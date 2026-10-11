@@ -24,14 +24,10 @@ import {
 import "./landing.css";
 
 const NAV_LINKS = [
-  { href: "#features", label: "Features" },
-  { href: "#audience", label: "Who it's for" },
-  { href: "#architecture", label: "How it works" },
-  { href: "#deploy", label: "Deploy" },
-  { href: "#faq", label: "FAQ" },
+  { href: "#features", label: "Feature" },
+  { href: "/security", label: "Security" },
   { href: "/pricing", label: "Pricing" },
   { href: "/enterprise", label: "Enterprise" },
-  { href: "/security", label: "Security" },
 ];
 
 const CONTACT_EMAIL = "contact@flexserver.tech";

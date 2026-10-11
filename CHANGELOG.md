@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — simplified public navigation
+
+- Limit desktop and mobile top navigation on all public pages to Feature, Security, Pricing, and Enterprise, in that order. Preserve existing footer links, branding, and page action buttons.
+
 ## Unreleased — public security page
 
 - Add `/security` with a shield hero, three overview cards, layered-control strip, and grouped security explanations with keyboard-focusable anchor targets. Describe implemented SSH trust, sessions, credential handling, API protections, optional terminal/Docker access, and operator responsibilities without unsupported certifications, encryption, uptime, or SLA claims.

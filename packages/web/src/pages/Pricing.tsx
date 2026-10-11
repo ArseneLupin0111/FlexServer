@@ -20,14 +20,10 @@ const ISSUES_URL = `${REPO_URL}/issues`;
 // Desktop + mobile nav shared by the pricing header. Anchor targets point at
 // the landing page because this page has no such sections of its own.
 const PRICING_NAV_LINKS = [
-  { href: "/#features", label: "Features" },
-  { href: "/#audience", label: "Who it's for" },
-  { href: "/#architecture", label: "How it works" },
-  { href: "/#deploy", label: "Deploy" },
+  { href: "/#features", label: "Feature" },
+  { href: "/security", label: "Security" },
   { href: "/pricing", label: "Pricing", current: true },
   { href: "/enterprise", label: "Enterprise" },
-  { href: "/security", label: "Security" },
-  { href: "/#faq", label: "FAQ" },
 ];
 
 // ── Single plan data source ─────────────────────────────────────────────

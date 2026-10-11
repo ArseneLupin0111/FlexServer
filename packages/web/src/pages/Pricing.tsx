@@ -25,6 +25,7 @@ const PRICING_NAV_LINKS = [
   { href: "/#architecture", label: "How it works" },
   { href: "/#deploy", label: "Deploy" },
   { href: "/pricing", label: "Pricing", current: true },
+  { href: "/enterprise", label: "Enterprise" },
   { href: "/#faq", label: "FAQ" },
 ];
 
@@ -468,7 +469,8 @@ export function PricingPage() {
               <p className="landing-contact-sub">
                 Pro covers up to 15 servers for 1 user. If your infrastructure
                 is bigger than that, tell us about your setup and we will talk
-                through options. FlexServer is software only and self-hosted —
+                through options, or read about the capabilities available for
+                larger estates. FlexServer is software only and self-hosted —
                 hosting is never included.
               </p>
               <div className="landing-contact-actions">
@@ -478,6 +480,9 @@ export function PricingPage() {
                 >
                   Contact us about larger plans
                   <ArrowUpRight size={17} aria-hidden="true" />
+                </a>
+                <a className="landing-btn landing-btn-secondary" href="/enterprise">
+                  See Enterprise overview
                 </a>
               </div>
             </div>
@@ -628,6 +633,9 @@ export function PricingPage() {
               aria-current="page"
             >
               Pricing
+            </a>
+            <a className="landing-footer-link" href="/enterprise">
+              Enterprise
             </a>
             <a
               className="landing-footer-link"

@@ -116,7 +116,7 @@ export async function createNestApp(
   // Public SPA fallback for React Router entry points. Only paths registered
   // in web/src/App.tsx routes belong here: these are hard navigations that
   // must return index.html so the browser can restore client-side routing.
-  server.get(/^\/(vps(\/.*)?|pricing)?$/, (_req, res) => {
+  server.get(/^\/(vps(\/.*)?|pricing|enterprise)?$/, (_req, res) => {
     res.sendFile(join(process.cwd(), "public", "index.html"));
   });
   await nestApp.init();

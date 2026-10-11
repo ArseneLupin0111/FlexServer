@@ -42,6 +42,8 @@ The Features section uses one shared two-column sticky scene on fitting desktop 
 
 The public `/pricing` page uses the landing palette and shell with Free/Plus/Pro cards, Plus highlighted as Recommended, a grouped comparison table, and native FAQ disclosures. Display the approved proposed monthly USD prices ($0/$3/$5) and limits consistently from one plan data source. State upfront that limits are not enforced and paid subscriptions cannot be purchased; contact actions only register interest by email, and Free links to deployment docs. Do not imply checkout, licensing, hosted VPS, or a support SLA exists. Keep this route outside dashboard authentication and include it in the API's direct-load SPA fallback.
 
+The public `/enterprise` page follows the reference's blue-lit hero and alternating feature-layout structure using the same landing shell and palette. Show labeled static previews for fleet health, SSH/jobs, and security layers; replace unsupported customer statistics and compliance badges with truthful self-hosted value panels, security cards, and deployment options. Contact CTAs use an email with requirement prompts, not a submission form or checkout. Explicitly distinguish existing evaluation capabilities from an Enterprise subscription, organizational access controls, certifications, or SLA commitments. Keep navigation consistent across all public pages and support direct API SPA loading.
+
 ## Reusable components
 
 - `components/layout/FleetSidebar.tsx`: fleet navigation from VPS records and metric snapshots; `FleetHostItem.tsx`: route-aware selectable host row.

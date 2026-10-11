@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — public enterprise page
+
+- Add `/enterprise` with a blue-lit hero, value panels, alternating capability previews, security cards, deployment overview, FAQ, and email contact actions. All previews are labeled illustrative; copy describes existing self-hosted capabilities without invented customer metrics, certifications, SSO/RBAC, or SLA promises.
+- Add Enterprise links to landing and pricing navigation/footers, and extend the API's public SPA fallback for direct loading. Contact emails include infrastructure requirement prompts; no Enterprise subscription, checkout, or backend form is introduced.
+
 ## Unreleased — public pricing page
 
 - Add `/pricing` with Termius-inspired Free ($0), Plus ($3/month USD, Recommended), and Pro ($5/month USD) cards, a grouped comparison table, and native FAQ disclosures. Proposed limits are 2/5/15 servers, 24-hour/7-day/30-day metrics history, and 7-day/30-day/90-day audit history; all plans list one user and shared core security and server-management capabilities.

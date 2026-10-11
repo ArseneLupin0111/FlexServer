@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" alt="FlexServer logo" width="112">
+  <img src="/packages/web/src/assets/brand/flexserver-mark.webp" alt="FlexServer logo" width="112">
 </p>
 <h1 align="center">FlexServer</h1>
 <p align="center"><strong>by FlexTechnology</strong></p>

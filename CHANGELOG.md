@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — public pricing page
+
+- Add `/pricing` with Termius-inspired Free ($0), Plus ($3/month USD, Recommended), and Pro ($5/month USD) cards, a grouped comparison table, and native FAQ disclosures. Proposed limits are 2/5/15 servers, 24-hour/7-day/30-day metrics history, and 7-day/30-day/90-day audit history; all plans list one user and shared core security and server-management capabilities.
+- Clearly disclose that these are proposed plans, their limits are not enforced, and paid subscriptions are not purchasable. Free links to deployment documentation; Plus/Pro and larger-plan actions open contact emails only. Hosting is not included; no billing, license enforcement, or checkout is introduced.
+- Add Pricing to landing navigation/footer, keep the route public without dashboard authentication, and support direct loading through the API SPA fallback. Reuse the navy/blue landing palette with responsive cards and a horizontally scrollable comparison table on small screens.
+
 ## Unreleased — pinned feature scrolling
 
 - Replace individually pinned cards with one Termius-style two-column scene: a left-hand list highlights and expands the current capability while a matching illustrative app preview appears on the right. Native scrolling selects all six features in order and reverses naturally; no wheel interception or new dependencies.

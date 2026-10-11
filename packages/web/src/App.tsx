@@ -21,6 +21,7 @@ import {
 import { AuthLoadingScreen, LoginGate } from "./components/auth/LoginGate";
 import { getAuthStatus, loginWithDashboardPassword } from "./lib/api";
 import { LandingPage } from "./pages/Landing";
+import { PricingPage } from "./pages/Pricing";
 
 // ── Auth state type ─────────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ export function App() {
   return (
     <Routes>
       <Route path="/" element={<LandingPage />} />
+      <Route path="/pricing" element={<PricingPage />} />
       <Route path="*" element={<DashboardApp />} />
     </Routes>
   );

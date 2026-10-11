@@ -40,6 +40,8 @@ Use capability groups, an audience and non-goals block, a four-part architecture
 
 The Features section uses one shared two-column sticky scene on fitting desktop viewports: a left-hand capability list expands the selected description with a blue indicator, while the right-hand illustrative app preview changes with the same scroll-selected step. All six capabilities share the stationary stage rather than pinning separate cards. Native scrolling advances and reverses selection without wheel interception. Feature controls also support keyboard navigation. Measure the tallest expanded content before enabling the scene; mobile, short viewports, reduced motion, and content too tall for the available viewport show every capability and its preview in normal flow without extra scroll distance. Preserve feature copy, inline links, focus visibility, and sticky-header anchor clearance.
 
+The public `/pricing` page uses the landing palette and shell with Free/Plus/Pro cards, Plus highlighted as Recommended, a grouped comparison table, and native FAQ disclosures. Display the approved proposed monthly USD prices ($0/$3/$5) and limits consistently from one plan data source. State upfront that limits are not enforced and paid subscriptions cannot be purchased; contact actions only register interest by email, and Free links to deployment docs. Do not imply checkout, licensing, hosted VPS, or a support SLA exists. Keep this route outside dashboard authentication and include it in the API's direct-load SPA fallback.
+
 ## Reusable components
 
 - `components/layout/FleetSidebar.tsx`: fleet navigation from VPS records and metric snapshots; `FleetHostItem.tsx`: route-aware selectable host row.

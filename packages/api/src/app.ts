@@ -113,6 +113,12 @@ export async function createNestApp(
   // is skipped.
   nestApp.useBodyParser("json", { limit: "1mb" });
   nestApp.useGlobalFilters(new ApiExceptionFilter());
+  // Public SPA fallback for React Router entry points. Only paths registered
+  // in web/src/App.tsx routes belong here: these are hard navigations that
+  // must return index.html so the browser can restore client-side routing.
+  server.get(/^\/(vps(\/.*)?|pricing)?$/, (_req, res) => {
+    res.sendFile(join(process.cwd(), "public", "index.html"));
+  });
   await nestApp.init();
   const terminalService = nestApp.get(TerminalSessionService);
   // Explicit server ownership: callers supplying httpServer own the accepting
@@ -120,9 +126,6 @@ export async function createNestApp(
   // createApp is an HTTP-test-only Express wrapper and does not expose listen.
   const terminalTransport = attachTerminalWebSocket(httpServer ?? nestApp.getHttpServer(), config, nestApp.get(DashboardSessionService), terminalService);
   terminalService.setWebSocketCloser(terminalTransport.close);
-  server.get(/^\/(vps(\/.*)?)?$/, (_req, res) => {
-    res.sendFile(join(process.cwd(), "public", "index.html"));
-  });
   return nestApp;
 }
 

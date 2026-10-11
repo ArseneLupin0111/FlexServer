@@ -29,6 +29,7 @@ const NAV_LINKS = [
   { href: "#architecture", label: "How it works" },
   { href: "#deploy", label: "Deploy" },
   { href: "#faq", label: "FAQ" },
+  { href: "/pricing", label: "Pricing" },
 ];
 
 const CONTACT_EMAIL = "contact@flexserver.tech";
@@ -2290,6 +2291,9 @@ export function LandingPage() {
             </a>
             <a className="landing-footer-link" href="#deploy">
               Deploy
+            </a>
+            <a className="landing-footer-link" href="/pricing">
+              Pricing
             </a>
             <a
               className="landing-footer-link"

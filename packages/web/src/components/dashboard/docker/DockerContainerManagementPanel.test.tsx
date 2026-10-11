@@ -280,15 +280,34 @@ describe("DockerContainerManagementPanel logs", () => {
     );
   });
 
-  it("does not subscribe when management is disabled", async () => {
-    stubCapability({});
+  it("streams read-only logs with management disabled and keeps actions disabled", async () => {
+    stubCapability({
+      "vps-1": { ...DEFAULT_CAPABILITY, supported: false, actions: [], logsSupported: true },
+    });
 
     render(<DockerContainerManagementPanel vpsId="vps-1" enabled={false} refreshTick={0} />);
 
-    await waitFor(() =>
-      expect(screen.getByText(/Management controls stay hidden/i)).toBeInTheDocument(),
-    );
-    expect(openStreams).toHaveLength(0);
+    const stream = await openStream();
+    act(() => stream.state("live"));
+    expect(screen.getByText(/Read-only logs are available by default/i)).toBeInTheDocument();
+    for (const action of ["start", "stop", "restart"]) {
+      expect(screen.getAllByRole("button", { name: new RegExp(`^${action}$`, "i") }).filter((button) => (button as HTMLButtonElement).disabled)).toHaveLength(1);
+    }
+    expect(screen.getByTestId("docker-log-stream-status")).toHaveTextContent("Live");
+  });
+
+  it("closes read-only logs when a capability refresh revokes log support", async () => {
+    stubCapability({
+      "vps-1": { ...DEFAULT_CAPABILITY, supported: false, actions: [], logsSupported: true },
+    });
+    const view = render(<DockerContainerManagementPanel vpsId="vps-1" enabled={false} refreshTick={0} />);
+    const stream = await openStream();
+    stubCapability({
+      "vps-1": { ...DEFAULT_CAPABILITY, supported: false, actions: [], logsSupported: false, targets: [] },
+    });
+    view.rerender(<DockerContainerManagementPanel vpsId="vps-1" enabled={false} refreshTick={1} />);
+    await waitFor(() => expect(stream.closed).toBe(true));
+    expect(openStreams).toHaveLength(1);
   });
 
   it("appends new lines in delivery order while preserving truncation flags", async () => {

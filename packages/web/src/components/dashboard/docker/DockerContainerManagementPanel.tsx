@@ -238,6 +238,7 @@ export function DockerContainerManagementPanel({
   fixedTarget = null,
 }: {
   vpsId: string;
+  /** Opt-in for mutations only; read-only logs use capability.logsSupported. */
   enabled: boolean;
   /** Capability reload tick from the workspace monitoring refresh. */
   refreshTick?: number;
@@ -251,10 +252,9 @@ export function DockerContainerManagementPanel({
 }) {
   const [capability, setCapability] =
     useState<DockerManagementCapability | null>(null);
-  // Initialize to true when enabled: the first paint happens before the
-  // effect fires, and showing "status unknown" during that single paint
-  // caused synchronous tests and fast renders to observe the error fallback.
-  const [capabilityLoading, setCapabilityLoading] = useState(enabled);
+  // Capability gates the read-only log viewer even when management is
+  // disabled, so it is always fetched.
+  const [capabilityLoading, setCapabilityLoading] = useState(true);
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [capabilityRetry, setCapabilityRetry] = useState(0);
   const [targetPair, setTargetPair] = useState<TargetPair | null>(null);
@@ -284,7 +284,7 @@ export function DockerContainerManagementPanel({
       ) ?? null)
     : null;
   const logsSupported = capability?.logsSupported === true;
-  const canStream = enabled && logsSupported && streamEnabled && selected !== null;
+  const canStream = logsSupported && streamEnabled && selected !== null;
 
   const preRef = useRef<HTMLPreElement | null>(null);
   /**
@@ -307,12 +307,6 @@ export function DockerContainerManagementPanel({
 
   // ── Capability load (retry + monitoring refresh tick) ──────────────
   useEffect(() => {
-    if (!enabled) {
-      setCapability(null);
-      setCapabilityLoading(false);
-      setCapabilityError(null);
-      return;
-    }
     let cancelled = false;
     const controller = new AbortController();
     // The first load has nothing to show yet, so it gates the viewer. A
@@ -497,7 +491,7 @@ export function DockerContainerManagementPanel({
   const buffer = published ?? EMPTY_BUFFER;
 
   const confirmAction = async () => {
-    if (!pendingAction || !selected) return;
+    if (!enabled || !capability?.supported || !pendingAction || !selected || !capability.actions.includes(pendingAction)) return;
     // Dialog Cancel closes without calling this; only explicit confirmation
     // reaches the API, and only once per click.
     setOperationState((prev) => ({
@@ -580,24 +574,6 @@ export function DockerContainerManagementPanel({
     if (element) element.scrollTop = element.scrollHeight;
   };
 
-  if (!enabled) {
-    return (
-      <section
-        aria-label="Docker container management"
-        className="border border-line bg-panel"
-      >
-        <header className="border-b border-line px-4 py-3">
-          <h3 className="text-[14px] font-semibold">Container management</h3>
-        </header>
-        <div className="p-4">
-          <p className="text-[12px] leading-relaxed text-dim">
-            Management controls stay hidden until Docker management is enabled.
-          </p>
-        </div>
-      </section>
-    );
-  }
-
   if (capabilityLoading) {
     return (
       <section
@@ -647,7 +623,7 @@ export function DockerContainerManagementPanel({
     );
   }
 
-  if (!capability.supported) {
+  if (!capability.supported && !logsSupported) {
     return (
       <section
         aria-label="Docker container management"
@@ -658,7 +634,7 @@ export function DockerContainerManagementPanel({
         </header>
         <div className="p-4">
           <p className="text-[12px] text-text">
-            Container management is not supported by this agent.
+            Container logs and controls are unavailable for this server.
           </p>
           {capability.reason ? (
             <p className="mt-1 text-[11px] text-dim">{capability.reason}</p>
@@ -721,6 +697,12 @@ export function DockerContainerManagementPanel({
             ? "This page targets one container; every action asks for confirmation first."
             : "Target a single container below; every action asks for confirmation first."}
         </p>
+        {!enabled || !capability.supported ? (
+          <p className="mt-2 text-[11px] text-dim">
+            Read-only logs are available by default. Start, stop, and restart
+            require Docker management to be enabled.
+          </p>
+        ) : null}
       </header>
 
       <div className="p-4">
@@ -814,6 +796,8 @@ export function DockerContainerManagementPanel({
                   variant={action === "stop" ? "destructive" : "secondary"}
                   className="capitalize"
                   disabled={
+                    !enabled ||
+                    !capability.supported ||
                     !selected ||
                     operationState.requestBusy ||
                     operationState.checking ||
@@ -914,7 +898,7 @@ export function DockerContainerManagementPanel({
                   type="button"
                   size="sm"
                   variant="secondary"
-                  disabled={!selected}
+                  disabled={!logsSupported || !selected}
                   onClick={reconnectStream}
                 >
                   Reconnect
@@ -955,7 +939,7 @@ export function DockerContainerManagementPanel({
 
           {!logsSupported ? (
             <p className="mt-2 text-[11px] text-dim">
-              Realtime log retrieval is not supported by this agent.
+              Realtime logs are unavailable for this server or agent.
             </p>
           ) : selected === null ? (
             <p className="mt-2 text-[11px] text-dim">

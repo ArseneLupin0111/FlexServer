@@ -15,7 +15,7 @@ const ACTIONS: Record<AllowedDockerManagementAction, true> = { start: true, stop
 const TTL_MS = 5 * 60_000;
 /** Maximum log lines the realtime viewer reopens from a fresh subscription. */
 const LOG_LIMIT = 200;
-/** Reported when policy allows Docker actions but real logs have no source. */
+/** Reported when real logs have no agent-backed source. */
 const DEMO_LOGS_REASON = "Realtime Docker logs are unavailable in demo mode";
 /** Viewer target projection shared with the dashboard and log-stream contract. */
 type DockerManagementTargetsRow = {
@@ -41,7 +41,7 @@ export class DockerManagementService {
     const enabled = record.managedBy !== "system" && record.dockerManagementEnabled === true;
     // Realtime logs need a real agent-backed Docker source, so demo mode
     // reports them unsupported while keeping identity and actions usable.
-    const logsSupported = enabled && this.config.mode === "local";
+    const logsSupported = record.managedBy !== "system" && this.config.mode === "local";
     let reason: string | undefined;
     if (record.managedBy === "system") reason = "Docker management is unavailable";
     else if (record.dockerManagementEnabled !== true) reason = "Docker management is disabled";
@@ -52,7 +52,7 @@ export class DockerManagementService {
       actions: enabled ? ["start", "stop", "restart"] : [],
       logsSupported,
       maxLogLines: LOG_LIMIT,
-      targets: enabled ? await this.listTargets(vpsId) : [],
+      targets: enabled || logsSupported ? await this.listTargets(vpsId) : [],
     };
   }
 

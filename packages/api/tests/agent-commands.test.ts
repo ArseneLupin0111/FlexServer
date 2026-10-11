@@ -112,8 +112,8 @@ afterEach(async () => {
 
 // ── Capability policy gating (viewer identity discovery) ──────────────────
 // capability() projects the latest committed snapshot into (containerKey,
-// agentInstanceId) pairs. Docker policy gates supported/actions/targets;
-// app mode gates logsSupported only. dockerMetricsEnabled gates nothing
+// agentInstanceId) pairs. Management consent gates supported/actions; local
+// non-system logs also expose targets without consent. dockerMetricsEnabled gates nothing
 // here: identity discovery is not monitoring data.
 
 const CAPABILITY_NOW = "2026-09-15T12:00:00.000Z";
@@ -204,10 +204,14 @@ describe("DockerManagementService capability gating", () => {
     expect(capability.logsSupported).toBe(true);
   });
 
-  it("blocks system-managed hosts with no actions or targets", async () => {
+  it.each([
+    ["demo", demoConfig],
+    ["local", localConfig],
+  ] as const)("blocks system-managed hosts with no actions, logs, or targets in %s mode", async (_mode, config) => {
     await vpsRepo.update(vpsId, { managedBy: "system" });
     await seedSnapshot({ containerKey: "ck_a", name: "web" });
-    await expect(mgmtService.capability(vpsId)).resolves.toEqual({
+    const service = new DockerManagementService(vpsRepo, mgmtRepo, monitoringRepo, config);
+    await expect(service.capability(vpsId)).resolves.toEqual({
       supported: false,
       reason: "Docker management is unavailable",
       actions: [],
@@ -215,9 +219,12 @@ describe("DockerManagementService capability gating", () => {
       maxLogLines: 200,
       targets: [],
     });
+    await expect(service.create(vpsId, {
+      action: "start", target: { containerKey: "ck_a" }, idempotencyKey: "system-denied",
+    })).rejects.toThrow("Docker management is unavailable");
   });
 
-  it("blocks disabled management with no actions or targets", async () => {
+  it("blocks logs and targets in demo mode when management is disabled", async () => {
     await vpsRepo.update(vpsId, { dockerManagementEnabled: false });
     await seedSnapshot({ containerKey: "ck_a", name: "web" });
     await expect(mgmtService.capability(vpsId)).resolves.toEqual({
@@ -228,6 +235,30 @@ describe("DockerManagementService capability gating", () => {
       maxLogLines: 200,
       targets: [],
     });
+    // Demo mode never provides an agent-backed real source; log policy must stay
+    // off even with target discovery available.
+  });
+
+
+  it("exposes logs and targets locally with default management consent off while denying operations", async () => {
+    const record = await vpsRepo.create({ name: "default-off", host: "203.0.113.90", port: 22, username: "root" });
+    vpsId = record.id;
+    expect(record.dockerManagementEnabled).toBe(false);
+    await seedSnapshot({ containerKey: "ck_a", name: "web" });
+    const service = new DockerManagementService(vpsRepo, mgmtRepo, monitoringRepo, localConfig);
+    await expect(service.capability(vpsId)).resolves.toEqual({
+      supported: false,
+      reason: "Docker management is disabled",
+      actions: [],
+      logsSupported: true,
+      maxLogLines: 200,
+      targets: [{ containerKey: "ck_a", name: "web", agentInstanceId: "inst_local" }],
+    });
+    for (const action of ["start", "stop", "restart"] as const) {
+      await expect(service.create(vpsId, {
+        action, target: { containerKey: "ck_a" }, idempotencyKey: `disabled-${action}`,
+      })).rejects.toThrow("Docker management is disabled");
+    }
   });
 
   it("keeps action and claim semantics unchanged by capability gating", async () => {

@@ -124,9 +124,9 @@ beforeEach(async () => {
   vpsEmpty = createdEmpty.id;
   vpsBroken = createdBroken.id;
 
-  // Docker management is enabled per VPS so capability targets are observable;
+  // Enable actions on A and BROKEN; B keeps default management consent off.
   // `dockerMetricsEnabled` stays at its default (false) to prove identity
-  // discovery does not depend on monitoring data being enabled.
+  // discovery does not depend on monitoring or action consent.
   await store.update(vpsA, { dockerManagementEnabled: true });
   await store.update(vpsBroken, { dockerManagementEnabled: true });
 
@@ -474,7 +474,7 @@ describe("GET /api/vps/:id/docker/management/capability", () => {
     expect(res.body.targets).toHaveLength(2);
   });
 
-  it("returns no targets when Docker management is disabled", async () => {
+  it("supports logs without management consent even with no snapshot", async () => {
     const res = await authed(
       request(server).get(`/api/vps/${vpsEmpty}/docker/management/capability`),
     ).expect(200);
@@ -482,9 +482,23 @@ describe("GET /api/vps/:id/docker/management/capability", () => {
       supported: false,
       reason: "Docker management is disabled",
       actions: [],
-      logsSupported: false,
+      logsSupported: true,
       maxLogLines: 200,
       targets: [],
+    });
+  });
+
+  it("returns committed log targets with default management consent off", async () => {
+    const res = await authed(
+      request(server).get(`/api/vps/${vpsB}/docker/management/capability`),
+    ).expect(200);
+    expect(res.body).toEqual({
+      supported: false,
+      reason: "Docker management is disabled",
+      actions: [],
+      logsSupported: true,
+      maxLogLines: 200,
+      targets: [{ containerKey: "ck_b", name: "service-b", state: "running", agentInstanceId: "instB" }],
     });
   });
 

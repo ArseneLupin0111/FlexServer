@@ -2058,12 +2058,13 @@ describe("React dashboard", () => {
         data: [{ agentInstanceId: TARGET_INSTANCE, containerKey: TARGET_KEY }],
       }),
       capabilityResponse: MockResponse = ok(capability),
+      serverResponse: MockResponse = ok({ data: [dockerServer] }),
     ) {
       fetchMock.mockImplementation(async (url: unknown) => {
         const path = String(url);
         if (path === "/api/auth/me") return ok({ data: { mode: "local", authenticated: false, authRequired: false } });
         if (path === "/api/dashboard") return ok({ data: dashboard });
-        if (path === "/api/vps") return ok({ data: [dockerServer] });
+        if (path === "/api/vps") return await serverResponse;
         if (path === "/api/vps/vps-1/docker/containers/current") return await currentContainers;
         if (path === "/api/vps/vps-1/docker/management/capability") return await capabilityResponse;
         if (path === "/api/vps/vps-1/docker/storage") return ok({ data: null });
@@ -2091,6 +2092,21 @@ describe("React dashboard", () => {
       expect(within(detail).getByText("legacy-api")).toBeInTheDocument();
       // It is the fixed target's own log surface, not the list page's.
       expect(screen.queryByRole("region", { name: "Container history" })).not.toBeInTheDocument();
+    });
+
+    it("renders logs on the detail route when management consent is off", async () => {
+      routeDetailPageFetch(
+        undefined,
+        ok({ ...capability, supported: false, actions: [] }),
+        ok({ data: [{ ...dockerServer, dockerManagementEnabled: false }] }),
+      );
+      renderApp([`/vps/vps-1/docker/containers/${TARGET_INSTANCE}/${TARGET_KEY}`]);
+
+      const detail = await screen.findByRole("region", { name: "Docker container detail" });
+      expect(within(detail).getByText("Container logs")).toBeInTheDocument();
+      for (const action of ["start", "stop", "restart"]) {
+        expect(within(detail).getAllByRole("button", { name: new RegExp(`^${action}$`, "i") }).filter((button) => (button as HTMLButtonElement).disabled)).toHaveLength(1);
+      }
     });
 
     it("offers back navigation to the container list", async () => {

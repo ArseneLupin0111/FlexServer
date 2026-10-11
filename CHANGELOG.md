@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — read-only container logs independent of Docker management flag
+
+- Make read-only container logs available by default for non-system VPS records in local mode without a new toggle. Read-only streams and the logs broker policy snapshot now depend on `logsSupported` (non-system VPS in local mode) instead of the management action capability or `dockerManagementEnabled`, and demo mode still reports unsupported with an explicit reason rather than faking a source.
+- Keep `dockerManagementEnabled` defaulting to `false` and protecting confirmed `start`, `stop`, and `restart` actions; read-only log access does not authorize mutations. System VPS records remain excluded.
+- Keep authentication, session/origin checks, authenticated agent credentials bound to the VPS, agent identity, and current inventory membership for the exact `agentInstanceId`/`containerKey` pair required for every stream, and keep log content out of jobs, audit, metrics, monitoring, and every JSON/PostgreSQL repository.
+- Populate target discovery when management is enabled or logs are supported, and use `logsSupported` for both opening and ongoing stream policy checks. The logs broker policy snapshot contains only `logsSupported` and targets; Linux agent reads still require the real `/var/run/docker.sock` source and fail explicitly on unsupported transports.
+
 ## Unreleased — brand identity and logo integration
 
 - Integrate supplied FlexServer brand identity assets while keeping original source art in `prompt-images/` (`logo.png`, `logo_with_name.png`) untouched. Add derived lossless assets in `packages/web/src/assets/brand/`: `flexserver-mark.webp` (256x246 mark), `flexserver-wordmark.webp` (960x216 wordmark), and `favicon.png` (64x64 PNG).

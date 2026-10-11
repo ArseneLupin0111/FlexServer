@@ -7,7 +7,8 @@ import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import type { AppConfig } from "../src/config/app-config.js";
-import { DockerLogsService } from "../src/docker/docker-logs.service.js";
+import { DockerLogsService, type DockerLogsPolicySnapshot } from "../src/docker/docker-logs.service.js";
+import { DockerManagementService } from "../src/docker/docker-management.service.js";
 import {
   createJsonAgentRepository,
   type AgentRepository,
@@ -113,7 +114,7 @@ beforeEach(async () => {
 
   await vpsRepo.update(vpsA, { dockerManagementEnabled: true });
   await vpsRepo.update(vpsB, { dockerManagementEnabled: true });
-  // vpsOff keeps Docker management disabled: policy must gate before headers.
+  // vpsOff keeps default management consent off; read-only logs remain available.
 
   await seedDockerMonitoringForTests(
     join(dataDir, "docker-monitoring.json"),
@@ -133,6 +134,11 @@ beforeEach(async () => {
           agentInstanceId: "instB",
           containerKey: "ck_b",
           name: "service-b",
+          state: "running",
+        }),
+        row("off", vpsOff, "snap_off", {
+          containerKey: "ck_web",
+          name: "web",
           state: "running",
         }),
       ],
@@ -536,7 +542,8 @@ describe("GET /api/vps/:id/docker/management/logs/stream", () => {
     expect(res.headers["content-type"]).not.toContain("text/event-stream");
   });
 
-  it("rejects a disabled policy with 403 before headers", async () => {
+  it("rejects a system-managed host with 403 before headers", async () => {
+    await vpsRepo.update(vpsOff, { managedBy: "system" });
     const server = app();
     const res = await request(server)
       .get(streamUrl(vpsOff))
@@ -591,6 +598,22 @@ describe("GET /api/vps/:id/docker/management/logs/stream", () => {
 // ── Claim → upload → live → result lifecycle ───────────────────────────────
 
 describe("log stream claim and upload lifecycle", () => {
+  it("opens, claims, and uploads logs with default management consent off", async () => {
+    expect((await vpsRepo.get(vpsOff))?.dockerManagementEnabled).toBe(false);
+    const tokenOff = (await agentService.createCredential(vpsOff)).token;
+    const server = app();
+    const stream = openStream(server, streamUrl(vpsOff));
+    const subscriptionId = await claimOpen(stream, server, tokenOff);
+    await chunks(server, tokenOff, subscriptionId, { lines: [line("read-only log")] }).expect(200);
+    await result(server, tokenOff, subscriptionId).expect(200);
+    const response = await stream;
+    expect(response.status).toBe(200);
+    expect(response.frames.map((frame) => frame.event)).toEqual([
+      "docker.logs.state", "docker.logs.state", "docker.logs.lines", "docker.logs.closed",
+    ]);
+    expect(response.frames[2].data).toEqual({ subscriptionId, lines: [line("read-only log")] });
+  });
+
   it("answers null when no viewer is waiting, then claims FIFO", async () => {
     const server = app();
     expect((await claim(server, tokenA).expect(200)).body).toEqual({
@@ -943,6 +966,8 @@ describe("log stream deterministic lifecycle and timers", () => {
     const chunks: string[] = [];
     const handlers = new Map<string, Array<() => void>>();
     let ended = false;
+    let resolveFinished!: () => void;
+    const finished = new Promise<void>((resolve) => { resolveFinished = resolve; });
     const write = overrides.write ?? (() => true);
     const response = {
       writeHead: vi.fn(),
@@ -954,6 +979,7 @@ describe("log stream deterministic lifecycle and timers", () => {
       }),
       end: vi.fn(() => {
         ended = true;
+        resolveFinished();
       }),
       on: vi.fn((event: string, handler: () => void) => {
         handlers.set(event, [...(handlers.get(event) ?? []), handler]);
@@ -972,6 +998,7 @@ describe("log stream deterministic lifecycle and timers", () => {
       writableEnded: false,
       destroyed: false,
       chunks,
+      finished,
       get ended() {
         return ended;
       },
@@ -989,12 +1016,9 @@ describe("log stream deterministic lifecycle and timers", () => {
   } = {}) {
     const config = { mode: "local" } as AppConfig;
     const dockerManagement = {
-      capability: vi.fn(() =>
+      capability: vi.fn((): Promise<DockerLogsPolicySnapshot> =>
         Promise.resolve({
-          supported: true,
-          enabled: true,
           logsSupported: true,
-          maxLogLines: 200,
           targets:
             overrides.targets ??
             [{ agentInstanceId: "instA", containerKey: "ck_web", name: "web" }],
@@ -1034,6 +1058,70 @@ describe("log stream deterministic lifecycle and timers", () => {
       .find((line) => line.startsWith("data: "));
     return (dataLine ?? "").replace("data: ", "");
   }
+
+  it.each(["system", "demo"] as const)("denies claim, upload, and periodic revalidation after a refreshed %s policy", async (policy) => {
+    const config = { ...baseConfig };
+    const management = new DockerManagementService(
+      vpsRepo,
+      createJsonDockerManagementRepository(join(tempDir, "data", "docker-management.json")),
+      createJsonDockerMonitoringRepository(join(tempDir, "data", "docker-monitoring.json")),
+      config,
+    );
+    const service = new DockerLogsService(config, management, {
+      authenticateById: async () => ({ id: "sess_1", userId: "u1" }),
+    } as never);
+    const offQuery = { ...query, vpsId: vpsOff };
+    const offCredential = { vpsId: vpsOff } as never;
+    const waiting = mockResponse();
+    const uploading = mockResponse();
+    const revalidating = mockResponse();
+    await service.open(waiting as unknown as Response, offQuery, session);
+    const upload = await service.open(uploading as unknown as Response, offQuery, session);
+    await service.claim(offCredential, { agentInstanceId: "instA" });
+    await service.claim(offCredential, { agentInstanceId: "instA" });
+    // Keep one subscription unclaimed to exercise claim's current-policy gate.
+    await service.open(revalidating as unknown as Response, offQuery, session);
+    if (policy === "system") await vpsRepo.update(vpsOff, { managedBy: "system" });
+    else config.mode = "demo";
+    expect(await service.claim(offCredential, { agentInstanceId: "instA" })).toBeNull();
+    await expect(service.chunks(offCredential, upload.subscriptionId, {
+      agentInstanceId: "instA", sequence: 1, ready: true, lines: [],
+    })).rejects.toMatchObject({ status: 410 });
+    await vi.advanceTimersByTimeAsync(15_000);
+    // The interval starts an async policy lookup backed by real file I/O.
+    // Advancing fake time does not await that I/O; await the response's close
+    // signal instead of assuming the interval's promise has already settled.
+    await withDeadline(waiting.finished, "refreshed policy stream closure");
+    expect(service.snapshot()).toHaveLength(0);
+    for (const response of [waiting, uploading, revalidating]) {
+      expect(lastClosedCode(response)).toContain("logs_unavailable");
+      expect(response.ended).toBe(true);
+    }
+  });
+
+  it("keeps a subscription available after management consent is withdrawn", async () => {
+    const management = new DockerManagementService(
+      vpsRepo,
+      createJsonDockerManagementRepository(join(tempDir, "data", "docker-management.json")),
+      createJsonDockerMonitoringRepository(join(tempDir, "data", "docker-monitoring.json")),
+      baseConfig,
+    );
+    const service = new DockerLogsService(baseConfig, management, {
+      authenticateById: async () => ({ id: "sess_1", userId: "u1" }),
+    } as never);
+    const response = mockResponse();
+    const opened = await service.open(response as unknown as Response, { ...query, vpsId: vpsA }, session);
+    await vpsRepo.update(vpsA, { dockerManagementEnabled: false });
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(service.snapshot()).toHaveLength(1);
+    const localCredential = { vpsId: vpsA } as never;
+    expect((await service.claim(localCredential, { agentInstanceId: "instA" }))?.subscriptionId).toBe(opened.subscriptionId);
+    await service.chunks(localCredential, opened.subscriptionId, {
+      agentInstanceId: "instA", sequence: 1, ready: true, lines: [line("still readable")],
+    });
+    expect(response.ended).toBe(false);
+    service.onModuleDestroy();
+  });
 
   it("closes with agent_unavailable when no claim and ready arrive in 30s", async () => {
     const { service } = createService();
@@ -1107,12 +1195,9 @@ describe("log stream deterministic lifecycle and timers", () => {
     let valid = true;
     const config = { mode: "local" } as AppConfig;
     const dockerManagement = {
-      capability: vi.fn(() =>
+      capability: vi.fn((): Promise<DockerLogsPolicySnapshot> =>
         Promise.resolve({
-          supported: true,
-          enabled: true,
           logsSupported: true,
-          maxLogLines: 200,
           targets: [
             { agentInstanceId: "instA", containerKey: "ck_web", name: "web" },
           ],
@@ -1153,12 +1238,9 @@ describe("log stream deterministic lifecycle and timers", () => {
     ];
     const config = { mode: "local" } as AppConfig;
     const dockerManagement = {
-      capability: vi.fn(() =>
+      capability: vi.fn((): Promise<DockerLogsPolicySnapshot> =>
         Promise.resolve({
-          supported: true,
-          enabled: true,
           logsSupported: true,
-          maxLogLines: 200,
           targets,
         }),
       ),

@@ -699,9 +699,11 @@ export type DockerManagementTarget = {
   agentInstanceId?: string;
 };
 export type DockerManagementCapability = {
+  /** Management actions only; read-only logs have their own capability. */
   supported: boolean;
   reason?: string;
   actions: DockerManagementAction[];
+  /** Available by default for non-system VPS backed by a local real agent. */
   logsSupported: boolean;
   maxLogLines: number;
   targets: DockerManagementTarget[];

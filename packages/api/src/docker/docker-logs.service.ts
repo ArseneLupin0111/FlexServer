@@ -74,9 +74,6 @@ export type DockerLogsSessionContext = {
 };
 
 export type DockerLogsPolicySnapshot = {
-  supported: boolean;
-  reason?: string;
-  enabled: boolean;
   logsSupported: boolean;
   targets: Array<{
     agentInstanceId: string;
@@ -208,12 +205,6 @@ export class DockerLogsService implements OnModuleDestroy, OnApplicationShutdown
     session: DockerLogsSessionContext,
   ): Promise<DockerLogsSubscription> {
     const policy = await this.policySnapshot(query.vpsId);
-    if (!policy.supported) {
-      throw new DockerLogsPolicyError(403, policy.reason ?? "docker_management_disabled");
-    }
-    if (!policy.enabled) {
-      throw new DockerLogsPolicyError(403, "docker_management_disabled");
-    }
     if (this.config.mode !== "local") {
       // Realtime logs need a real agent-backed source; demo never fakes one.
       throw new DockerLogsPolicyError(403, "logs_unavailable");
@@ -523,22 +514,14 @@ export class DockerLogsService implements OnModuleDestroy, OnApplicationShutdown
   private async policySnapshot(vpsId: string): Promise<DockerLogsPolicySnapshot> {
     try {
       const result = await this.dockerManagement.capability(vpsId);
-      // capability() reports `supported` for the policy gate; `enabled` is the
-      // same flag under the viewer-facing name, never a separate switch.
-      const enabled = result.supported === true;
       return {
-        supported: enabled,
-        reason: result.reason,
-        enabled,
-        logsSupported: result.logsSupported === true && enabled,
+        logsSupported: this.config.mode === "local" && result.logsSupported === true,
         targets: (result.targets ?? []).map((target) => ({ ...target })),
       };
     } catch (error) {
       if (error instanceof NotFoundException) throw error;
       // A policy lookup failure is not leakable detail: report unavailable.
       return {
-        supported: false,
-        enabled: false,
         logsSupported: false,
         targets: [],
       };
@@ -609,8 +592,6 @@ export class DockerLogsService implements OnModuleDestroy, OnApplicationShutdown
     try {
       const policy = await this.policySnapshot(entry.vpsId);
       return (
-        policy.supported === true &&
-        policy.enabled === true &&
         policy.logsSupported === true &&
         policy.targets.some(
           (target) =>

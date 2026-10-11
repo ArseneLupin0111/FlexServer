@@ -581,8 +581,8 @@ export function VpsWorkspaceDockerContainerPage() {
           Container logs and controls
         </h2>
         <p className="mt-1.5 text-sm leading-6 text-dim">
-          Realtime logs for this container on this server, with confirmed
-          start, stop, and restart actions.
+          Read-only realtime logs for this container on this server. Start,
+          stop, and restart require management permission and confirmation.
         </p>
       </div>
       <DockerContainerManagementPanel

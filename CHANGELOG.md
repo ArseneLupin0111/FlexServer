@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — public security page
+
+- Add `/security` with a shield hero, three overview cards, layered-control strip, and grouped security explanations with keyboard-focusable anchor targets. Describe implemented SSH trust, sessions, credential handling, API protections, optional terminal/Docker access, and operator responsibilities without unsupported certifications, encryption, uptime, or SLA claims.
+- Add Security navigation/footer links across public pages and an API direct-load fallback. Collapse the expanded public navigation below 80rem to avoid crowding. Documentation and email CTAs work without authentication, forms, or fake report downloads.
+
 ## Unreleased — public enterprise page
 
 - Add `/enterprise` with a blue-lit hero, value panels, alternating capability previews, security cards, deployment overview, FAQ, and email contact actions. All previews are labeled illustrative; copy describes existing self-hosted capabilities without invented customer metrics, certifications, SSO/RBAC, or SLA promises.

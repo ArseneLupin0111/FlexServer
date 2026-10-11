@@ -117,7 +117,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1.5rem;
+  gap: 1rem;
   min-height: var(--landing-header-h);
 }
 
@@ -172,7 +172,7 @@
   display: inline-flex;
   align-items: center;
   min-height: 2.75rem;
-  padding: 0.625rem 0.875rem;
+  padding: 0.625rem 0.75rem;
   color: hsl(var(--l-dim));
   font-size: 0.9375rem;
   font-weight: 500;
@@ -2478,15 +2478,10 @@
   }
 }
 
-@media (max-width: 48rem) {
-  .landing-section {
-    padding-block: clamp(3rem, 8vw, 4.5rem);
-  }
-
-  .landing-hero {
-    padding-block: clamp(3rem, 9vw, 4.5rem);
-  }
-
+/* Eight marketing links plus the brand and header CTA no longer fit the
+   72rem container below ~80rem, so the desktop nav yields to the hamburger
+   there. Below 48rem the rest of the mobile layout takes over as before. */
+@media (max-width: 79.99rem) {
   .landing-nav {
     display: none;
   }
@@ -2497,6 +2492,16 @@
 
   .landing-header-actions .landing-btn {
     display: none;
+  }
+}
+
+@media (max-width: 48rem) {
+  .landing-section {
+    padding-block: clamp(3rem, 8vw, 4.5rem);
+  }
+
+  .landing-hero {
+    padding-block: clamp(3rem, 9vw, 4.5rem);
   }
 
   .landing-hero-ctas .landing-btn {

@@ -31,6 +31,7 @@ const NAV_LINKS = [
   { href: "#faq", label: "FAQ" },
   { href: "/pricing", label: "Pricing" },
   { href: "/enterprise", label: "Enterprise" },
+  { href: "/security", label: "Security" },
 ];
 
 const CONTACT_EMAIL = "contact@flexserver.tech";
@@ -2299,6 +2300,9 @@ export function LandingPage() {
             <a className="landing-footer-link" href="/enterprise">
               Enterprise
             </a>
+            <a className="landing-footer-link" href="/security">
+              Security
+            </a>
             <a
               className="landing-footer-link"
               href={REPO_URL}
@@ -2312,6 +2316,12 @@ export function LandingPage() {
             <p className="landing-footer-heading">Support</p>
             <a className="landing-footer-link" href="#faq">
               FAQ
+            </a>
+            <a className="landing-footer-link" href="/security">
+              Security
+            </a>
+            <a className="landing-footer-link" href={SECURITY_URL} target="_blank" rel="noreferrer">
+              Security model docs
             </a>
             <a
               className="landing-footer-link"

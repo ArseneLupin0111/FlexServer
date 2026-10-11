@@ -44,6 +44,8 @@ The public `/pricing` page uses the landing palette and shell with Free/Plus/Pro
 
 The public `/enterprise` page follows the reference's blue-lit hero and alternating feature-layout structure using the same landing shell and palette. Show labeled static previews for fleet health, SSH/jobs, and security layers; replace unsupported customer statistics and compliance badges with truthful self-hosted value panels, security cards, and deployment options. Contact CTAs use an email with requirement prompts, not a submission form or checkout. Explicitly distinguish existing evaluation capabilities from an Enterprise subscription, organizational access controls, certifications, or SLA commitments. Keep navigation consistent across all public pages and support direct API SPA loading.
 
+The public `/security` page follows the reference's shield hero, overview cards, review CTA, layered-control strip, and grouped two-column sidebar/card layout. Keep claims grounded in `docs/security.md` and implementation, with explicit self-hosted operator responsibilities and unsupported enterprise/compliance boundaries. Sidebar anchors focus their card targets with sticky-header clearance; narrow layouts stack the groups. Documentation links and email contact replace certification reports or fake submission forms. Include Security in all public navigation/footers and the API SPA fallback; expanded navigation collapses below 80rem.
+
 ## Reusable components
 
 - `components/layout/FleetSidebar.tsx`: fleet navigation from VPS records and metric snapshots; `FleetHostItem.tsx`: route-aware selectable host row.

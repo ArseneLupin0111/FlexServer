@@ -26,6 +26,7 @@ const PRICING_NAV_LINKS = [
   { href: "/#deploy", label: "Deploy" },
   { href: "/pricing", label: "Pricing", current: true },
   { href: "/enterprise", label: "Enterprise" },
+  { href: "/security", label: "Security" },
   { href: "/#faq", label: "FAQ" },
 ];
 
@@ -637,6 +638,9 @@ export function PricingPage() {
             <a className="landing-footer-link" href="/enterprise">
               Enterprise
             </a>
+            <a className="landing-footer-link" href="/security">
+              Security
+            </a>
             <a
               className="landing-footer-link"
               href={REPO_URL}
@@ -650,6 +654,9 @@ export function PricingPage() {
             <p className="landing-footer-heading">Support</p>
             <a className="landing-footer-link" href="/#faq">
               FAQ
+            </a>
+            <a className="landing-footer-link" href="/security">
+              Security
             </a>
             <a
               className="landing-footer-link"

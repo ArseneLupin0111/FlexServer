@@ -1,0 +1,462 @@
+/* Security — scoped to .security-page inside .landing-page. Shares the public
+   navy/blue tokens and shell classes from landing.css; only this page's
+   sections are styled here. */
+
+/* ── Hero: shield badge, headline, three overview cards ── */
+.security-page .security-hero {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  padding-block: clamp(3.5rem, 8vw, 6rem) clamp(3rem, 7vw, 5rem);
+  text-align: center;
+}
+
+.security-page .security-hero::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse 60% 70% at 50% -10%,
+    hsl(var(--l-blue) / 0.32),
+    transparent 75%
+  );
+}
+
+.security-page .security-shield {
+  display: grid;
+  place-items: center;
+  width: 5.75rem;
+  height: 5.75rem;
+  margin: 0 auto 1.75rem;
+  color: hsl(var(--l-blue-bright));
+  border: 1px solid hsl(var(--l-blue) / 0.4);
+  border-radius: 1.5rem;
+  background: linear-gradient(165deg, hsl(var(--l-panel)), hsl(var(--l-bg-alt)));
+  box-shadow:
+    0 0 45px hsl(var(--l-blue) / 0.22),
+    inset 0 1px 0 hsl(var(--l-line-soft) / 0.18);
+}
+
+.security-page .security-hero h1 {
+  margin: 0;
+  font-size: clamp(2.25rem, 5vw, 3.75rem);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.045em;
+  text-wrap: balance;
+}
+
+.security-page .security-hero .landing-section-eyebrow {
+  margin-bottom: 0.875rem;
+}
+
+.security-page .security-lead {
+  max-width: 40rem;
+  margin: 1.25rem auto 0;
+  color: hsl(var(--l-dim));
+  font-size: clamp(1rem, 1.6vw, 1.125rem);
+  text-wrap: pretty;
+}
+
+.security-page .security-desktop-break {
+  display: none;
+}
+
+/* Three overview cards */
+.security-page .security-overview {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin: clamp(2.5rem, 5vw, 3.5rem) auto 0;
+  max-width: 62rem;
+  text-align: left;
+  list-style: none;
+  padding: 0;
+}
+
+.security-page .security-overview article {
+  padding: 1.75rem;
+  border: 1px solid hsl(var(--l-line));
+  border-radius: 0.875rem;
+  background: linear-gradient(160deg, hsl(var(--l-panel)), hsl(var(--l-bg) / 0.7));
+}
+
+.security-page .security-overview svg {
+  color: hsl(var(--l-blue-bright));
+  margin-bottom: 1rem;
+}
+
+.security-page .security-overview h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.security-page .security-overview p {
+  margin: 0;
+  color: hsl(var(--l-dim));
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+/* ── Assurance CTA: review docs instead of SOC 2 / report download ── */
+.security-page .security-assurance {
+  padding-block: clamp(3rem, 7vw, 5rem);
+  border-top: 1px solid hsl(var(--l-line));
+  border-bottom: 1px solid hsl(var(--l-line));
+  background: hsl(var(--l-bg-alt));
+}
+
+.security-page .security-assurance .landing-wrap {
+  display: grid;
+  justify-items: center;
+  text-align: center;
+}
+
+.security-page .security-doc-mark {
+  display: grid;
+  place-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+  color: hsl(var(--l-blue-bright));
+}
+
+.security-page .security-doc-mark span {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: hsl(var(--l-dim));
+}
+
+.security-page .security-assurance h2 {
+  margin: 0;
+  font-size: clamp(1.75rem, 3.4vw, 2.5rem);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.035em;
+  text-wrap: balance;
+}
+
+.security-page .security-assurance > .landing-wrap > p {
+  margin: 1rem 0 1.75rem;
+  color: hsl(var(--l-dim));
+  font-size: 0.9375rem;
+  text-wrap: pretty;
+}
+
+/* ── Capability strip: layer bars, non-interactive ── */
+.security-page .security-layers-section {
+  padding-block: clamp(3rem, 7vw, 5rem);
+  text-align: center;
+}
+
+.security-page .security-layers-section > .landing-wrap > h2 {
+  margin: 0 auto 0.75rem;
+  max-width: 36rem;
+  font-size: clamp(1.5rem, 3vw, 2rem);
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+.security-page .security-layers-section > .landing-wrap > p {
+  margin: 0 auto 2.5rem;
+  max-width: 34rem;
+  color: hsl(var(--l-dim));
+  font-size: 0.9375rem;
+}
+
+.security-page .security-layers {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+  margin: 0 auto;
+  padding: 0;
+  max-width: 58rem;
+  list-style: none;
+}
+
+.security-page .security-layers li {
+  display: grid;
+  justify-items: center;
+  gap: 0.375rem;
+  padding: 1.25rem 1rem;
+  border: 1px solid hsl(var(--l-line));
+  border-radius: 0.75rem;
+  background: linear-gradient(180deg, hsl(var(--l-panel) / 0.75), hsl(var(--l-bg) / 0.5));
+}
+
+.security-page .security-layers li::before {
+  content: "";
+  width: 2px;
+  height: 1.25rem;
+  border-radius: 2px;
+  background: linear-gradient(hsl(var(--l-blue-bright)), hsl(var(--l-blue) / 0.15));
+}
+
+.security-page .security-layers svg {
+  color: hsl(var(--l-blue-bright));
+}
+
+.security-page .security-layers strong {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.security-page .security-layers span {
+  color: hsl(var(--l-dim));
+  font-size: 0.75rem;
+}
+
+.security-page .security-layer-note {
+  margin: 1.75rem auto 0;
+  max-width: 30rem;
+  color: hsl(var(--l-dimmer));
+  font-size: 0.75rem;
+}
+
+/* ── Grouped two-column: sidebar anchors + stacked detail cards ── */
+.security-page .security-details {
+  display: grid;
+  gap: clamp(3rem, 6vw, 4.5rem);
+  padding-block: clamp(3rem, 7vw, 5rem);
+}
+
+.security-page .security-group {
+  display: grid;
+  grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
+  gap: 2.5rem clamp(2.5rem, 5vw, 4rem);
+  align-items: start;
+  scroll-margin-top: calc(var(--landing-header-h) + 1.5rem);
+}
+
+.security-page .security-group-sidebar {
+  position: sticky;
+  top: calc(var(--landing-header-h) + 1.5rem);
+}
+
+.security-page .security-group-sidebar h2 {
+  margin: 0 0 0.625rem;
+  font-size: 1.1875rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.security-page .security-group-sidebar > p {
+  margin: 0 0 1.25rem;
+  color: hsl(var(--l-dim));
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+.security-page .security-group-sidebar nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.125rem;
+  border-left: 1px solid hsl(var(--l-line));
+}
+
+.security-page .security-group-sidebar nav a {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  min-height: 2.25rem;
+  color: hsl(var(--l-dim));
+  font-size: 0.8125rem;
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  margin-left: -1px;
+}
+
+.security-page .security-group-sidebar nav a:hover {
+  color: hsl(var(--l-text));
+  background: hsl(var(--l-blue) / 0.08);
+}
+
+.security-page .security-group-sidebar nav a svg {
+  flex: none;
+  color: hsl(var(--l-blue-bright));
+}
+
+.security-page .security-group-cards {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.security-page .security-detail-card {
+  padding: 1.5rem 1.75rem;
+  border: 1px solid hsl(var(--l-line));
+  border-radius: 0.875rem;
+  background: linear-gradient(170deg, hsl(var(--l-panel) / 0.9), hsl(var(--l-bg) / 0.6));
+  scroll-margin-top: calc(var(--landing-header-h) + 2rem);
+}
+
+.security-page .security-detail-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  margin: 0 0 0.75rem;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.security-page .security-detail-card h3 svg {
+  flex: none;
+  color: hsl(var(--l-blue-bright));
+}
+
+.security-page .security-detail-card p {
+  margin: 0;
+  color: hsl(var(--l-dim));
+  font-size: 0.875rem;
+  line-height: 1.65;
+}
+
+.security-page .security-detail-card p + p {
+  margin-top: 0.75rem;
+}
+
+/* Boundary note: what is deliberately not claimed */
+.security-page .security-boundary {
+  margin: 0;
+  padding: 1.125rem 1.25rem;
+  border: 1px solid hsl(var(--l-line));
+  border-left: 2px solid hsl(var(--l-blue) / 0.5);
+  border-radius: 0.625rem;
+  background: hsl(var(--l-bg-alt) / 0.6);
+  color: hsl(var(--l-dim));
+  font-size: 0.8125rem;
+  line-height: 1.65;
+}
+
+/* ── Final CTA panel ── */
+.security-page .security-contact {
+  padding-block: clamp(3rem, 7vw, 5rem);
+}
+
+.security-page .security-contact-panel {
+  max-width: 64rem;
+  margin-inline: auto;
+  padding: clamp(2rem, 5vw, 3.5rem);
+  text-align: center;
+  border: 1px solid hsl(var(--l-blue) / 0.35);
+  border-radius: 1rem;
+  background:
+    radial-gradient(ellipse 70% 100% at 50% 0%, hsl(var(--l-blue) / 0.24), transparent 70%),
+    linear-gradient(160deg, hsl(var(--l-panel)), hsl(var(--l-bg)));
+  box-shadow: 0 25px 70px -40px hsl(var(--l-blue) / 0.5);
+}
+
+.security-page .security-contact h2 {
+  margin: 0.875rem 0 0.75rem;
+  font-size: clamp(1.75rem, 3.2vw, 2.375rem);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.035em;
+}
+
+.security-page .security-contact > .landing-wrap > div > p:last-of-type {
+  margin: 0 auto 1.75rem;
+  max-width: 32rem;
+  color: hsl(var(--l-dim));
+  font-size: 0.9375rem;
+}
+
+.security-page .security-contact-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.security-page [aria-current="page"] {
+  color: hsl(var(--l-text));
+}
+
+/* ── Responsive: 1024 / 768 / 560 ─────────── */
+@media (max-width: 63.99rem) {
+  .security-page .security-overview {
+    grid-template-columns: minmax(0, 1fr);
+    max-width: 34rem;
+  }
+
+  .security-page .security-layers {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .security-page .security-group {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.75rem;
+  }
+
+  .security-page .security-group-sidebar {
+    position: static;
+  }
+
+  .security-page .security-group-sidebar nav ul {
+    border-left: 0;
+    border-top: 1px solid hsl(var(--l-line));
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+  }
+
+  .security-page .security-group-sidebar nav a {
+    border-left: 0;
+    margin-left: 0;
+  }
+}
+
+@media (max-width: 47.99rem) {
+  .security-page .security-hero {
+    padding-top: 3rem;
+  }
+
+  .security-page .security-overview article,
+  .security-page .security-detail-card {
+    padding: 1.25rem;
+  }
+
+  .security-page .security-layers {
+    grid-template-columns: minmax(0, 1fr);
+    max-width: 22rem;
+  }
+
+  .security-page .security-contact-panel {
+    padding: 1.75rem 1.25rem;
+  }
+}
+
+@media (max-width: 31.99rem) {
+  .security-page .security-contact-actions {
+    flex-direction: column;
+  }
+
+  .security-page .security-contact-actions .landing-btn {
+    width: 100%;
+  }
+}
+
+@media (min-width: 64rem) {
+  .security-page .security-desktop-break {
+    display: inline;
+  }
+}
+
+/* ── Reduced motion: this page ships no animation, but the shell sets
+   smooth scrolling; honor the user's preference explicitly. ── */
+@media (prefers-reduced-motion: reduce) {
+  .security-page,
+  .security-page * {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

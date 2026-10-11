@@ -23,6 +23,7 @@ import { getAuthStatus, loginWithDashboardPassword } from "./lib/api";
 import { LandingPage } from "./pages/Landing";
 import { PricingPage } from "./pages/Pricing";
 import { EnterprisePage } from "./pages/Enterprise";
+import { SecurityPage } from "./pages/Security";
 
 // ── Auth state type ─────────────────────────────────────────────────
 
@@ -39,6 +40,7 @@ export function App() {
       <Route path="/" element={<LandingPage />} />
       <Route path="/pricing" element={<PricingPage />} />
       <Route path="/enterprise" element={<EnterprisePage />} />
+      <Route path="/security" element={<SecurityPage />} />
       <Route path="*" element={<DashboardApp />} />
     </Routes>
   );

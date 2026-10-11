@@ -22,6 +22,7 @@ import {
   Zap,
 } from "lucide-react";
 import "./landing.css";
+import { Brand, FooterBrand } from "../components/Brand";
 
 const NAV_LINKS = [
   { href: "#features", label: "Feature" },
@@ -97,7 +98,7 @@ function HealthPreview() {
             </div>
             <div className="landing-preview-meter">
               <div
-                className="landing-preview-meter-fill"
+                className="landing-preview-meter-fill is-mem"
                 style={{ width: "42.2%" }}
               />
             </div>
@@ -115,7 +116,7 @@ function HealthPreview() {
             <div className="landing-preview-meter">
               <div
                 className="landing-preview-meter-fill"
-                style={{ width: "40.1%" }}
+                style={{ width: "40.1%", background: "hsl(var(--dim))" }}
               />
             </div>
             <div className="landing-preview-box-sub">
@@ -132,7 +133,7 @@ function HealthPreview() {
             <div className="landing-preview-meter">
               <div
                 className="landing-preview-meter-fill"
-                style={{ width: "32%" }}
+                style={{ width: "32%", background: "hsl(var(--telemetry-rx))" }}
               />
             </div>
             <div className="landing-preview-box-sub">
@@ -424,24 +425,24 @@ function HistoryPreview() {
                 <linearGradient id="landing-grad-cpu" x1="0" y1="0" x2="0" y2="1">
                   <stop
                     offset="0%"
-                    stopColor="hsl(217 91% 60%)"
+                    stopColor="hsl(var(--telemetry-cpu))"
                     stopOpacity="0.3"
                   />
                   <stop
                     offset="100%"
-                    stopColor="hsl(217 91% 60%)"
+                    stopColor="hsl(var(--telemetry-cpu))"
                     stopOpacity="0.0"
                   />
                 </linearGradient>
                 <linearGradient id="landing-grad-mem" x1="0" y1="0" x2="0" y2="1">
                   <stop
                     offset="0%"
-                    stopColor="hsl(265 80% 65%)"
+                    stopColor="hsl(var(--telemetry-memory))"
                     stopOpacity="0.25"
                   />
                   <stop
                     offset="100%"
-                    stopColor="hsl(265 80% 65%)"
+                    stopColor="hsl(var(--telemetry-memory))"
                     stopOpacity="0.0"
                   />
                 </linearGradient>
@@ -451,7 +452,7 @@ function HistoryPreview() {
                 y1="20"
                 x2="460"
                 y2="20"
-                stroke="hsl(217 33% 20%)"
+                stroke="hsl(var(--line))"
                 strokeDasharray="3 3"
               />
               <line
@@ -459,7 +460,7 @@ function HistoryPreview() {
                 y1="50"
                 x2="460"
                 y2="50"
-                stroke="hsl(217 33% 20%)"
+                stroke="hsl(var(--line))"
                 strokeDasharray="3 3"
               />
               <line
@@ -467,7 +468,7 @@ function HistoryPreview() {
                 y1="80"
                 x2="460"
                 y2="80"
-                stroke="hsl(217 33% 20%)"
+                stroke="hsl(var(--line))"
                 strokeDasharray="3 3"
               />
 
@@ -478,7 +479,7 @@ function HistoryPreview() {
               <path
                 d="M 0 55 Q 60 52 110 50 T 230 46 T 340 48 T 460 45"
                 fill="none"
-                stroke="hsl(265 80% 68%)"
+                stroke="hsl(var(--telemetry-memory))"
                 strokeWidth="1.75"
               />
 
@@ -489,11 +490,11 @@ function HistoryPreview() {
               <path
                 d="M 0 72 Q 70 70 140 68 T 260 28 T 330 65 T 460 62"
                 fill="none"
-                stroke="hsl(210 100% 66%)"
+                stroke="hsl(var(--telemetry-cpu))"
                 strokeWidth="2"
               />
 
-              <circle cx="260" cy="28" r="3.5" fill="hsl(210 100% 66%)" />
+              <circle cx="260" cy="28" r="3.5" fill="hsl(var(--telemetry-cpu))" />
             </svg>
             <div className="landing-preview-chart-times tnum">
               <span>00:00</span>
@@ -1191,13 +1192,7 @@ export function LandingPage() {
             onClick={() => setMenuOpen(false)}
             aria-label="FlexServer — back to top"
           >
-            <span className="landing-brand-mark" aria-hidden="true">
-              <Server size={18} strokeWidth={2.25} />
-            </span>
-            <span className="landing-brand-text">
-              <span className="landing-brand-name">FlexServer</span>
-              <span className="landing-brand-sub">by FlexTechnology</span>
-            </span>
+            <Brand />
           </a>
 
           <nav className="landing-nav" aria-label="Primary">
@@ -2262,15 +2257,7 @@ export function LandingPage() {
       <footer className="landing-footer">
         <div className="landing-wrap landing-footer-grid">
           <div className="landing-footer-brand">
-            <span className="landing-brand" aria-hidden="true">
-              <span className="landing-brand-mark">
-                <Server size={18} strokeWidth={2.25} />
-              </span>
-              <span className="landing-brand-text">
-                <span className="landing-brand-name">FlexServer</span>
-                <span className="landing-brand-sub">by FlexTechnology</span>
-              </span>
-            </span>
+            <FooterBrand />
             <p className="landing-footer-tagline">
               A self-hosted dashboard for many servers in one place — resource
               tracking, Docker checks, and SSH jobs.

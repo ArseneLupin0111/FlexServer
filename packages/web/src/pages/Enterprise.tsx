@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { Activity, ArrowUpRight, Check, ChevronDown, Container, Database, Fingerprint, History, KeyRound, LockKeyhole, Menu, Server, ShieldCheck, TerminalSquare, Workflow, X } from "lucide-react";
 import "./landing.css";
 import "./enterprise.css";
+import { Brand, FooterBrand } from "../components/Brand";
 
 const REPO_URL = "https://github.com/ArseneLupin0111/vps-manager-nodejs";
 const DEPLOY_URL = `${REPO_URL}#deploy-with-docker-compose`;
@@ -26,9 +27,6 @@ const FOOTER_LINKS = [
   { href: "/#faq", label: "FAQ" },
 ];
 
-function Brand() {
-  return <><span className="landing-brand-mark" aria-hidden="true"><Server size={18} strokeWidth={2.25} /></span><span className="landing-brand-text"><span className="landing-brand-name">FlexServer</span><span className="landing-brand-sub">by FlexTechnology</span></span></>;
-}
 
 function Preview({ title, children, caption }: { title: string; children: ReactNode; caption: string }) {
   return <figure className="enterprise-preview">
@@ -113,6 +111,6 @@ export function EnterprisePage() {
       <section className="landing-section enterprise-contact-section" aria-labelledby="enterprise-contact-title"><div className="landing-wrap"><div className="landing-contact-panel"><p className="landing-section-eyebrow">Let's talk infrastructure</p><h2 className="landing-contact-title" id="enterprise-contact-title">Your environment.<br />Your requirements.</h2><p className="landing-contact-sub">Tell us what you run and what you need from a VPS operations dashboard. We can discuss the current self-hosted capabilities and whether they fit your setup.</p><div className="landing-contact-actions"><a className="landing-btn landing-btn-primary" href={ENTERPRISE_MAILTO}>Discuss your infrastructure<ArrowUpRight size={17} aria-hidden="true" /></a><a className="landing-btn landing-btn-secondary" href={DEPLOY_URL} target="_blank" rel="noreferrer">Read deployment docs<ArrowUpRight size={17} aria-hidden="true" /></a></div><p className="enterprise-small-note">Opens your mail app. No form submission, purchase, or hosting commitment.</p></div></div></section>
     </main>
 
-    <footer className="landing-footer"><div className="landing-wrap landing-footer-grid"><div className="landing-footer-brand"><span className="landing-brand" aria-hidden="true"><Brand /></span><p className="landing-footer-tagline">A self-hosted dashboard for many servers in one place — resource tracking, Docker checks, and SSH jobs.</p></div><nav className="landing-footer-col" aria-label="Product"><p className="landing-footer-heading">Product</p>{FOOTER_LINKS.filter((link) => link.label !== "FAQ").map((link) => <a className="landing-footer-link" key={link.href} href={link.href} aria-current={link.current ? "page" : undefined}>{link.label}</a>)}<a className="landing-footer-link" href={REPO_URL} target="_blank" rel="noreferrer">GitHub repository</a></nav><nav className="landing-footer-col" aria-label="Support"><p className="landing-footer-heading">Support</p><a className="landing-footer-link" href="#enterprise-faq">Enterprise questions</a><a className="landing-footer-link" href={SECURITY_URL} target="_blank" rel="noreferrer">Security model</a><a className="landing-footer-link" href={`${REPO_URL}/issues`} target="_blank" rel="noreferrer">Report an issue</a><a className="landing-footer-link" href={ENTERPRISE_MAILTO}>{CONTACT_EMAIL}</a></nav></div><div className="landing-wrap landing-footer-bottom"><p>© 2026 FlexTechnology. FlexServer — centralized VPS operations.</p></div></footer>
+    <footer className="landing-footer"><div className="landing-wrap landing-footer-grid"><div className="landing-footer-brand"><FooterBrand /><p className="landing-footer-tagline">A self-hosted dashboard for many servers in one place — resource tracking, Docker checks, and SSH jobs.</p></div><nav className="landing-footer-col" aria-label="Product"><p className="landing-footer-heading">Product</p>{FOOTER_LINKS.filter((link) => link.label !== "FAQ").map((link) => <a className="landing-footer-link" key={link.href} href={link.href} aria-current={link.current ? "page" : undefined}>{link.label}</a>)}<a className="landing-footer-link" href={REPO_URL} target="_blank" rel="noreferrer">GitHub repository</a></nav><nav className="landing-footer-col" aria-label="Support"><p className="landing-footer-heading">Support</p><a className="landing-footer-link" href="#enterprise-faq">Enterprise questions</a><a className="landing-footer-link" href={SECURITY_URL} target="_blank" rel="noreferrer">Security model</a><a className="landing-footer-link" href={`${REPO_URL}/issues`} target="_blank" rel="noreferrer">Report an issue</a><a className="landing-footer-link" href={ENTERPRISE_MAILTO}>{CONTACT_EMAIL}</a></nav></div><div className="landing-wrap landing-footer-bottom"><p>© 2026 FlexTechnology. FlexServer — centralized VPS operations.</p></div></footer>
   </div>;
 }

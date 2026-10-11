@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — brand identity and logo integration
+
+- Integrate supplied FlexServer brand identity assets while keeping original source art in `prompt-images/` (`logo.png`, `logo_with_name.png`) untouched. Add derived lossless assets in `packages/web/src/assets/brand/`: `flexserver-mark.webp` (256x246 mark), `flexserver-wordmark.webp` (960x216 wordmark), and `favicon.png` (64x64 PNG).
+- Introduce shared identity components in `packages/web/src/components/Brand.tsx` with styling in `brand.css` (`BrandMark`, `Brand`, `FooterBrand`), replacing previous branding across all four public page headers and footers (`Landing`, `Pricing`, `Enterprise`, `Security`), the dashboard header (`DashboardShell`), the fleet sidebar (`FleetSidebar`), the login gate (`LoginGate`), and the document favicon in `index.html`.
+- Enforce brand contrast rules: dark headers and sidebar surfaces pair the icon mark with live high-contrast text (`text-text`); the supplied dark-letter wordmark is rendered exclusively on a dedicated white backing plate (`.brand-wordmark-surface`) across dark public footers without recoloring or altering the original lettering. Retain existing layouts, responsive navigation, and focus styling without scope creep.
+
+## Unreleased — public palette alignment
+
+- Align the public pages' marketing palette with the dashboard by aliasing the existing dashboard semantic tokens: public shell aliases the charcoal surfaces/text tokens for all four public pages, with lime `--l-accent`/`--l-ok` for primary actions and emphasis, and dashboard-hued telemetry `--telemetry-cpu` (lime) and `--telemetry-memory` (cyan) kept without overrides.
+- Update DESIGN.md palette wording accordingly: the landing reuses dashboard charcoal/lime tokens instead of its own navy/blue (`--l-blue`/`--l-violet`) tokens, Features uses a lime indicator, and the Enterprise hero is lime-lit.
+- No changes to layout, behavior, accessibility, navigation, or dashboard UI/tokens; only the palette aliases on public pages are aligned.
+
 ## Unreleased — simplified public navigation
 
 - Limit desktop and mobile top navigation on all public pages to Feature, Security, Pricing, and Enterprise, in that order. Preserve existing footer links, branding, and page action buttons.

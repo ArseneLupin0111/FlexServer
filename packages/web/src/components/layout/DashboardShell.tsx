@@ -1,7 +1,6 @@
 import {
   LogOut,
   RefreshCw,
-  Server,
   Settings,
   ShieldCheck,
   UserCircle,
@@ -21,6 +20,7 @@ import {
 import { cn } from "../../lib/utils";
 import { FleetSidebar } from "./FleetSidebar";
 import type { DashboardOverview, VpsRecord } from "../../lib/api";
+import { BrandMark } from "../Brand";
 
 export type LiveConnectionState =
   | { status: "connecting" }
@@ -78,9 +78,7 @@ export function DashboardShell({
             aria-label="FlexServer — go to servers"
             className="flex shrink-0 items-center gap-2 font-semibold text-text transition-colors hover:text-dim focus-visible:outline-2 focus-visible:outline-signal"
           >
-            <span className="grid h-8 w-8 place-items-center border border-line bg-panel text-signal">
-              <Server size={16} aria-hidden="true" />
-            </span>
+            <BrandMark />
             <span className="hidden min-[400px]:inline">FlexServer</span>
           </Link>
           <span aria-hidden="true" className="shrink-0 text-line">

@@ -3,6 +3,7 @@ import type { LucideIcon } from "lucide-react";
 import { ArrowUpRight, BookOpen, Check, Container, Database, Fingerprint, KeyRound, LockKeyhole, Menu, Network, Server, ShieldCheck, TerminalSquare, X } from "lucide-react";
 import "./landing.css";
 import "./security.css";
+import { Brand, FooterBrand } from "../components/Brand";
 
 const REPO_URL = "https://github.com/ArseneLupin0111/vps-manager-nodejs";
 const SECURITY_URL = `${REPO_URL}/blob/main/docs/security.md`;
@@ -53,9 +54,6 @@ const GROUPS: SecurityGroup[] = [
   },
 ];
 
-function Brand() {
-  return <><span className="landing-brand-mark" aria-hidden="true"><Server size={18} strokeWidth={2.25} /></span><span className="landing-brand-text"><span className="landing-brand-name">FlexServer</span><span className="landing-brand-sub">by FlexTechnology</span></span></>;
-}
 
 export function SecurityPage() {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -106,6 +104,6 @@ export function SecurityPage() {
       <section className="security-contact" aria-labelledby="security-contact-title"><div className="landing-wrap"><div className="security-contact-panel"><p className="landing-section-eyebrow">Make an informed decision</p><h2 id="security-contact-title">Start your security evaluation</h2><p>Review the model and discuss your deployment requirements.<br />No guaranteed response time or service commitment.</p><div className="security-contact-actions"><a className="landing-btn landing-btn-primary" href={SECURITY_MAILTO}>Discuss security requirements<ArrowUpRight size={16} aria-hidden="true" /></a><a className="landing-btn landing-btn-secondary" href={DEPLOY_URL} target="_blank" rel="noreferrer">Deployment guide<ArrowUpRight size={16} aria-hidden="true" /></a></div></div></div></section>
     </main>
 
-    <footer className="landing-footer"><div className="landing-wrap landing-footer-grid"><div className="landing-footer-brand"><span className="landing-brand" aria-hidden="true"><Brand /></span><p className="landing-footer-tagline">A self-hosted dashboard for many servers in one place — resource tracking, Docker checks, and SSH jobs.</p></div><nav className="landing-footer-col" aria-label="Product"><p className="landing-footer-heading">Product</p>{FOOTER_LINKS.filter((link) => link.label !== "FAQ").map((link) => <a className="landing-footer-link" key={link.href} href={link.href} aria-current={link.current ? "page" : undefined}>{link.label}</a>)}<a className="landing-footer-link" href={REPO_URL} target="_blank" rel="noreferrer">GitHub repository</a></nav><nav className="landing-footer-col" aria-label="Support"><p className="landing-footer-heading">Support</p><a className="landing-footer-link" href="/#faq">FAQ</a><a className="landing-footer-link" href={SECURITY_URL} target="_blank" rel="noreferrer">Security model docs</a><a className="landing-footer-link" href={DEPLOY_URL} target="_blank" rel="noreferrer">Deployment guide</a><a className="landing-footer-link" href={SECURITY_MAILTO}>{CONTACT_EMAIL}</a></nav></div><div className="landing-wrap landing-footer-bottom"><p>© 2026 FlexTechnology. FlexServer — centralized VPS operations.</p></div></footer>
+    <footer className="landing-footer"><div className="landing-wrap landing-footer-grid"><div className="landing-footer-brand"><FooterBrand /><p className="landing-footer-tagline">A self-hosted dashboard for many servers in one place — resource tracking, Docker checks, and SSH jobs.</p></div><nav className="landing-footer-col" aria-label="Product"><p className="landing-footer-heading">Product</p>{FOOTER_LINKS.filter((link) => link.label !== "FAQ").map((link) => <a className="landing-footer-link" key={link.href} href={link.href} aria-current={link.current ? "page" : undefined}>{link.label}</a>)}<a className="landing-footer-link" href={REPO_URL} target="_blank" rel="noreferrer">GitHub repository</a></nav><nav className="landing-footer-col" aria-label="Support"><p className="landing-footer-heading">Support</p><a className="landing-footer-link" href="/#faq">FAQ</a><a className="landing-footer-link" href={SECURITY_URL} target="_blank" rel="noreferrer">Security model docs</a><a className="landing-footer-link" href={DEPLOY_URL} target="_blank" rel="noreferrer">Deployment guide</a><a className="landing-footer-link" href={SECURITY_MAILTO}>{CONTACT_EMAIL}</a></nav></div><div className="landing-wrap landing-footer-bottom"><p>© 2026 FlexTechnology. FlexServer — centralized VPS operations.</p></div></footer>
   </div>;
 }

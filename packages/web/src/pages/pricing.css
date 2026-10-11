@@ -17,7 +17,7 @@
   z-index: -1;
   pointer-events: none;
   background:
-    radial-gradient(36rem 20rem at 50% -4rem, hsl(var(--l-blue) / 0.2), transparent 65%);
+    radial-gradient(36rem 20rem at 50% -4rem, hsl(var(--l-accent) / 0.2), transparent 65%);
 }
 
 .landing-page .pricing-hero-inner {
@@ -35,8 +35,8 @@
   max-width: 52rem;
   margin: 0 0 2rem;
   padding: 0.875rem 1rem;
-  background: hsl(var(--l-blue) / 0.1);
-  border: 1px solid hsl(var(--l-blue) / 0.4);
+  background: hsl(var(--l-accent) / 0.1);
+  border: 1px solid hsl(var(--l-accent) / 0.4);
   border-radius: 0.75rem;
   color: hsl(var(--l-text));
   font-size: 0.9375rem;
@@ -46,7 +46,7 @@
 .landing-page .pricing-status svg {
   flex: none;
   margin-top: 0.2rem;
-  color: hsl(var(--l-blue-bright));
+  color: hsl(var(--l-accent));
 }
 
 .landing-page .pricing-lead {
@@ -78,9 +78,9 @@
 }
 
 .landing-page .pricing-card.is-recommended {
-  background: hsl(var(--l-blue) / 0.1);
-  border-color: hsl(var(--l-blue) / 0.6);
-  box-shadow: 0 0 48px -18px hsl(var(--l-blue) / 0.55);
+  background: hsl(var(--l-accent) / 0.1);
+  border-color: hsl(var(--l-accent) / 0.6);
+  box-shadow: 0 0 48px -18px hsl(var(--l-accent) / 0.55);
 }
 
 .landing-page .pricing-badge {
@@ -90,8 +90,8 @@
   transform: translateX(-50%);
   margin: 0;
   padding: 0.25rem 0.875rem;
-  background: hsl(var(--l-blue));
-  color: hsl(0 0% 100%);
+  background: hsl(var(--l-accent));
+  color: hsl(var(--l-bg));
   font-size: 0.75rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -165,7 +165,7 @@
 .landing-page .pricing-feature svg {
   flex: none;
   margin-top: 0.2rem;
-  color: hsl(var(--l-blue-bright));
+  color: hsl(var(--l-accent));
 }
 
 .landing-page .pricing-shared {
@@ -184,7 +184,7 @@
 }
 
 .landing-page .pricing-table-scroll:focus-visible {
-  outline: 2px solid hsl(var(--l-blue));
+  outline: 2px solid hsl(var(--l-accent));
   outline-offset: 2px;
 }
 
@@ -204,7 +204,7 @@
 }
 
 .landing-page .pricing-table col.pricing-col-hot {
-  background: hsl(var(--l-blue) / 0.07);
+  background: hsl(var(--l-accent) / 0.07);
 }
 
 .landing-page .pricing-table th,
@@ -232,7 +232,7 @@
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: hsl(var(--l-blue-bright));
+  color: hsl(var(--l-accent));
 }
 
 .landing-page .pricing-table tbody th[scope="row"] {

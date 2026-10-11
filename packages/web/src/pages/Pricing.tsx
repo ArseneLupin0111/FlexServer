@@ -5,11 +5,11 @@ import {
   ChevronDown,
   Info,
   Menu,
-  Server,
   X,
 } from "lucide-react";
 import "./landing.css";
 import "./pricing.css";
+import { Brand, FooterBrand } from "../components/Brand";
 
 const CONTACT_EMAIL = "contact@flexserver.tech";
 const REPO_URL = "https://github.com/ArseneLupin0111/vps-manager-nodejs";
@@ -204,13 +204,7 @@ export function PricingPage() {
             onClick={() => setMenuOpen(false)}
             aria-label="FlexServer — home"
           >
-            <span className="landing-brand-mark" aria-hidden="true">
-              <Server size={18} strokeWidth={2.25} />
-            </span>
-            <span className="landing-brand-text">
-              <span className="landing-brand-name">FlexServer</span>
-              <span className="landing-brand-sub">by FlexTechnology</span>
-            </span>
+            <Brand />
           </a>
 
           <nav className="landing-nav" aria-label="Primary">
@@ -596,15 +590,7 @@ export function PricingPage() {
       <footer className="landing-footer">
         <div className="landing-wrap landing-footer-grid">
           <div className="landing-footer-brand">
-            <span className="landing-brand" aria-hidden="true">
-              <span className="landing-brand-mark">
-                <Server size={18} strokeWidth={2.25} />
-              </span>
-              <span className="landing-brand-text">
-                <span className="landing-brand-name">FlexServer</span>
-                <span className="landing-brand-sub">by FlexTechnology</span>
-              </span>
-            </span>
+            <FooterBrand />
             <p className="landing-footer-tagline">
               A self-hosted dashboard for many servers in one place — resource
               tracking, Docker checks, and SSH jobs.

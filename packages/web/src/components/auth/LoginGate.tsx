@@ -4,6 +4,7 @@ import { Alert } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { BrandMark } from "../Brand";
 
 export function AuthLoadingScreen() {
   return (
@@ -39,15 +40,10 @@ export function LoginGate({
         className="w-full max-w-sm border border-line bg-panel p-6 sm:p-7"
       >
         <div className="mb-5">
-          <div className="flex items-center gap-2.5">
-            <span
-              aria-hidden="true"
-              className="grid h-8 w-8 shrink-0 place-items-center border border-line bg-raised text-[11px] font-semibold text-signal"
-            >
-              FS
-            </span>
-            <p className="text-sm font-semibold text-dim">FlexServer</p>
-          </div>
+          <Link to="/" aria-label="FlexServer — home" className="flex items-center gap-2.5 focus-visible:outline-2 focus-visible:outline-signal">
+            <BrandMark />
+            <span className="text-sm font-semibold text-text">FlexServer</span>
+          </Link>
           <h1
             id="login-title"
             className="mt-4 text-2xl font-semibold tracking-tight text-text"

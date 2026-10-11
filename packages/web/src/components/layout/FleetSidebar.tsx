@@ -3,6 +3,7 @@ import { cn } from "../../lib/utils";
 import { vpsDisplayName } from "../../lib/dashboard-formatters";
 import type { DashboardOverview, VpsRecord } from "../../lib/api";
 import { FleetHostItem } from "./FleetHostItem";
+import { BrandMark } from "../Brand";
 
 export type FleetSidebarProps = {
   hosts: VpsRecord[];
@@ -34,15 +35,10 @@ export function FleetSidebar({
       )}
     >
       <div className="border-b border-line p-4">
-        <div className="flex items-baseline gap-2">
-          <span className="text-lg font-bold tracking-tight text-text">
-            FlexServer
-          </span>
-          <span
-            aria-hidden="true"
-            className="h-1.5 w-1.5 rounded-full bg-signal pulse"
-          />
-        </div>
+        <Link to="/vps" aria-label="FlexServer — go to servers" className="flex items-center gap-2 text-text focus-visible:outline-2 focus-visible:outline-signal">
+          <BrandMark />
+          <span className="text-lg font-bold tracking-tight">FlexServer</span>
+        </Link>
         <div className="tnum mt-1 text-[11px] text-dim">
           {onlineCount}/{hosts.length} HOSTS ONLINE
         </div>

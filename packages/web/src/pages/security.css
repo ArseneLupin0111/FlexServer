@@ -1,5 +1,5 @@
 /* Security — scoped to .security-page inside .landing-page. Shares the public
-   navy/blue tokens and shell classes from landing.css; only this page's
+   charcoal/lime tokens and shell classes from landing.css; only this page's
    sections are styled here. */
 
 /* ── Hero: shield badge, headline, three overview cards ── */
@@ -19,7 +19,7 @@
   pointer-events: none;
   background: radial-gradient(
     ellipse 60% 70% at 50% -10%,
-    hsl(var(--l-blue) / 0.32),
+    hsl(var(--l-accent) / 0.32),
     transparent 75%
   );
 }
@@ -30,12 +30,12 @@
   width: 5.75rem;
   height: 5.75rem;
   margin: 0 auto 1.75rem;
-  color: hsl(var(--l-blue-bright));
-  border: 1px solid hsl(var(--l-blue) / 0.4);
+  color: hsl(var(--l-accent));
+  border: 1px solid hsl(var(--l-accent) / 0.4);
   border-radius: 1.5rem;
   background: linear-gradient(165deg, hsl(var(--l-panel)), hsl(var(--l-bg-alt)));
   box-shadow:
-    0 0 45px hsl(var(--l-blue) / 0.22),
+    0 0 45px hsl(var(--l-accent) / 0.22),
     inset 0 1px 0 hsl(var(--l-line-soft) / 0.18);
 }
 
@@ -84,7 +84,7 @@
 }
 
 .security-page .security-overview svg {
-  color: hsl(var(--l-blue-bright));
+  color: hsl(var(--l-accent));
   margin-bottom: 1rem;
 }
 
@@ -121,7 +121,7 @@
   place-items: center;
   gap: 0.5rem;
   margin-bottom: 1.5rem;
-  color: hsl(var(--l-blue-bright));
+  color: hsl(var(--l-accent));
 }
 
 .security-page .security-doc-mark span {
@@ -194,11 +194,11 @@
   width: 2px;
   height: 1.25rem;
   border-radius: 2px;
-  background: linear-gradient(hsl(var(--l-blue-bright)), hsl(var(--l-blue) / 0.15));
+  background: linear-gradient(hsl(var(--l-accent)), hsl(var(--l-accent) / 0.15));
 }
 
 .security-page .security-layers svg {
-  color: hsl(var(--l-blue-bright));
+  color: hsl(var(--l-accent));
 }
 
 .security-page .security-layers strong {
@@ -276,12 +276,12 @@
 
 .security-page .security-group-sidebar nav a:hover {
   color: hsl(var(--l-text));
-  background: hsl(var(--l-blue) / 0.08);
+  background: hsl(var(--l-accent) / 0.08);
 }
 
 .security-page .security-group-sidebar nav a svg {
   flex: none;
-  color: hsl(var(--l-blue-bright));
+  color: hsl(var(--l-accent));
 }
 
 .security-page .security-group-cards {
@@ -310,7 +310,7 @@
 
 .security-page .security-detail-card h3 svg {
   flex: none;
-  color: hsl(var(--l-blue-bright));
+  color: hsl(var(--l-accent));
 }
 
 .security-page .security-detail-card p {
@@ -329,7 +329,7 @@
   margin: 0;
   padding: 1.125rem 1.25rem;
   border: 1px solid hsl(var(--l-line));
-  border-left: 2px solid hsl(var(--l-blue) / 0.5);
+  border-left: 2px solid hsl(var(--l-accent) / 0.5);
   border-radius: 0.625rem;
   background: hsl(var(--l-bg-alt) / 0.6);
   color: hsl(var(--l-dim));
@@ -347,12 +347,12 @@
   margin-inline: auto;
   padding: clamp(2rem, 5vw, 3.5rem);
   text-align: center;
-  border: 1px solid hsl(var(--l-blue) / 0.35);
+  border: 1px solid hsl(var(--l-accent) / 0.35);
   border-radius: 1rem;
   background:
-    radial-gradient(ellipse 70% 100% at 50% 0%, hsl(var(--l-blue) / 0.24), transparent 70%),
+    radial-gradient(ellipse 70% 100% at 50% 0%, hsl(var(--l-accent) / 0.24), transparent 70%),
     linear-gradient(160deg, hsl(var(--l-panel)), hsl(var(--l-bg)));
-  box-shadow: 0 25px 70px -40px hsl(var(--l-blue) / 0.5);
+  box-shadow: 0 25px 70px -40px hsl(var(--l-accent) / 0.5);
 }
 
 .security-page .security-contact h2 {

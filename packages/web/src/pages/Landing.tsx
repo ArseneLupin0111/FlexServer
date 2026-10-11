@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
   ArrowUpRight,
@@ -40,8 +40,796 @@ const ISSUES_URL = `${REPO_URL}/issues`;
 const ARCHITECTURE_URL = `${REPO_URL}/blob/main/docs/architecture.md`;
 const DEMO_GUIDE_URL = `${REPO_URL}/blob/main/docs/demo.md`;
 
+function HealthPreview() {
+  return (
+    <div className="landing-story-preview-card">
+      <div className="landing-preview-chrome">
+        <div className="landing-preview-chrome-left">
+          <span className="landing-preview-dots" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          <span className="landing-preview-title">
+            <Server size={14} aria-hidden="true" />
+            <span>vps-prod-01 — Host Health</span>
+          </span>
+        </div>
+        <div className="landing-preview-chrome-right">
+          <span className="landing-preview-pill is-healthy">
+            <span className="landing-preview-pulse" aria-hidden="true" />
+            Healthy • Uptime 42d 8h
+          </span>
+        </div>
+      </div>
+
+      <div className="landing-preview-body" aria-hidden="true">
+        <div className="landing-preview-meta-row">
+          <div className="landing-preview-host-meta">
+            <span className="landing-preview-os-badge">Ubuntu 24.04</span>
+            <span className="landing-preview-ip tnum">198.51.100.24</span>
+            <span className="landing-preview-dim">systemd agent v1.4</span>
+          </div>
+          <span className="landing-preview-tag-dim tnum">Last poll: 2s ago</span>
+        </div>
+
+        <div className="landing-preview-metric-grid">
+          <div className="landing-preview-metric-box">
+            <div className="landing-preview-box-head">
+              <span className="landing-preview-box-label">CPU Usage</span>
+              <span className="landing-preview-box-val tnum">18.4%</span>
+            </div>
+            <div className="landing-preview-meter">
+              <div
+                className="landing-preview-meter-fill"
+                style={{ width: "18.4%" }}
+              />
+            </div>
+            <div className="landing-preview-box-sub">
+              <span>4 vCPUs (EPYC 7763)</span>
+              <span className="tnum">Load 0.34</span>
+            </div>
+          </div>
+
+          <div className="landing-preview-metric-box">
+            <div className="landing-preview-box-head">
+              <span className="landing-preview-box-label">Memory</span>
+              <span className="landing-preview-box-val tnum">42.2%</span>
+            </div>
+            <div className="landing-preview-meter">
+              <div
+                className="landing-preview-meter-fill"
+                style={{ width: "42.2%" }}
+              />
+            </div>
+            <div className="landing-preview-box-sub">
+              <span className="tnum">3.38 / 8.00 GB</span>
+              <span>1.15 GB cache</span>
+            </div>
+          </div>
+
+          <div className="landing-preview-metric-box">
+            <div className="landing-preview-box-head">
+              <span className="landing-preview-box-label">Disk (/)</span>
+              <span className="landing-preview-box-val tnum">40.1%</span>
+            </div>
+            <div className="landing-preview-meter">
+              <div
+                className="landing-preview-meter-fill"
+                style={{ width: "40.1%" }}
+              />
+            </div>
+            <div className="landing-preview-box-sub">
+              <span className="tnum">48.2 / 120 GB</span>
+              <span>NVMe ext4</span>
+            </div>
+          </div>
+
+          <div className="landing-preview-metric-box">
+            <div className="landing-preview-box-head">
+              <span className="landing-preview-box-label">Network (eth0)</span>
+              <span className="landing-preview-box-val tnum">5.27 MB/s</span>
+            </div>
+            <div className="landing-preview-meter">
+              <div
+                className="landing-preview-meter-fill"
+                style={{ width: "32%" }}
+              />
+            </div>
+            <div className="landing-preview-box-sub">
+              <span className="tnum">↓ 1.42 MB/s</span>
+              <span className="tnum">↑ 3.85 MB/s</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="landing-preview-sub-row">
+          <div className="landing-preview-host-item">
+            <span
+              className="landing-preview-status-dot is-green"
+              aria-hidden="true"
+            />
+            <span className="landing-preview-host-name">vps-staging-02</span>
+            <span className="landing-preview-ip tnum">198.51.100.89</span>
+          </div>
+          <div className="landing-preview-host-stats tnum">
+            <span>CPU 8%</span>
+            <span>RAM 52%</span>
+            <span>Disk 27%</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="landing-preview-caption">
+        <span className="landing-preview-sample-tag">
+          Illustrative preview · sample data
+        </span>
+        <span>
+          Bounded per-host telemetry: missing samples render as explicit gaps, never fabricated numbers.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function DockerPreview() {
+  return (
+    <div className="landing-story-preview-card">
+      <div className="landing-preview-chrome">
+        <div className="landing-preview-chrome-left">
+          <span className="landing-preview-dots" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          <span className="landing-preview-title">
+            <Container size={14} aria-hidden="true" />
+            <span>vps-prod-01 — Docker Containers</span>
+          </span>
+        </div>
+        <div className="landing-preview-chrome-right">
+          <span className="landing-preview-pill is-info">
+            Docker 26.1.1 • Snapshot: 4s ago
+          </span>
+        </div>
+      </div>
+
+      <div className="landing-preview-body">
+        <div className="landing-preview-banner">
+          <span className="landing-preview-banner-badge">Decoupled</span>
+          <span>
+            Container health is tracked independently from host status: stopped containers never mark host down.
+          </span>
+        </div>
+
+        <div className="landing-preview-sub-bar">
+          <div className="landing-preview-tabs">
+            <span className="landing-preview-tab is-active">
+              Containers (4)
+            </span>
+            <span className="landing-preview-tab">Detail rows: 4 / 4</span>
+          </div>
+          <div className="landing-preview-pills-row">
+            <span className="landing-preview-chip is-success">3 Running</span>
+            <span className="landing-preview-chip is-muted">1 Exited</span>
+          </div>
+        </div>
+
+        <div className="landing-preview-table">
+          <div className="landing-preview-container-row">
+            <div className="landing-preview-col-name">
+              <span
+                className="landing-preview-status-dot is-green"
+                aria-hidden="true"
+              />
+              <div className="landing-preview-name-group">
+                <span className="landing-preview-item-name">web-nginx</span>
+                <span className="landing-preview-item-sub">nginx:1.25-alpine</span>
+              </div>
+            </div>
+            <div className="landing-preview-col-ports tnum">0.0.0.0:80, 443</div>
+            <div className="landing-preview-col-res tnum">0.8% • 42 MB</div>
+          </div>
+
+          <div className="landing-preview-container-row">
+            <div className="landing-preview-col-name">
+              <span
+                className="landing-preview-status-dot is-green"
+                aria-hidden="true"
+              />
+              <div className="landing-preview-name-group">
+                <span className="landing-preview-item-name">api-backend</span>
+                <span className="landing-preview-item-sub">flexserver/api:latest</span>
+              </div>
+            </div>
+            <div className="landing-preview-col-ports tnum">127.0.0.1:3000</div>
+            <div className="landing-preview-col-res tnum">2.4% • 186 MB</div>
+          </div>
+
+          <div className="landing-preview-container-row">
+            <div className="landing-preview-col-name">
+              <span
+                className="landing-preview-status-dot is-green"
+                aria-hidden="true"
+              />
+              <div className="landing-preview-name-group">
+                <span className="landing-preview-item-name">db-postgres</span>
+                <span className="landing-preview-item-sub">postgres:16-alpine</span>
+              </div>
+            </div>
+            <div className="landing-preview-col-ports tnum">127.0.0.1:5432</div>
+            <div className="landing-preview-col-res tnum">1.2% • 312 MB</div>
+          </div>
+
+          <div className="landing-preview-container-row is-dimmed">
+            <div className="landing-preview-col-name">
+              <span
+                className="landing-preview-status-dot is-gray"
+                aria-hidden="true"
+              />
+              <div className="landing-preview-name-group">
+                <span className="landing-preview-item-name">redis-cache</span>
+                <span className="landing-preview-item-sub">redis:7-alpine</span>
+              </div>
+            </div>
+            <div className="landing-preview-col-ports tnum">Exited (0) • 2h ago</div>
+            <div className="landing-preview-col-res tnum">Restarts: 0</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="landing-preview-caption">
+        <span className="landing-preview-sample-tag">
+          Illustrative preview · sample data
+        </span>
+        <span>
+          Docker checks require an agent snapshot and stay decoupled from container management.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function SshPreview() {
+  return (
+    <div className="landing-story-preview-card">
+      <div className="landing-preview-chrome">
+        <div className="landing-preview-chrome-left">
+          <span className="landing-preview-dots" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          <span className="landing-preview-title">
+            <TerminalSquare size={14} aria-hidden="true" />
+            <span>vps-prod-01 — SSH & Command Jobs</span>
+          </span>
+        </div>
+        <div className="landing-preview-chrome-right">
+          <span className="landing-preview-pill is-success">
+            Key Verified • Ed25519
+          </span>
+        </div>
+      </div>
+
+      <div className="landing-preview-body">
+        <div className="landing-preview-meta-grid">
+          <div className="landing-preview-mini-param">
+            <span className="landing-preview-param-lbl">SSH Key</span>
+            <span className="landing-preview-param-val tnum">
+              ed25519-ops-prod (SHA256: 9f4a...e12b)
+            </span>
+          </div>
+          <div className="landing-preview-mini-param">
+            <span className="landing-preview-param-lbl">Host Trust</span>
+            <span className="landing-preview-param-val is-ok">
+              Strict — pinned host key verified
+            </span>
+          </div>
+        </div>
+
+        <div className="landing-preview-job-card">
+          <div className="landing-preview-job-head">
+            <div className="landing-preview-job-title">
+              <span className="landing-preview-job-tag tnum">#1084</span>
+              <span>apt-get --just-print upgrade</span>
+            </div>
+            <span className="landing-preview-chip is-success">Completed (Exit 0)</span>
+          </div>
+          <div className="landing-preview-job-meta">
+            <span>Target: vps-prod-01 (198.51.100.24:22)</span>
+            <span className="tnum">Duration: 2.41s</span>
+          </div>
+        </div>
+
+        <div className="landing-preview-terminal">
+          <div className="landing-preview-term-line">
+            <span className="landing-term-prompt">$</span>
+            <span className="landing-term-cmd">
+              ssh ops@vps-prod-01 &apos;apt-get --just-print upgrade&apos;
+            </span>
+          </div>
+          <div className="landing-term-dim">
+            [flexserver] Host key verified (ed25519) for 198.51.100.24:22
+          </div>
+          <div className="landing-term-out">Reading package lists... Done</div>
+          <div className="landing-term-out">Building dependency tree... Done</div>
+          <div className="landing-term-accent">
+            1 package can be upgraded (libssl3 security update available).
+          </div>
+          <div className="landing-term-dim">
+            [flexserver] Job #1084 exited with code 0 in 2.41s.
+          </div>
+        </div>
+      </div>
+
+      <div className="landing-preview-caption">
+        <span className="landing-preview-sample-tag">
+          Illustrative preview · sample data
+        </span>
+        <span>
+          Real SSH only targets allowed addresses with explicit host key trust. Web terminal disabled by default.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function HistoryPreview() {
+  return (
+    <div className="landing-story-preview-card">
+      <div className="landing-preview-chrome">
+        <div className="landing-preview-chrome-left">
+          <span className="landing-preview-dots" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          <span className="landing-preview-title">
+            <History size={14} aria-hidden="true" />
+            <span>vps-prod-01 — Retained History & Audit</span>
+          </span>
+        </div>
+        <div className="landing-preview-sub-bar">
+          <div className="landing-preview-chart-title">
+            CPU &amp; Memory Timeline (Last 24 Hours)
+          </div>
+          <div className="landing-preview-chrome-right">
+            <span className="landing-preview-pill is-info">
+              Sample window — not your configured retention
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="landing-preview-body">
+        <div className="landing-preview-chart-box">
+          <div className="landing-preview-chart-head">
+            <span className="landing-preview-chart-title">
+              CPU & Memory Timeline (Last 24 Hours)
+            </span>
+            <div className="landing-preview-chart-legend">
+              <span className="legend-cpu">CPU (%)</span>
+              <span className="legend-mem">Memory (%)</span>
+            </div>
+          </div>
+
+          <div className="landing-preview-svg-wrap">
+            <svg
+              viewBox="0 0 460 90"
+              className="landing-preview-svg"
+              preserveAspectRatio="none"
+              aria-hidden="true"
+            >
+              <defs>
+                <linearGradient id="landing-grad-cpu" x1="0" y1="0" x2="0" y2="1">
+                  <stop
+                    offset="0%"
+                    stopColor="hsl(217 91% 60%)"
+                    stopOpacity="0.3"
+                  />
+                  <stop
+                    offset="100%"
+                    stopColor="hsl(217 91% 60%)"
+                    stopOpacity="0.0"
+                  />
+                </linearGradient>
+                <linearGradient id="landing-grad-mem" x1="0" y1="0" x2="0" y2="1">
+                  <stop
+                    offset="0%"
+                    stopColor="hsl(265 80% 65%)"
+                    stopOpacity="0.25"
+                  />
+                  <stop
+                    offset="100%"
+                    stopColor="hsl(265 80% 65%)"
+                    stopOpacity="0.0"
+                  />
+                </linearGradient>
+              </defs>
+              <line
+                x1="0"
+                y1="20"
+                x2="460"
+                y2="20"
+                stroke="hsl(217 33% 20%)"
+                strokeDasharray="3 3"
+              />
+              <line
+                x1="0"
+                y1="50"
+                x2="460"
+                y2="50"
+                stroke="hsl(217 33% 20%)"
+                strokeDasharray="3 3"
+              />
+              <line
+                x1="0"
+                y1="80"
+                x2="460"
+                y2="80"
+                stroke="hsl(217 33% 20%)"
+                strokeDasharray="3 3"
+              />
+
+              <path
+                d="M 0 55 Q 60 52 110 50 T 230 46 T 340 48 T 460 45 L 460 90 L 0 90 Z"
+                fill="url(#landing-grad-mem)"
+              />
+              <path
+                d="M 0 55 Q 60 52 110 50 T 230 46 T 340 48 T 460 45"
+                fill="none"
+                stroke="hsl(265 80% 68%)"
+                strokeWidth="1.75"
+              />
+
+              <path
+                d="M 0 72 Q 70 70 140 68 T 260 28 T 330 65 T 460 62 L 460 90 L 0 90 Z"
+                fill="url(#landing-grad-cpu)"
+              />
+              <path
+                d="M 0 72 Q 70 70 140 68 T 260 28 T 330 65 T 460 62"
+                fill="none"
+                stroke="hsl(210 100% 66%)"
+                strokeWidth="2"
+              />
+
+              <circle cx="260" cy="28" r="3.5" fill="hsl(210 100% 66%)" />
+            </svg>
+            <div className="landing-preview-chart-times tnum">
+              <span>00:00</span>
+              <span>06:00</span>
+              <span>12:00</span>
+              <span>18:00</span>
+              <span>Now</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="landing-preview-audit-box">
+          <div className="landing-preview-audit-head">
+            <span>Audit Log</span>
+            <span className="landing-preview-dim tnum">3 events displayed</span>
+          </div>
+
+          <div className="landing-preview-audit-list">
+            <div className="landing-preview-audit-item">
+              <span className="landing-preview-time tnum">02:45:18</span>
+              <span className="landing-preview-actor">alex@ops</span>
+              <span className="landing-preview-action">job.execute</span>
+              <span className="landing-preview-target">vps-prod-01</span>
+              <span className="landing-preview-badge is-ok">Exit 0</span>
+            </div>
+            <div className="landing-preview-audit-item">
+              <span className="landing-preview-time tnum">01:12:04</span>
+              <span className="landing-preview-actor">ci-bot</span>
+              <span className="landing-preview-action">container.restart</span>
+              <span className="landing-preview-target">api-backend</span>
+              <span className="landing-preview-badge is-ok">Success</span>
+            </div>
+            <div className="landing-preview-audit-item">
+              <span className="landing-preview-time tnum">22:50:11</span>
+              <span className="landing-preview-actor">alex@ops</span>
+              <span className="landing-preview-action">ssh_key.verify</span>
+              <span className="landing-preview-target">vps-staging-02</span>
+              <span className="landing-preview-badge is-ok">Verified</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="landing-preview-caption">
+        <span className="landing-preview-sample-tag">
+          Illustrative preview · sample data
+        </span>
+        <span>
+          Retained telemetry samples and audit records preserve operational context.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function StoragePreview() {
+  return (
+    <div className="landing-story-preview-card">
+      <div className="landing-preview-chrome">
+        <div className="landing-preview-chrome-left">
+          <span className="landing-preview-dots" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          <span className="landing-preview-title">
+            <Database size={14} aria-hidden="true" />
+            <span>Settings — Deployment & Data Storage</span>
+          </span>
+        </div>
+        <div className="landing-preview-chrome-right">
+          <span className="landing-preview-pill is-success">
+            Postgres Active
+          </span>
+        </div>
+      </div>
+
+      <div className="landing-preview-body">
+        <div className="landing-preview-storage-modes">
+          <div className="landing-preview-mode-card is-active">
+            <div className="landing-preview-mode-head">
+              <span className="landing-preview-mode-name">
+                PostgreSQL / TimescaleDB
+              </span>
+              <span className="landing-preview-chip is-success">Connected</span>
+            </div>
+            <div className="landing-preview-mode-desc">
+              PostgreSQL persistence with optional TimescaleDB.
+            </div>
+            <div className="landing-preview-mode-meta tnum">
+              postgresql://flexserver@127.0.0.1:5432/ops
+            </div>
+          </div>
+
+          <div className="landing-preview-mode-card">
+            <div className="landing-preview-mode-head">
+              <span className="landing-preview-mode-name">
+                Local JSON Flat-Files
+              </span>
+              <span className="landing-preview-chip is-muted">Supported</span>
+            </div>
+            <div className="landing-preview-mode-desc">
+              File-backed persistence without an external database.
+            </div>
+            <div className="landing-preview-mode-meta tnum">
+              JSON files in your configured data directory
+            </div>
+          </div>
+        </div>
+
+        <div className="landing-preview-banner is-shield">
+          <ShieldCheck size={16} aria-hidden="true" />
+          <span>
+            <strong>Separate modes:</strong> Switching modes does not convert simulated demo records into real server data.
+          </span>
+        </div>
+
+        <div className="landing-preview-meta-grid">
+          <div className="landing-preview-mini-param">
+            <span className="landing-preview-param-lbl">
+              Retained telemetry
+            </span>
+            <span className="landing-preview-param-val tnum">
+              Bounded per-host history
+            </span>
+          </div>
+          <div className="landing-preview-mini-param">
+            <span className="landing-preview-param-lbl">Backups</span>
+            <span className="landing-preview-param-val tnum is-ok">
+              Operator-managed, outside the dashboard
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="landing-preview-caption">
+        <span className="landing-preview-sample-tag">
+          Illustrative preview · sample data
+        </span>
+        <span>
+          Self-host via Docker Compose or from source. Keep data in JSON files or PostgreSQL.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function SecurityPreview() {
+  return (
+    <div className="landing-story-preview-card">
+      <div className="landing-preview-chrome">
+        <div className="landing-preview-chrome-left">
+          <span className="landing-preview-dots" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          <span className="landing-preview-title">
+            <ShieldCheck size={14} aria-hidden="true" />
+            <span>Security — Default Access Guardrails</span>
+          </span>
+        </div>
+        <div className="landing-preview-chrome-right">
+          <span className="landing-preview-pill is-shield">
+            Default Guardrails
+          </span>
+        </div>
+      </div>
+
+      <div className="landing-preview-body">
+        <div className="landing-preview-policy-grid">
+          <div className="landing-preview-policy-card">
+            <div className="landing-preview-policy-head">
+              <span className="landing-preview-policy-title">
+                Demo Mode Lock
+              </span>
+              <span className="landing-preview-chip is-amber">Locked</span>
+            </div>
+            <p className="landing-preview-policy-desc">
+              Real SSH execution and mutating actions are disabled when operating in simulated demo mode.
+            </p>
+          </div>
+
+          <div className="landing-preview-policy-card">
+            <div className="landing-preview-policy-head">
+              <span className="landing-preview-policy-title">
+                Subnet Allowlist
+              </span>
+              <span className="landing-preview-chip is-success">Enforced</span>
+            </div>
+            <p className="landing-preview-policy-desc">
+              RFC1918 private network targets are blocked unless explicitly allowed in local configuration.
+            </p>
+          </div>
+
+          <div className="landing-preview-policy-card">
+            <div className="landing-preview-policy-head">
+              <span className="landing-preview-policy-title">
+                Agent Boundary
+              </span>
+              <span className="landing-preview-chip is-info">Restricted</span>
+            </div>
+            <p className="landing-preview-policy-desc">
+              Systemd agent runs with least-privilege permissions: no Docker socket access by default.
+            </p>
+          </div>
+
+          <div className="landing-preview-policy-card">
+            <div className="landing-preview-policy-head">
+              <span className="landing-preview-policy-title">
+                Host Key Trust
+              </span>
+              <span className="landing-preview-chip is-success">Strict Match</span>
+            </div>
+            <p className="landing-preview-policy-desc">
+              SSH connections strictly verify host key fingerprints against stored trusted pins. No blind trust.
+            </p>
+          </div>
+        </div>
+
+        <div className="landing-preview-banner">
+          <BookOpen size={16} aria-hidden="true" />
+          <span>
+            Read the security model documentation before opening SSH, terminal, or Docker access.
+          </span>
+        </div>
+      </div>
+
+      <div className="landing-preview-caption">
+        <span className="landing-preview-sample-tag">
+          Illustrative preview · sample data
+        </span>
+        <span>
+          Review the documented access controls before enabling remote execution.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+interface FeatureStoryItem {
+  id: string;
+  tag: string;
+  title: string;
+  icon: typeof Activity;
+  desc: ReactNode;
+  preview: ReactNode;
+}
+
+const FEATURES: FeatureStoryItem[] = [
+  {
+    id: "health",
+    tag: "01 / 06",
+    title: "Per-host health you can read at a glance",
+    icon: Activity,
+    desc: "Track CPU, memory, disk, system load, network throughput, and uptime for every server. Bounded per-host history feeds the overview and metrics views, and missing samples render as explicit gaps or “unavailable” instead of invented values.",
+    preview: <HealthPreview />,
+  },
+  {
+    id: "docker",
+    tag: "02 / 06",
+    title: "Docker checks in their own tab",
+    icon: Container,
+    desc: (
+      <>
+        Container counts stay separate from host health, so a stopped container
+        is never misread as a down server. Docker monitoring needs an agent
+        snapshot and stays independent from management actions; see the{" "}
+        <a
+          className="landing-inline-link"
+          href={SECURITY_URL}
+          target="_blank"
+          rel="noreferrer"
+        >
+          security model
+        </a>
+        .
+      </>
+    ),
+    preview: <DockerPreview />,
+  },
+  {
+    id: "ssh",
+    tag: "03 / 06",
+    title: "SSH keys, command jobs, and an optional terminal",
+    icon: TerminalSquare,
+    desc: "Provision and verify an SSH key per server, then run remote commands as tracked jobs with progress and results. Real SSH only targets allowed addresses with explicit host key trust; the web terminal ships disabled and needs local-mode configuration.",
+    preview: <SshPreview />,
+  },
+  {
+    id: "history",
+    tag: "04 / 06",
+    title: "History and audit trail for follow-up",
+    icon: History,
+    desc: "Revisit retained CPU and memory samples, network RX/TX in bytes per second, job outcomes with failure reasons, and the audit log when you need to compare what changed. Stale data keeps an explicit timestamp label.",
+    preview: <HistoryPreview />,
+  },
+  {
+    id: "storage",
+    tag: "05 / 06",
+    title: "Your deployment, your data",
+    icon: Database,
+    desc: "Self-host the dashboard and keep data in JSON files or PostgreSQL (optional TimescaleDB). Switching modes never converts simulated demo records into real server data.",
+    preview: <StoragePreview />,
+  },
+  {
+    id: "security",
+    tag: "06 / 06",
+    title: "Guardrails are on by default",
+    icon: ShieldCheck,
+    desc: (
+      <>
+        Demo mode disables real SSH, private-network targets are blocked unless
+        explicitly allowed in local mode, and the systemd agent gets no Docker
+        socket access unless you opt in. Read the{" "}
+        <a
+          className="landing-inline-link"
+          href={SECURITY_URL}
+          target="_blank"
+          rel="noreferrer"
+        >
+          security model
+        </a>{" "}
+        before opening SSH, terminal, or Docker access.
+      </>
+    ),
+    preview: <SecurityPreview />,
+  },
+];
+
 export function LandingPage() {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [activeFeatureIndex, setActiveFeatureIndex] = useState(0);
+  const [featuresActive, setFeaturesActive] = useState(false);
+  const activeFeatureIndexRef = useRef(0);
 
   // Pinned-hero storytelling: native document scroll only (no wheel
   // interception). While the hero scene is pinned, progress maps scroll to
@@ -183,10 +971,10 @@ export function LandingPage() {
     };
   }, []);
 
-  // Pinned features storytelling: native document scroll with sticky tracks.
-  // Gated on desktop viewports where feature cards comfortably fit below the
-  // sticky header without clipping. Mobile, short viewports, and reduced motion
-  // keep the plain static flow without extra track heights.
+  // Termius-style single pinned two-column storytelling scene:
+  // Native document scroll with passive RAF throttled listener.
+  // Gated on desktop viewports where the stage layout fits without clipping.
+  // Mobile, short viewports, and reduced motion keep plain static flow.
   useEffect(() => {
     const scene = featuresSceneRef.current;
     if (!scene) return;
@@ -196,64 +984,192 @@ export function LandingPage() {
     );
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
+    let frameId: number | null = null;
+    let isDesktopActive = false;
+
+    // Measure every real step state at its actual column width so the fit
+    // gate sees the tallest possible stage, never one collapsed height.
+    const measure = () => {
+      const stage = scene.querySelector<HTMLElement>(".landing-story-stage");
+      if (!stage) return 0;
+      const items = Array.from(
+        stage.querySelectorAll<HTMLElement>(".landing-story-nav-item")
+      );
+      const descriptions = Array.from(
+        stage.querySelectorAll<HTMLElement>(".landing-story-desc")
+      );
+      const panes = Array.from(
+        stage.querySelectorAll<HTMLElement>(".landing-story-preview-pane")
+      );
+      const applyStep = (index: number) => {
+        items.forEach((item, i) => item.classList.toggle("is-active", i === index));
+        descriptions.forEach((desc, i) => { desc.hidden = i !== index; });
+        panes.forEach((pane, i) => {
+          pane.hidden = i !== index;
+          pane.classList.toggle("is-active", i === index);
+        });
+      };
+      let tallest = 0;
+      for (let index = 0; index < FEATURES.length; index += 1) {
+        applyStep(index);
+        tallest = Math.max(tallest, stage.offsetHeight);
+      }
+      applyStep(activeFeatureIndexRef.current);
+      return tallest;
+    };
+
     const reset = () => {
+      isDesktopActive = false;
+      setFeaturesActive(false);
       scene.removeAttribute("data-features-active");
-      scene.querySelectorAll<HTMLElement>(".landing-feature-track").forEach((track) => {
-        track.style.removeProperty("--feature-stage-height");
-      });
+      scene.removeAttribute("data-features-measuring");
+      scene.removeAttribute("data-active-step");
+      const track = scene.querySelector<HTMLElement>(".landing-story-track");
+      if (track) track.style.removeProperty("--story-stage-height");
+    };
+
+    const updateScrollProgress = () => {
+      if (!isDesktopActive) return;
+      const track = scene.querySelector<HTMLElement>(".landing-story-track");
+      const stage = scene.querySelector<HTMLElement>(".landing-story-stage");
+      if (!track || !stage) return;
+
+      const headerEl = document.querySelector<HTMLElement>(".landing-header");
+      const headerH = headerEl ? headerEl.offsetHeight : 72;
+      const stickyTop = headerH + 24; // 24px (1.5rem) below sticky header
+
+      const trackRect = track.getBoundingClientRect();
+      const scrollOffset = stickyTop - trackRect.top;
+      const scrollTravel = track.offsetHeight - stage.offsetHeight;
+
+      if (scrollTravel <= 0) return;
+
+      const progress = Math.min(1, Math.max(0, scrollOffset / scrollTravel));
+      const stepCount = 6;
+      const nextIndex = Math.min(
+        stepCount - 1,
+        Math.max(0, Math.floor(progress * stepCount))
+      );
+
+      // Focused inline links must never be dropped by scroll-driven step
+      // switching, so the focused step stays mounted until focus leaves it.
+      const activeDesc = scene.querySelector<HTMLDivElement>(".landing-story-desc:not([hidden])");
+      if (activeDesc?.contains(document.activeElement)) return;
+      if (nextIndex !== activeFeatureIndexRef.current) {
+        activeFeatureIndexRef.current = nextIndex;
+        scene.setAttribute("data-active-step", String(nextIndex));
+        setActiveFeatureIndex(nextIndex);
+      }
     };
 
     const sync = () => {
-      const active = media.matches && !reduceMotion.matches;
-      if (!active) {
+      const qualifies = media.matches && !reduceMotion.matches;
+      if (!qualifies) {
         reset();
         return;
       }
 
-      // Measure the enhanced desktop panel, not the smaller fallback layout.
+      // Temporarily lay out each of the six states before pinning is decided.
       scene.setAttribute("data-features-active", "");
-      // Check whether feature panels fit comfortably below the sticky header.
-      // Sticky header height is ~72px (var(--landing-header-h) = 4.5rem).
+      scene.setAttribute("data-features-measuring", "");
+
       const headerEl = document.querySelector<HTMLElement>(".landing-header");
       const headerH = headerEl ? headerEl.offsetHeight : 72;
-      const topOffset = headerH + 24; // 24px (1.5rem) margin below header
-      const availableH = window.innerHeight - topOffset - 24; // 24px bottom margin
+      const topOffset = headerH + 24;
+      const availableH = window.innerHeight - topOffset - 24;
 
-      const stages = scene.querySelectorAll<HTMLElement>(
-        ".landing-feature-stage"
-      );
-      let maxStageH = 0;
-      stages.forEach((el) => {
-        el.parentElement?.style.setProperty("--feature-stage-height", `${el.offsetHeight}px`);
-        if (el.offsetHeight > maxStageH) {
-          maxStageH = el.offsetHeight;
-        }
-      });
-
-      // Require at least 640px window height and enough room so no card clips
-      if (
-        window.innerHeight < 640 ||
-        (maxStageH > 0 && maxStageH > availableH)
-      ) {
+      const track = scene.querySelector<HTMLElement>(".landing-story-track");
+      const stage = scene.querySelector<HTMLElement>(".landing-story-stage");
+      if (!track || !stage) {
+        scene.removeAttribute("data-features-measuring");
         reset();
         return;
       }
 
+      // Measure with the track unstretched so `measure()` samples each real
+      // step's natural height, then restore the visible step it last probed.
+      track.style.removeProperty("--story-stage-height");
+      const stageH = measure();
+      scene.removeAttribute("data-features-measuring");
+
+      // Gate: pin only when the tallest step fits the available height and
+      // enough travel exists for six synchronized steps.
+      if (window.innerHeight < 640 || stageH <= 0 || stageH > availableH) {
+        reset();
+        return;
+      }
+
+      track.style.setProperty("--story-stage-height", `${stageH}px`);
+      isDesktopActive = true;
+      setFeaturesActive(true);
       scene.setAttribute("data-features-active", "");
+      scene.setAttribute(
+        "data-active-step",
+        String(activeFeatureIndexRef.current)
+      );
+      updateScrollProgress();
     };
 
+    const onScroll = () => {
+      if (!isDesktopActive) return;
+      if (frameId === null) {
+        frameId = window.requestAnimationFrame(() => {
+          frameId = null;
+          updateScrollProgress();
+        });
+      }
+    };
+
+    const onFocusOut = () => {
+      if (!isDesktopActive || frameId !== null) return;
+      frameId = window.requestAnimationFrame(() => {
+        frameId = null;
+        updateScrollProgress();
+      });
+    };
+    scene.addEventListener("focusout", onFocusOut);
     media.addEventListener("change", sync);
     reduceMotion.addEventListener("change", sync);
+    window.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("resize", sync);
     sync();
 
     return () => {
       media.removeEventListener("change", sync);
       reduceMotion.removeEventListener("change", sync);
+      window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", sync);
+      scene.removeEventListener("focusout", onFocusOut);
+      if (frameId !== null) window.cancelAnimationFrame(frameId);
       reset();
     };
   }, []);
+
+  const handleSelectFeature = (index: number) => {
+    setActiveFeatureIndex(index);
+    activeFeatureIndexRef.current = index;
+    const scene = featuresSceneRef.current;
+    if (!scene) return;
+    scene.setAttribute("data-active-step", String(index));
+    if (!scene.hasAttribute("data-features-active")) return;
+
+    const track = scene.querySelector<HTMLElement>(".landing-story-track");
+    const stage = scene.querySelector<HTMLElement>(".landing-story-stage");
+    if (!track || !stage) return;
+
+    const headerEl = document.querySelector<HTMLElement>(".landing-header");
+    const headerH = headerEl ? headerEl.offsetHeight : 72;
+    const stickyTop = headerH + 24;
+    const trackRect = track.getBoundingClientRect();
+    const trackScrollTop = window.scrollY + trackRect.top;
+    const scrollTravel = track.offsetHeight - stage.offsetHeight;
+
+    if (scrollTravel > 0) {
+      const stepFraction = (index + 0.5) / 6;
+      const targetY = trackScrollTop - stickyTop + stepFraction * scrollTravel;
+      window.scrollTo({ top: Math.round(targetY), behavior: "auto" });
+    }
+  };
 
   useEffect(() => {
     document.body.style.overflow = menuOpen ? "hidden" : "";
@@ -440,7 +1356,7 @@ export function LandingPage() {
                   >
                     vps-prod-01 — Overview
                   </span>
-                  <span className="landing-sample-badge">Sample data</span>
+                  <span className="landing-sample-badge">Illustrative preview · sample data</span>
                 </div>
                 <div className="landing-console-body">
                   <ul
@@ -619,236 +1535,174 @@ export function LandingPage() {
       </section>
 
         <section
-          className="landing-section"
+          className="landing-section landing-features-section"
           id="features"
-          aria-labelledby="landing-features-title"
+          aria-labelledby={
+            featuresActive
+              ? "landing-features-title"
+              : "landing-features-fallback-title"
+          }
         >
-          <div className="landing-wrap">
-            <div className="landing-section-head">
-              <p className="landing-section-eyebrow">Features</p>
-              <h2
-                className="landing-section-title"
-                id="landing-features-title"
-              >
-                One place for everyday VPS operations
-              </h2>
-              <p className="landing-section-sub">
-                Concrete capabilities you get after you deploy the dashboard on
-                your own infrastructure. Everything below describes the
-                dashboard you run — not a service hosted by FlexTechnology.
-              </p>
+          <div className="landing-features-scene" ref={featuresSceneRef}>
+            {/* Pinned Desktop Two-Column Story (Termius style: active when desktop fit gate passes) */}
+            <div className="landing-story-pinned">
+              <div className="landing-story-track">
+                <div className="landing-story-stage">
+                  <div className="landing-wrap landing-story-wrap">
+                    {/* Left Column: Eyebrow + Headline + Interactive Capabilities List */}
+                    <div className="landing-story-col-left">
+                      <div className="landing-story-head">
+                        <p className="landing-section-eyebrow">Features</p>
+                        <h2
+                          className="landing-section-title"
+                          id="landing-features-title"
+                        >
+                          One place for everyday VPS operations
+                        </h2>
+                        <p className="landing-story-lead">
+                          Concrete capabilities you get after you deploy the
+                          dashboard on your own infrastructure. Everything below
+                          describes the dashboard you run — not a service hosted
+                          by FlexTechnology.
+                        </p>
+                      </div>
+
+                      <div
+                        className="landing-story-nav"
+                        role="tablist"
+                        aria-label="Capabilities"
+                        aria-orientation="vertical"
+                      >
+                        {FEATURES.map((feature, idx) => {
+                          const isActive = idx === activeFeatureIndex;
+                          return (
+                            <div
+                              key={feature.id}
+                              className={`landing-story-nav-item ${isActive ? "is-active" : ""}`}
+                              data-index={idx}
+                            >
+                              <button
+                                type="button"
+                                className="landing-story-nav-btn"
+                                role="tab"
+                                id={`story-tab-${idx}`}
+                                aria-selected={isActive}
+                                aria-controls={`story-preview-${idx}`}
+                                aria-describedby={`story-desc-${idx}`}
+                                tabIndex={isActive ? 0 : -1}
+                                onKeyDown={(event) => {
+                                  let next = idx;
+                                  if (event.key === "ArrowDown") next = (idx + 1) % FEATURES.length;
+                                  else if (event.key === "ArrowUp") next = (idx - 1 + FEATURES.length) % FEATURES.length;
+                                  else if (event.key === "Home") next = 0;
+                                  else if (event.key === "End") next = FEATURES.length - 1;
+                                  else return;
+                                  event.preventDefault();
+                                  document.getElementById(`story-tab-${next}`)?.focus({ preventScroll: true });
+                                  handleSelectFeature(next);
+                                }}
+                                onClick={() => handleSelectFeature(idx)}
+                              >
+                                {isActive && (
+                                  <span
+                                    className="landing-story-indicator"
+                                    aria-hidden="true"
+                                  />
+                                )}
+                                <span className="landing-story-title">
+                                  {feature.title}
+                                </span>
+                              </button>
+                              <div className="landing-story-desc" id={`story-desc-${idx}`} hidden={!isActive}>
+                                <p>{feature.desc}</p>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Right Column: Synchronized Realistic App Preview */}
+                    <div className="landing-story-col-right">
+                      <div className="landing-story-preview-container">
+                        {FEATURES.map((feature, idx) => {
+                          const isActive = idx === activeFeatureIndex;
+                          return (
+                            <div
+                              key={feature.id}
+                              id={`story-preview-${idx}`}
+                              role="tabpanel"
+                              aria-labelledby={`story-tab-${idx}`}
+                              tabIndex={0}
+                              className={`landing-story-preview-pane ${
+                                isActive ? "is-active" : ""
+                              }`}
+                              hidden={!isActive}
+                            >
+                              {feature.preview}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
-            <div className="landing-features-scene" ref={featuresSceneRef}>
-              <ul className="landing-features-track-list">
-                <li className="landing-feature-track">
-                  <div className="landing-feature-stage">
-                    <div className="landing-feature-panel landing-feature">
-                      <div className="landing-feature-header">
+            {/* Fallback Static Flow (mobile / short viewports / reduced-motion) */}
+            <div className="landing-story-fallback">
+              <div className="landing-wrap">
+                <div className="landing-section-head">
+                  <p className="landing-section-eyebrow">Features</p>
+                  <h2
+                    className="landing-section-title"
+                    id="landing-features-fallback-title"
+                  >
+                    One place for everyday VPS operations
+                  </h2>
+                  <p className="landing-section-sub">
+                    Concrete capabilities you get after you deploy the dashboard
+                    on your own infrastructure. Everything below describes the
+                    dashboard you run — not a service hosted by FlexTechnology.
+                  </p>
+                </div>
+
+                <div className="landing-story-fallback-list">
+                  {FEATURES.map((feature) => (
+                    <article
+                      key={feature.id}
+                      className="landing-story-fallback-item"
+                    >
+                      <div className="landing-story-fallback-header">
                         <span
                           className="landing-feature-icon"
                           aria-hidden="true"
                         >
-                          <Activity size={20} />
+                          <feature.icon size={20} />
                         </span>
                         <span
-                          className="landing-feature-tag tnum"
+                          className="landing-story-fallback-tag tnum"
                           aria-hidden="true"
                         >
-                          01 / 06
+                          {feature.tag}
                         </span>
                       </div>
-                      <div className="landing-feature-body">
+                      <div className="landing-story-fallback-body">
                         <h3 className="landing-feature-title">
-                          Per-host health you can read at a glance
+                          {feature.title}
                         </h3>
-                        <p className="landing-feature-desc">
-                          Track CPU, memory, disk, system load, network
-                          throughput, and uptime for every server. Bounded
-                          per-host history feeds the overview and metrics views,
-                          and missing samples render as explicit gaps or
-                          “unavailable” instead of invented values.
-                        </p>
+                        <p className="landing-feature-desc">{feature.desc}</p>
                       </div>
-                    </div>
-                  </div>
-                </li>
-                <li className="landing-feature-track">
-                  <div className="landing-feature-stage">
-                    <div className="landing-feature-panel landing-feature">
-                      <div className="landing-feature-header">
-                        <span
-                          className="landing-feature-icon"
-                          aria-hidden="true"
-                        >
-                          <Container size={20} />
-                        </span>
-                        <span
-                          className="landing-feature-tag tnum"
-                          aria-hidden="true"
-                        >
-                          02 / 06
-                        </span>
+                      <div className="landing-story-fallback-preview">
+                        <div className="landing-story-preview-container">
+                          {feature.preview}
+                        </div>
                       </div>
-                      <div className="landing-feature-body">
-                        <h3 className="landing-feature-title">
-                          Docker checks in their own tab
-                        </h3>
-                        <p className="landing-feature-desc">
-                          Container counts stay separate from host health, so a
-                          stopped container is never misread as a down server.
-                          Docker monitoring needs an agent snapshot and stays
-                          independent from management actions; see the{" "}
-                          <a
-                            className="landing-inline-link"
-                            href={SECURITY_URL}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            security model
-                          </a>
-                          .
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </li>
-                <li className="landing-feature-track">
-                  <div className="landing-feature-stage">
-                    <div className="landing-feature-panel landing-feature">
-                      <div className="landing-feature-header">
-                        <span
-                          className="landing-feature-icon"
-                          aria-hidden="true"
-                        >
-                          <TerminalSquare size={20} />
-                        </span>
-                        <span
-                          className="landing-feature-tag tnum"
-                          aria-hidden="true"
-                        >
-                          03 / 06
-                        </span>
-                      </div>
-                      <div className="landing-feature-body">
-                        <h3 className="landing-feature-title">
-                          SSH keys, command jobs, and an optional terminal
-                        </h3>
-                        <p className="landing-feature-desc">
-                          Provision and verify an SSH key per server, then run
-                          remote commands as tracked jobs with progress and
-                          results. Real SSH only targets allowed addresses with
-                          explicit host key trust; the web terminal ships
-                          disabled and needs local-mode configuration.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </li>
-                <li className="landing-feature-track">
-                  <div className="landing-feature-stage">
-                    <div className="landing-feature-panel landing-feature">
-                      <div className="landing-feature-header">
-                        <span
-                          className="landing-feature-icon"
-                          aria-hidden="true"
-                        >
-                          <History size={20} />
-                        </span>
-                        <span
-                          className="landing-feature-tag tnum"
-                          aria-hidden="true"
-                        >
-                          04 / 06
-                        </span>
-                      </div>
-                      <div className="landing-feature-body">
-                        <h3 className="landing-feature-title">
-                          History and audit trail for follow-up
-                        </h3>
-                        <p className="landing-feature-desc">
-                          Revisit retained CPU and memory samples, network RX/TX
-                          in bytes per second, job outcomes with failure
-                          reasons, and the audit log when you need to compare
-                          what changed. Stale data keeps an explicit timestamp
-                          label.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </li>
-                <li className="landing-feature-track">
-                  <div className="landing-feature-stage">
-                    <div className="landing-feature-panel landing-feature">
-                      <div className="landing-feature-header">
-                        <span
-                          className="landing-feature-icon"
-                          aria-hidden="true"
-                        >
-                          <Database size={20} />
-                        </span>
-                        <span
-                          className="landing-feature-tag tnum"
-                          aria-hidden="true"
-                        >
-                          05 / 06
-                        </span>
-                      </div>
-                      <div className="landing-feature-body">
-                        <h3 className="landing-feature-title">
-                          Your deployment, your data
-                        </h3>
-                        <p className="landing-feature-desc">
-                          Self-host the dashboard and keep data in JSON files or
-                          PostgreSQL (optional TimescaleDB). Switching modes
-                          never converts simulated demo records into real server
-                          data.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </li>
-                <li className="landing-feature-track">
-                  <div className="landing-feature-stage">
-                    <div className="landing-feature-panel landing-feature">
-                      <div className="landing-feature-header">
-                        <span
-                          className="landing-feature-icon"
-                          aria-hidden="true"
-                        >
-                          <ShieldCheck size={20} />
-                        </span>
-                        <span
-                          className="landing-feature-tag tnum"
-                          aria-hidden="true"
-                        >
-                          06 / 06
-                        </span>
-                      </div>
-                      <div className="landing-feature-body">
-                        <h3 className="landing-feature-title">
-                          Guardrails are on by default
-                        </h3>
-                        <p className="landing-feature-desc">
-                          Demo mode disables real SSH, private-network targets
-                          are blocked unless explicitly allowed in local mode,
-                          and the systemd agent gets no Docker socket access
-                          unless you opt in. Read the{" "}
-                          <a
-                            className="landing-inline-link"
-                            href={SECURITY_URL}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            security model
-                          </a>{" "}
-                          before opening SSH, terminal, or Docker access.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </li>
-              </ul>
+                    </article>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         </section>

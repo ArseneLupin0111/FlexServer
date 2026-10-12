@@ -744,6 +744,7 @@ interface FeatureStoryItem {
   id: string;
   tag: string;
   title: string;
+  shortTitle: string;
   icon: typeof Activity;
   desc: ReactNode;
   preview: ReactNode;
@@ -754,14 +755,16 @@ const FEATURES: FeatureStoryItem[] = [
     id: "health",
     tag: "01 / 06",
     title: "Per-host health you can read at a glance",
+    shortTitle: "Health",
     icon: Activity,
-    desc: "Track CPU, memory, disk, system load, network throughput, and uptime for every server. Bounded per-host history feeds the overview and metrics views, and missing samples render as explicit gaps or “unavailable” instead of invented values.",
+    desc: "Track CPU, memory, disk, system load, network throughput, and uptime for every server. Bounded per-host history feeds the overview and metrics views, and missing samples render as explicit gaps or \u201Cunavailable\u201D instead of invented values.",
     preview: <HealthPreview />,
   },
   {
     id: "docker",
     tag: "02 / 06",
     title: "Docker checks in their own tab",
+    shortTitle: "Docker",
     icon: Container,
     desc: (
       <>
@@ -785,6 +788,7 @@ const FEATURES: FeatureStoryItem[] = [
     id: "ssh",
     tag: "03 / 06",
     title: "SSH keys, command jobs, and an optional terminal",
+    shortTitle: "SSH",
     icon: TerminalSquare,
     desc: "Provision and verify an SSH key per server, then run remote commands as tracked jobs with progress and results. Real SSH only targets allowed addresses with explicit host key trust; the web terminal ships disabled and needs local-mode configuration.",
     preview: <SshPreview />,
@@ -793,6 +797,7 @@ const FEATURES: FeatureStoryItem[] = [
     id: "history",
     tag: "04 / 06",
     title: "History and audit trail for follow-up",
+    shortTitle: "History",
     icon: History,
     desc: "Revisit retained CPU and memory samples, network RX/TX in bytes per second, job outcomes with failure reasons, and the audit log when you need to compare what changed. Stale data keeps an explicit timestamp label.",
     preview: <HistoryPreview />,
@@ -801,6 +806,7 @@ const FEATURES: FeatureStoryItem[] = [
     id: "storage",
     tag: "05 / 06",
     title: "Your deployment, your data",
+    shortTitle: "Storage",
     icon: Database,
     desc: "Self-host the dashboard and keep data in JSON files or PostgreSQL (optional TimescaleDB). Switching modes never converts simulated demo records into real server data.",
     preview: <StoragePreview />,
@@ -809,6 +815,7 @@ const FEATURES: FeatureStoryItem[] = [
     id: "security",
     tag: "06 / 06",
     title: "Guardrails are on by default",
+    shortTitle: "Security",
     icon: ShieldCheck,
     desc: (
       <>
@@ -836,30 +843,66 @@ export function LandingPage() {
   const [featuresActive, setFeaturesActive] = useState(false);
   const activeFeatureIndexRef = useRef(0);
   const storyTrackRef = useRef<HTMLDivElement>(null);
+  const featuresSceneRef = useRef<HTMLDivElement>(null);
+  const sceneRef = useRef<HTMLDivElement>(null);
   const [storyMetrics, setStoryMetrics] = useState({
     stickyTop: 96,
     stageHeight: 522,
   });
+  const [isDesktop, setIsDesktop] = useState(() =>
+    typeof window !== "undefined"
+      ? window.matchMedia("(min-width: 64rem)").matches
+      : true
+  );
+  const [isReducedMotion, setIsReducedMotion] = useState(() =>
+    typeof window !== "undefined"
+      ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      : false
+  );
+
+  useEffect(() => {
+    const desktopMedia = window.matchMedia("(min-width: 64rem)");
+    const motionMedia = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+    const onMediaChange = () => {
+      setIsDesktop(desktopMedia.matches);
+      setIsReducedMotion(motionMedia.matches);
+    };
+
+    desktopMedia.addEventListener("change", onMediaChange);
+    motionMedia.addEventListener("change", onMediaChange);
+
+    return () => {
+      desktopMedia.removeEventListener("change", onMediaChange);
+      motionMedia.removeEventListener("change", onMediaChange);
+    };
+  }, []);
 
   const { scrollYProgress } = useScroll({
     target: storyTrackRef,
-    offset: featuresActive
-      ? [
-          `start ${storyMetrics.stickyTop}px`,
-          `end ${storyMetrics.stickyTop + storyMetrics.stageHeight}px`,
-        ]
-      : undefined,
+    offset:
+      featuresActive && isDesktop
+        ? [
+            `start ${storyMetrics.stickyTop}px`,
+            `end ${storyMetrics.stickyTop + storyMetrics.stageHeight}px`,
+          ]
+        : undefined,
   });
 
   useMotionValueEvent(scrollYProgress, "change", (progress) => {
-    if (!featuresActive) return;
-
+    if (!featuresActive || !isDesktop) return;
     const scene = featuresSceneRef.current;
     if (scene) {
-      const activeDesc = scene.querySelector<HTMLDivElement>(
-        ".landing-story-desc:not([hidden])"
+      const activeDescs = scene.querySelectorAll<HTMLElement>(
+        ".landing-story-desc:not([hidden]), .landing-story-mobile-desc"
       );
-      if (activeDesc?.contains(document.activeElement)) return;
+      let isDescFocused = false;
+      if (document.activeElement) {
+        activeDescs.forEach((d) => {
+          if (d.contains(document.activeElement)) isDescFocused = true;
+        });
+      }
+      if (isDescFocused) return;
       scene.style.setProperty("--story-progress", progress.toFixed(4));
     }
 
@@ -878,12 +921,6 @@ export function LandingPage() {
     }
   });
 
-  // Pinned-hero storytelling: native document scroll only (no wheel
-  // interception). While the hero scene is pinned, progress maps scroll to
-  // CSS properties on the scene element; reduced motion and short/narrow
-  // viewports keep the plain stacked flow.
-  const sceneRef = useRef<HTMLDivElement>(null);
-  const featuresSceneRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") setMenuOpen(false);
@@ -891,6 +928,11 @@ export function LandingPage() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
+
+  // Pinned-hero storytelling: native document scroll only (no wheel
+  // interception). While the hero scene is pinned, progress maps scroll to
+  // CSS properties on the scene element; reduced motion and short/narrow
+  // viewports keep the plain stacked flow.
 
   useEffect(() => {
     const scene = sceneRef.current;
@@ -1017,25 +1059,36 @@ export function LandingPage() {
     };
   }, []);
 
-  // Termius-style pinned two-column storytelling scene powered by Motion:
-  // Gated on desktop viewports where the stage layout fits without clipping.
-  // Mobile, short viewports, and reduced motion keep plain static flow.
+  // Pinned storytelling scene powered by Motion:
+  // Desktop (>= 64rem): ALWAYS pinned independent of viewport height. Short desktop
+  // viewports (e.g. 1024x500) use compact styling and stable sticky positioning.
+  // Mobile (< 64rem): Dedicated single-column pinned storytelling layout. Fits
+  // viewports pin the full stage; very short viewports keep sticky navigation with
+  // natural readable document scrolling without clipping or traps.
+  // Reduced motion: plain static flow.
   useEffect(() => {
     const scene = featuresSceneRef.current;
     if (!scene) return;
 
-    const media = window.matchMedia(
-      "(min-width: 64rem) and (min-height: 40rem)"
-    );
+    const desktopMedia = window.matchMedia("(min-width: 64rem)");
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
-    let isDesktopActive = false;
+    let isEffectActive = false;
 
-    // Measure every real step state at its actual column width so the fit
-    // gate sees the tallest possible stage, never one collapsed height.
+    // Measure every real step state at its actual column width so the measurement
+    // sees the tallest possible stage across all steps without layout jump.
     const measure = () => {
-      const stage = scene.querySelector<HTMLElement>(".landing-story-stage");
+      const stage = scene.querySelector<HTMLElement>(
+        ".landing-story-desktop-stage, .landing-story-stage"
+      );
       if (!stage) return 0;
+      scene.style.removeProperty("--story-scale");
+      scene.style.removeProperty("--story-stage-height");
+      stage.style.removeProperty("--story-scale");
+      stage.style.removeProperty("--story-stage-height");
+      const wrap = stage.querySelector<HTMLElement>(
+        ".landing-story-desktop-wrap, .landing-story-wrap"
+      );
       const items = Array.from(
         stage.querySelectorAll<HTMLElement>(".landing-story-nav-item")
       );
@@ -1046,8 +1099,12 @@ export function LandingPage() {
         stage.querySelectorAll<HTMLElement>(".landing-story-preview-pane")
       );
       const applyStep = (index: number) => {
-        items.forEach((item, i) => item.classList.toggle("is-active", i === index));
-        descriptions.forEach((desc, i) => { desc.hidden = i !== index; });
+        items.forEach((item, i) =>
+          item.classList.toggle("is-active", i === index)
+        );
+        descriptions.forEach((desc, i) => {
+          desc.hidden = i !== index;
+        });
         panes.forEach((pane, i) => {
           pane.hidden = i !== index;
           pane.classList.toggle("is-active", i === index);
@@ -1056,86 +1113,188 @@ export function LandingPage() {
       let tallest = 0;
       for (let index = 0; index < FEATURES.length; index += 1) {
         applyStep(index);
-        tallest = Math.max(tallest, stage.offsetHeight);
+        const currentH = wrap ? wrap.offsetHeight : stage.offsetHeight;
+        tallest = Math.max(tallest, currentH);
       }
       applyStep(activeFeatureIndexRef.current);
       return tallest;
     };
 
     const reset = () => {
-      isDesktopActive = false;
+      isEffectActive = false;
       setFeaturesActive(false);
       scene.removeAttribute("data-features-active");
       scene.removeAttribute("data-features-measuring");
       scene.removeAttribute("data-active-step");
-      const track = storyTrackRef.current ?? scene.querySelector<HTMLElement>(".landing-story-track");
-      if (track) track.style.removeProperty("--story-stage-height");
+      scene.removeAttribute("data-mobile-mode");
+      const track =
+        storyTrackRef.current ??
+        scene.querySelector<HTMLElement>(".landing-story-track");
+      if (track) {
+        track.style.removeProperty("--story-stage-height");
+      }
+      scene.style.removeProperty("--story-sticky-top");
+      scene.style.removeProperty("--story-stage-height");
+      scene.style.removeProperty("--story-scale");
+      const stage = scene.querySelector<HTMLElement>(
+        ".landing-story-desktop-stage, .landing-story-stage"
+      );
+      if (stage) {
+        stage.style.removeProperty("--story-stage-height");
+        stage.style.removeProperty("--story-scale");
+      }
+    };
+    const syncMobileScroll = () => {
+      if (desktopMedia.matches || reduceMotion.matches) return;
+      const panels = scene.querySelectorAll<HTMLElement>(
+        ".landing-story-mobile-panel"
+      );
+      if (!panels.length) return;
+      const headerEl = document.querySelector<HTMLElement>(
+        "header.landing-header, .landing-header"
+      );
+      const headerH = headerEl ? headerEl.offsetHeight : 56;
+      const stickyBar = scene.querySelector<HTMLElement>(
+        ".landing-story-mobile-sticky-bar"
+      );
+      const stickyBarH = stickyBar ? stickyBar.offsetHeight : 52;
+      const threshold = headerH + stickyBarH + 32;
+
+      let currentIdx = 0;
+      panels.forEach((panel, i) => {
+        const rect = panel.getBoundingClientRect();
+        if (rect.top <= threshold) {
+          currentIdx = i;
+        }
+      });
+
+      if (currentIdx !== activeFeatureIndexRef.current) {
+        activeFeatureIndexRef.current = currentIdx;
+        setActiveFeatureIndex(currentIdx);
+        scene.setAttribute("data-active-step", String(currentIdx));
+        const activeTab = scene.querySelector<HTMLElement>(
+          `#mobile-tab-${currentIdx}`
+        );
+        if (activeTab && activeTab.parentElement) {
+          activeTab.parentElement.scrollTo({
+            left: activeTab.offsetLeft - 16,
+            behavior: "smooth",
+          });
+        }
+      }
     };
 
     const sync = () => {
-      const qualifies = media.matches && !reduceMotion.matches;
-      if (!qualifies) {
+      if (reduceMotion.matches) {
         reset();
         return;
       }
 
-      // Temporarily lay out each of the six states before pinning is decided.
       scene.setAttribute("data-features-active", "");
       scene.setAttribute("data-features-measuring", "");
 
-      const headerEl = document.querySelector<HTMLElement>(".landing-header");
-      const headerH = headerEl ? headerEl.offsetHeight : 72;
-      const topOffset = headerH + 24;
-      const availableH = window.innerHeight - topOffset - 24;
+      const headerEl = document.querySelector<HTMLElement>(
+        "header.landing-header, .landing-header"
+      );
+      const headerH = headerEl
+        ? headerEl.offsetHeight
+        : (desktopMedia.matches ? 72 : 56);
+      const isShortScreen = window.innerHeight < 640;
 
-      const track = storyTrackRef.current ?? scene.querySelector<HTMLElement>(".landing-story-track");
-      const stage = scene.querySelector<HTMLElement>(".landing-story-stage");
+      const track =
+        storyTrackRef.current ??
+        scene.querySelector<HTMLElement>(".landing-story-track");
+      const stage = scene.querySelector<HTMLElement>(
+        ".landing-story-desktop-stage, .landing-story-stage"
+      );
       if (!track || !stage) {
         scene.removeAttribute("data-features-measuring");
         reset();
         return;
       }
 
-      // Measure with the track unstretched so `measure()` samples each real
-      // step's natural height, then restore the visible step it last probed.
       track.style.removeProperty("--story-stage-height");
-      const stageH = measure();
-      scene.removeAttribute("data-features-measuring");
 
-      // Gate: pin only when the tallest step fits the available height and
-      // enough travel exists for six synchronized steps.
-      if (window.innerHeight < 640 || stageH <= 0 || stageH > availableH) {
-        reset();
-        return;
-      }
+      if (desktopMedia.matches) {
+        // Desktop (>= 64rem): ALWAYS pinned independent of viewport height.
+        // Entire stage stays strictly below the fixed header at all times.
+        const naturalH = measure();
+        scene.removeAttribute("data-features-measuring");
 
-      track.style.setProperty("--story-stage-height", `${stageH}px`);
-      isDesktopActive = true;
-      setStoryMetrics({
-        stickyTop: topOffset,
-        stageHeight: stageH,
-      });
-      setFeaturesActive(true);
-      scene.setAttribute("data-features-active", "");
-      scene.setAttribute(
-        "data-active-step",
-        String(activeFeatureIndexRef.current)
-      );
+        // Positive stickyTop clearance below header:
+        const isShortScreen = window.innerHeight < 640;
+        const minClearance = isShortScreen ? 8 : 16;
+        const bottomGap = isShortScreen ? 8 : 16;
+        const availableH = Math.max(
+          160,
+          window.innerHeight - (headerH + minClearance) - bottomGap
+        );
 
-      const progress = scrollYProgress.get();
-      const nextIndex = Math.min(
-        FEATURES.length - 1,
-        Math.max(0, Math.floor(progress * FEATURES.length))
-      );
-      if (nextIndex !== activeFeatureIndexRef.current) {
-        activeFeatureIndexRef.current = nextIndex;
-        scene.setAttribute("data-active-step", String(nextIndex));
-        setActiveFeatureIndex(nextIndex);
+        // Measured proportional scale ONLY when natural stage exceeds available height:
+        const needsScale = naturalH > availableH;
+        const scale = needsScale
+          ? Math.min(1, Math.max(0.35, Number((availableH / naturalH).toFixed(4))))
+          : 1;
+        const scaledStageH = Math.round(naturalH * scale);
+
+        // Positive stickyTop: when fitting naturally (scale = 1), center the stage
+        // vertically in available space below header; when scaled down to fit,
+        // anchor stickyTop with positive clearance below header.
+        const excessSpace = availableH - scaledStageH;
+        const topClearance = needsScale
+          ? minClearance
+          : Math.min(
+              isShortScreen ? 16 : 48,
+              minClearance + Math.max(0, Math.round(excessSpace / 2))
+            );
+        const stickyTop = headerH + topClearance;
+
+        scene.style.setProperty("--story-scale", String(scale));
+        scene.style.setProperty("--story-sticky-top", `${stickyTop}px`);
+        scene.style.setProperty("--story-stage-height", `${scaledStageH}px`);
+        stage.style.setProperty("--story-scale", String(scale));
+        stage.style.setProperty("--story-stage-height", `${scaledStageH}px`);
+        track.style.setProperty("--story-stage-height", `${scaledStageH}px`);
+
+        isEffectActive = true;
+        setStoryMetrics({
+          stickyTop,
+          stageHeight: scaledStageH,
+        });
+        setFeaturesActive(true);
+        scene.setAttribute("data-features-active", "");
+        scene.setAttribute(
+          "data-active-step",
+          String(activeFeatureIndexRef.current)
+        );
+
+        const progress = scrollYProgress.get();
+        const nextIndex = Math.min(
+          FEATURES.length - 1,
+          Math.max(0, Math.floor(progress * FEATURES.length))
+        );
+        if (nextIndex !== activeFeatureIndexRef.current) {
+          activeFeatureIndexRef.current = nextIndex;
+          scene.setAttribute("data-active-step", String(nextIndex));
+          setActiveFeatureIndex(nextIndex);
+        }
+      } else {
+        // Mobile layout (< 64rem):
+        // Dedicated natural-flow layout rendering all six full articles
+        // with sticky control bar under the header across all articles.
+        scene.removeAttribute("data-features-measuring");
+        track.style.removeProperty("--story-stage-height");
+        scene.style.removeProperty("--story-sticky-top");
+        scene.setAttribute("data-features-active", "");
+        scene.setAttribute("data-mobile-mode", "nav-only");
+        isEffectActive = true;
+        setFeaturesActive(true);
+        syncMobileScroll();
       }
     };
 
     const onFocusOut = () => {
-      if (!isDesktopActive) return;
+      if (!isEffectActive || !desktopMedia.matches) return;
       const progress = scrollYProgress.get();
       const nextIndex = Math.min(
         FEATURES.length - 1,
@@ -1149,19 +1308,21 @@ export function LandingPage() {
     };
 
     scene.addEventListener("focusout", onFocusOut);
-    media.addEventListener("change", sync);
+    desktopMedia.addEventListener("change", sync);
     reduceMotion.addEventListener("change", sync);
     window.addEventListener("resize", sync);
+    window.addEventListener("scroll", syncMobileScroll, { passive: true });
     sync();
 
     return () => {
-      media.removeEventListener("change", sync);
+      desktopMedia.removeEventListener("change", sync);
       reduceMotion.removeEventListener("change", sync);
       window.removeEventListener("resize", sync);
+      window.removeEventListener("scroll", syncMobileScroll);
       scene.removeEventListener("focusout", onFocusOut);
       reset();
     };
-  }, [scrollYProgress]);
+  }, [scrollYProgress, isDesktop, isReducedMotion]);
 
   const handleSelectFeature = (index: number) => {
     setActiveFeatureIndex(index);
@@ -1169,22 +1330,45 @@ export function LandingPage() {
     const scene = featuresSceneRef.current;
     if (!scene) return;
     scene.setAttribute("data-active-step", String(index));
-    if (!scene.hasAttribute("data-features-active")) return;
 
-    const track = storyTrackRef.current ?? scene.querySelector<HTMLElement>(".landing-story-track");
+    if (!isDesktop) {
+      // Mobile: Native scroll alignment directly to target article panel
+      const targetPanel = document.getElementById(`mobile-feature-${index}`);
+      if (targetPanel) {
+        const headerEl = document.querySelector<HTMLElement>(
+          "header.landing-header, .landing-header"
+        );
+        const headerH = headerEl ? headerEl.offsetHeight : 56;
+        const stickyBar = scene.querySelector<HTMLElement>(
+          ".landing-story-mobile-sticky-bar"
+        );
+        const stickyBarH = stickyBar ? stickyBar.offsetHeight : 52;
+        const offset = headerH + stickyBarH + 8;
+        const targetY =
+          window.scrollY + targetPanel.getBoundingClientRect().top - offset;
+        window.scrollTo({
+          top: Math.max(0, Math.round(targetY)),
+          behavior: "auto",
+        });
+      }
+      return;
+    }
+
+    if (!scene.hasAttribute("data-features-active")) return;
+    const track =
+      storyTrackRef.current ??
+      scene.querySelector<HTMLElement>(".landing-story-track");
     const stage = scene.querySelector<HTMLElement>(".landing-story-stage");
     if (!track || !stage) return;
 
-    const headerEl = document.querySelector<HTMLElement>(".landing-header");
-    const headerH = headerEl ? headerEl.offsetHeight : 72;
-    const stickyTop = headerH + 24;
     const trackRect = track.getBoundingClientRect();
     const trackScrollTop = window.scrollY + trackRect.top;
-    const scrollTravel = track.offsetHeight - stage.offsetHeight;
-
+    const stageHeight = storyMetrics.stageHeight || stage.offsetHeight;
+    const scrollTravel = track.offsetHeight - stageHeight;
     if (scrollTravel > 0) {
       const stepFraction = (index + 0.5) / FEATURES.length;
-      const targetY = trackScrollTop - stickyTop + stepFraction * scrollTravel;
+      const targetY =
+        trackScrollTop - storyMetrics.stickyTop + stepFraction * scrollTravel;
       window.scrollTo({ top: Math.round(targetY), behavior: "auto" });
     }
   };
@@ -1550,227 +1734,394 @@ export function LandingPage() {
           className="landing-section landing-features-section"
           id="features"
           aria-labelledby={
-            featuresActive
+            isReducedMotion
+              ? "landing-features-fallback-title"
+              : isDesktop
               ? "landing-features-title"
-              : "landing-features-fallback-title"
+              : "landing-features-mobile-title"
           }
         >
           <div className="landing-features-scene" ref={featuresSceneRef}>
-            {/* Pinned Desktop Two-Column Story (Termius style: active when desktop fit gate passes) */}
-            <div className="landing-story-pinned">
-              <div className="landing-story-track" ref={storyTrackRef}>
-                <div className="landing-story-stage">
-                  <div className="landing-wrap landing-story-wrap">
-                    {/* Left Column: Eyebrow + Headline + Interactive Capabilities List */}
-                    <div className="landing-story-col-left">
-                      <div className="landing-story-head">
-                        <p className="landing-section-eyebrow">Features</p>
-                        <h2
-                          className="landing-section-title"
-                          id="landing-features-title"
-                        >
-                          One place for everyday VPS operations
-                        </h2>
-                        <p className="landing-story-lead">
-                          Concrete capabilities you get after you deploy the
-                          dashboard on your own infrastructure. Everything below
-                          describes the dashboard you run — not a service hosted
-                          by FlexTechnology.
-                        </p>
-                      </div>
+            {isReducedMotion ? (
+              /* Fallback Static Flow (reduced-motion) */
+              <div className="landing-story-fallback">
+                <div className="landing-wrap">
+                  <div className="landing-section-head">
+                    <p className="landing-section-eyebrow">Features</p>
+                    <h2
+                      className="landing-section-title"
+                      id="landing-features-fallback-title"
+                    >
+                      One place for everyday VPS operations
+                    </h2>
+                    <p className="landing-section-sub">
+                      Concrete capabilities you get after you deploy the
+                      dashboard on your own infrastructure. Everything below
+                      describes the dashboard you run — not a service hosted
+                      by FlexTechnology.
+                    </p>
+                  </div>
 
-                      <div
-                        className="landing-story-nav"
-                        role="tablist"
-                        aria-label="Capabilities"
-                        aria-orientation="vertical"
+                  <div className="landing-story-fallback-list">
+                    {FEATURES.map((feature) => (
+                      <article
+                        key={feature.id}
+                        className="landing-story-fallback-item"
                       >
-                        {FEATURES.map((feature, idx) => {
-                          const isActive = idx === activeFeatureIndex;
-                          return (
-                            <div
-                              key={feature.id}
-                              className={`landing-story-nav-item ${isActive ? "is-active" : ""}`}
-                              data-index={idx}
-                            >
-                              <button
-                                type="button"
-                                className="landing-story-nav-btn"
-                                role="tab"
-                                id={`story-tab-${idx}`}
-                                aria-selected={isActive}
-                                aria-controls={`story-preview-${idx}`}
-                                aria-describedby={`story-desc-${idx}`}
-                                tabIndex={isActive ? 0 : -1}
-                                onKeyDown={(event) => {
-                                  let next = idx;
-                                  if (event.key === "ArrowDown") next = (idx + 1) % FEATURES.length;
-                                  else if (event.key === "ArrowUp") next = (idx - 1 + FEATURES.length) % FEATURES.length;
-                                  else if (event.key === "Home") next = 0;
-                                  else if (event.key === "End") next = FEATURES.length - 1;
-                                  else return;
-                                  event.preventDefault();
-                                  document.getElementById(`story-tab-${next}`)?.focus({ preventScroll: true });
-                                  handleSelectFeature(next);
-                                }}
-                                onClick={() => handleSelectFeature(idx)}
-                              >
-                                {isActive && (
-                                  <span
-                                    className="landing-story-indicator"
-                                    aria-hidden="true"
-                                  />
-                                )}
-                                <span className="landing-story-nav-num tnum" aria-hidden="true">
-                                  0{idx + 1}
-                                </span>
-                                <span className="landing-story-title">
-                                  {feature.title}
-                                </span>
-                              </button>
-                              <motion.div
-                                className="landing-story-desc"
-                                id={`story-desc-${idx}`}
-                                hidden={!isActive}
-                                initial={false}
-                                animate={
-                                  isActive
-                                    ? { opacity: 1, y: 0 }
-                                    : { opacity: 0, y: 6 }
-                                }
-                                transition={{
-                                  duration: 0.18,
-                                  ease: [0.16, 1, 0.3, 1],
-                                }}
-                              >
-                                <p>{feature.desc}</p>
-                              </motion.div>
-                            </div>
-                          );
-                        })}
-                      </div>
-
-                      <div className="landing-story-progress-card">
-                        <div className="landing-story-progress-header">
-                          <div className="landing-story-progress-counter tnum">
-                            <span className="landing-story-progress-current">
-                              0{activeFeatureIndex + 1}
-                            </span>
-                            <span className="landing-story-progress-divider">/</span>
-                            <span className="landing-story-progress-total">
-                              0{FEATURES.length}
-                            </span>
+                        <div className="landing-story-fallback-header">
+                          <span
+                            className="landing-feature-icon"
+                            aria-hidden="true"
+                          >
+                            <feature.icon size={20} />
+                          </span>
+                          <span
+                            className="landing-story-fallback-tag tnum"
+                            aria-hidden="true"
+                          >
+                            {feature.tag}
+                          </span>
+                        </div>
+                        <div className="landing-story-fallback-body">
+                          <h3 className="landing-feature-title">
+                            {feature.title}
+                          </h3>
+                          <p className="landing-feature-desc">{feature.desc}</p>
+                        </div>
+                        <div className="landing-story-fallback-preview">
+                          <div className="landing-story-preview-container">
+                            {feature.preview}
                           </div>
-                          <span className="landing-story-progress-title">
-                            {FEATURES[activeFeatureIndex].title}
-                          </span>
                         </div>
-                        <div className="landing-story-progress-track" aria-hidden="true">
-                          <motion.div
-                            className="landing-story-progress-fill"
-                            style={{ scaleX: scrollYProgress, transformOrigin: "0% 50%" }}
-                          />
-                        </div>
-                        <div className="landing-story-progress-footer">
-                          <span className="landing-story-progress-hint">
-                            Scroll to navigate · Click or ↑↓ to switch
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Right Column: Synchronized Realistic App Preview */}
-                    <div className="landing-story-col-right">
-                      <div className="landing-story-preview-container">
-                        {FEATURES.map((feature, idx) => {
-                          const isActive = idx === activeFeatureIndex;
-                          return (
-                            <motion.div
-                              key={feature.id}
-                              id={`story-preview-${idx}`}
-                              role="tabpanel"
-                              aria-labelledby={`story-tab-${idx}`}
-                              tabIndex={0}
-                              className={`landing-story-preview-pane ${
-                                isActive ? "is-active" : ""
-                              }`}
-                              hidden={!isActive}
-                              initial={false}
-                              animate={
-                                isActive
-                                  ? { opacity: 1, y: 0, scale: 1 }
-                                  : { opacity: 0, y: 8, scale: 0.99 }
-                              }
-                              transition={{
-                                duration: 0.22,
-                                ease: [0.16, 1, 0.3, 1],
-                              }}
-                            >
-                              {feature.preview}
-                            </motion.div>
-                          );
-                        })}
-                      </div>
-                    </div>
+                      </article>
+                    ))}
                   </div>
                 </div>
               </div>
-            </div>
+            ) : (
+              /* Pinned Storytelling (Desktop Two-Column or Mobile Single-Column) */
+              <div className="landing-story-pinned">
+                <div className="landing-story-track" ref={storyTrackRef}>
+                  {isDesktop ? (
+                    /* Desktop Two-Column Layout (>= 64rem) */
+                    <div className="landing-story-stage landing-story-desktop-stage">
+                      <div className="landing-wrap landing-story-wrap landing-story-desktop-wrap">
+                        {/* Left Column: Eyebrow + Headline + Interactive Capabilities List */}
+                        <div className="landing-story-col-left">
+                          <div className="landing-story-head">
+                            <p className="landing-section-eyebrow">Features</p>
+                            <h2
+                              className="landing-section-title"
+                              id="landing-features-title"
+                            >
+                              One place for everyday VPS operations
+                            </h2>
+                            <p className="landing-story-lead">
+                              Concrete capabilities you get after you deploy the
+                              dashboard on your own infrastructure. Everything below
+                              describes the dashboard you run — not a service hosted
+                              by FlexTechnology.
+                            </p>
+                          </div>
 
-            {/* Fallback Static Flow (mobile / short viewports / reduced-motion) */}
-            <div className="landing-story-fallback">
-              <div className="landing-wrap">
-                <div className="landing-section-head">
-                  <p className="landing-section-eyebrow">Features</p>
-                  <h2
-                    className="landing-section-title"
-                    id="landing-features-fallback-title"
-                  >
-                    One place for everyday VPS operations
-                  </h2>
-                  <p className="landing-section-sub">
-                    Concrete capabilities you get after you deploy the dashboard
-                    on your own infrastructure. Everything below describes the
-                    dashboard you run — not a service hosted by FlexTechnology.
-                  </p>
-                </div>
+                          <div
+                            className="landing-story-nav"
+                            role="tablist"
+                            aria-label="Capabilities"
+                            aria-orientation="vertical"
+                          >
+                            {FEATURES.map((feature, idx) => {
+                              const isActive = idx === activeFeatureIndex;
+                              return (
+                                <div
+                                  key={feature.id}
+                                  className={`landing-story-nav-item ${isActive ? "is-active" : ""}`}
+                                  data-index={idx}
+                                >
+                                  <button
+                                    type="button"
+                                    className="landing-story-nav-btn"
+                                    role="tab"
+                                    id={`story-tab-${idx}`}
+                                    aria-selected={isActive}
+                                    aria-controls={`story-preview-${idx}`}
+                                    aria-describedby={`story-desc-${idx}`}
+                                    tabIndex={isActive ? 0 : -1}
+                                    onKeyDown={(event) => {
+                                      let next = idx;
+                                      if (event.key === "ArrowDown") next = (idx + 1) % FEATURES.length;
+                                      else if (event.key === "ArrowUp") next = (idx - 1 + FEATURES.length) % FEATURES.length;
+                                      else if (event.key === "Home") next = 0;
+                                      else if (event.key === "End") next = FEATURES.length - 1;
+                                      else return;
+                                      event.preventDefault();
+                                      document.getElementById(`story-tab-${next}`)?.focus({ preventScroll: true });
+                                      handleSelectFeature(next);
+                                    }}
+                                    onClick={() => handleSelectFeature(idx)}
+                                  >
+                                    {isActive && (
+                                      <span
+                                        className="landing-story-indicator"
+                                        aria-hidden="true"
+                                      />
+                                    )}
+                                    <span className="landing-story-nav-num tnum" aria-hidden="true">
+                                      0{idx + 1}
+                                    </span>
+                                    <span className="landing-story-title">
+                                      {feature.title}
+                                    </span>
+                                  </button>
+                                  <motion.div
+                                    className="landing-story-desc"
+                                    id={`story-desc-${idx}`}
+                                    hidden={!isActive}
+                                    initial={false}
+                                    animate={
+                                      isActive
+                                        ? { opacity: 1, y: 0 }
+                                        : { opacity: 0, y: 6 }
+                                    }
+                                    transition={{
+                                      duration: 0.18,
+                                      ease: [0.16, 1, 0.3, 1],
+                                    }}
+                                  >
+                                    <p>{feature.desc}</p>
+                                  </motion.div>
+                                </div>
+                              );
+                            })}
+                          </div>
 
-                <div className="landing-story-fallback-list">
-                  {FEATURES.map((feature) => (
-                    <article
-                      key={feature.id}
-                      className="landing-story-fallback-item"
-                    >
-                      <div className="landing-story-fallback-header">
-                        <span
-                          className="landing-feature-icon"
-                          aria-hidden="true"
-                        >
-                          <feature.icon size={20} />
-                        </span>
-                        <span
-                          className="landing-story-fallback-tag tnum"
-                          aria-hidden="true"
-                        >
-                          {feature.tag}
-                        </span>
-                      </div>
-                      <div className="landing-story-fallback-body">
-                        <h3 className="landing-feature-title">
-                          {feature.title}
-                        </h3>
-                        <p className="landing-feature-desc">{feature.desc}</p>
-                      </div>
-                      <div className="landing-story-fallback-preview">
-                        <div className="landing-story-preview-container">
-                          {feature.preview}
+                          <div className="landing-story-progress-card">
+                            <div className="landing-story-progress-header">
+                              <div className="landing-story-progress-counter tnum">
+                                <span className="landing-story-progress-current">
+                                  0{activeFeatureIndex + 1}
+                                </span>
+                                <span className="landing-story-progress-divider">/</span>
+                                <span className="landing-story-progress-total">
+                                  0{FEATURES.length}
+                                </span>
+                              </div>
+                              <span className="landing-story-progress-title">
+                                {FEATURES[activeFeatureIndex].title}
+                              </span>
+                            </div>
+                            <div className="landing-story-progress-track" aria-hidden="true">
+                              <motion.div
+                                className="landing-story-progress-fill"
+                                style={{ scaleX: scrollYProgress, transformOrigin: "0% 50%" }}
+                              />
+                            </div>
+                            <div className="landing-story-progress-footer">
+                              <span className="landing-story-progress-hint">
+                                Scroll to navigate · Click or ↑↓ to switch
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Right Column: Synchronized Realistic App Preview */}
+                        <div className="landing-story-col-right">
+                          <div className="landing-story-preview-container">
+                            {FEATURES.map((feature, idx) => {
+                              const isActive = idx === activeFeatureIndex;
+                              return (
+                                <motion.div
+                                  key={feature.id}
+                                  id={`story-preview-${idx}`}
+                                  role="tabpanel"
+                                  aria-labelledby={`story-tab-${idx}`}
+                                  tabIndex={0}
+                                  className={`landing-story-preview-pane ${
+                                    isActive ? "is-active" : ""
+                                  }`}
+                                  hidden={!isActive}
+                                  initial={false}
+                                  animate={
+                                    isActive
+                                      ? { opacity: 1, y: 0, scale: 1 }
+                                      : { opacity: 0, y: 8, scale: 0.99 }
+                                  }
+                                  transition={{
+                                    duration: 0.22,
+                                    ease: [0.16, 1, 0.3, 1],
+                                  }}
+                                >
+                                  {feature.preview}
+                                </motion.div>
+                              );
+                            })}
+                          </div>
                         </div>
                       </div>
-                    </article>
-                  ))}
+                    </div>
+                  ) : (
+                    /* Mobile Dedicated Layout (< 64rem) */
+                    <div className="landing-story-stage landing-story-mobile-stage">
+                      <div className="landing-wrap landing-story-mobile-wrap">
+                        {/* Mobile Header */}
+                        <div className="landing-story-head landing-story-mobile-head">
+                          <p className="landing-section-eyebrow">Features</p>
+                          <h2
+                            className="landing-section-title"
+                            id="landing-features-mobile-title"
+                          >
+                            One place for everyday VPS operations
+                          </h2>
+                          <p className="landing-story-lead">
+                            Concrete capabilities you get after you deploy the
+                            dashboard on your own infrastructure. Everything below
+                            describes the dashboard you run — not a service hosted
+                            by FlexTechnology.
+                          </p>
+                        </div>
+
+                        {/* Mobile Sticky Navigation & Real-time Progress Bar */}
+                        <div className="landing-story-mobile-sticky-bar">
+                          <div
+                            className="landing-story-mobile-nav"
+                            role="tablist"
+                            aria-label="Capabilities"
+                            aria-orientation="horizontal"
+                          >
+                            {FEATURES.map((feature, idx) => {
+                              const isActive = idx === activeFeatureIndex;
+                              return (
+                                <button
+                                  key={feature.id}
+                                  type="button"
+                                  className={`landing-story-mobile-tab-btn ${
+                                    isActive ? "is-active" : ""
+                                  }`}
+                                  role="tab"
+                                  id={`mobile-tab-${idx}`}
+                                  aria-selected={isActive}
+                                  aria-controls={`mobile-feature-${idx}`}
+                                  aria-describedby={`mobile-desc-${idx}`}
+                                  tabIndex={isActive ? 0 : -1}
+                                  onKeyDown={(event) => {
+                                    let next = idx;
+                                    if (
+                                      event.key === "ArrowRight" ||
+                                      event.key === "ArrowDown"
+                                    ) {
+                                      next = (idx + 1) % FEATURES.length;
+                                    } else if (
+                                      event.key === "ArrowLeft" ||
+                                      event.key === "ArrowUp"
+                                    ) {
+                                      next =
+                                        (idx - 1 + FEATURES.length) %
+                                        FEATURES.length;
+                                    } else if (event.key === "Home") {
+                                      next = 0;
+                                    } else if (event.key === "End") {
+                                      next = FEATURES.length - 1;
+                                    } else {
+                                      return;
+                                    }
+                                    event.preventDefault();
+                                    document
+                                      .getElementById(`mobile-tab-${next}`)
+                                      ?.focus({ preventScroll: true });
+                                    handleSelectFeature(next);
+                                  }}
+                                  onClick={() => handleSelectFeature(idx)}
+                                >
+                                  <span
+                                    className="landing-story-mobile-tab-num tnum"
+                                    aria-hidden="true"
+                                  >
+                                    0{idx + 1}
+                                  </span>
+                                  <span className="landing-story-mobile-tab-title">
+                                    {feature.shortTitle}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          <div className="landing-story-mobile-progress-row">
+                            <div className="landing-story-progress-counter tnum">
+                              <span className="landing-story-progress-current">
+                                0{activeFeatureIndex + 1}
+                              </span>
+                              <span className="landing-story-progress-divider">
+                                /
+                              </span>
+                              <span className="landing-story-progress-total">
+                                0{FEATURES.length}
+                              </span>
+                            </div>
+                            <div
+                              className="landing-story-progress-track"
+                              aria-hidden="true"
+                            >
+                              <div
+                                className="landing-story-progress-fill"
+                                style={{
+                                  transform: `scaleX(${(activeFeatureIndex + 1) / FEATURES.length})`,
+                                  transformOrigin: "0% 50%",
+                                }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Mobile Feature Panels: Six Natural-Flow Full Articles */}
+                        <div
+                          className="landing-story-mobile-panels"
+                          role="region"
+                          aria-label="Feature details"
+                        >
+                          {FEATURES.map((feature, idx) => {
+                            return (
+                              <article
+                                key={feature.id}
+                                id={`mobile-feature-${idx}`}
+                                className="landing-story-mobile-panel"
+                                aria-labelledby={`mobile-step-title-${idx}`}
+                              >
+                                <div className="landing-story-mobile-step-header">
+                                  <span
+                                    className="landing-story-mobile-step-tag tnum"
+                                    aria-hidden="true"
+                                  >
+                                    {feature.tag}
+                                  </span>
+                                  <h3
+                                    className="landing-story-mobile-step-title"
+                                    id={`mobile-step-title-${idx}`}
+                                  >
+                                    {feature.title}
+                                  </h3>
+                                </div>
+
+                                <div
+                                  className="landing-story-mobile-desc"
+                                  id={`mobile-desc-${idx}`}
+                                >
+                                  <p>{feature.desc}</p>
+                                </div>
+
+                                <div className="landing-story-preview-container landing-story-mobile-preview-container">
+                                  {feature.preview}
+                                </div>
+                              </article>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
-            </div>
+            )}
           </div>
         </section>
 

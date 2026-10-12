@@ -1,13 +1,12 @@
 # Changelog
 
-## Unreleased — Motion-driven Features pinned storytelling
+## Unreleased — Responsive Features pinned storytelling on desktop and mobile
 
-- Refactor landing page Features section from manual RAF scroll listener to Motion (`motion/react`) `useScroll` timeline and `useMotionValueEvent`.
-- Provide smooth preview card transitions and step description reveals with GPU-accelerated opacity/transform animations.
-- Add pinned progress card indicator with real-time scroll progress bar and step indexing (`01` to `06`), balancing typography and visual density.
-- Maintain fit-safe fallback flow for mobile screens (<64rem), short viewports (<40rem), and `prefers-reduced-motion` environments.
-- Retain full keyboard navigation, ARIA tablist/tab/tabpanel attributes, and focus-safe scroll alignment.
-
+- Expand Features section on mobile (< 64rem) to a dedicated single-column storytelling layout featuring a sticky horizontal tab bar and real-time progress bar under the landing header paired with six natural-flow feature article panels, ensuring zero offscreen blank displacement or clipping while keeping active tab and progress indicator synchronized during scrolling.
+- Support mobile tab click and keyboard navigation (ArrowLeft/ArrowRight, Home, End) by smoothly aligning native document scroll directly to the target feature panel with sticky header and control bar clearance.
+- Make desktop (>= 64rem) always pinned regardless of viewport height with positive header clearance, introducing measured proportional scaling (`transform: scale(--story-scale) origin top center`) when natural stage height exceeds available window height, ensuring the entire stage and step headers remain fully visible below the header at short viewports (e.g. 1024x500) without clipping or scrollbars.
+- Retain static multi-card fallback in normal flow for `prefers-reduced-motion` environments with zero DOM ID duplication.
+- Retain full keyboard navigation, ARIA tablist/tab/region roles, focus-safe scroll alignment, and native document scroll across all viewports.
 ## Unreleased — pinned dashboard preview grid
 
 - Display sample hosts in the landing page's pinned dashboard preview as a two-column grid from 512px, preserving a single-column list on smaller screens and existing native scroll pinning. The live VPS dashboard is unchanged.

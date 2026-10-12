@@ -282,125 +282,145 @@
   width: 100%;
 }
 
-/* ── Hero: centered, spacious, lime atmosphere ─ */
+/* ── Hero: centered, natural flow, lime atmosphere ─ */
 .landing-hero {
   position: relative;
   isolation: isolate;
-  padding-block: clamp(2.5rem, 5.5vw, 4.5rem);
+  padding-top: clamp(2.5rem, 5vw, 4.5rem);
+  padding-bottom: clamp(3.5rem, 6vw, 5.5rem);
   border-bottom: 1px solid hsl(var(--l-line-soft) / 0.1);
+  overflow: clip;
 }
 
-/* Pinned hero storytelling. .landing-hero-scene is the scroll track.
-   Desktop-only: .landing-hero-stage is the sticky surface holding the scene
-   in view. The copy stays in normal initial flow (completely visible at
-   scroll=0) and the preview is absolutely positioned below it, translated
-   upward toward ~24px below the sticky header as progress advances.
-   Defaults to --scene-progress: 0 so mobile, short/narrow viewports, and
-   reduced-motion render the normal stacked flow with no extra scroll area. */
-.landing-hero-scene {
-  --scene-progress: 0;
-  position: relative;
+/* Layered lime atmospheric aurora backdrop (CSS-driven, no heavy video) */
+.landing-hero-backdrop {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  overflow: hidden;
 }
 
-.landing-hero-stage {
-  display: block;
+.landing-hero-glow {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(60px);
+  opacity: 0.22;
+  will-change: transform, opacity;
+  pointer-events: none;
+}
+
+.landing-hero-glow-primary {
+  width: clamp(24rem, 45vw, 42rem);
+  height: clamp(16rem, 30vw, 26rem);
+  top: -12%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: radial-gradient(
+    circle,
+    hsl(var(--l-accent) / 0.45) 0%,
+    hsl(var(--l-accent) / 0.15) 50%,
+    transparent 75%
+  );
+  animation: hero-aurora-pulse 9s ease-in-out infinite alternate;
+}
+
+.landing-hero-glow-secondary {
+  width: clamp(20rem, 35vw, 34rem);
+  height: clamp(14rem, 25vw, 22rem);
+  top: 15%;
+  left: 15%;
+  background: radial-gradient(
+    circle,
+    hsl(var(--l-accent) / 0.3) 0%,
+    hsl(var(--l-accent) / 0.08) 55%,
+    transparent 75%
+  );
+  animation: hero-aurora-drift-1 13s ease-in-out infinite alternate;
+}
+
+.landing-hero-glow-tertiary {
+  width: clamp(18rem, 32vw, 30rem);
+  height: clamp(12rem, 22vw, 20rem);
+  top: 25%;
+  right: 12%;
+  background: radial-gradient(
+    circle,
+    hsl(var(--l-accent) / 0.25) 0%,
+    hsl(var(--l-accent) / 0.06) 55%,
+    transparent 75%
+  );
+  animation: hero-aurora-drift-2 11s ease-in-out infinite alternate;
+}
+
+.landing-hero-aurora-mesh {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(
+      ellipse 80% 50% at 50% -10%,
+      hsl(var(--l-accent) / 0.12),
+      transparent 80%
+    ),
+    radial-gradient(
+      ellipse 60% 40% at 80% 40%,
+      hsl(var(--l-accent) / 0.06),
+      transparent 70%
+    );
+  opacity: 0.85;
+}
+
+@keyframes hero-aurora-pulse {
+  0% {
+    transform: translateX(-50%) scale(1);
+    opacity: 0.22;
+  }
+  50% {
+    transform: translateX(-48%) scale(1.08);
+    opacity: 0.3;
+  }
+  100% {
+    transform: translateX(-52%) scale(0.96);
+    opacity: 0.24;
+  }
+}
+
+@keyframes hero-aurora-drift-1 {
+  0% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(4%, 6%) scale(1.05);
+  }
+  100% {
+    transform: translate(-3%, 3%) scale(0.95);
+  }
+}
+
+@keyframes hero-aurora-drift-2 {
+  0% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(-5%, 4%) scale(1.06);
+  }
+  100% {
+    transform: translate(3%, -4%) scale(0.94);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-hero-glow-primary,
+  .landing-hero-glow-secondary,
+  .landing-hero-glow-tertiary {
+    animation: none;
+    transform: none;
+    opacity: 0.2;
+  }
 }
 
 .landing-hero-stage-copy {
   display: block;
-}
-
-.landing-hero-preview-wrap {
-  position: relative;
-}
-
-@media (min-width: 64rem) and (min-height: 40rem) {
-  @media not (prefers-reduced-motion: reduce) {
-    /* Reserve extra scroll space for the pin ramp ONLY when active */
-    .landing-hero-scene[data-scene-active] {
-      height: 200vh;
-      position: relative;
-    }
-
-    /* Sticky stage block pinned directly below the sticky header */
-    .landing-hero-scene[data-scene-active] .landing-hero-stage {
-      position: sticky;
-      top: var(--landing-header-h);
-      height: calc(100vh - var(--landing-header-h));
-      display: block;
-      overflow: clip;
-      padding-top: clamp(1.25rem, 2.5vw, 2rem);
-    }
-
-    /* Copy in normal initial flow: fully visible at scroll=0, fades as
-       scroll progress advances. No time-based transitions: scroll drives
-       opacity directly so forward and reverse scrolls track 1:1. */
-    .landing-hero-scene[data-scene-active] .landing-hero-stage-copy {
-      position: relative;
-      opacity: calc(1 - var(--scene-progress) * 1.5);
-      transform: translate3d(0, calc(var(--scene-progress) * -3.5rem), 0);
-      will-change: opacity, transform;
-    }
-
-    /* Focused CTA or link restores copy visibility and interaction immediately */
-    .landing-hero-scene[data-scene-active] .landing-hero-stage-copy:focus-within {
-      opacity: 1 !important;
-      transform: none !important;
-      pointer-events: auto !important;
-      z-index: 10;
-    }
-
-    /* Pointer events remain active throughout mid-fade; only disabled when
-       copy has substantially faded out */
-    .landing-hero-scene[data-scene-active][data-scene-copy-faded] .landing-hero-stage-copy {
-      pointer-events: none;
-    }
-
-    /* Preview positioned absolutely with top based on measured copy height.
-       Progress translation brings it to ~24px below the sticky header at end.
-       Scale is calculated to fit full console + caption + caveat within the
-       sticky stage across standard and shorter desktop heights. */
-    .landing-hero-scene[data-scene-active] .landing-hero-preview-wrap {
-      position: absolute;
-      top: var(--preview-initial-top, 420px);
-      left: 0;
-      right: 0;
-      margin-inline: auto;
-      transform: translate3d(
-          0,
-          calc(-1 * var(--scene-progress) * var(--preview-travel, 380px)),
-          0
-        )
-        scale(
-          calc(
-            var(--preview-start-scale, 0.95) +
-              var(--scene-progress) * var(--preview-scale-delta, 0.05)
-          )
-        );
-      transform-origin: top center;
-      will-change: transform;
-    }
-  }
-}
-
-/* Soft lime atmospheric glow behind hero and preview. */
-.landing-hero::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background:
-    radial-gradient(
-      42rem 26rem at 76% 68%,
-      hsl(var(--l-accent) / 0.2),
-      transparent 65%
-    ),
-    radial-gradient(
-      56rem 32rem at 50% -8%,
-      hsl(var(--l-accent) / 0.1),
-      transparent 70%
-    );
 }
 
 .landing-hero-copy {
@@ -486,9 +506,17 @@
   flex: none;
 }
 
-/* Wide centered product preview. */
+/* Wide centered product preview with Termius-style 3D perspective flow */
 .landing-hero-preview-wrap {
   position: relative;
+  perspective: 1200px;
+  perspective-origin: center top;
+}
+
+@media (max-width: 63.99rem) {
+  .landing-hero-preview-wrap {
+    perspective: 800px;
+  }
 }
 
 .landing-console {
@@ -504,6 +532,19 @@
     0 0 0 1px hsl(var(--l-bg) / 0.6),
     0 32px 64px -24px hsl(var(--l-bg) / 0.9),
     0 0 72px -18px hsl(var(--l-accent) / 0.35);
+  transform-style: preserve-3d;
+  transform-origin: center top;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-hero-preview-wrap {
+    perspective: none;
+  }
+  .landing-console {
+    transform: none !important;
+    will-change: auto;
+  }
 }
 
 .landing-console-chrome {
@@ -825,33 +866,6 @@
   border-top: 1px solid hsl(var(--l-line) / 0.6);
 }
 
-/* Unobtrusive scroll affordance for the pinned hero. Decorative only
-   (aria-hidden) and hidden on small/short viewports. */
-.landing-hero-scene-hint {
-  display: none;
-}
-
-@media (min-width: 64rem) and (min-height: 40rem) {
-  @media not (prefers-reduced-motion: reduce) {
-    .landing-hero-scene[data-scene-active] .landing-hero-scene-hint {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.5rem;
-      position: absolute;
-      bottom: 1.25rem;
-      left: 0;
-      right: 0;
-      margin-inline: auto;
-      color: hsl(var(--l-dim));
-      font-size: 0.8125rem;
-      font-weight: 500;
-      letter-spacing: 0.02em;
-      opacity: calc(1 - var(--scene-progress, 0) * 4);
-      pointer-events: none;
-    }
-  }
-}
 
 /* Self-hosted/demo caveat sits low in the hero, under the preview. */
 .landing-hero-caveat {

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — Termius-inspired natural-flow landing hero
+
+- Replace the 200vh pinned hero storytelling scroll controller with a Termius-inspired natural-flow hero.
+- Add an animated layered lime atmospheric aurora backdrop with radial gradients and subtle pulsing/drifting CSS keyframe animations, replacing heavy video backgrounds while staying true to the brand lime palette.
+- Introduce a staggered one-time Motion entry reveal (`motion/react`) for hero eyebrow, title, subtitle, CTAs, and capability highlights.
+- Implement a 3D perspective dashboard preview (1200px perspective on desktop, 800px on mobile) easing smoothly into a level alignment as it enters the viewport using Motion's `useScroll` and `useTransform`.
+- Preserve all existing content, links, CTAs, caveat notices, keyboard focusability, and Features storytelling behavior.
+- Support `prefers-reduced-motion: reduce`: static layout without initial entrance opacity hiding, static aurora glow without infinite CSS keyframe animations, and flat preview without scroll-linked 3D transforms.
+- Remove superseded CSS attributes, scroll variables (`--scene-progress`), and the scroll affordance hint (`.landing-hero-scene-hint`).
+
 ## Unreleased — jsdom scrolling support
 
 - Provide `Element.scrollTo` coordinate updates in the shared web test environment so mobile Features navigation can mount under jsdom. Production scrolling behavior is unchanged.

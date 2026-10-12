@@ -2,7 +2,10 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   motion,
   useMotionValueEvent,
+  useReducedMotion,
   useScroll,
+  useTransform,
+  type Variants,
 } from "motion/react";
 import {
   Activity,
@@ -836,6 +839,28 @@ const FEATURES: FeatureStoryItem[] = [
     preview: <SecurityPreview />,
   },
 ];
+const heroContainerVariants: Variants = {
+  hidden: { opacity: 0 },
+  visible: {
+    opacity: 1,
+    transition: {
+      staggerChildren: 0.08,
+      delayChildren: 0.04,
+    },
+  },
+};
+
+const heroItemVariants: Variants = {
+  hidden: { opacity: 0, y: 18 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    transition: {
+      duration: 0.55,
+      ease: [0.22, 1, 0.36, 1],
+    },
+  },
+};
 
 export function LandingPage() {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -844,7 +869,7 @@ export function LandingPage() {
   const activeFeatureIndexRef = useRef(0);
   const storyTrackRef = useRef<HTMLDivElement>(null);
   const featuresSceneRef = useRef<HTMLDivElement>(null);
-  const sceneRef = useRef<HTMLDivElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
   const [storyMetrics, setStoryMetrics] = useState({
     stickyTop: 96,
     stageHeight: 522,
@@ -858,6 +883,30 @@ export function LandingPage() {
     typeof window !== "undefined"
       ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
       : false
+  );
+
+  const prefersReducedMotion = useReducedMotion();
+  const shouldReduceMotion = Boolean(prefersReducedMotion ?? isReducedMotion);
+
+  const { scrollYProgress: previewProgress } = useScroll({
+    target: previewRef,
+    offset: ["start end", "center 55%"],
+  });
+
+  const previewRotateX = useTransform(
+    previewProgress,
+    [0, 1],
+    [isDesktop ? 16 : 4, 0]
+  );
+  const previewScale = useTransform(
+    previewProgress,
+    [0, 1],
+    [isDesktop ? 0.94 : 0.98, 1]
+  );
+  const previewY = useTransform(
+    previewProgress,
+    [0, 1],
+    [isDesktop ? 30 : 12, 0]
   );
 
   useEffect(() => {
@@ -937,135 +986,6 @@ export function LandingPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  // Pinned-hero storytelling: native document scroll only (no wheel
-  // interception). While the hero scene is pinned, progress maps scroll to
-  // CSS properties on the scene element; reduced motion and short/narrow
-  // viewports keep the plain stacked flow.
-
-  useEffect(() => {
-    const scene = sceneRef.current;
-    if (!scene) return;
-
-    const media = window.matchMedia(
-      "(min-width: 64rem) and (min-height: 40rem)"
-    );
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-
-    let frame = 0;
-    let unpinnedScroll = 0;
-    let active = false;
-
-    const reset = () => {
-      scene.style.setProperty("--scene-progress", "0");
-      scene.style.removeProperty("--preview-initial-top");
-      scene.style.removeProperty("--preview-travel");
-      scene.style.removeProperty("--preview-start-scale");
-      scene.style.removeProperty("--preview-scale-delta");
-      scene.removeAttribute("data-scene-active");
-      scene.removeAttribute("data-scene-pinned");
-      scene.removeAttribute("data-scene-copy-faded");
-    };
-
-    // Re-measure on media/preference/viewport changes, then repaint.
-    const sync = () => {
-      active = media.matches && !reduceMotion.matches;
-      if (!active) {
-        reset();
-        return;
-      }
-
-      const stage = scene.querySelector<HTMLElement>(".landing-hero-stage");
-      const metaEl = scene.querySelector<HTMLElement>(".landing-hero-meta");
-      const copyEl = scene.querySelector<HTMLElement>(
-        ".landing-hero-stage-copy"
-      );
-      const previewWrap = scene.querySelector<HTMLElement>(
-        ".landing-hero-preview-wrap"
-      );
-
-      // Measure capability row bottom with extra 40px gap so preview does not
-      // collide with highlights row at initial flow.
-      let initialTop = 420;
-      if (stage && metaEl) {
-        const stageRect = stage.getBoundingClientRect();
-        const metaRect = metaEl.getBoundingClientRect();
-        initialTop = Math.round(metaRect.bottom - stageRect.top + 40);
-      } else if (copyEl) {
-        initialTop = Math.round(copyEl.offsetHeight + 40);
-      }
-
-      // Fit shorter desktop heights (e.g. 900, 768, 640): scale preview so the
-      // entire console + caption + caveat fits the sticky stage at end.
-      const headerH = 72;
-      const stageH = window.innerHeight - headerH;
-      const availableH = stageH - 36;
-      const previewH = previewWrap ? previewWrap.offsetHeight : 770;
-
-      // Safe static fallback if viewport cannot fit scaled preview comfortably
-      if (window.innerHeight < 600 || availableH / previewH < 0.6) {
-        active = false;
-        reset();
-        return;
-      }
-
-      scene.setAttribute("data-scene-active", "");
-      scene.style.setProperty("--scene-progress", "0");
-
-      const endScale = Math.min(1, Number((availableH / previewH).toFixed(3)));
-      const startScale = Number((endScale * 0.95).toFixed(3));
-      const scaleDelta = Number((endScale - startScale).toFixed(3));
-      const scaledH = previewH * endScale;
-
-      // Vertically center final preview in sticky stage with ~24px top bound
-      const targetTop = Math.max(16, Math.round((stageH - scaledH) / 2));
-      const travel = Math.max(0, initialTop - targetTop);
-
-      scene.style.setProperty("--preview-initial-top", `${initialTop}px`);
-      scene.style.setProperty("--preview-travel", `${travel}px`);
-      scene.style.setProperty("--preview-start-scale", `${startScale}`);
-      scene.style.setProperty("--preview-scale-delta", `${scaleDelta}`);
-
-      // Guard: if the scene can't pin (e.g. height collapses), bail out.
-      unpinnedScroll = scene.offsetHeight - window.innerHeight;
-      if (unpinnedScroll <= 0) {
-        active = false;
-        reset();
-        return;
-      }
-      render();
-    };
-
-    const render = () => {
-      frame = 0;
-      if (!active || unpinnedScroll <= 0) return;
-      const rect = scene.getBoundingClientRect();
-      const top = rect.top;
-      // Progress 0 while the scene is still entering, 1 once it unpins.
-      const progress = Math.min(1, Math.max(0, -top / unpinnedScroll));
-      scene.style.setProperty("--scene-progress", progress.toFixed(4));
-      scene.toggleAttribute("data-scene-pinned", progress > 0 && progress < 1);
-      scene.toggleAttribute("data-scene-copy-faded", progress >= 0.85);
-    };
-
-    const onScroll = () => {
-      if (!frame) frame = window.requestAnimationFrame(render);
-    };
-
-    media.addEventListener("change", sync);
-    reduceMotion.addEventListener("change", sync);
-    window.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", sync);
-    sync();
-
-    return () => {
-      media.removeEventListener("change", sync);
-      reduceMotion.removeEventListener("change", sync);
-      window.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", sync);
-      if (frame) window.cancelAnimationFrame(frame);
-      reset();
-    };
-  }, []);
 
   // Universal Pinned Storytelling Scene:
   // Desktop (>= 64rem): Stationary two-column stage (nav list + synchronized preview).
@@ -1430,43 +1350,69 @@ export function LandingPage() {
 
       <main id="main-content" tabIndex={-1}>
         <section className="landing-hero" aria-labelledby="landing-hero-title">
-          <div className="landing-hero-scene" ref={sceneRef}>
-            <div className="landing-hero-stage">
-              <div className="landing-wrap landing-hero-stage-copy">
-                <div className="landing-hero-copy">
-                  <p className="landing-eyebrow">
-                    <span className="landing-eyebrow-dot" aria-hidden="true" />
-                    Self-hosted VPS operations dashboard
-                  </p>
-                <h1 className="landing-hero-title" id="landing-hero-title">
-                  Modern VPS Management
-                </h1>
-                <p className="landing-hero-sub">
-                  Server health, Docker and SSH jobs. One workspace, on your
-                  infrastructure.
-                </p>
-                <div className="landing-hero-ctas">
-                  <a
-                    className="landing-btn landing-btn-primary"
-                    href={DEPLOY_URL}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Read the deployment docs
-                    <ArrowUpRight size={17} aria-hidden="true" />
-                  </a>
-                  <a
-                    className="landing-btn landing-btn-secondary"
-                    href={REPO_URL}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Browse on GitHub
-                  </a>
-                </div>
-              </div>
-  
-              <ul className="landing-hero-meta" aria-label="Highlights">
+          <div className="landing-hero-backdrop" aria-hidden="true">
+            <div className="landing-hero-glow landing-hero-glow-primary" />
+            <div className="landing-hero-glow landing-hero-glow-secondary" />
+            <div className="landing-hero-glow landing-hero-glow-tertiary" />
+            <div className="landing-hero-aurora-mesh" />
+          </div>
+
+          <div className="landing-wrap landing-hero-stage-copy">
+            <motion.div
+              className="landing-hero-copy"
+              variants={shouldReduceMotion ? undefined : heroContainerVariants}
+              initial={shouldReduceMotion ? false : "hidden"}
+              animate={shouldReduceMotion ? undefined : "visible"}
+            >
+              <motion.p
+                className="landing-eyebrow"
+                variants={shouldReduceMotion ? undefined : heroItemVariants}
+              >
+                <span className="landing-eyebrow-dot" aria-hidden="true" />
+                Self-hosted VPS operations dashboard
+              </motion.p>
+              <motion.h1
+                className="landing-hero-title"
+                id="landing-hero-title"
+                variants={shouldReduceMotion ? undefined : heroItemVariants}
+              >
+                Modern VPS Management
+              </motion.h1>
+              <motion.p
+                className="landing-hero-sub"
+                variants={shouldReduceMotion ? undefined : heroItemVariants}
+              >
+                Server health, Docker and SSH jobs. One workspace, on your
+                infrastructure.
+              </motion.p>
+              <motion.div
+                className="landing-hero-ctas"
+                variants={shouldReduceMotion ? undefined : heroItemVariants}
+              >
+                <a
+                  className="landing-btn landing-btn-primary"
+                  href={DEPLOY_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Read the deployment docs
+                  <ArrowUpRight size={17} aria-hidden="true" />
+                </a>
+                <a
+                  className="landing-btn landing-btn-secondary"
+                  href={REPO_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Browse on GitHub
+                </a>
+              </motion.div>
+
+              <motion.ul
+                className="landing-hero-meta"
+                aria-label="Highlights"
+                variants={shouldReduceMotion ? undefined : heroItemVariants}
+              >
                 <li className="landing-hero-meta-item">
                   <Check size={15} aria-hidden="true" />
                   Many servers in one place
@@ -1479,14 +1425,24 @@ export function LandingPage() {
                   <Check size={15} aria-hidden="true" />
                   Deploys on your infrastructure
                 </li>
-              </ul>
-            </div>
+              </motion.ul>
+            </motion.div>
+          </div>
 
-            <div className="landing-wrap landing-hero-preview-wrap">
-              <figure
-                className="landing-console"
-                aria-labelledby="landing-console-title"
-              >
+          <div className="landing-wrap landing-hero-preview-wrap" ref={previewRef}>
+            <motion.figure
+              className="landing-console"
+              aria-labelledby="landing-console-title"
+              style={
+                shouldReduceMotion
+                  ? undefined
+                  : {
+                      rotateX: previewRotateX,
+                      scale: previewScale,
+                      y: previewY,
+                    }
+              }
+            >
                 <div className="landing-console-chrome">
                   <span className="landing-chrome-dots" aria-hidden="true">
                     <i />
@@ -1660,22 +1616,15 @@ export function LandingPage() {
                   Static layout illustration with sample numbers. It is not live
                   telemetry and never connects to your servers.
                 </figcaption>
-              </figure>
-              <p className="landing-hero-caveat">
-                No hosted account, no third-party data store. This page is
-                informational only and offers no public demo: run your own
-                deployment in demo mode to explore with simulated data, or in
-                local mode to manage real servers.
-              </p>
-            </div>
-
-            <p className="landing-hero-scene-hint" aria-hidden="true">
-              <ChevronDown size={16} strokeWidth={2.25} />
-              Scroll to focus the dashboard
+            </motion.figure>
+            <p className="landing-hero-caveat">
+              No hosted account, no third-party data store. This page is
+              informational only and offers no public demo: run your own
+              deployment in demo mode to explore with simulated data, or in
+              local mode to manage real servers.
             </p>
           </div>
-        </div>
-      </section>
+        </section>
 
         <section
           className="landing-section landing-features-section"

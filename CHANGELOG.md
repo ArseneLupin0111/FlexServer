@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — Motion-driven Features pinned storytelling
+
+- Refactor landing page Features section from manual RAF scroll listener to Motion (`motion/react`) `useScroll` timeline and `useMotionValueEvent`.
+- Provide smooth preview card transitions and step description reveals with GPU-accelerated opacity/transform animations.
+- Add pinned progress card indicator with real-time scroll progress bar and step indexing (`01` to `06`), balancing typography and visual density.
+- Maintain fit-safe fallback flow for mobile screens (<64rem), short viewports (<40rem), and `prefers-reduced-motion` environments.
+- Retain full keyboard navigation, ARIA tablist/tab/tabpanel attributes, and focus-safe scroll alignment.
+
 ## Unreleased — pinned dashboard preview grid
 
 - Display sample hosts in the landing page's pinned dashboard preview as a two-column grid from 512px, preserving a single-column list on smaller screens and existing native scroll pinning. The live VPS dashboard is unchanged.

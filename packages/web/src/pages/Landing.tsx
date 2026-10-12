@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  motion,
+  useMotionValueEvent,
+  useScroll,
+} from "motion/react";
+import {
   Activity,
   ArrowUpRight,
   BookOpen,
@@ -830,6 +835,48 @@ export function LandingPage() {
   const [activeFeatureIndex, setActiveFeatureIndex] = useState(0);
   const [featuresActive, setFeaturesActive] = useState(false);
   const activeFeatureIndexRef = useRef(0);
+  const storyTrackRef = useRef<HTMLDivElement>(null);
+  const [storyMetrics, setStoryMetrics] = useState({
+    stickyTop: 96,
+    stageHeight: 522,
+  });
+
+  const { scrollYProgress } = useScroll({
+    target: storyTrackRef,
+    offset: featuresActive
+      ? [
+          `start ${storyMetrics.stickyTop}px`,
+          `end ${storyMetrics.stickyTop + storyMetrics.stageHeight}px`,
+        ]
+      : undefined,
+  });
+
+  useMotionValueEvent(scrollYProgress, "change", (progress) => {
+    if (!featuresActive) return;
+
+    const scene = featuresSceneRef.current;
+    if (scene) {
+      const activeDesc = scene.querySelector<HTMLDivElement>(
+        ".landing-story-desc:not([hidden])"
+      );
+      if (activeDesc?.contains(document.activeElement)) return;
+      scene.style.setProperty("--story-progress", progress.toFixed(4));
+    }
+
+    const stepCount = FEATURES.length;
+    const nextIndex = Math.min(
+      stepCount - 1,
+      Math.max(0, Math.floor(progress * stepCount))
+    );
+
+    if (nextIndex !== activeFeatureIndexRef.current) {
+      activeFeatureIndexRef.current = nextIndex;
+      if (scene) {
+        scene.setAttribute("data-active-step", String(nextIndex));
+      }
+      setActiveFeatureIndex(nextIndex);
+    }
+  });
 
   // Pinned-hero storytelling: native document scroll only (no wheel
   // interception). While the hero scene is pinned, progress maps scroll to
@@ -837,7 +884,6 @@ export function LandingPage() {
   // viewports keep the plain stacked flow.
   const sceneRef = useRef<HTMLDivElement>(null);
   const featuresSceneRef = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") setMenuOpen(false);
@@ -971,8 +1017,7 @@ export function LandingPage() {
     };
   }, []);
 
-  // Termius-style single pinned two-column storytelling scene:
-  // Native document scroll with passive RAF throttled listener.
+  // Termius-style pinned two-column storytelling scene powered by Motion:
   // Gated on desktop viewports where the stage layout fits without clipping.
   // Mobile, short viewports, and reduced motion keep plain static flow.
   useEffect(() => {
@@ -984,7 +1029,6 @@ export function LandingPage() {
     );
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
-    let frameId: number | null = null;
     let isDesktopActive = false;
 
     // Measure every real step state at its actual column width so the fit
@@ -1024,42 +1068,8 @@ export function LandingPage() {
       scene.removeAttribute("data-features-active");
       scene.removeAttribute("data-features-measuring");
       scene.removeAttribute("data-active-step");
-      const track = scene.querySelector<HTMLElement>(".landing-story-track");
+      const track = storyTrackRef.current ?? scene.querySelector<HTMLElement>(".landing-story-track");
       if (track) track.style.removeProperty("--story-stage-height");
-    };
-
-    const updateScrollProgress = () => {
-      if (!isDesktopActive) return;
-      const track = scene.querySelector<HTMLElement>(".landing-story-track");
-      const stage = scene.querySelector<HTMLElement>(".landing-story-stage");
-      if (!track || !stage) return;
-
-      const headerEl = document.querySelector<HTMLElement>(".landing-header");
-      const headerH = headerEl ? headerEl.offsetHeight : 72;
-      const stickyTop = headerH + 24; // 24px (1.5rem) below sticky header
-
-      const trackRect = track.getBoundingClientRect();
-      const scrollOffset = stickyTop - trackRect.top;
-      const scrollTravel = track.offsetHeight - stage.offsetHeight;
-
-      if (scrollTravel <= 0) return;
-
-      const progress = Math.min(1, Math.max(0, scrollOffset / scrollTravel));
-      const stepCount = 6;
-      const nextIndex = Math.min(
-        stepCount - 1,
-        Math.max(0, Math.floor(progress * stepCount))
-      );
-
-      // Focused inline links must never be dropped by scroll-driven step
-      // switching, so the focused step stays mounted until focus leaves it.
-      const activeDesc = scene.querySelector<HTMLDivElement>(".landing-story-desc:not([hidden])");
-      if (activeDesc?.contains(document.activeElement)) return;
-      if (nextIndex !== activeFeatureIndexRef.current) {
-        activeFeatureIndexRef.current = nextIndex;
-        scene.setAttribute("data-active-step", String(nextIndex));
-        setActiveFeatureIndex(nextIndex);
-      }
     };
 
     const sync = () => {
@@ -1078,7 +1088,7 @@ export function LandingPage() {
       const topOffset = headerH + 24;
       const availableH = window.innerHeight - topOffset - 24;
 
-      const track = scene.querySelector<HTMLElement>(".landing-story-track");
+      const track = storyTrackRef.current ?? scene.querySelector<HTMLElement>(".landing-story-track");
       const stage = scene.querySelector<HTMLElement>(".landing-story-stage");
       if (!track || !stage) {
         scene.removeAttribute("data-features-measuring");
@@ -1101,49 +1111,57 @@ export function LandingPage() {
 
       track.style.setProperty("--story-stage-height", `${stageH}px`);
       isDesktopActive = true;
+      setStoryMetrics({
+        stickyTop: topOffset,
+        stageHeight: stageH,
+      });
       setFeaturesActive(true);
       scene.setAttribute("data-features-active", "");
       scene.setAttribute(
         "data-active-step",
         String(activeFeatureIndexRef.current)
       );
-      updateScrollProgress();
-    };
 
-    const onScroll = () => {
-      if (!isDesktopActive) return;
-      if (frameId === null) {
-        frameId = window.requestAnimationFrame(() => {
-          frameId = null;
-          updateScrollProgress();
-        });
+      const progress = scrollYProgress.get();
+      const nextIndex = Math.min(
+        FEATURES.length - 1,
+        Math.max(0, Math.floor(progress * FEATURES.length))
+      );
+      if (nextIndex !== activeFeatureIndexRef.current) {
+        activeFeatureIndexRef.current = nextIndex;
+        scene.setAttribute("data-active-step", String(nextIndex));
+        setActiveFeatureIndex(nextIndex);
       }
     };
 
     const onFocusOut = () => {
-      if (!isDesktopActive || frameId !== null) return;
-      frameId = window.requestAnimationFrame(() => {
-        frameId = null;
-        updateScrollProgress();
-      });
+      if (!isDesktopActive) return;
+      const progress = scrollYProgress.get();
+      const nextIndex = Math.min(
+        FEATURES.length - 1,
+        Math.max(0, Math.floor(progress * FEATURES.length))
+      );
+      if (nextIndex !== activeFeatureIndexRef.current) {
+        activeFeatureIndexRef.current = nextIndex;
+        scene.setAttribute("data-active-step", String(nextIndex));
+        setActiveFeatureIndex(nextIndex);
+      }
     };
+
     scene.addEventListener("focusout", onFocusOut);
     media.addEventListener("change", sync);
     reduceMotion.addEventListener("change", sync);
-    window.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("resize", sync);
     sync();
 
     return () => {
       media.removeEventListener("change", sync);
       reduceMotion.removeEventListener("change", sync);
-      window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", sync);
       scene.removeEventListener("focusout", onFocusOut);
-      if (frameId !== null) window.cancelAnimationFrame(frameId);
       reset();
     };
-  }, []);
+  }, [scrollYProgress]);
 
   const handleSelectFeature = (index: number) => {
     setActiveFeatureIndex(index);
@@ -1153,7 +1171,7 @@ export function LandingPage() {
     scene.setAttribute("data-active-step", String(index));
     if (!scene.hasAttribute("data-features-active")) return;
 
-    const track = scene.querySelector<HTMLElement>(".landing-story-track");
+    const track = storyTrackRef.current ?? scene.querySelector<HTMLElement>(".landing-story-track");
     const stage = scene.querySelector<HTMLElement>(".landing-story-stage");
     if (!track || !stage) return;
 
@@ -1165,7 +1183,7 @@ export function LandingPage() {
     const scrollTravel = track.offsetHeight - stage.offsetHeight;
 
     if (scrollTravel > 0) {
-      const stepFraction = (index + 0.5) / 6;
+      const stepFraction = (index + 0.5) / FEATURES.length;
       const targetY = trackScrollTop - stickyTop + stepFraction * scrollTravel;
       window.scrollTo({ top: Math.round(targetY), behavior: "auto" });
     }
@@ -1540,7 +1558,7 @@ export function LandingPage() {
           <div className="landing-features-scene" ref={featuresSceneRef}>
             {/* Pinned Desktop Two-Column Story (Termius style: active when desktop fit gate passes) */}
             <div className="landing-story-pinned">
-              <div className="landing-story-track">
+              <div className="landing-story-track" ref={storyTrackRef}>
                 <div className="landing-story-stage">
                   <div className="landing-wrap landing-story-wrap">
                     {/* Left Column: Eyebrow + Headline + Interactive Capabilities List */}
@@ -1603,16 +1621,61 @@ export function LandingPage() {
                                     aria-hidden="true"
                                   />
                                 )}
+                                <span className="landing-story-nav-num tnum" aria-hidden="true">
+                                  0{idx + 1}
+                                </span>
                                 <span className="landing-story-title">
                                   {feature.title}
                                 </span>
                               </button>
-                              <div className="landing-story-desc" id={`story-desc-${idx}`} hidden={!isActive}>
+                              <motion.div
+                                className="landing-story-desc"
+                                id={`story-desc-${idx}`}
+                                hidden={!isActive}
+                                initial={false}
+                                animate={
+                                  isActive
+                                    ? { opacity: 1, y: 0 }
+                                    : { opacity: 0, y: 6 }
+                                }
+                                transition={{
+                                  duration: 0.18,
+                                  ease: [0.16, 1, 0.3, 1],
+                                }}
+                              >
                                 <p>{feature.desc}</p>
-                              </div>
+                              </motion.div>
                             </div>
                           );
                         })}
+                      </div>
+
+                      <div className="landing-story-progress-card">
+                        <div className="landing-story-progress-header">
+                          <div className="landing-story-progress-counter tnum">
+                            <span className="landing-story-progress-current">
+                              0{activeFeatureIndex + 1}
+                            </span>
+                            <span className="landing-story-progress-divider">/</span>
+                            <span className="landing-story-progress-total">
+                              0{FEATURES.length}
+                            </span>
+                          </div>
+                          <span className="landing-story-progress-title">
+                            {FEATURES[activeFeatureIndex].title}
+                          </span>
+                        </div>
+                        <div className="landing-story-progress-track" aria-hidden="true">
+                          <motion.div
+                            className="landing-story-progress-fill"
+                            style={{ scaleX: scrollYProgress, transformOrigin: "0% 50%" }}
+                          />
+                        </div>
+                        <div className="landing-story-progress-footer">
+                          <span className="landing-story-progress-hint">
+                            Scroll to navigate · Click or ↑↓ to switch
+                          </span>
+                        </div>
                       </div>
                     </div>
 
@@ -1622,7 +1685,7 @@ export function LandingPage() {
                         {FEATURES.map((feature, idx) => {
                           const isActive = idx === activeFeatureIndex;
                           return (
-                            <div
+                            <motion.div
                               key={feature.id}
                               id={`story-preview-${idx}`}
                               role="tabpanel"
@@ -1632,9 +1695,19 @@ export function LandingPage() {
                                 isActive ? "is-active" : ""
                               }`}
                               hidden={!isActive}
+                              initial={false}
+                              animate={
+                                isActive
+                                  ? { opacity: 1, y: 0, scale: 1 }
+                                  : { opacity: 0, y: 8, scale: 0.99 }
+                              }
+                              transition={{
+                                duration: 0.22,
+                                ease: [0.16, 1, 0.3, 1],
+                              }}
                             >
                               {feature.preview}
-                            </div>
+                            </motion.div>
                           );
                         })}
                       </div>

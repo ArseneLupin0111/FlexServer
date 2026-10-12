@@ -3,7 +3,21 @@
   "mcp": {
     "shadcn": {
       "type": "local",
-      "command": ["npx", "shadcn@latest", "mcp"],
+      "command": [
+        "npx",
+        "shadcn@latest",
+        "mcp"
+      ],
+      "enabled": true
+    },
+    "motion": {
+      "type": "remote",
+      "url": "https://mcp.motion.dev",
+      "enabled": true
+    },
+    "motion-plus": {
+      "type": "remote",
+      "url": "https://mcp.motion.dev/plus",
       "enabled": true
     }
   },

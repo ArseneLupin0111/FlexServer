@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — pinned dashboard preview grid
+
+- Display sample hosts in the landing page's pinned dashboard preview as a two-column grid from 512px, preserving a single-column list on smaller screens and existing native scroll pinning. The live VPS dashboard is unchanged.
+
+## Unreleased — Motion tooling
+
+- Add `motion` to the web workspace for animation imports from `motion/react`.
+- Install Motion AI Kit skills for OMP and OpenCode, and configure the hosted `motion` and `motion-plus` MCP servers in OpenCode. Motion+ requires account sign-in.
+
 ## Unreleased — read-only container logs independent of Docker management flag
 
 - Make read-only container logs available by default for non-system VPS records in local mode without a new toggle. Read-only streams and the logs broker policy snapshot now depend on `logsSupported` (non-system VPS in local mode) instead of the management action capability or `dockerManagementEnabled`, and demo mode still reports unsupported with an explicit reason rather than faking a source.

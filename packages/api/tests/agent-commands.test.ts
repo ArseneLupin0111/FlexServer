@@ -119,14 +119,14 @@ afterEach(async () => {
 const CAPABILITY_NOW = "2026-09-15T12:00:00.000Z";
 const localConfig: AppConfig = { ...demoConfig, mode: "local" };
 
-async function seedSnapshot(container: Record<string, unknown>) {
+async function seedSnapshot(container: Record<string, unknown>, targetVpsId = vpsId) {
   await seedDockerMonitoringForTests(
     join(tempDir, "data", "docker-monitoring.json"),
     {
       samples: [
         {
-          id: "cap_h",
-          vpsId,
+          id: `cap_h_${targetVpsId}`,
+          vpsId: targetVpsId,
           agentInstanceId: "inst_local",
           snapshotId: "snap_cap",
           collectedAt: CAPABILITY_NOW,
@@ -135,8 +135,8 @@ async function seedSnapshot(container: Record<string, unknown>) {
           metrics: { cpuPercent: 1, memoryUsageBytes: 64, pids: 2 },
         },
         {
-          id: "cap_c",
-          vpsId,
+          id: `cap_c_${targetVpsId}`,
+          vpsId: targetVpsId,
           agentInstanceId: "inst_local",
           snapshotId: "snap_cap",
           collectedAt: CAPABILITY_NOW,
@@ -222,6 +222,68 @@ describe("DockerManagementService capability gating", () => {
     await expect(service.create(vpsId, {
       action: "start", target: { containerKey: "ck_a" }, idempotencyKey: "system-denied",
     })).rejects.toThrow("Docker management is unavailable");
+  });
+  it("allows logs and targets for the system-managed local host in local mode while blocking destructive actions", async () => {
+    const local = await vpsRepo.ensureLocalHost({
+      id: "vps_local_host",
+      name: "local-host",
+      host: "127.0.0.1",
+      port: 22,
+      username: "root",
+      kind: "local",
+      managedBy: "system",
+    });
+    await seedSnapshot({ containerKey: "ck_a", name: "web" }, local.id);
+    const localService = new DockerManagementService(
+      vpsRepo,
+      mgmtRepo,
+      monitoringRepo,
+      localConfig,
+    );
+    await expect(localService.capability(local.id)).resolves.toEqual({
+      supported: false,
+      reason: "Docker management is unavailable",
+      actions: [],
+      logsSupported: true,
+      maxLogLines: 200,
+      targets: [
+        { containerKey: "ck_a", name: "web", agentInstanceId: "inst_local" },
+      ],
+    });
+    await expect(
+      localService.create(local.id, {
+        action: "start",
+        target: { containerKey: "ck_a" },
+        idempotencyKey: "local-start-denied",
+      }),
+    ).rejects.toThrow("Docker management is unavailable");
+  });
+
+  it("blocks logs and targets for the system-managed local host in demo mode", async () => {
+    const local = await vpsRepo.ensureLocalHost({
+      id: "vps_local_host",
+      name: "local-host",
+      host: "127.0.0.1",
+      port: 22,
+      username: "root",
+      kind: "local",
+      managedBy: "system",
+    });
+    await seedSnapshot({ containerKey: "ck_a", name: "web" }, local.id);
+    const demoService = new DockerManagementService(
+      vpsRepo,
+      mgmtRepo,
+      monitoringRepo,
+      demoConfig,
+    );
+    await expect(demoService.capability(local.id)).resolves.toEqual({
+      supported: false,
+      reason: "Docker management is unavailable",
+      actions: [],
+      logsSupported: false,
+      maxLogLines: 200,
+      targets: [],
+    });
   });
 
   it("blocks logs and targets in demo mode when management is disabled", async () => {

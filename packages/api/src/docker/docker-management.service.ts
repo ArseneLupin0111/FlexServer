@@ -41,7 +41,11 @@ export class DockerManagementService {
     const enabled = record.managedBy !== "system" && record.dockerManagementEnabled === true;
     // Realtime logs need a real agent-backed Docker source, so demo mode
     // reports them unsupported while keeping identity and actions usable.
-    const logsSupported = record.managedBy !== "system" && this.config.mode === "local";
+    // Local app mode allows logs for user-managed VPS records as well as the
+    // local host (kind local managedBy system), while keeping unknown
+    // system-managed remote records excluded.
+    const isLocalHost = record.kind === "local" && record.managedBy === "system";
+    const logsSupported = (record.managedBy !== "system" || isLocalHost) && this.config.mode === "local";
     let reason: string | undefined;
     if (record.managedBy === "system") reason = "Docker management is unavailable";
     else if (record.dockerManagementEnabled !== true) reason = "Docker management is disabled";

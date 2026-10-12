@@ -593,6 +593,22 @@ describe("GET /api/vps/:id/docker/management/logs/stream", () => {
       .set("Cookie", sessionCookie)
       .expect(403);
   });
+  it("rejects a local host stream in demo mode with 403", async () => {
+    const local = await vpsRepo.ensureLocalHost({
+      id: "vps_local_host",
+      name: "Local host",
+      host: "127.0.0.1",
+      port: 22,
+      username: "root",
+      kind: "local",
+      managedBy: "system",
+    });
+    const server = app({ mode: "demo" });
+    await request(server)
+      .get(streamUrl(local.id))
+      .set("Cookie", sessionCookie)
+      .expect(403);
+  });
 });
 
 // ── Claim → upload → live → result lifecycle ───────────────────────────────
@@ -612,6 +628,50 @@ describe("log stream claim and upload lifecycle", () => {
       "docker.logs.state", "docker.logs.state", "docker.logs.lines", "docker.logs.closed",
     ]);
     expect(response.frames[2].data).toEqual({ subscriptionId, lines: [line("read-only log")] });
+  });
+  it("opens, claims, and uploads logs for the system-managed local host in local mode", async () => {
+    const local = await vpsRepo.ensureLocalHost({
+      id: "vps_local_host",
+      name: "Local host",
+      host: "127.0.0.1",
+      port: 22,
+      username: "root",
+      kind: "local",
+      managedBy: "system",
+    });
+    await seedDockerMonitoringForTests(
+      join(tempDir, "data", "docker-monitoring.json"),
+      {
+        samples: [
+          row("local", local.id, "snap_local", {
+            containerKey: "ck_web",
+            name: "web",
+            state: "running",
+            agentInstanceId: "instA",
+          }),
+        ],
+      },
+    );
+    const localToken = (await agentService.createCredential(local.id)).token;
+    const server = app();
+    const stream = openStream(server, streamUrl(local.id));
+    const subscriptionId = await claimOpen(stream, server, localToken);
+    await chunks(server, localToken, subscriptionId, {
+      lines: [line("local host log")],
+    }).expect(200);
+    await result(server, localToken, subscriptionId).expect(200);
+    const response = await stream;
+    expect(response.status).toBe(200);
+    expect(response.frames.map((frame) => frame.event)).toEqual([
+      "docker.logs.state",
+      "docker.logs.state",
+      "docker.logs.lines",
+      "docker.logs.closed",
+    ]);
+    expect(response.frames[2].data).toEqual({
+      subscriptionId,
+      lines: [line("local host log")],
+    });
   });
 
   it("answers null when no viewer is waiting, then claims FIFO", async () => {
@@ -812,6 +872,69 @@ describe("log stream credential binding", () => {
     await chunks(server, tokenA, subscriptionId).expect(200);
     await result(server, tokenA, subscriptionId).expect(200);
     await stream;
+  });
+  it("enforces cross-VPS isolation between local host and remote VPS", async () => {
+    const local = await vpsRepo.ensureLocalHost({
+      id: "vps_local_host",
+      name: "Local host",
+      host: "127.0.0.1",
+      port: 22,
+      username: "root",
+      kind: "local",
+      managedBy: "system",
+    });
+    await seedDockerMonitoringForTests(
+      join(tempDir, "data", "docker-monitoring.json"),
+      {
+        samples: [
+          row("web", vpsA, "snap_a", {
+            containerKey: "ck_web",
+            name: "web",
+            state: "running",
+            agentInstanceId: "instA",
+          }),
+          row("local", local.id, "snap_local", {
+            containerKey: "ck_web",
+            name: "web",
+            state: "running",
+            agentInstanceId: "instA",
+          }),
+        ],
+      },
+    );
+    const localToken = (await agentService.createCredential(local.id)).token;
+    const server = app();
+
+    const localStream = openStream(server, streamUrl(local.id));
+    const localSubId = await claimOpen(localStream, server, localToken);
+
+    // Foreign remote token (tokenA) cannot write chunks or result to local host subscription
+    await chunks(server, tokenA, localSubId, {
+      lines: [line("foreign write")],
+    }).expect(404);
+    await result(server, tokenA, localSubId).expect(404);
+
+    const remoteStream = openStream(server, streamUrl(vpsA));
+    const remoteSubId = await claimOpen(remoteStream, server, tokenA);
+
+    // Local host token cannot write chunks or result to remote VPS subscription
+    await chunks(server, localToken, remoteSubId, {
+      lines: [line("local write on remote")],
+    }).expect(404);
+    await result(server, localToken, remoteSubId).expect(404);
+
+    // Legitimate credentials succeed on their own streams
+    await chunks(server, localToken, localSubId, {
+      lines: [line("valid local")],
+    }).expect(200);
+    await result(server, localToken, localSubId).expect(200);
+    await localStream;
+
+    await chunks(server, tokenA, remoteSubId, {
+      lines: [line("valid remote")],
+    }).expect(200);
+    await result(server, tokenA, remoteSubId).expect(200);
+    await remoteStream;
   });
 
   it("refuses an unknown id with 404 and a closed id with 410", async () => {

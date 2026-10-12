@@ -17,6 +17,26 @@ Object.defineProperty(window, "matchMedia", {
   }),
 });
 
+// jsdom has no scrolling engine. Preserve scroll coordinates for consumers
+// of the browser's Element.scrollTo API without simulating layout or motion.
+Object.defineProperty(Element.prototype, "scrollTo", {
+  configurable: true,
+  writable: true,
+  value: function (
+    this: Element,
+    optionsOrX: ScrollToOptions | number,
+    y?: number
+  ) {
+    if (typeof optionsOrX === "number") {
+      this.scrollLeft = optionsOrX;
+      this.scrollTop = y ?? 0;
+    } else {
+      if (optionsOrX.left !== undefined) this.scrollLeft = optionsOrX.left;
+      if (optionsOrX.top !== undefined) this.scrollTop = optionsOrX.top;
+    }
+  },
+});
+
 // xterm probes canvas capabilities during module initialization. jsdom does
 // not implement canvas, so provide the smallest test-only capability stub.
 Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {

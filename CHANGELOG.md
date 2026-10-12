@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — jsdom scrolling support
+
+- Provide `Element.scrollTo` coordinate updates in the shared web test environment so mobile Features navigation can mount under jsdom. Production scrolling behavior is unchanged.
+
 ## Unreleased — Responsive Features pinned storytelling on desktop and mobile
 
 - Expand Features section on mobile (< 64rem) to a dedicated single-column storytelling layout featuring a sticky horizontal tab bar and real-time progress bar under the landing header paired with six natural-flow feature article panels, ensuring zero offscreen blank displacement or clipping while keeping active tab and progress indicator synchronized during scrolling.

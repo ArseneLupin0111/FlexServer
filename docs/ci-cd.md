@@ -43,7 +43,7 @@ Deploy pulls by immutable digest (`name@sha256:...` references recorded from `Re
 
 After publishing, the workflow can deploy over SSH if deployment secrets are configured.
 
-Local systemd agent releases use the separate, reviewer-gated `.github/workflows/release-agent.yml` workflow. It signs an immutable manifest containing agent and updater Linux/amd64 artifacts, then advances the stable pointer. Publishing API/web images does not update the host agent. Configure `AGENT_RELEASE_PUBLIC_KEY` and `AGENT_RELEASE_MANIFEST_URL` together on the API; bootstrap the host updater with the same pinned key and a distinct local-updater credential. The private `AGENT_RELEASE_SIGNING_KEY` belongs only in the protected GitHub `release` environment. See `docs/local-agent-upgrade-operations.md` for staging checks, recovery, rotation, and rollback.
+Local host agent upgrades use the bundled agent and updater binaries packaged directly in the deployed API container (`/app/agent/vps-agent-linux-amd64` and `/app/agent/vps-updater-linux-amd64`). The deployment workflow automatically extracts the bundled updater and executes `install-updater.sh --upgrade` to ensure the host updater is running protocol version 2, while preserving existing credentials and state. Deploying the API container updates the bundled agent available for upgrade, but does not automatically replace the host systemd agent on disk — local upgrades are confirmed by operators in the dashboard and safely executed by the host updater. No manual signing keys or external release catalogs are required. See `docs/local-agent-upgrade-operations.md` for updater operations, verification, and rollback.
 
 ## Runtime topology
 
@@ -88,8 +88,8 @@ Optional repository variables can override generated server `.env` values:
 | `RATE_LIMIT_WINDOW_MS`          | `60000`   | Rate limit window.                                                                          |
 | `RATE_LIMIT_MAX`                | `120`     | Rate limit max requests per window.                                                         |
 | `AGENT_PUBLIC_BASE_URL`         | empty     | Public callback URL for installed agents.                                                   |
-| `AGENT_RELEASE_PUBLIC_KEY`      | empty     | Pinned Ed25519 public key (base64 of exactly 32 raw bytes) for the agent release catalog. Must be paired with `AGENT_RELEASE_MANIFEST_URL`; see below. |
-| `AGENT_RELEASE_MANIFEST_URL`    | empty     | Stable-channel pointer URL (`https`, allowlisted host) for the agent release catalog. Must be paired with `AGENT_RELEASE_PUBLIC_KEY`; see below. |
+| `AGENT_RELEASE_PUBLIC_KEY`      | empty     | Optional legacy Ed25519 public key (base64 of 32 raw bytes) for external catalog lookups. Unneeded for bundled local agent upgrades. |
+| `AGENT_RELEASE_MANIFEST_URL`    | empty     | Optional legacy stable-channel pointer URL (`https`, allowlisted host) for external catalog lookups. Unneeded for bundled local agent upgrades. |
 | `ALLOW_INSECURE_AGENT_HTTP`     | `false`   | Allows HTTP agent callback URLs when explicitly accepted.                                   |
 | `DASHBOARD_SESSION_TTL_SECONDS` | `28800`   | Dashboard session TTL in seconds.                                                           |
 | `DASHBOARD_PUBLIC_ORIGIN`       | empty     | Expected Origin header for CSRF protection.                                                 |
@@ -97,13 +97,13 @@ Optional repository variables can override generated server `.env` values:
 | `DASHBOARD_COOKIE_SAME_SITE`    | `lax`     | SameSite cookie attribute.                                                                  |
 | `TRUST_PROXY_HOPS`              | `0`       | Number of reverse proxy hops to trust for client IP. Set to `1` when behind an HTTPS proxy. |
 
-### Configuring the agent release catalog in production
+### Local agent updates and optional release catalog
 
-The deploy step writes `AGENT_RELEASE_PUBLIC_KEY` and `AGENT_RELEASE_MANIFEST_URL` into the server `.env` (mode `600`), and the generated compose file passes both to the `api` service explicitly. Configure them as repository **variables** (not secrets) and follow these rules:
+Local host agent upgrades do not require external catalog variables or manual signing keys. The API container bundles the agent and updater binaries directly. During deployment, the workflow extracts the bundled updater from the API container and executes `install-updater.sh --upgrade --binary <path> --config /etc/vps-updater/config.json`, keeping existing host updaters updated to protocol 2 while preserving credentials, configuration, and state. If an updater is absent and an HTTPS backend URL is configured, it bootstraps it.
 
-- **Set them as a pair.** Both empty keeps the release catalog unavailable; setting only one makes the API refuse to start (fail closed). The public key must be base64 of exactly 32 raw Ed25519 bytes — the value printed by `node scripts/release/sign-manifest.mjs --print-pubkey` or read from the signature step of the published release run. The pointer URL must be `https` on an allowlisted host (see `RELEASE_ALLOWED_HOSTS` in `packages/api/src/release/release-config.ts`).
-- **The public key and pointer URL are public by design.** They identify the trusted signer and the stable channel; they are not credentials, so repository variables are appropriate. Never put the private `AGENT_RELEASE_SIGNING_KEY` in a repository variable, the generated `.env`, or any compose file — it lives only in the protected GitHub `release` environment used by `release-agent.yml`.
-- **To rotate the key**, publish the new public key to `AGENT_RELEASE_PUBLIC_KEY` and redeploy before signing any manifest with the replacement private key; see `docs/local-agent-upgrade-operations.md` for the staged rotation and rollback procedure.
+The repository variables `AGENT_RELEASE_PUBLIC_KEY` and `AGENT_RELEASE_MANIFEST_URL` are strictly optional legacy settings for external catalog pointer lookups:
+- **Unneeded for bundled local updates.** The API serves the bundled agent binary directly to authenticated updaters with protocol 2 over HTTPS.
+- **If configured, both must be set together.** Setting only one variable causes the API to fail closed at startup. The public key must be base64 of exactly 32 raw Ed25519 bytes, and the pointer URL must be HTTPS on an allowlisted host. Never configure the private `AGENT_RELEASE_SIGNING_KEY` on the API or host.
 
 ## Server requirements
 

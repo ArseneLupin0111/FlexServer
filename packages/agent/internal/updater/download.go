@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // DownloadResult describes a completed, verified download.
@@ -17,45 +19,61 @@ type DownloadResult struct {
 	SHA256 string
 }
 
-// DownloadArtifact fetches artifact into destPath with hard bounds:
-//   - URL re-validated against the hostname allowlist (https, no userinfo,
-//     no unexpected port, exact host match) even though the manifest was
-//     already signed — a signature does not relax transport policy;
-//   - HTTP timeout from config;
-//   - Content-Length (when present) and streamed bytes capped at both the
-//     manifest size and MaxArtifactBytes;
-//   - final SHA-256 must equal the signed artifact hash.
-//
-// The write goes to destPath+".part" and is renamed only after the hash
-// matches, so a partial or wrong file never sits at the final path.
-func DownloadArtifact(ctx context.Context, cfg *Config, client *http.Client, artifact *ManifestArtifact, destPath string) (*DownloadResult, error) {
-	if err := validateArtifactURL(artifact.URL, cfg.AllowedHosts); err != nil {
-		return nil, err
+
+// DownloadBundledArtifact fetches the agent binary directly from the local API endpoint:
+//   - Origin matches the API origin (no cross-origin redirects);
+//   - Uses local-updater bearer authentication;
+//   - Final SHA256 must match targetSha;
+//   - Streamed bytes capped at MaxArtifactBytes and targetSize (if positive);
+//   - Written atomically with 0755 permissions.
+func DownloadBundledArtifact(ctx context.Context, cfg *Config, client *http.Client, targetURL, targetSha string, targetSize int64, destPath string) (*DownloadResult, error) {
+	apiURL, err := url.Parse(cfg.APIBase)
+	if err != nil {
+		return nil, fmt.Errorf("parse apiBase: %w", err)
+	}
+	fullURL := targetURL
+	if strings.HasPrefix(targetURL, "/") {
+		fullURL = strings.TrimRight(cfg.APIBase, "/") + targetURL
+	}
+	reqURL, err := url.Parse(fullURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse target URL: %w", err)
+	}
+	if reqURL.Scheme != apiURL.Scheme || reqURL.Host != apiURL.Host || reqURL.Port() != apiURL.Port() {
+		return nil, fmt.Errorf("artifact URL origin (%s://%s) does not match API origin (%s://%s)", reqURL.Scheme, reqURL.Host, apiURL.Scheme, apiURL.Host)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, artifact.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "vps-updater/1")
+	req.Header.Set("Authorization", "Bearer "+cfg.Credential)
+	req.Header.Set("User-Agent", "vps-updater/2")
+	req.Header.Set("X-Updater-Protocol-Version", "2")
 
-	resp, err := client.Do(req)
+	dlClient := client
+	if dlClient == nil {
+		dlClient = &http.Client{Timeout: cfg.HTTPTimeout}
+	}
+	customClient := *dlClient
+	customClient.CheckRedirect = func(redirReq *http.Request, via []*http.Request) error {
+		return fmt.Errorf("redirects are forbidden for artifact downloads")
+	}
+	resp, err := customClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("download: %w", err)
+		return nil, fmt.Errorf("download artifact: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download: status %d", resp.StatusCode)
 	}
-	if resp.ContentLength > 0 {
-		if resp.ContentLength > artifact.Size || resp.ContentLength > cfg.MaxArtifactBytes {
-			return nil, fmt.Errorf("download: content-length %d exceeds bound", resp.ContentLength)
-		}
-	}
 
-	limit := artifact.Size
-	if cfg.MaxArtifactBytes < limit {
-		limit = cfg.MaxArtifactBytes
+	limit := cfg.MaxArtifactBytes
+	if limit <= 0 {
+		limit = int64(defaultMaxArtifactBytes)
+	}
+	if targetSize > 0 && targetSize < limit {
+		limit = targetSize
 	}
 
 	partPath := destPath + ".part"
@@ -68,7 +86,7 @@ func DownloadArtifact(ctx context.Context, cfg *Config, client *http.Client, art
 	}
 	defer func() {
 		_ = f.Close()
-		_ = os.Remove(partPath) // no-op after successful rename
+		_ = os.Remove(partPath)
 	}()
 
 	h := sha256.New()
@@ -79,8 +97,8 @@ func DownloadArtifact(ctx context.Context, cfg *Config, client *http.Client, art
 	if n > limit {
 		return nil, fmt.Errorf("download exceeded %d bytes bound", limit)
 	}
-	if n != artifact.Size {
-		return nil, fmt.Errorf("download size %d != signed size %d", n, artifact.Size)
+	if targetSize > 0 && n != targetSize {
+		return nil, fmt.Errorf("download size %d != expected size %d", n, targetSize)
 	}
 	if err := f.Sync(); err != nil {
 		return nil, fmt.Errorf("fsync download: %w", err)
@@ -90,11 +108,9 @@ func DownloadArtifact(ctx context.Context, cfg *Config, client *http.Client, art
 	}
 
 	got := fmt.Sprintf("%x", h.Sum(nil))
-	if got != artifact.SHA256 {
-		return nil, fmt.Errorf("download sha256 %s does not match signed %s", got, artifact.SHA256)
+	if targetSha != "" && got != targetSha {
+		return nil, fmt.Errorf("download sha256 %s does not match expected %s", got, targetSha)
 	}
-	// The helper runs without DAC override capabilities. Set permissions on
-	// the temporary file before publishing it as the verified artifact.
 	if err := os.Chmod(partPath, 0o755); err != nil {
 		return nil, fmt.Errorf("make staged artifact readable: %w", err)
 	}
@@ -112,10 +128,7 @@ func newHTTPClient(cfg *Config) *http.Client {
 	return &http.Client{
 		Timeout: cfg.HTTPTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return fmt.Errorf("too many redirects")
-			}
-			return validateArtifactURL(req.URL.String(), cfg.AllowedHosts)
+			return fmt.Errorf("redirects are forbidden")
 		},
 	}
 }

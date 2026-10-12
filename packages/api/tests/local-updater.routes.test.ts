@@ -1,9 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { ArgumentsHost, HttpException } from "@nestjs/common";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -20,27 +19,13 @@ import { createSessionCookie } from "./test-helpers.js";
 
 const RELEASE_SHA = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
 const BASELINE_SHA = "1111111111111111111111111111111111111111";
-const POINTER_URL =
-  "https://github.com/example-org/vps-manager-nodejs/releases/latest/download/pointer.json";
-const MANIFEST_URL = `https://github.com/example-org/vps-manager-nodejs/releases/download/agent-${RELEASE_SHA}/manifest.json`;
-
-const fixturesDir = fileURLToPath(
-  new URL("../../../scripts/release/fixtures/", import.meta.url),
-);
-const fixturePublicKey = readFileSync(
-  join(fixturesDir, "manifest.pubkey.b64"),
-  "utf8",
-);
-const manifestText = readFileSync(
-  join(fixturesDir, "manifest.valid.json"),
-  "utf8",
-);
 
 // Environment captured before any test mutates it so unconfigured tests stay
 // deterministic regardless of execution order.
 const initialEnv = {
   AGENT_RELEASE_PUBLIC_KEY: process.env.AGENT_RELEASE_PUBLIC_KEY,
   AGENT_RELEASE_MANIFEST_URL: process.env.AGENT_RELEASE_MANIFEST_URL,
+  AGENT_BINARY_PATH: process.env.AGENT_BINARY_PATH,
 };
 const initialFetch = globalThis.fetch;
 
@@ -95,6 +80,7 @@ beforeEach(async () => {
     tempDir,
     localConfig.dashboardSessionSecret,
   );
+  setupBundledBinary();
 });
 
 afterEach(async () => {
@@ -107,39 +93,46 @@ afterEach(async () => {
   if (initialEnv.AGENT_RELEASE_MANIFEST_URL === undefined) {
     delete process.env.AGENT_RELEASE_MANIFEST_URL;
   }
+  process.env.AGENT_BINARY_PATH = initialEnv.AGENT_BINARY_PATH;
+  if (initialEnv.AGENT_BINARY_PATH === undefined) {
+    delete process.env.AGENT_BINARY_PATH;
+  }
   globalThis.fetch = initialFetch;
   await rm(tempDir, { recursive: true, force: true });
 });
 
-// ── App + catalog wiring ────────────────────────────────────────────────
-
-/**
- * The catalog service reads env and captures the global fetch at provider
- * construction, so configuration must be installed before createApp().
- */
-function installReleaseCatalog() {
-  process.env.AGENT_RELEASE_PUBLIC_KEY = fixturePublicKey;
-  process.env.AGENT_RELEASE_MANIFEST_URL = POINTER_URL;
-  globalThis.fetch = (async (input: unknown) => {
-    const url = String(input);
-    if (url.includes("pointer.json")) {
-      return new Response(
-        JSON.stringify({ releaseId: RELEASE_SHA, manifestUrl: MANIFEST_URL }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }
-    if (url === MANIFEST_URL) {
-      return new Response(manifestText, {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    return new Response("not found", { status: 404 });
-  }) as typeof fetch;
+function setupBundledBinary(customDir?: string) {
+  const dir = customDir ?? tempDir;
+  const binPath = join(dir, "vps-agent-linux-amd64");
+  const dummyElf = Buffer.alloc(128);
+  dummyElf[0] = 0x7f;
+  dummyElf[1] = 0x45; // 'E'
+  dummyElf[2] = 0x4c; // 'L'
+  dummyElf[3] = 0x46; // 'F'
+  dummyElf[4] = 2; // ELFCLASS64
+  dummyElf[5] = 1; // ELFDATA2LSB
+  dummyElf[6] = 1; // EV_CURRENT
+  dummyElf[7] = 0; // ELFOSABI_NONE
+  dummyElf[16] = 2; // ET_EXEC
+  dummyElf.writeUInt16LE(0x3e, 18); // EM_X86_64
+  dummyElf.write(`version.Build=${RELEASE_SHA}\0`, 32);
+  dummyElf.write("version.Value=1.4.0\0", 80);
+  writeFileSync(binPath, dummyElf);
+  const companion = {
+    os: "linux",
+    arch: "amd64",
+    version: "1.4.0",
+    buildId: RELEASE_SHA,
+    sha256: createHash("sha256").update(dummyElf).digest("hex"),
+    size: dummyElf.length,
+    publishedAt: new Date().toISOString(),
+  };
+  writeFileSync(`${binPath}.json`, JSON.stringify(companion, null, 2));
+  process.env.AGENT_BINARY_PATH = binPath;
+  return { binPath, companion };
 }
 
-function serveApp(options: { catalog?: boolean } = {}) {
-  if (options.catalog) installReleaseCatalog();
+function serveApp() {
   return createApp({
     store: vpsRepo,
     agent: agentRepo,
@@ -199,11 +192,12 @@ async function credentialToken(
   return `vma_${credential.id}_${secret}`;
 }
 
-async function touchHeartbeat(vpsId: string) {
+async function touchHeartbeat(vpsId: string, protocolVersion = 2) {
   await lugRepo.recordUpdaterHeartbeat({
     vpsId,
     lastSeenAt: new Date().toISOString(),
     credentialId: "cred_updater_test",
+    protocolVersion,
   });
 }
 
@@ -344,7 +338,8 @@ describe("job lifecycle over HTTP", () => {
     expect(view.body.data.job.id).toBe(created.id);
   });
 
-  it("reports release_unavailable when the catalog is unconfigured", async () => {
+  it("reports release_unavailable when the binary is unconfigured", async () => {
+    process.env.AGENT_BINARY_PATH = join(tempDir, "missing-binary");
     const server = serveApp();
     const vpsId = await createLocalVps();
     await touchHeartbeat(vpsId);
@@ -356,7 +351,6 @@ describe("job lifecycle over HTTP", () => {
         .send({ releaseId: RELEASE_SHA }),
     ).expect(409);
     expect(res.body.error.code).toBe("release_unavailable");
-    expect(res.body.error.message).toContain("not_configured");
 
     const view = await withCookie(
       request(server).get(`/api/vps/${vpsId}/agent-update`),
@@ -448,7 +442,7 @@ describe("claim, progress and result", () => {
     await upsertBuild(vpsId, BASELINE_SHA, 5_000);
     const job = await createQueuedJob(server, vpsId);
     const token = await credentialToken(vpsId, "local-updater");
-    const auth = { Authorization: `Bearer ${token}` };
+    const auth = { Authorization: `Bearer ${token}`, "X-Updater-Protocol-Version": "2" };
 
     // Claim: first claim fences the job; a second claim with a live lease is
     // an idempotent replay (same fencing token, no reclaim).
@@ -459,7 +453,6 @@ describe("claim, progress and result", () => {
     expect(claim1.body.data.job).toMatchObject({
       jobId: job.id,
       phase: "claimed",
-      manifestRaw: expect.any(String),
       release: {
         releaseId: RELEASE_SHA,
         buildId: RELEASE_SHA,

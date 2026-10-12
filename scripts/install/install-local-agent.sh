@@ -72,19 +72,30 @@ done
 # unset — indexing it unguarded aborts under `set -u` — so locate a sibling
 # library explicitly, and only fall back to downloading the pinned copy.
 
+SCRIPT_DIR=""
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
 INSTALLER_LIB_PATH=""
 if [[ -f "./installer-lib.sh" ]]; then
   INSTALLER_LIB_PATH="$(pwd)/installer-lib.sh"
-elif [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
-  INSTALLER_LIB_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/installer-lib.sh"
+elif [[ -n "$SCRIPT_DIR" && -f "${SCRIPT_DIR}/installer-lib.sh" ]]; then
+  INSTALLER_LIB_PATH="${SCRIPT_DIR}/installer-lib.sh"
 fi
 if [[ ! -f "$INSTALLER_LIB_PATH" ]]; then
   INSTALLER_LIB_PATH=""
 fi
 
 INSTALLER_DIR=""
-if [[ -n "$INSTALLER_LIB_PATH" ]]; then
+if [[ -n "$INSTALLER_LIB_PATH" && -f "$INSTALLER_LIB_PATH" && "$INSTALLER_LIB_PATH" != /tmp/* ]]; then
   INSTALLER_DIR="$(dirname "$INSTALLER_LIB_PATH")"
+elif [[ -n "$SCRIPT_DIR" ]]; then
+  INSTALLER_DIR="$SCRIPT_DIR"
+elif [[ -f "./scripts/install/installer-lib.sh" ]]; then
+  INSTALLER_DIR="$(pwd)/scripts/install"
+elif [[ -f "./installer-lib.sh" ]]; then
+  INSTALLER_DIR="$(pwd)"
 fi
 
 # Sourced only from a real sibling file. Downloading is a write plus a network
@@ -140,7 +151,9 @@ INSTALL_CLI=true
 SKIP_CLI=false
 CLI_DEST="${FLEXSERVERCTL_DEST_DEFAULT}"
 CLI_SRC=""
-
+UPGRADE_UPDATER=false
+UPDATER_SRC=""
+UPDATER_CONFIG_SRC=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary)
@@ -157,6 +170,12 @@ while [[ $# -gt 0 ]]; do
       UNINSTALL=true; shift ;;
     --enable-docker-metrics-access)
       ENABLE_DOCKER_ACCESS=true; shift ;;
+    --upgrade-updater)
+      UPGRADE_UPDATER=true; shift ;;
+    --updater-binary)
+      UPDATER_SRC="$2"; shift 2 ;;
+    --updater-config)
+      UPDATER_CONFIG_SRC="$2"; shift 2 ;;
     --install-cli)
       INSTALL_CLI=true; SKIP_CLI=false; shift ;;
     --skip-cli)
@@ -547,15 +566,89 @@ echo ""
 echo "Check status: sudo systemctl status ${SERVICE_NAME}"
 echo "View logs:    sudo journalctl -u ${SERVICE_NAME} -f"
 echo ""
-# Runbook pointer (plan §5): safe-upgrade updater is a separate, manual
-# bootstrap — installing the agent never installs or upgrades the updater.
-if [[ -x /usr/local/lib/vps-manager-agent/vps-updater ]]; then
+# Runbook pointer (plan §5): safe-upgrade updater
+locate_updater_installer() {
+  local script=""
+  if [[ -n "${INSTALLER_DIR:-}" && -f "${INSTALLER_DIR}/install-updater.sh" ]]; then
+    script="${INSTALLER_DIR}/install-updater.sh"
+  elif [[ -n "${SCRIPT_DIR:-}" && -f "${SCRIPT_DIR}/install-updater.sh" ]]; then
+    script="${SCRIPT_DIR}/install-updater.sh"
+  elif [[ -f "./scripts/install/install-updater.sh" ]]; then
+    script="$(pwd)/scripts/install/install-updater.sh"
+  elif [[ -f "./install-updater.sh" ]]; then
+    script="$(pwd)/install-updater.sh"
+  fi
+
+  if [[ -z "$script" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      script="${INSTALLER_DIR:-.}/install-updater.sh"
+    elif command -v curl &>/dev/null; then
+      script="$(mktemp)"
+      INSTALLER_TMP_FILES+=("$script")
+      if curl -fsSL -o "$script" "https://raw.githubusercontent.com/sondoan17/vps-manager-nodejs/main/scripts/install/install-updater.sh"; then
+        chmod 0755 "$script"
+      else
+        rm -f "$script"
+        script=""
+      fi
+    fi
+  fi
+  printf '%s' "$script"
+}
+
+UPDATER_INSTALL_SCRIPT="$(locate_updater_installer)"
+
+if [[ -x /usr/local/lib/vps-manager-agent/vps-updater || -f /etc/vps-updater/config.json ]]; then
   echo "Updater:  installed (pull-only safe-upgrade daemon)"
+  if [[ -z "$UPDATER_SRC" ]]; then
+    cand_dir="$(dirname "$BINARY_SRC")"
+    for cand in "${cand_dir}/vps-updater-linux-amd64" "${cand_dir}/vps-updater" "/app/agent/vps-updater-linux-amd64" "/opt/vps-manager/vps-updater-linux-amd64"; do
+      if [[ -f "$cand" ]]; then
+        UPDATER_SRC="$cand"
+        break
+      fi
+    done
+  fi
+  if [[ "$UPGRADE_UPDATER" == "true" || -n "$UPDATER_SRC" ]] && [[ -n "$UPDATER_SRC" && -f "$UPDATER_SRC" ]]; then
+    UPGRADE_CONFIG="${UPDATER_CONFIG_SRC:-/etc/vps-updater/config.json}"
+    echo "[Install] Refreshing updater via ${UPDATER_INSTALL_SCRIPT:-install-updater.sh} --upgrade..."
+    UPGRADE_ARGS=(--upgrade --binary "$UPDATER_SRC")
+    if [[ -f "$UPGRADE_CONFIG" ]]; then
+      UPGRADE_ARGS+=(--config "$UPGRADE_CONFIG")
+    fi
+    if [[ "$DRY_RUN" == "true" ]]; then
+      UPGRADE_ARGS+=(--dry-run)
+    fi
+    if [[ -z "$UPDATER_INSTALL_SCRIPT" || (! -f "$UPDATER_INSTALL_SCRIPT" && "$DRY_RUN" != "true") ]]; then
+      echo "Error: install-updater.sh not found for updater upgrade." >&2
+      exit 1
+    fi
+    if ! "$UPDATER_INSTALL_SCRIPT" "${UPGRADE_ARGS[@]}"; then
+      echo "Error: Updater upgrade failed." >&2
+      exit 1
+    fi
+    echo "  Status: sudo /usr/local/lib/vps-manager-agent/vps-updater status -config /etc/vps-updater/config.json"
+  else
+    echo "  Status: sudo /usr/local/lib/vps-manager-agent/vps-updater status -config /etc/vps-updater/config.json"
+    echo "  Upgrade to bundled protocol: sudo ${UPDATER_INSTALL_SCRIPT:-./scripts/install/install-updater.sh} --upgrade --binary <vps-updater>"
+  fi
+elif [[ -n "${UPDATER_CONFIG_SRC:-}" && -f "${UPDATER_CONFIG_SRC:-}" ]] && [[ -n "$UPDATER_SRC" && -f "$UPDATER_SRC" ]]; then
+  echo "Updater:  bootstrapping bundled safe-upgrade daemon..."
+  BOOTSTRAP_ARGS=(--upgrade --binary "$UPDATER_SRC" --config "$UPDATER_CONFIG_SRC")
+  if [[ "$DRY_RUN" == "true" ]]; then
+    BOOTSTRAP_ARGS+=(--dry-run)
+  fi
+  if [[ -z "$UPDATER_INSTALL_SCRIPT" || (! -f "$UPDATER_INSTALL_SCRIPT" && "$DRY_RUN" != "true") ]]; then
+    echo "Error: install-updater.sh not found for updater bootstrap." >&2
+    exit 1
+  fi
+  if ! "$UPDATER_INSTALL_SCRIPT" "${BOOTSTRAP_ARGS[@]}"; then
+    echo "Error: Bundled updater bootstrap failed." >&2
+    exit 1
+  fi
   echo "  Status: sudo /usr/local/lib/vps-manager-agent/vps-updater status -config /etc/vps-updater/config.json"
 else
-  echo "Updater:  not installed — agent upgrades stay manual (plan §4/§5)."
-  echo "  Bootstrap: sudo ./scripts/install/install-updater.sh --binary <vps-updater> --config <config.json> \\"
-  echo "             --manifest <manifest.json> --pubkey-file <pinned-release-pub.b64>"
-  echo "             (--sha256 <entry-sha256> optional extra pin; must equal the signed entry, never trusted alone)"
+  echo "Updater:  not installed."
+  echo "  Bootstrap: sudo ${UPDATER_INSTALL_SCRIPT:-./scripts/install/install-updater.sh} --upgrade --binary <vps-updater> --config <config.json>"
 fi
 echo "Runbook:  docs/local-agent-upgrade-operations.md (offline recovery, rollback hold/ack)"

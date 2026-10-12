@@ -109,6 +109,7 @@ export type UpdaterHeartbeat = {
   vpsId: string;
   lastSeenAt: string;
   credentialId?: string;
+  protocolVersion?: number;
 };
 
 // ── Timing policy ────────────────────────────────────────────────────────

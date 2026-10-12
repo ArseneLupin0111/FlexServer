@@ -51,8 +51,6 @@ const status = (overrides: Partial<AgentUpdateStatus> = {}): AgentUpdateStatus =
     version: "1.1.0",
     buildId: TARGET_BUILD,
     publishedAt: "2026-09-27T08:00:00.000Z",
-    manifestUrl: "https://releases.example.com/rel-2001/manifest.json",
-    publicKey: "cHVibGlja2V5",
     artifacts: [
       { os: "linux", arch: "amd64", size: 4096, sha256: "d".repeat(64), url: "https://releases.example.com/rel-2001/vps-agent-linux-amd64" },
     ],
@@ -152,6 +150,7 @@ describe("LocalAgentUpdate confirm flow", () => {
     expect(within(dialog).getByText(/1\.0\.0 \(aaaa1111aaaa\)/)).toBeInTheDocument();
     expect(within(dialog).getByText(/1\.1\.0 \(bbbb1111bbbb\)/)).toBeInTheDocument();
     expect(within(dialog).getByText("rel-2001")).toBeInTheDocument();
+    expect(within(dialog).getByText("Deployed API image")).toBeInTheDocument();
     expect(within(dialog).getByText(/Monitoring pauses for a few seconds while the agent restarts/)).toBeInTheDocument();
     expect(within(dialog).getByText(/Existing credentials are preserved/)).toBeInTheDocument();
 
@@ -189,7 +188,7 @@ describe("LocalAgentUpdate persisted job progress", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
 
-    expect(screen.getByText("Downloading release")).toBeInTheDocument();
+    expect(screen.getByText("Downloading update")).toBeInTheDocument();
     const bar = screen.getByRole("progressbar");
     expect(bar).toHaveAttribute("aria-valuenow", "42");
     expect(bar).toHaveAttribute("aria-valuemin", "0");
@@ -208,7 +207,7 @@ describe("LocalAgentUpdate persisted job progress", () => {
     const jobCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("/local-agent-upgrades/job-1"));
     expect(jobCalls.length).toBe(1);
     expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "55");
-    expect(screen.getByText("Downloading release").closest('[aria-live="polite"]')).not.toBeNull();
+    expect(screen.getByText("Downloading update").closest('[aria-live="polite"]')).not.toBeNull();
   });
 });
 
@@ -226,15 +225,6 @@ describe("LocalAgentUpdate disabled upgrade control", () => {
     expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "30");
   });
 
-  it("replaces the generic fallback with a state-specific reason when the release catalog is unavailable", async () => {
-    handler = () => ok(status({ state: "release_unavailable" }));
-    render(<LocalAgentUpdate vps={vps} variant="workspace" />);
-
-    expect(await screen.findByText("Release unavailable")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Upgrade agent" })).toBeDisabled();
-    expect(screen.getByText("The release catalog is unavailable — try again shortly.")).toBeInTheDocument();
-    expect(screen.queryByText(/unavailable right now/)).not.toBeInTheDocument();
-  });
 
   it("associates the disabled upgrade button with its reason for assistive tech", async () => {
     handler = () =>
@@ -324,31 +314,7 @@ describe("LocalAgentUpdate live SSE refresh", () => {
   });
 });
 
-describe("LocalAgentUpdate manual instructions", () => {
-  it("never offers an upgrade button without an updater and shows the verified manual steps", async () => {
-    handler = () =>
-      ok(
-        status({
-          state: "updater_unavailable",
-          updater: { installed: false, healthy: false, lastSeenAt: null },
-        }),
-      );
-    render(<LocalAgentUpdate vps={vps} variant="card" />);
-
-    await screen.findByText("Updater not installed");
-    expect(screen.queryByRole("button", { name: "Upgrade agent" })).not.toBeInTheDocument();
-
-    await fireEvent.click(screen.getByRole("button", { name: "View update instructions" }));
-    const dialog = await screen.findByRole("alertdialog");
-    expect(within(dialog).getByText(/Updater not installed — upgrade manually as root/)).toBeInTheDocument();
-    const script = within(dialog).getByText(/verify-manifest\.mjs/);
-    expect(script).toHaveTextContent("https://releases.example.com/rel-2001/manifest.json");
-    expect(script).toHaveTextContent("d".repeat(64));
-    expect(script).toHaveTextContent("sha256sum -c");
-    expect(script).toHaveTextContent("bbbb1111bbbb2222bbbb3333bbbb4444bbbb5555");
-    expect(within(dialog).getAllByText(/release rel-2001/).length).toBeGreaterThan(0);
-  });
-
+describe("LocalAgentUpdate updater absence", () => {
   it("hides the upgrade button whenever the updater is absent, even with a release available", async () => {
     handler = () =>
       ok(
@@ -362,7 +328,6 @@ describe("LocalAgentUpdate manual instructions", () => {
 
     await screen.findByText("Update status unknown");
     expect(screen.queryByRole("button", { name: "Upgrade agent" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "View update instructions" })).toBeInTheDocument();
   });
 });
 
@@ -385,7 +350,7 @@ describe("LocalAgentUpdate terminal results", () => {
     handler = () => ok(payload);
     const { unmount } = render(<LocalAgentUpdate vps={vps} variant="card" />);
 
-    await screen.findByText("Release unavailable");
+    await screen.findByText("Bundled agent unavailable");
     expect(screen.queryByText(/Upgrade confirmed/)).not.toBeInTheDocument();
     unmount();
     cleanup();
@@ -415,6 +380,27 @@ describe("LocalAgentUpdate terminal results", () => {
     expect(screen.queryByRole("button", { name: "Upgrade agent" })).not.toBeInTheDocument();
     expect(screen.queryByText(/manual intervention required/)).not.toBeInTheDocument();
   });
+  it("accurately labels a historical succeeded job as previous upgrade when a new bundled update is available", async () => {
+    handler = () =>
+      ok(
+        status({
+          state: "available",
+          job: job({
+            state: "succeeded",
+            progress: 100,
+            releaseVersion: "1.0.0",
+            releaseBuildId: CURRENT_BUILD,
+            completedAt: "2026-09-14T07:00:00.000Z",
+            result: { outcome: "succeeded", reportedBuildId: CURRENT_BUILD, heartbeatBuildId: CURRENT_BUILD, completedAt: "2026-09-14T07:00:00.000Z" },
+          }),
+        }),
+      );
+    render(<LocalAgentUpdate vps={vps} variant="workspace" />);
+    expect(await screen.findByText(/Previous upgrade — 1\.0\.0 \(aaaa1111aaaa\) was confirmed by heartbeat\./)).toBeInTheDocument();
+    expect(screen.queryByText(/is sending a fresh heartbeat/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Upgrade agent" })).toBeInTheDocument();
+  });
+
 
   it("marks an unverified rollback as needing manual intervention", async () => {
     handler = () =>
@@ -521,6 +507,6 @@ describe("LocalAgentUpdate live region persistence", () => {
     });
 
     expect(screen.getByRole("status")).toBe(region);
-    expect(region).toHaveTextContent("Downloading release");
+    expect(region).toHaveTextContent("Downloading update");
   });
 });

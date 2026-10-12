@@ -17,8 +17,7 @@ import type {
   LocalUpgradeWritePatch,
 } from "../persistence/repositories/local-upgrade.repository.js";
 import { newLocalUpgradeId } from "../persistence/repositories/local-upgrade.repository.js";
-import type { ReleaseCatalog } from "../release/index.js";
-import { RELEASE_CATALOG } from "../release/index.js";
+import { BundledAgentService } from "./bundled-agent.service.js";
 import {
   AGENT_REPOSITORY,
   APP_CONFIG,
@@ -61,8 +60,6 @@ export type AgentUpdateReleaseView = {
   buildId: string;
   publishedAt: string;
   artifacts: { os: string; arch: string; size: number; sha256: string; url: string }[];
-  manifestUrl: string;
-  publicKey: string;
 };
 
 export type AgentUpdateState =
@@ -221,7 +218,8 @@ export class LocalUpgradeService {
     private readonly repository: LocalUpgradeRepository,
     @Inject(AGENT_REPOSITORY) private readonly agents: AgentRepository,
     @Inject(VPS_REPOSITORY) private readonly vps: VpsRepository,
-    @Inject(RELEASE_CATALOG) private readonly catalog: ReleaseCatalog,
+    @Inject(BundledAgentService)
+    private readonly bundledAgent: BundledAgentService,
     @Inject(AuditService) private readonly audit: AuditService,
   ) {}
 
@@ -239,54 +237,51 @@ export class LocalUpgradeService {
       ? isFreshTimestamp(agentState.lastSeenAt)
       : false;
 
-    const release = arch
-      ? await this.catalog.getCompatibleRelease({
-          channel: "stable",
-          os: "linux",
-          arch,
-          apiContractVersion: AGENT_API_CONTRACT_VERSION,
-        })
-      : { status: "unavailable" as const, reason: "unsupported_architecture" };
+    const bundled = this.bundledAgent.getMetadata();
 
     let available: AgentUpdateReleaseView | null = null;
     let compatible = false;
     let reason: AgentUpdateCompatibilityReason = "release_unavailable";
     let releaseBuildIds: string[] = [];
-    if (release.status === "ok" && arch) {
-      const entry = release.release;
-      const artifacts = entry.artifacts.filter(
-        (artifact) => artifact.os === "linux" && artifact.arch === arch,
-      );
+    if (bundled) {
       available = {
-        releaseId: entry.releaseId,
-        version: entry.version,
-        buildId: entry.buildId,
-        publishedAt: entry.publishedAt,
-        artifacts,
-        manifestUrl: entry.manifestUrl,
-        publicKey: entry.publicKey,
+        releaseId: bundled.buildId,
+        version: bundled.version,
+        buildId: bundled.buildId,
+        publishedAt: bundled.publishedAt,
+        artifacts: [
+          {
+            os: "linux",
+            arch: bundled.arch,
+            size: bundled.size,
+            sha256: bundled.sha256,
+            url: `/api/local-updater/bundled/artifact`,
+          },
+        ],
       };
-      const apiOk =
-        entry.apiCompatibility.min <= AGENT_API_CONTRACT_VERSION &&
-        AGENT_API_CONTRACT_VERSION <= entry.apiCompatibility.max;
-      compatible = apiOk && artifacts.length > 0;
-      reason = !apiOk
-        ? "api_incompatible"
-        : artifacts.length === 0
-          ? "unsupported_architecture"
-          : "ok";
-      releaseBuildIds = [entry.releaseId, entry.buildId];
+      if (!arch || bundled.arch !== arch) {
+        compatible = false;
+        reason = "unsupported_architecture";
+        available = null;
+      } else {
+        compatible = true;
+        reason = "ok";
+      }
+      releaseBuildIds = [bundled.buildId];
     }
 
     const updaterHeartbeat = await this.repository.getUpdaterHeartbeat(vpsId);
+    const updaterHealthy = Boolean(
+      updaterHeartbeat &&
+        isFreshTimestamp(
+          updaterHeartbeat.lastSeenAt,
+          UPDATER_HEALTH_TTL_MS,
+        ) &&
+        (updaterHeartbeat.protocolVersion ?? 1) >= 2,
+    );
     const updater = {
       installed: updaterHeartbeat != null,
-      healthy: updaterHeartbeat
-        ? isFreshTimestamp(
-            updaterHeartbeat.lastSeenAt,
-            UPDATER_HEALTH_TTL_MS,
-          )
-        : false,
+      healthy: updaterHealthy,
       lastSeenAt: updaterHeartbeat?.lastSeenAt ?? null,
     };
 
@@ -295,7 +290,7 @@ export class LocalUpgradeService {
     if (!arch) {
       reason = "unsupported_architecture";
       state = "incompatible";
-    } else if (release.status !== "ok") {
+    } else if (!bundled) {
       state = "release_unavailable";
     } else if (!agentState?.lastSeenAt || !installedBuild || !fresh) {
       state = "unknown";
@@ -370,60 +365,63 @@ export class LocalUpgradeService {
         },
       });
     }
+    if ((updaterHeartbeat.protocolVersion ?? 1) < 2) {
+      throw new ConflictException({
+        error: {
+          message:
+            "Local updater is running an outdated protocol; upgrade the updater to enable bundled agent updates",
+          code: "updater_incompatible",
+        },
+      });
+    }
 
     const agentState = await this.agents.getState(vpsId);
     const systemInfo = await this.agents.getSystemInfo(vpsId);
     const arch = ARCH_BY_KERNEL[systemInfo?.kernel?.arch ?? ""];
     if (!arch) {
-      throw new BadRequestException({ error: { message: "Agent architecture is unknown or unsupported", code: "release_incompatible", reason: "unsupported_architecture" } });
+      throw new BadRequestException({
+        error: {
+          message: "Agent architecture is unknown or unsupported",
+          code: "release_incompatible",
+          reason: "unsupported_architecture",
+        },
+      });
     }
-    if (!agentState?.buildId || !agentState.lastSeenAt || !isFreshTimestamp(agentState.lastSeenAt)) {
-      throw new ConflictException({ error: { message: "A fresh agent heartbeat with build identity is required", code: "agent_unavailable" } });
-    }
-
-    const release = await this.catalog.getReleaseById({
-      releaseId: input.releaseId,
-      os: "linux",
-      arch,
-      apiContractVersion: AGENT_API_CONTRACT_VERSION,
-    });
-    if (release.status === "unavailable") {
+    if (
+      !agentState?.buildId ||
+      !agentState.lastSeenAt ||
+      !isFreshTimestamp(agentState.lastSeenAt)
+    ) {
       throw new ConflictException({
         error: {
-          message: `Release catalog unavailable: ${release.reason}`,
+          message: "A fresh agent heartbeat with build identity is required",
+          code: "agent_unavailable",
+        },
+      });
+    }
+
+    const bundled = this.bundledAgent.getMetadata();
+    if (!bundled) {
+      throw new ConflictException({
+        error: {
+          message: "Bundled agent binary is not available",
           code: "release_unavailable",
         },
       });
     }
-    if (release.status === "not_found") {
+    if (bundled.buildId !== input.releaseId) {
       throw new ConflictException({
         error: {
-          message: "The requested release no longer matches the signed pointer",
+          message:
+            "The requested release does not match the deployed bundled binary",
           code: "release_changed",
         },
       });
     }
-
-    const entry = release.release;
-    if (
-      entry.apiCompatibility.min > AGENT_API_CONTRACT_VERSION ||
-      AGENT_API_CONTRACT_VERSION > entry.apiCompatibility.max
-    ) {
+    if (bundled.arch !== arch) {
       throw new BadRequestException({
         error: {
-          message: "Release does not support this API contract version",
-          code: "release_incompatible",
-          reason: "api_incompatible",
-        },
-      });
-    }
-    const artifact = entry.artifacts.find(
-      (candidate) => candidate.os === "linux" && candidate.arch === arch,
-    );
-    if (!artifact) {
-      throw new BadRequestException({
-        error: {
-          message: `No linux/${arch} artifact in this release`,
+          message: `Bundled agent binary arch (${bundled.arch}) does not match host architecture (${arch})`,
           code: "release_incompatible",
           reason: "unsupported_architecture",
         },
@@ -435,11 +433,7 @@ export class LocalUpgradeService {
       agentState.lastSeenAt &&
       isFreshTimestamp(agentState.lastSeenAt)
     );
-    if (
-      installedFresh &&
-      (agentState?.buildId === entry.releaseId ||
-        agentState?.buildId === entry.buildId)
-    ) {
+    if (installedFresh && agentState?.buildId === bundled.buildId) {
       throw new ConflictException({
         error: {
           message: "Agent is already running this release",
@@ -450,18 +444,19 @@ export class LocalUpgradeService {
 
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
+    const jobId = newLocalUpgradeId();
     const job: LocalUpgradeJob = {
-      id: newLocalUpgradeId(),
+      id: jobId,
       vpsId,
       state: "queued",
       progress: null,
-      releaseId: entry.releaseId,
-      releaseVersion: entry.version,
-      releaseBuildId: entry.buildId,
-      targetSha256: artifact.sha256,
-      targetUrl: artifact.url,
-      targetSizeBytes: artifact.size,
-      manifestRaw: entry.manifestRaw,
+      releaseId: bundled.buildId,
+      releaseVersion: bundled.version,
+      releaseBuildId: bundled.buildId,
+      targetSha256: bundled.sha256,
+      targetUrl: `/api/local-updater/jobs/${jobId}/artifact`,
+      targetSizeBytes: bundled.size,
+      manifestRaw: "",
       ...(agentState?.buildId ? { baselineBuildId: agentState.buildId } : {}),
       actor: options.actor ?? "dashboard",
       ...(options.idempotencyKey
@@ -533,18 +528,26 @@ export class LocalUpgradeService {
 
   async claim(
     credential: AgentCredential,
+    protocolVersion: number = 2,
   ): Promise<UpdaterClaimResult | null> {
     const nowMs = Date.now();
     await this.repository.recordUpdaterHeartbeat({
       vpsId: credential.vpsId,
       lastSeenAt: new Date(nowMs).toISOString(),
       credentialId: credential.id,
+      protocolVersion,
     });
     await this.reconcile(credential.vpsId, nowMs);
 
     for (let attempt = 0; attempt < 3; attempt++) {
       const job = await this.repository.getActiveByVps(credential.vpsId);
       if (!job) return null;
+      if (isTerminalState(job.state)) return null;
+
+      // Protocol guard: legacy updater (protocol < 2) requires signed manifest
+      if (!job.manifestRaw && protocolVersion < 2) {
+        return null;
+      }
       const leaseValid =
         job.leaseExpiresAt != null && nowMs <= Date.parse(job.leaseExpiresAt);
       if (leaseValid) {
@@ -602,12 +605,14 @@ export class LocalUpgradeService {
     credential: AgentCredential,
     jobId: string,
     input: LocalUpdaterProgressInput,
+    protocolVersion: number = 2,
   ): Promise<LocalUpgradeJob> {
     const nowMs = Date.now();
     await this.repository.recordUpdaterHeartbeat({
       vpsId: credential.vpsId,
       lastSeenAt: new Date(nowMs).toISOString(),
       credentialId: credential.id,
+      protocolVersion,
     });
 
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -647,13 +652,24 @@ export class LocalUpgradeService {
     credential: AgentCredential,
     jobId: string,
     input: LocalUpdaterResultInput,
+    protocolVersion: number = 2,
   ): Promise<UpdaterResultOutcome> {
     const nowMs = Date.now();
     await this.repository.recordUpdaterHeartbeat({
       vpsId: credential.vpsId,
       lastSeenAt: new Date(nowMs).toISOString(),
       credentialId: credential.id,
+      protocolVersion,
     });
+    return this.settleResult(credential, jobId, input, nowMs);
+  }
+
+  private async settleResult(
+    credential: AgentCredential,
+    jobId: string,
+    input: LocalUpdaterResultInput,
+    nowMs: number,
+  ): Promise<UpdaterResultOutcome> {
 
     for (let attempt = 0; attempt < 3; attempt++) {
       const job = await this.requireJob(credential.vpsId, jobId);
@@ -831,6 +847,7 @@ export class LocalUpgradeService {
   async getUpdaterJob(
     credential: AgentCredential,
     jobId: string,
+    _protocolVersion?: string,
   ): Promise<LocalUpgradeJob> {
     await this.reconcile(credential.vpsId, Date.now());
     return this.requireJob(credential.vpsId, jobId);
@@ -1064,5 +1081,41 @@ export class LocalUpgradeService {
         ...(jobId ? { jobId } : {}),
       },
     });
+  }
+  async getJobArtifact(
+    credential: AgentCredential,
+    jobId: string,
+  ): Promise<{ filePath: string; size: number; sha256: string }> {
+    await this.reconcile(credential.vpsId, Date.now());
+    const job = await this.requireJob(credential.vpsId, jobId);
+    if (isTerminalState(job.state) || job.state === "queued") {
+      throw this.jobTerminalConflict();
+    }
+    const bundled = this.bundledAgent.getMetadata();
+    if (!bundled) {
+      throw new NotFoundException({
+        error: {
+          message: "Bundled agent binary not found",
+          code: "artifact_missing",
+        },
+      });
+    }
+    if (
+      bundled.sha256 !== job.targetSha256 ||
+      bundled.buildId !== job.releaseBuildId
+    ) {
+      throw new ConflictException({
+        error: {
+          message:
+            "Deployed agent binary does not match the pinned job artifact",
+          code: "artifact_mismatch",
+        },
+      });
+    }
+    return {
+      filePath: bundled.filePath,
+      size: bundled.size,
+      sha256: bundled.sha256,
+    };
   }
 }

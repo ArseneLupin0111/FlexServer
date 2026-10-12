@@ -1,3 +1,4 @@
+import { createReadStream } from "node:fs";
 import {
   Body,
   Controller,
@@ -8,8 +9,9 @@ import {
   Param,
   Post,
   Req,
+  Res,
 } from "@nestjs/common";
-import type { Request } from "express";
+import type { Request, Response } from "express";
 import type { AgentCredential } from "../agents/agent.models.js";
 import { AgentService } from "../agents/agent.service.js";
 import type { VpsRepository } from "../persistence/repositories/vps.repository.js";
@@ -48,7 +50,25 @@ function updaterJob(job: LocalUpgradeJob, requiresReconcile = false) {
       buildId: job.releaseBuildId,
       targetSha256: job.targetSha256,
     },
+    targetUrl: job.targetUrl || `/api/local-updater/jobs/${job.id}/artifact`,
+    targetSha256: job.targetSha256,
+    targetSizeBytes: job.targetSizeBytes,
   };
+}
+
+function extractProtocolVersion(req: Request): number {
+  const header = req.header("x-updater-protocol-version")?.trim();
+  if (header) {
+    const parsed = parseInt(header, 10);
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+  }
+  const ua = req.header("user-agent") || "";
+  const match = /vps-updater\/(\d+)/i.exec(ua);
+  if (match) {
+    const parsed = parseInt(match[1], 10);
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return 1;
 }
 
 /**
@@ -70,7 +90,8 @@ export class LocalUpdaterController {
   @HttpCode(200)
   async claim(@Req() req: Request) {
     const credential = await this.authenticate(req);
-    const claim = await this.service.claim(credential);
+    const protocolVersion = extractProtocolVersion(req);
+    const claim = await this.service.claim(credential, protocolVersion);
     if (!claim) return { data: { job: null } };
     return {
       data: {
@@ -88,8 +109,9 @@ export class LocalUpdaterController {
     @Body() body: unknown,
   ) {
     const credential = await this.authenticate(req);
+    const protocolVersion = extractProtocolVersion(req);
     const input = localUpdaterProgressSchema.parse(body);
-    const job = await this.service.progress(credential, jobId, input);
+    const job = await this.service.progress(credential, jobId, input, protocolVersion);
     return { data: { job: updaterJob(job) } };
   }
 
@@ -101,8 +123,9 @@ export class LocalUpdaterController {
     @Body() body: unknown,
   ) {
     const credential = await this.authenticate(req);
+    const protocolVersion = extractProtocolVersion(req);
     const input = localUpdaterResultSchema.parse(body);
-    const outcome = await this.service.result(credential, jobId, input);
+    const outcome = await this.service.result(credential, jobId, input, protocolVersion);
     return {
       data: {
         job: updaterJob(outcome.job),
@@ -116,9 +139,26 @@ export class LocalUpdaterController {
     const credential = await this.authenticate(req);
     return {
       data: {
-        job: updaterJob(await this.service.getUpdaterJob(credential, jobId)),
+        job: updaterJob(
+          await this.service.getUpdaterJob(credential, jobId),
+        ),
       },
     };
+  }
+
+  @Get("jobs/:jobId/artifact")
+  async getArtifact(
+    @Req() req: Request,
+    @Param("jobId") jobId: string,
+    @Res() res: Response,
+  ) {
+    const credential = await this.authenticate(req);
+    const artifact = await this.service.getJobArtifact(credential, jobId);
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Length", artifact.size);
+    res.setHeader("X-Artifact-Sha256", artifact.sha256);
+    const stream = createReadStream(artifact.filePath);
+    stream.pipe(res);
   }
 
   private async authenticate(req: Request): Promise<AgentCredential> {

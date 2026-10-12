@@ -915,3 +915,58 @@ jobs:
           $SSH "cd '$DEPLOY_PATH' && docker compose up -d --remove-orphans"
           $SSH "cd '$DEPLOY_PATH' && docker compose ps"
           $SSH "for i in \$(seq 1 30); do curl -fsS http://127.0.0.1:3000/api/health && exit 0; sleep 2; done; docker compose -f '$DEPLOY_PATH/docker-compose.yml' logs --tail=80; exit 1"
+          # Refresh or bootstrap local updater on the host using the bundled binary from API image
+          echo "Updating host local-updater from API image..."
+          scp "${SSH_OPTS[@]}" scripts/install/install-updater.sh scripts/install/installer-lib.sh "${VPS_USER}@${VPS_HOST}:/tmp/"
+          $SSH "chmod 0755 /tmp/install-updater.sh /tmp/installer-lib.sh"
+          $SSH "
+            set -euo pipefail
+            SUDO=\"\"
+            if [ \"\$(id -u)\" -ne 0 ]; then
+              SUDO=\"sudo\"
+            fi
+
+            UPDATER_TMP=\"\$(mktemp /tmp/vps-updater-bundled.XXXXXX)\"
+            if ! docker run --rm --entrypoint cat '$API_IMAGE' /app/agent/vps-updater-linux-amd64 > \"\$UPDATER_TMP\" || [ ! -s \"\$UPDATER_TMP\" ]; then
+              echo 'Error: Failed to extract bundled updater binary from API image.' >&2
+              rm -f \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh
+              exit 1
+            fi
+            chmod 0755 \"\$UPDATER_TMP\"
+
+            if [ -x /usr/local/lib/vps-manager-agent/vps-updater ] || [ -f /etc/vps-updater/config.json ]; then
+              echo 'Upgrading existing local updater to bundled protocol daemon...'
+              if ! \$SUDO /tmp/install-updater.sh --upgrade --binary \"\$UPDATER_TMP\" --config /etc/vps-updater/config.json; then
+                echo 'Error: Failed to upgrade existing local updater on host.' >&2
+                rm -f \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh
+                exit 1
+              fi
+              echo 'Local updater successfully upgraded.'
+            else
+              UPDATER_URL=\"${AGENT_PUBLIC_BASE_URL_VALUE:-$DASHBOARD_PUBLIC_ORIGIN_VALUE}\"
+              if [[ \"\$UPDATER_URL\" == https://* ]]; then
+                echo 'Bootstrapping absent local updater using existing provisioning...'
+                CONFIG_TMP=\"\$(mktemp /tmp/vps-updater-cfg.XXXXXX)\"
+                JSON_OUT=\"\$(cd '$DEPLOY_PATH' && docker compose run --rm -T api node dist/scripts/bootstrap-local-updater.js --backend-url \"\$UPDATER_URL\" --rotate 2>/dev/null || true)\"
+                TOKEN=\"\$(printf '%s' \"\$JSON_OUT\" | sed -n 's/.*\"token\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' | head -1)\"
+                if [ -z \"\$TOKEN\" ]; then
+                  echo 'Error: Failed to provision absent local updater credential from API.' >&2
+                  rm -f \"\$CONFIG_TMP\" \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh
+                  exit 1
+                fi
+                printf '{\n  \"apiBase\": \"%s\",\n  \"credential\": \"%s\",\n  \"agentBinary\": \"/usr/local/bin/vps-manager-agent\",\n  \"agentUnit\": \"vps-manager-agent.service\",\n  \"stateDir\": \"/var/lib/vps-updater\"\n}\n' \"\$UPDATER_URL\" \"\$TOKEN\" > \"\$CONFIG_TMP\"
+                chmod 0600 \"\$CONFIG_TMP\"
+                if ! \$SUDO /tmp/install-updater.sh --upgrade --binary \"\$UPDATER_TMP\" --config \"\$CONFIG_TMP\"; then
+                  echo 'Error: Failed to bootstrap absent local updater on host.' >&2
+                  rm -f \"\$CONFIG_TMP\" \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh
+                  exit 1
+                fi
+                rm -f \"\$CONFIG_TMP\"
+                echo 'Local updater successfully bootstrapped without exposing secrets.'
+              else
+                echo 'Local updater is absent and no HTTPS backend URL configured; skipping updater bootstrap.'
+              fi
+            fi
+            rm -f \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh
+          "
+          echo "Host local-updater refresh completed."

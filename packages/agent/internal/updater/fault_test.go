@@ -146,8 +146,6 @@ func testConfig(t *testing.T, rel *releaseFixture) *Config {
 	cfg := &Config{
 		APIBase:                "https://api.test.invalid",
 		Credential:             "vma_test_credential",
-		PinnedPublicKey:        rel.pubKeyB64,
-		AllowedHosts:           []string{"localhost", "example.com"},
 		AgentBinary:            filepath.Join(binDir, "vps-manager-agent"),
 		AgentUnit:              "vps-manager-agent.service",
 		StateDir:               stateDir,
@@ -160,6 +158,23 @@ func testConfig(t *testing.T, rel *releaseFixture) *Config {
 	// In-process fault harness only: redirect the fixed production targets
 	// and allowlist at temp dirs.
 	cfg.EnableTestOverrides()
+	if rel != nil {
+		job := &ClaimedJob{
+			JobID:           faultJobID,
+			Phase:           PhaseRestarting,
+			TargetSha256:    rel.sha,
+			TargetSizeBytes: int64(len(rel.content)),
+			LeaseExpiresAt:  FlexTime{Time: time.Now().Add(5 * time.Minute)},
+			PhaseDeadlineAt: FlexTime{Time: time.Now().Add(5 * time.Minute)},
+			DeadlineAt:      FlexTime{Time: time.Now().Add(5 * time.Minute)},
+			Release: ReleaseInfo{
+				ReleaseID:    rel.releaseID,
+				BuildID:      rel.buildID,
+				TargetSha256: rel.sha,
+			},
+		}
+		cfg.SetTestAuthorizer(&fakeAPI{job: job})
+	}
 	if err := cfg.NormalizeAndValidate(); err != nil {
 		t.Fatalf("test config: %v", err)
 	}
@@ -331,8 +346,14 @@ func seedStaging(t *testing.T, cfg *Config, rel *releaseFixture) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir staging: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), rel.manifestRaw, 0o644); err != nil {
-		t.Fatalf("write staging manifest: %v", err)
+	metaBytes, _ := json.Marshal(map[string]any{
+		"jobId":   faultJobID,
+		"buildId": rel.buildID,
+		"sha256":  rel.sha,
+		"size":    len(rel.content),
+	})
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), metaBytes, 0o644); err != nil {
+		t.Fatalf("write staging meta: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "artifact.bin"), rel.content, 0o755); err != nil {
 		t.Fatalf("write staging artifact: %v", err)
@@ -428,7 +449,7 @@ func mustRead(t *testing.T, path string) []byte {
 // TestHelperRejectsTamperedManifestNoSwap: a one-byte tamper of the signed
 // manifest must abort the privileged apply before ANY mutation: binary
 // untouched, no backup, no helper journal, verify_failed reported.
-func TestHelperRejectsTamperedManifestNoSwap(t *testing.T) {
+func TestHelperRejectsTamperedMetadataNoSwap(t *testing.T) {
 	rel := newRelease(t, []byte("new-agent-binary-content"), "https://example.com/agent")
 	cfg := testConfig(t, rel)
 	events := &eventLog{}
@@ -438,11 +459,15 @@ func TestHelperRejectsTamperedManifestNoSwap(t *testing.T) {
 	writeFile(t, cfg.AgentBinary, oldContent, 0o755)
 	oldSha := shaOf(t, cfg.AgentBinary)
 
-	// Stage a tampered manifest with a matching (but now-unsigned) artifact.
 	seedStaging(t, cfg, rel)
-	tampered := rel.tamper(t)
-	if err := os.WriteFile(filepath.Join(stagingDir(cfg.StateDir, faultJobID), "manifest.json"), tampered, 0o644); err != nil {
-		t.Fatalf("overwrite tampered manifest: %v", err)
+	tamperedMeta, _ := json.Marshal(map[string]any{
+		"jobId":   faultJobID,
+		"buildId": "tampered-build-id-different",
+		"sha256":  rel.sha,
+		"size":    len(rel.content),
+	})
+	if err := os.WriteFile(filepath.Join(stagingDir(cfg.StateDir, faultJobID), "meta.json"), tamperedMeta, 0o644); err != nil {
+		t.Fatalf("overwrite tampered meta: %v", err)
 	}
 	writePending(t, cfg, actionApply, faultJobID)
 
@@ -454,8 +479,8 @@ func TestHelperRejectsTamperedManifestNoSwap(t *testing.T) {
 	if res.Outcome != "verify_failed" {
 		t.Fatalf("outcome = %q, want verify_failed (detail: %s)", res.Outcome, res.Detail)
 	}
-	if !strings.Contains(res.Detail, "signature") {
-		t.Fatalf("detail %q does not mention signature verification", res.Detail)
+	if !strings.Contains(res.Detail, "buildId mismatch") {
+		t.Fatalf("detail %q does not mention buildId mismatch", res.Detail)
 	}
 	if got := shaOf(t, cfg.AgentBinary); got != oldSha || string(mustRead(t, cfg.AgentBinary)) != string(oldContent) {
 		t.Fatalf("binary mutated by rejected apply: sha %s", got)
@@ -479,7 +504,7 @@ func TestHelperRejectsTamperedManifestNoSwap(t *testing.T) {
 // TestDaemonFailsPreSwapOnTamperedManifest: the same failure at daemon level
 // reports outcome=failed to the API, never writes an apply request, and
 // clears its journal only after the server's terminal ruling.
-func TestDaemonFailsPreSwapOnTamperedManifest(t *testing.T) {
+func TestDaemonFailsPreSwapOnMissingTargetSha(t *testing.T) {
 	rel := newRelease(t, []byte("daemon-tampered-content"), "https://example.com/agent")
 	cfg := testConfig(t, rel)
 	events := &eventLog{}
@@ -489,15 +514,11 @@ func TestDaemonFailsPreSwapOnTamperedManifest(t *testing.T) {
 	writeFile(t, cfg.AgentBinary, oldContent, 0o755)
 	oldSha := shaOf(t, cfg.AgentBinary)
 
-	job := &ClaimedJob{JobID: faultJobID, Phase: "queued", FencingToken: 1,
-		ManifestRaw: string(rel.tamper(t))}
-	job.Release.ReleaseID, job.Release.BuildID = rel.releaseID, rel.buildID
-	job.Release.Version, job.Release.TargetSha256 = "9.9.9", rel.sha
+	job := &ClaimedJob{JobID: faultJobID, Phase: "queued", FencingToken: 1}
 	api := newFakeAPI(job, events)
+	d := NewDaemon(cfg, api)
 
 	startHelperLoop(t, cfg, events)
-
-	d := NewDaemon(cfg, api)
 	d.stepClaim(context.Background())
 	j, err := d.journal.Load()
 	if err != nil || j == nil {
@@ -1424,4 +1445,92 @@ func TestHelperRefusesSymlinkedStateDirs(t *testing.T) {
 			t.Fatalf("no result may be written on a refused boundary: %v", serr)
 		}
 	})
+}
+
+func TestHelperBundledUpdate(t *testing.T) {
+	content := []byte("NEW-bundled-binary-content")
+	sha := SHA256Hex(content)
+	buildID := SHA256Hex([]byte(sha + "b"))[:40]
+
+	events := &eventLog{}
+	installSeams(t, events, buildID)
+
+	stateDir := t.TempDir()
+	binDir := t.TempDir()
+	agentBin := filepath.Join(binDir, "vps-manager-agent")
+	if err := os.WriteFile(agentBin, []byte("OLD-binary"), 0o755); err != nil {
+		t.Fatalf("write old binary: %v", err)
+	}
+
+	cfg := &Config{
+		APIBase:      "https://api.test.invalid",
+		Credential:   "vma_test_credential",
+		AgentBinary:  agentBin,
+		AgentUnit:    "vps-manager-agent.service",
+		StateDir:     stateDir,
+	}
+	jobID := "bundled-job-test-1"
+	job := &ClaimedJob{
+		JobID:           jobID,
+		Phase:           PhaseRestarting,
+		TargetSha256:    sha,
+		TargetSizeBytes: int64(len(content)),
+		LeaseExpiresAt:  FlexTime{Time: time.Now().Add(5 * time.Minute)},
+		PhaseDeadlineAt: FlexTime{Time: time.Now().Add(5 * time.Minute)},
+		DeadlineAt:      FlexTime{Time: time.Now().Add(5 * time.Minute)},
+		Release: ReleaseInfo{
+			ReleaseID:    buildID,
+			BuildID:      buildID,
+			TargetSha256: sha,
+		},
+	}
+	cfg.EnableTestOverrides()
+	cfg.SetTestAuthorizer(&fakeAPI{job: job})
+	if err := cfg.NormalizeAndValidate(); err != nil {
+		t.Fatalf("NormalizeAndValidate: %v", err)
+	}
+	staging := stagingDir(cfg.StateDir, jobID)
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		t.Fatalf("mkdir staging: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "artifact.bin"), content, 0o755); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	meta := map[string]any{
+		"jobId":   jobID,
+		"buildId": buildID,
+		"sha256":  sha,
+		"size":    int64(len(content)),
+	}
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "meta.json"), metaBytes, 0o644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	writePending(t, cfg, actionApply, jobID)
+
+	if err := RunHelper(context.Background(), cfg); err != nil {
+		t.Fatalf("RunHelper: %v", err)
+	}
+
+	res, err := ReadResult(cfg.StateDir, actionApply, jobID)
+	if err != nil {
+		t.Fatalf("ReadResult: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected result, got nil")
+	}
+	if res.Outcome != "restarted" {
+		t.Fatalf("expected outcome 'restarted', got %q (%s)", res.Outcome, res.Detail)
+	}
+	gotNew, err := os.ReadFile(agentBin)
+	if err != nil {
+		t.Fatalf("read new binary: %v", err)
+	}
+	if string(gotNew) != string(content) {
+		t.Fatalf("expected binary content %q, got %q", string(content), string(gotNew))
+	}
 }

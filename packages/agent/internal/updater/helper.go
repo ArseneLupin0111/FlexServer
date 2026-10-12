@@ -229,7 +229,19 @@ func ReadResult(stateDir, action, jobID string) (*HelperResult, error) {
 // file, performs the fixed privileged operations, and writes results. It
 // accepts no argv — the daemon can only ask for actions the helper already
 // knows how to do with root-owned state.
+// JobAuthorizer fetches and validates job authorization from the local API.
+type JobAuthorizer interface {
+	Get(ctx context.Context, jobID string) (*ClaimedJob, error)
+}
+
 func RunHelper(ctx context.Context, cfg *Config) error {
+	return RunHelperWithAuthorizer(ctx, cfg, nil)
+}
+
+func RunHelperWithAuthorizer(ctx context.Context, cfg *Config, auth JobAuthorizer) error {
+	if auth == nil && cfg.testAuthorizer != nil {
+		auth = cfg.testAuthorizer
+	}
 	// Fail closed before any privileged work: the state layout must be real
 	// directories, never planted symlinks (requireSecureDir).
 	if err := requireSecureDir(helperRoot(cfg.StateDir)); err != nil {
@@ -266,7 +278,7 @@ func RunHelper(ctx context.Context, cfg *Config) error {
 		var res *HelperResult
 		switch action {
 		case actionApply:
-			res = handleApply(ctx, cfg, jobID)
+			res = handleApply(ctx, cfg, auth, jobID)
 		case actionRollback:
 			res = handleRollback(ctx, cfg, jobID)
 		case actionCleanup:
@@ -304,7 +316,7 @@ func parsePendingName(name string) (action, jobID string, ok bool) {
 // apply re-verifies everything from scratch; a leftover helper journal turns
 // the call into pure reconciliation so a re-triggered path unit can never
 // double-swap.
-func handleApply(ctx context.Context, cfg *Config, jobID string) *HelperResult {
+func handleApply(ctx context.Context, cfg *Config, auth JobAuthorizer, jobID string) *HelperResult {
 	res := &HelperResult{JobID: jobID, Action: actionApply}
 
 	hj, err := LoadHelperJournal(cfg.StateDir)
@@ -317,30 +329,87 @@ func handleApply(ctx context.Context, cfg *Config, jobID string) *HelperResult {
 	}
 
 	staging := stagingDir(cfg.StateDir, jobID)
-	manifestPath := filepath.Join(staging, "manifest.json")
-	// Refuse a planted symlink: a replaced manifest must not redirect the
-	// privileged read (the signature check is the arbiter of content, but
-	// the read itself stays bounded to real staging files).
-	if fi, err := os.Lstat(manifestPath); err != nil {
-		res.Outcome, res.Detail = "verify_failed", "staging manifest missing: "+err.Error()
-		return res
-	} else if !fi.Mode().IsRegular() {
-		res.Outcome, res.Detail = "verify_failed", "staging manifest is not a regular file"
+	metaPath := filepath.Join(staging, "meta.json")
+
+	if auth == nil {
+		auth = NewClient(cfg)
+	}
+	apiJob, err := auth.Get(ctx, jobID)
+	if err != nil {
+		res.Outcome, res.Detail = "verify_failed", "api verify job authorization: " + err.Error()
 		return res
 	}
-	manifestRaw, err := os.ReadFile(manifestPath)
-	if err != nil {
-		res.Outcome, res.Detail = "verify_failed", "staging manifest missing: "+err.Error()
+	if apiJob == nil || apiJob.JobID != jobID {
+		res.Outcome, res.Detail = "verify_failed", "api returned invalid job"
 		return res
 	}
-	m, err := VerifyManifest(manifestRaw, cfg.PinnedPublicKey)
-	if err != nil {
-		res.Outcome, res.Detail = "verify_failed", err.Error()
+	if apiJob.EffectivePhase() != PhaseRestarting {
+		res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("job not in restarting phase: %s", apiJob.EffectivePhase())
 		return res
 	}
-	artifact, err := m.AgentArtifact(cfg.AllowedHosts)
+	now := time.Now()
+	if apiJob.LeaseExpiresAt.IsZero() || now.After(apiJob.LeaseExpiresAt.Time) {
+		res.Outcome, res.Detail = "verify_failed", "job lease missing or expired"
+		return res
+	}
+	if apiJob.PhaseDeadlineAt.IsZero() || now.After(apiJob.PhaseDeadlineAt.Time) {
+		res.Outcome, res.Detail = "verify_failed", "job phase deadline missing or expired"
+		return res
+	}
+	if apiJob.DeadlineAt.IsZero() || now.After(apiJob.DeadlineAt.Time) {
+		res.Outcome, res.Detail = "verify_failed", "job overall deadline missing or expired"
+		return res
+	}
+
+	expectedSha := apiJob.TargetSha256
+	if !hex64Re.MatchString(expectedSha) {
+		res.Outcome, res.Detail = "verify_failed", "api job targetSha256 must be 64-hex SHA-256"
+		return res
+	}
+	expectedBuildID := apiJob.Release.BuildID
+	if !hex40Re.MatchString(expectedBuildID) {
+		res.Outcome, res.Detail = "verify_failed", "api job buildId must be 40-hex git SHA"
+		return res
+	}
+	maxBytes := cfg.MaxArtifactBytes
+	if maxBytes <= 0 {
+		maxBytes = int64(defaultMaxArtifactBytes)
+	}
+	expectedSize := apiJob.TargetSizeBytes
+	if expectedSize <= 0 || expectedSize > maxBytes {
+		res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("api job target size %d out of bounds (1..%d)", expectedSize, maxBytes)
+		return res
+	}
+	metaFi, err := os.Lstat(metaPath)
+	if err != nil || !metaFi.Mode().IsRegular() {
+		res.Outcome, res.Detail = "verify_failed", "staging metadata meta.json missing"
+		return res
+	}
+	raw, err := os.ReadFile(metaPath)
 	if err != nil {
-		res.Outcome, res.Detail = "verify_failed", err.Error()
+		res.Outcome, res.Detail = "verify_failed", "staging meta unreadable: " + err.Error()
+		return res
+	}
+	var meta struct {
+		JobID   string `json:"jobId"`
+		BuildID string `json:"buildId"`
+		SHA256  string `json:"sha256"`
+		Size    int64  `json:"size"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		res.Outcome, res.Detail = "verify_failed", "staging meta invalid: " + err.Error()
+		return res
+	}
+	if meta.JobID != "" && meta.JobID != jobID {
+		res.Outcome, res.Detail = "verify_failed", "staging meta jobId mismatch"
+		return res
+	}
+	if meta.BuildID != "" && meta.BuildID != expectedBuildID {
+		res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("staging meta buildId mismatch: expected %s, got %s", expectedBuildID, meta.BuildID)
+		return res
+	}
+	if meta.SHA256 != "" && meta.SHA256 != expectedSha {
+		res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("staging meta sha256 mismatch: expected %s, got %s", expectedSha, meta.SHA256)
 		return res
 	}
 
@@ -355,7 +424,7 @@ func handleApply(ctx context.Context, cfg *Config, jobID string) *HelperResult {
 	tmpPath := filepath.Join(binDir, ".vps-new-"+jobID)
 	defer os.Remove(tmpPath)
 
-	newSha, err := copyHashed(filepath.Join(staging, "artifact.bin"), tmpPath, artifact.SHA256, artifact.Size)
+	newSha, err := copyHashed(filepath.Join(staging, "artifact.bin"), tmpPath, expectedSha, expectedSize)
 	if err != nil {
 		res.Outcome, res.Detail = "verify_failed", "staged artifact: "+err.Error()
 		return res
@@ -365,7 +434,7 @@ func handleApply(ctx context.Context, cfg *Config, jobID string) *HelperResult {
 		return res
 	}
 
-	// Execute the staged binary only AFTER signature + hash checks, and only
+	// Execute the staged binary only AFTER hash checks, and only
 	// to read its self-reported build identity.
 	vctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	line, err := execStagedVersion(vctx, tmpPath)
@@ -379,9 +448,9 @@ func handleApply(ctx context.Context, cfg *Config, jobID string) *HelperResult {
 		res.Outcome, res.Detail = "verify_failed", err.Error()
 		return res
 	}
-	if stagedBuild != m.BuildID {
+	if expectedBuildID != "" && stagedBuild != expectedBuildID {
 		res.Outcome, res.Detail = "verify_failed",
-			fmt.Sprintf("staged buildId %s != manifest %s", stagedBuild, m.BuildID)
+			fmt.Sprintf("staged buildId %s != expected %s", stagedBuild, expectedBuildID)
 		return res
 	}
 

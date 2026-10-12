@@ -24,8 +24,10 @@ RUN go mod download
 COPY packages/agent/ .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${AGENT_BUILD_ID}" \
-    -o /out/vps-agent-linux-amd64 ./cmd/vps-agent
-
+    -o /out/vps-agent-linux-amd64 ./cmd/vps-agent && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${AGENT_BUILD_ID}" \
+    -o /out/vps-updater-linux-amd64 ./cmd/vps-updater
 FROM node:24-alpine AS api-runtime
 ENV NODE_ENV=production \
     AGENT_BINARY_PATH=/app/agent/vps-agent-linux-amd64
@@ -38,6 +40,7 @@ COPY --from=build --chown=app:app /app/package.json ./package.json
 COPY --from=build --chown=app:app /app/dist ./dist
 COPY --from=build --chown=app:app /app/packages/api/db ./db
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-agent-linux-amd64 /app/agent/vps-agent-linux-amd64
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-updater-linux-amd64 /app/agent/vps-updater-linux-amd64
 RUN mkdir -p /app/data /app/private && chown -R app:app /app/data /app/private
 USER app
 EXPOSE 3000

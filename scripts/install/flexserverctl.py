@@ -326,7 +326,7 @@ AGENT_REQUIRED_KEYS = (
     "intervalSeconds",
     "requestTimeoutSeconds",
 )
-UPDATER_REQUIRED_KEYS = ("apiBase", "credential", "pinnedPublicKey")
+UPDATER_REQUIRED_KEYS = ("apiBase", "credential")
 
 
 def validate_agent_config(cfg) -> dict:
@@ -361,15 +361,17 @@ def validate_updater_config(cfg) -> dict:
     validate_updater_apibase(str(cfg["apiBase"]))
     if not str(cfg["credential"]).startswith("vma_"):
         raise ValueError("updater config credential must be a scoped vma_ bearer")
-    try:
-        decoded = base64.b64decode(str(cfg["pinnedPublicKey"]), validate=True)
-    except Exception as exc:
-        raise ValueError(f"updater config pinnedPublicKey is not valid base64: {exc}") from exc
-    if len(decoded) != 32:
-        raise ValueError(
-            "updater config pinnedPublicKey must decode to a 32-byte Ed25519 key, "
-            f"got {len(decoded)} bytes"
-        )
+    pinned_key = cfg.get("pinnedPublicKey")
+    if pinned_key:
+        try:
+            decoded = base64.b64decode(str(pinned_key), validate=True)
+        except Exception as exc:
+            raise ValueError(f"updater config pinnedPublicKey is not valid base64: {exc}") from exc
+        if len(decoded) != 32:
+            raise ValueError(
+                "updater config pinnedPublicKey must decode to a 32-byte Ed25519 key, "
+                f"got {len(decoded)} bytes"
+            )
     state_dir = cfg.get("stateDir")
     if state_dir is not None and (not isinstance(state_dir, str) or not os.path.isabs(state_dir)):
         raise ValueError("updater config stateDir must be an absolute path")

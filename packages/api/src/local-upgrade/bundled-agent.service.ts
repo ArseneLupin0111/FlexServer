@@ -1,0 +1,216 @@
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import { Inject, Injectable } from "@nestjs/common";
+import { APP_CONFIG } from "../tokens.js";
+import type { AppConfig } from "../config/app-config.js";
+
+export type BundledAgentMetadata = {
+  filePath: string;
+  os: "linux";
+  arch: "amd64" | "arm64";
+  version: string;
+  buildId: string;
+  sha256: string;
+  size: number;
+  publishedAt: string;
+};
+
+const GIT_SHA_RE = /^[0-9a-f]{40}$/;
+const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
+
+export function extractAgentBinaryMetadata(
+  filePath: string,
+  buffer?: Buffer,
+): BundledAgentMetadata {
+  const stat = statSync(filePath);
+  const buf = buffer ?? readFileSync(filePath);
+
+  // 1. Strict ELF64 little-endian Linux validation
+  if (buf.length < 64) {
+    throw new Error(`Invalid agent binary: file size (${buf.length} bytes) is less than ELF64 header`);
+  }
+  if (
+    buf[0] !== 0x7f ||
+    buf[1] !== 0x45 || // 'E'
+    buf[2] !== 0x4c || // 'L'
+    buf[3] !== 0x46    // 'F'
+  ) {
+    throw new Error("Invalid agent binary: missing ELF magic header");
+  }
+  if (buf[4] !== 2) {
+    throw new Error("Invalid agent binary: not ELF64 (64-bit)");
+  }
+  if (buf[5] !== 1) {
+    throw new Error("Invalid agent binary: not little-endian (ELFDATA2LSB)");
+  }
+  if (buf[7] !== 0 && buf[7] !== 3) {
+    throw new Error(`Invalid agent binary: non-Linux OS ABI (${buf[7]})`);
+  }
+
+  const machine = buf.readUInt16LE(18);
+  let arch: "amd64" | "arm64";
+  if (machine === 0x3e) {
+    arch = "amd64";
+  } else if (machine === 0xb7) {
+    arch = "arm64";
+  } else {
+    throw new Error(`Invalid agent binary: unsupported machine architecture (0x${machine.toString(16)})`);
+  }
+
+  const sha256 = createHash("sha256").update(buf).digest("hex");
+
+  // 2. Check for companion build manifest packaged alongside binary
+  const companionPath = `${filePath}.json`;
+  if (existsSync(companionPath)) {
+    try {
+      const companionRaw = JSON.parse(readFileSync(companionPath, "utf8"));
+      if (companionRaw.sha256 && companionRaw.sha256 !== sha256) {
+        throw new Error("Companion manifest sha256 does not match binary sha256");
+      }
+      if (companionRaw.arch && companionRaw.arch !== arch) {
+        throw new Error(`Companion manifest arch (${companionRaw.arch}) does not match ELF arch (${arch})`);
+      }
+      if (!companionRaw.buildId || !GIT_SHA_RE.test(companionRaw.buildId)) {
+        throw new Error("Companion manifest missing valid 40-hex buildId");
+      }
+      if (!companionRaw.version || !VERSION_RE.test(companionRaw.version)) {
+        throw new Error("Companion manifest missing valid version");
+      }
+      return {
+        filePath,
+        os: "linux",
+        arch,
+        version: companionRaw.version,
+        buildId: companionRaw.buildId,
+        sha256,
+        size: stat.size,
+        publishedAt: companionRaw.publishedAt ?? new Date(stat.mtimeMs).toISOString(),
+      };
+    } catch (err: unknown) {
+      if ((err as Error).message.includes("does not match") || (err as Error).message.includes("missing valid")) {
+        throw err;
+      }
+    }
+  }
+
+  // 3. Parse targeted Go build metadata from buffer without full-buffer copy
+  let version: string | null = null;
+  let buildId: string | null = null;
+
+  const buildMarker = Buffer.from("version.Build=");
+  const buildIdx = buf.indexOf(buildMarker);
+  if (buildIdx !== -1) {
+    const start = buildIdx + buildMarker.length;
+    if (start + 40 <= buf.length) {
+      const candidate = buf.subarray(start, start + 40).toString("ascii");
+      if (GIT_SHA_RE.test(candidate)) {
+        buildId = candidate;
+      }
+    }
+  }
+
+  const valueMarker = Buffer.from("version.Value=");
+  const valueIdx = buf.indexOf(valueMarker);
+  if (valueIdx !== -1) {
+    const start = valueIdx + valueMarker.length;
+    let end = start;
+    while (
+      end < buf.length &&
+      end < start + 64 &&
+      buf[end] !== 0 &&
+      buf[end] !== 0x20 &&
+      buf[end] !== 0x0a &&
+      buf[end] !== 0x22 &&
+      buf[end] !== 0x27
+    ) {
+      end++;
+    }
+    const candidate = buf.subarray(start, end).toString("ascii");
+    if (VERSION_RE.test(candidate)) {
+      version = candidate;
+    }
+  }
+
+  if (!buildId) {
+    const vcsMarker = Buffer.from("vcs.revision=");
+    const vcsIdx = buf.indexOf(vcsMarker);
+    if (vcsIdx !== -1) {
+      const start = vcsIdx + vcsMarker.length;
+      if (start + 40 <= buf.length) {
+        const candidate = buf.subarray(start, start + 40).toString("ascii");
+        if (GIT_SHA_RE.test(candidate)) {
+          buildId = candidate;
+        }
+      }
+    }
+  }
+
+  if (!buildId || !GIT_SHA_RE.test(buildId)) {
+    throw new Error("Agent binary is missing valid 40-hex build identity (version.Build)");
+  }
+  if (!version || !VERSION_RE.test(version)) {
+    throw new Error("Agent binary is missing valid version (version.Value)");
+  }
+
+  return {
+    filePath,
+    os: "linux",
+    arch,
+    version,
+    buildId,
+    sha256,
+    size: stat.size,
+    publishedAt: new Date(stat.mtimeMs).toISOString(),
+  };
+}
+
+@Injectable()
+export class BundledAgentService {
+  private cached: {
+    mtimeMs: number;
+    size: number;
+    meta: BundledAgentMetadata;
+  } | null = null;
+
+  constructor(@Inject(APP_CONFIG) private readonly config: AppConfig) {}
+
+  resolveBinaryPath(): string | null {
+    if (this.config.agentBinaryPath) {
+      return existsSync(this.config.agentBinaryPath) ? this.config.agentBinaryPath : null;
+    }
+    if (process.env.AGENT_BINARY_PATH) {
+      return existsSync(process.env.AGENT_BINARY_PATH) ? process.env.AGENT_BINARY_PATH : null;
+    }
+    const fallbacks = [
+      "/app/agent/vps-agent-linux-amd64",
+      join(process.cwd(), "agent", "vps-agent-linux-amd64"),
+      join(process.cwd(), "packages", "agent", "dist", "vps-agent-linux-amd64"),
+      join(process.cwd(), "..", "agent", "dist", "vps-agent-linux-amd64"),
+    ];
+    for (const fb of fallbacks) {
+      if (existsSync(fb)) return fb;
+    }
+    return null;
+  }
+
+  getMetadata(): BundledAgentMetadata | null {
+    const binPath = this.resolveBinaryPath();
+    if (!binPath) return null;
+    try {
+      const stat = statSync(binPath);
+      if (
+        this.cached &&
+        this.cached.mtimeMs === stat.mtimeMs &&
+        this.cached.size === stat.size
+      ) {
+        return this.cached.meta;
+      }
+      const meta = extractAgentBinaryMetadata(binPath);
+      this.cached = { mtimeMs: stat.mtimeMs, size: stat.size, meta };
+      return meta;
+    } catch {
+      return null;
+    }
+  }
+}

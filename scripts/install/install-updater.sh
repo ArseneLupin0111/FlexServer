@@ -7,10 +7,12 @@
 #
 # Usage:
 #   sudo ./scripts/install/install-updater.sh --binary <path> --config <path> [options]
+#   sudo ./scripts/install/install-updater.sh --upgrade [--binary <path>] [--config <path>] [options]
 #
 # Options:
-#   --binary <path>       Path to the vps-updater binary (required).
-#   --config <path>       Path to the updater config JSON (required).
+#   --binary <path>       Path to the vps-updater binary (required unless --upgrade with candidate binary).
+#   --config <path>       Path to the updater config JSON (required unless --upgrade with existing config).
+#   --upgrade             Upgrade existing updater without release manifest or signing keys.
 #   --manifest <path>     Path to the Ed25519-signed release manifest
 #                         (required in install mode, including --dry-run;
 #                         not needed for --uninstall). Verified offline
@@ -193,13 +195,13 @@ PUBKEY=""
 PUBKEY_FILE=""
 PUBKEY_ENV=""
 SHA256_EXPECTED=""
+UPGRADE=false
 UNINSTALL=false
 PURGE_STATE=false
 INSTALL_CLI=true
 SKIP_CLI=false
 CLI_DEST="${FLEXSERVERCTL_DEST_DEFAULT}"
 CLI_SRC=""
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary)
@@ -216,6 +218,8 @@ while [[ $# -gt 0 ]]; do
       PUBKEY_ENV="$2"; shift 2 ;;
     --sha256)
       SHA256_EXPECTED="$2"; shift 2 ;;
+    --upgrade)
+      UPGRADE=true; shift ;;
     --dry-run)
       DRY_RUN=true; shift ;;
     --uninstall)
@@ -240,7 +244,7 @@ while [[ $# -gt 0 ]]; do
       exit 0 ;;
     *)
       echo "Error: Unknown argument: $1" >&2
-      echo "Usage: sudo ./scripts/install/install-updater.sh --binary <path> --config <path> --manifest <path> (--pubkey <b64>|--pubkey-file <path>|--pubkey-env <name>) [--dry-run|--uninstall]" >&2
+      echo "Usage: sudo ./scripts/install/install-updater.sh --binary <path> --config <path> [--manifest <path>] [--upgrade] [--dry-run|--uninstall]" >&2
       exit 1 ;;
   esac
 done
@@ -301,6 +305,26 @@ fi
 
 # ── Install mode validation ───────────────────────────────────────────────
 
+if [[ "$UPGRADE" == "true" ]]; then
+  if [[ -z "$CONFIG_SRC" && -f "$CONFIG_FILE" ]]; then
+    CONFIG_SRC="$CONFIG_FILE"
+  fi
+  if [[ -z "$BINARY_SRC" ]]; then
+    CANDIDATES=(
+      "./vps-updater-linux-amd64"
+      "./vps-updater"
+      "/app/agent/vps-updater-linux-amd64"
+      "$(dirname "$0")/../../packages/agent/dist/vps-updater-linux-amd64"
+    )
+    for cand in "${CANDIDATES[@]}"; do
+      if [[ -f "$cand" ]]; then
+        BINARY_SRC="$cand"
+        break
+      fi
+    done
+  fi
+fi
+
 if [[ -z "$BINARY_SRC" ]]; then
   echo "Error: --binary <path> is required." >&2
   exit 1
@@ -317,12 +341,18 @@ if [[ ! -f "$CONFIG_SRC" ]]; then
   echo "Error: Config file not found: ${CONFIG_SRC}" >&2
   exit 1
 fi
+# node runtime for manifest verification and config validation
+if ! command -v node &>/dev/null; then
+  echo "Error: node is required to validate the updater config and verify the signed manifest." >&2
+  exit 1
+fi
 
 # Signed-manifest trust bootstrap (plan §4): install mode — including
 # --dry-run — refuses any binary whose size/SHA-256/-version identity is not
 # covered by the Ed25519-signed updater artifact entry. --sha256 alone is
 # never sufficient: it is only cross-checked against the signed entry.
-# --uninstall above needs no manifest; there is no unverified install path.
+# --uninstall above needs no manifest; --upgrade upgrades to bundled protocol without signing keys.
+if [[ "$UPGRADE" != "true" || -n "$MANIFEST_SRC" ]]; then
 if [[ -z "$MANIFEST_SRC" ]]; then
   echo "Error: --manifest <path> is required (the signed release manifest)." >&2
   echo "  Obtain it from the release pipeline and verify it against your" >&2
@@ -430,11 +460,6 @@ if [[ -n "$SHA256_EXPECTED" ]]; then
   fi
 fi
 
-# `-version` must report the signed release identity "<version>+<buildId>",
-# so a stale or foreign binary fails closed before install. The bootstrap
-# binary runs on the target host: no executable means no verified identity,
-# hence no install. The installed copy is NOT on PATH ($BINARY_DEST), so the
-# source is checked here.
 WANT_ID="${ENTRY_VERSION}+${ENTRY_BUILDID}"
 if [[ ! -x "$BINARY_SRC" ]]; then
   echo "Error: ${BINARY_SRC} is not executable; cannot check -version against signed identity ${WANT_ID}." >&2
@@ -451,13 +476,49 @@ if [[ "$UPD_VER" != "$WANT_ID" ]]; then
   exit 1
 fi
 echo "[Install] Updater identity verified: ${UPD_VER} (release ${ENTRY_RELEASE})"
-
+else
+# In upgrade mode without a release manifest, verify binary directly:
+BINARY_SIZE="$(wc -c < "$BINARY_SRC" | tr -d '[:space:]')"
+if ! [[ "$BINARY_SIZE" =~ ^[0-9]+$ ]]; then
+  echo "Error: cannot measure binary size: ${BINARY_SRC}" >&2
+  exit 1
+fi
+if command -v sha256sum &>/dev/null; then
+  ACTUAL_SHA="$(sha256sum "$BINARY_SRC" | awk '{print $1}')"
+elif command -v shasum &>/dev/null; then
+  ACTUAL_SHA="$(shasum -a 256 "$BINARY_SRC" | awk '{print $1}')"
+else
+  echo "Error: cannot verify binary hash (no sha256sum or shasum)." >&2
+  exit 1
+fi
+if [[ -n "$SHA256_EXPECTED" ]]; then
+  if ! [[ "$SHA256_EXPECTED" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "Error: --sha256 must be 64 hex characters." >&2
+    exit 1
+  fi
+  if [[ "${SHA256_EXPECTED,,}" != "${ACTUAL_SHA,,}" ]]; then
+    echo "Error: binary SHA-256 mismatch: got ${ACTUAL_SHA}, expected ${SHA256_EXPECTED}." >&2
+    exit 1
+  fi
+fi
+if [[ ! -x "$BINARY_SRC" ]]; then
+  chmod +x "$BINARY_SRC" 2>/dev/null || true
+fi
+if [[ -x "$BINARY_SRC" ]]; then
+  UPD_VER="$("$BINARY_SRC" -version 2>&1 || true)"
+  UPD_VER="${UPD_VER//$'\r'/}"
+  echo "[Upgrade] Binary identity: ${UPD_VER}"
+fi
+echo "[Upgrade] Verified binary size=${BINARY_SIZE} sha256=${ACTUAL_SHA}"
+fi
 # Validate the updater config: required fields and the production invariants
 # the updater itself enforces (https apiBase, fixed binary/state targets).
 # node was already required above for manifest verification.
 if ! CFG_ERR="$(node -e '
   const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-  for (const k of ["apiBase", "credential", "pinnedPublicKey", "agentBinary", "stateDir"]) {
+  const isUpgrade = process.argv[2] === "true";
+  const required = ["apiBase", "credential", "agentBinary", "stateDir"];
+  for (const k of required) {
     if (typeof c[k] !== "string" || !c[k]) throw new Error(`missing ${k}`);
   }
   const api = new URL(c.apiBase);
@@ -467,10 +528,12 @@ if ! CFG_ERR="$(node -e '
   if ((c.agentUnit ?? "vps-manager-agent.service") !== "vps-manager-agent.service") throw new Error("agentUnit must be vps-manager-agent.service");
   if (c.stateDir !== "/var/lib/vps-updater") throw new Error("stateDir must be /var/lib/vps-updater");
   if ("allowedHosts" in c) throw new Error("allowedHosts is pinned in the binary");
-  let raw;
-  try { raw = Buffer.from(c.pinnedPublicKey, "base64"); } catch { throw new Error("pinnedPublicKey must be base64"); }
-  if (raw.length !== 32) throw new Error(`pinnedPublicKey must decode to 32 bytes, got ${raw.length}`);
-' "$CONFIG_SRC" 2>&1)"; then
+  if (c.pinnedPublicKey) {
+    let raw;
+    try { raw = Buffer.from(c.pinnedPublicKey, "base64"); } catch { throw new Error("pinnedPublicKey must be base64"); }
+    if (raw.length !== 32) throw new Error(`pinnedPublicKey must decode to 32 bytes, got ${raw.length}`);
+  }
+' "$CONFIG_SRC" "$UPGRADE" 2>&1)"; then
   echo "Error: Config is not a valid updater config (see plan §5): ${CONFIG_SRC}" >&2
   printf '%s\n' "$CFG_ERR" | sed 's/^/  /' >&2
   exit 1
@@ -500,6 +563,27 @@ fi
 
 echo "[Install] Installing the local-agent updater..."
 
+# Refuse active job/journal/pending helper before mutation so an in-flight
+# upgrade transaction is never interrupted or corrupted.
+if [[ -d "$STATE_DIR" ]]; then
+  if systemctl is-active --quiet vps-updater-apply.service 2>/dev/null; then
+    echo "Error: vps-updater-apply.service is currently running; refusing upgrade while helper is active." >&2
+    exit 1
+  fi
+  if [[ -d "${STATE_DIR}/pending" ]] && [[ -n "$(ls -A "${STATE_DIR}/pending" 2>/dev/null)" ]]; then
+    echo "Error: Pending helper actions detected in ${STATE_DIR}/pending; refusing upgrade while action is pending." >&2
+    exit 1
+  fi
+  if [[ -f "${STATE_DIR}/journal.json" ]]; then
+    echo "Error: Active daemon journal detected at ${STATE_DIR}/journal.json; refusing upgrade while job is in flight." >&2
+    exit 1
+  fi
+  if [[ -f "${STATE_DIR}/helper/journal.json" ]]; then
+    echo "Error: Active helper journal detected at ${STATE_DIR}/helper/journal.json; refusing upgrade while helper transaction is in flight." >&2
+    exit 1
+  fi
+fi
+
 # User/group
 if ! getent group "$SERVICE_USER" &>/dev/null; then
   run groupadd --system "$SERVICE_USER"
@@ -508,6 +592,13 @@ if ! getent passwd "$SERVICE_USER" &>/dev/null; then
   run useradd --system --no-create-home --shell /sbin/nologin -g "$SERVICE_USER" "$SERVICE_USER"
 fi
 
+# Quiesce active daemon before binary replacement to avoid ETXTBSY on live executable.
+WAS_UPDATER_ACTIVE=false
+if systemctl is-active --quiet vps-updater.service 2>/dev/null; then
+  WAS_UPDATER_ACTIVE=true
+  echo "[Upgrade] Quiescing active vps-updater daemon before binary replacement..."
+  run systemctl stop vps-updater.service 2>/dev/null || true
+fi
 # Binary (directory not writable by the updater user: it cannot replace
 # itself; only the fixed helper may touch /usr/local/bin/vps-manager-agent).
 run mkdir -p "$(dirname "$BINARY_DEST")"
@@ -515,9 +606,18 @@ run mkdir -p "$(dirname "$BINARY_DEST")"
 # The unprivileged updater needs traversal, not write access.
 run chown root:root "$(dirname "$BINARY_DEST")"
 run chmod 0755 "$(dirname "$BINARY_DEST")"
-run cp -f "$BINARY_SRC" "$BINARY_DEST"
-run chown root:root "$BINARY_DEST"
-run chmod 0755 "$BINARY_DEST"
+
+# Backup existing binary if present for transaction rollback.
+if [[ -f "$BINARY_DEST" ]]; then
+  run cp -f "$BINARY_DEST" "${BINARY_DEST}.backup" 2>/dev/null || true
+fi
+
+# Atomic replace: copy to sibling temp file and mv into place to avoid ETXTBSY.
+TMP_BIN="${BINARY_DEST}.tmp.$$"
+run cp -f "$BINARY_SRC" "$TMP_BIN"
+run chown root:root "$TMP_BIN"
+run chmod 0755 "$TMP_BIN"
+run mv -f "$TMP_BIN" "$BINARY_DEST"
 
 # Config
 if [[ "$DRY_RUN" == "true" ]]; then
@@ -674,16 +774,31 @@ write_unit "$UNIT_DAEMON" "$DAEMON_UNIT_CONTENT"
 write_unit "$UNIT_PATH" "$PATH_UNIT_CONTENT"
 write_unit "$UNIT_HELPER" "$HELPER_UNIT_CONTENT"
 
-# Reload and enable (daemon restarted only — the agent is untouched).
+# Reload, enable, and restart daemon (daemon restarted — the agent is untouched).
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "  [DRY-RUN] Would run: systemctl daemon-reload"
-  echo "  [DRY-RUN] Would run: systemctl enable --now vps-updater.service"
-  echo "  [DRY-RUN] Would run: systemctl enable --now vps-updater-apply.path"
+  echo "  [DRY-RUN] Would run: systemctl enable vps-updater.service vps-updater-apply.path"
+  echo "  [DRY-RUN] Would run: systemctl restart vps-updater.service vps-updater-apply.path"
 else
   systemctl daemon-reload
-  systemctl enable --now vps-updater.service
-  systemctl enable --now vps-updater-apply.path
-  echo "  Started vps-updater.service and vps-updater-apply.path (enabled on boot)"
+  systemctl enable vps-updater.service vps-updater-apply.path 2>/dev/null || true
+  systemctl restart vps-updater-apply.path 2>/dev/null || true
+  if ! systemctl restart vps-updater.service; then
+    echo "ERROR: Failed to restart vps-updater.service with new binary" >&2
+    if [[ -f "${BINARY_DEST}.backup" ]]; then
+      echo "Rolling back to previous updater binary..." >&2
+      mv -f "${BINARY_DEST}.backup" "$BINARY_DEST"
+      systemctl daemon-reload
+      if [[ "$WAS_UPDATER_ACTIVE" == "true" ]]; then
+        systemctl restart vps-updater.service 2>/dev/null || true
+      else
+        systemctl stop vps-updater.service 2>/dev/null || true
+      fi
+    fi
+    exit 1
+  fi
+  rm -f "${BINARY_DEST}.backup" 2>/dev/null || true
+  echo "  Started/restarted vps-updater.service and vps-updater-apply.path (enabled on boot)"
 fi
 
 echo ""

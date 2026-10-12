@@ -21,12 +21,12 @@ var (
 	ErrForbidden    = errors.New("credential scope rejected (403)")
 )
 
-// flexTime accepts RFC3339 strings (with or without fractional seconds) as
+// FlexTime accepts RFC3339 strings (with or without fractional seconds) as
 // well as epoch seconds/milliseconds, so a server-side date format change can
 // never silently drop a deadline.
-type flexTime struct{ time.Time }
+type FlexTime struct{ time.Time }
 
-func (t *flexTime) UnmarshalJSON(raw []byte) error {
+func (t *FlexTime) UnmarshalJSON(raw []byte) error {
 	s := strings.Trim(string(raw), `"`)
 	if s == "" || s == "null" {
 		t.Time = time.Time{}
@@ -56,18 +56,23 @@ type ClaimedJob struct {
 	FencingToken        int64    `json:"fencingToken"`
 	ManifestRaw         string   `json:"manifestRaw"`
 	RequiresReconcile   bool     `json:"requiresReconcile"`
-	LeaseExpiresAt      flexTime `json:"leaseExpiresAt"`
-	PhaseDeadlineAt     flexTime `json:"phaseDeadlineAt"`
-	DeadlineAt          flexTime `json:"deadlineAt"`
-	BaselineHeartbeatAt flexTime `json:"baselineHeartbeatAt"`
-	Progress            *int     `json:"progress"`
-	Error               *string  `json:"error"`
-	Release             struct {
-		ReleaseID    string `json:"releaseId"`
-		Version      string `json:"version"`
-		BuildID      string `json:"buildId"`
-		TargetSha256 string `json:"targetSha256"`
-	} `json:"release"`
+	TargetURL           string   `json:"targetUrl"`
+	TargetSha256        string   `json:"targetSha256"`
+	TargetSizeBytes     int64    `json:"targetSizeBytes"`
+	LeaseExpiresAt      FlexTime    `json:"leaseExpiresAt"`
+	PhaseDeadlineAt     FlexTime    `json:"phaseDeadlineAt"`
+	DeadlineAt          FlexTime    `json:"deadlineAt"`
+	BaselineHeartbeatAt FlexTime    `json:"baselineHeartbeatAt"`
+	Progress            *int        `json:"progress"`
+	Error               *string     `json:"error"`
+	Release             ReleaseInfo `json:"release"`
+}
+
+type ReleaseInfo struct {
+	ReleaseID    string `json:"releaseId"`
+	Version      string `json:"version"`
+	BuildID      string `json:"buildId"`
+	TargetSha256 string `json:"targetSha256"`
 }
 
 // EffectivePhase prefers `phase` and falls back to `state`.
@@ -98,7 +103,12 @@ func NewClient(cfg *Config) *Client {
 	return &Client{
 		base:       strings.TrimRight(cfg.APIBase, "/"),
 		credential: cfg.Credential,
-		http:       &http.Client{Timeout: cfg.HTTPTimeout},
+		http: &http.Client{
+			Timeout: cfg.HTTPTimeout,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return fmt.Errorf("redirects are forbidden")
+			},
+		},
 	}
 }
 
@@ -192,6 +202,8 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.credential)
+	req.Header.Set("User-Agent", "vps-updater/2")
+	req.Header.Set("X-Updater-Protocol-Version", "2")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

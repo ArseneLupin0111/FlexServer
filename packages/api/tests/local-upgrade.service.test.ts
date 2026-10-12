@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../src/config/app-config.js";
-import type { ReleaseCatalog } from "../src/release/index.js";
 import type { AgentCredential } from "../src/agents/agent.models.js";
 import { AuditService } from "../src/audit/audit.service.js";
 import type { AgentRepository } from "../src/persistence/repositories/agent.repository.js";
@@ -83,7 +82,10 @@ afterEach(async () => {
 
 // ── Test helpers ────────────────────────────────────────────────────────
 
-function makeService(mode: "local" | "demo" = "local") {
+function makeService(
+  mode: "local" | "demo" = "local",
+  bundledOverrides?: Partial<BundledAgentService>,
+) {
   const config: AppConfig = {
     ...baseConfig,
     mode,
@@ -93,16 +95,30 @@ function makeService(mode: "local" | "demo" = "local") {
   const catalog = {
     getCompatibleRelease: vi.fn(),
     getReleaseById: vi.fn(),
-  } as unknown as ReleaseCatalog;
+  };
+  const bundledAgent = {
+    getMetadata: vi.fn().mockReturnValue({
+      filePath: "/app/agent/vps-agent-linux-amd64",
+      os: "linux",
+      arch: "amd64",
+      version: "1.4.0",
+      buildId: RELEASE_SHA,
+      sha256: TARGET_SHA256,
+      size: 1024,
+      publishedAt: "2026-09-01T00:00:00Z",
+    }),
+    resolveBinaryPath: vi.fn().mockReturnValue("/app/agent/vps-agent-linux-amd64"),
+    ...bundledOverrides,
+  } as unknown as BundledAgentService;
   const service = new LocalUpgradeService(
     config,
     lugRepo,
     agentRepo,
     vpsRepo,
-    catalog,
+    bundledAgent,
     new AuditService(config, createJsonAuditRepository(join(tempDir, "data", "audit.json"))),
   );
-  return { service, catalog };
+  return { service, catalog, bundledAgent };
 }
 
 /**
@@ -151,8 +167,6 @@ function okRelease(
           },
         ],
       manifestRaw: `{"releaseId":"${overrides.releaseId ?? RELEASE_SHA}"}`,
-      manifestUrl: "https://example.com/manifest.json",
-      publicKey: "cHVibGlja2V5",
     },
   };
 }
@@ -187,11 +201,12 @@ function credential(vpsId = LOCAL_VPS_ID): Promise<AgentCredential> {
   });
 }
 
-async function touchHeartbeat(vpsId = LOCAL_VPS_ID) {
+async function touchHeartbeat(vpsId = LOCAL_VPS_ID, protocolVersion = 2) {
   await lugRepo.recordUpdaterHeartbeat({
     vpsId,
     lastSeenAt: new Date().toISOString(),
     credentialId: "cred_updater_test",
+    protocolVersion,
   });
 }
 
@@ -354,25 +369,29 @@ describe("createJob validation", () => {
     expect(await lugRepo.listByVps(LOCAL_VPS_ID, { limit: 10 })).toHaveLength(0);
   });
 
-  it("maps catalog unavailable and not_found outcomes", async () => {
+  it("maps bundled unavailable and changed outcomes", async () => {
     await localVps();
-    const { service, catalog } = makeService();
+    const { service, bundledAgent } = makeService();
     await touchHeartbeat();
     await upsertBuild(BASELINE_SHA);
 
-    vi.mocked(catalog.getReleaseById).mockResolvedValueOnce({
-      status: "unavailable",
-      reason: "fetch_failed",
-    } as never);
+    vi.mocked(bundledAgent.getMetadata).mockReturnValueOnce(null);
     await expectHttpError(
       service.createJob(LOCAL_VPS_ID, { releaseId: RELEASE_SHA }),
       409,
       "release_unavailable",
     );
 
-    vi.mocked(catalog.getReleaseById).mockResolvedValueOnce({
-      status: "not_found",
-    } as never);
+    vi.mocked(bundledAgent.getMetadata).mockReturnValueOnce({
+      filePath: "/app/agent/vps-agent-linux-amd64",
+      os: "linux",
+      arch: "amd64",
+      version: "1.4.0",
+      buildId: "9999999999999999999999999999999999999999",
+      sha256: TARGET_SHA256,
+      size: 1024,
+      publishedAt: "2026-09-01T00:00:00Z",
+    });
     await expectHttpError(
       service.createJob(LOCAL_VPS_ID, { releaseId: RELEASE_SHA }),
       409,
@@ -380,40 +399,21 @@ describe("createJob validation", () => {
     );
   });
 
-  it("rejects an incompatible API contract", async () => {
+  it("rejects bundled binary without a matching architecture", async () => {
     await localVps();
-    const { service, catalog } = makeService();
+    const { service, bundledAgent } = makeService();
     await touchHeartbeat();
     await upsertBuild(BASELINE_SHA);
-    vi.mocked(catalog.getReleaseById).mockResolvedValueOnce(
-      okRelease({ apiCompatibility: { min: 3, max: 4 } }) as never,
-    );
-    const error = await expectHttpError(
-      service.createJob(LOCAL_VPS_ID, { releaseId: RELEASE_SHA }),
-      400,
-      "release_incompatible",
-    );
-    expect(error.reason).toBe("api_incompatible");
-  });
-
-  it("rejects releases without a linux/amd64 artifact", async () => {
-    await localVps();
-    const { service, catalog } = makeService();
-    await touchHeartbeat();
-    await upsertBuild(BASELINE_SHA);
-    vi.mocked(catalog.getReleaseById).mockResolvedValueOnce(
-      okRelease({
-        artifacts: [
-          {
-            os: "linux",
-            arch: "arm64",
-            size: 8301224,
-            sha256: TARGET_SHA256,
-            url: "https://example.com/vps-agent-linux-arm64",
-          },
-        ],
-      }) as never,
-    );
+    vi.mocked(bundledAgent.getMetadata).mockReturnValueOnce({
+      filePath: "/app/agent/vps-agent-linux-amd64",
+      os: "linux",
+      arch: "arm64",
+      version: "1.4.0",
+      buildId: RELEASE_SHA,
+      sha256: TARGET_SHA256,
+      size: 1024,
+      publishedAt: "2026-09-01T00:00:00Z",
+    });
     const error = await expectHttpError(
       service.createJob(LOCAL_VPS_ID, { releaseId: RELEASE_SHA }),
       400,
@@ -421,7 +421,6 @@ describe("createJob validation", () => {
     );
     expect(error.reason).toBe("unsupported_architecture");
   });
-
   it("rejects when the agent already runs this release", async () => {
     await localVps();
     const { service, catalog } = makeService();
@@ -465,9 +464,9 @@ describe("createJob persistence", () => {
     expect(job.releaseVersion).toBe("1.4.0");
     expect(job.releaseBuildId).toBe(RELEASE_SHA);
     expect(job.targetSha256).toBe(TARGET_SHA256);
-    expect(job.targetUrl).toBe("https://example.com/vps-agent-linux-amd64");
-    expect(job.targetSizeBytes).toBe(8345672);
-    expect(job.manifestRaw).toContain(RELEASE_SHA);
+    expect(job.targetUrl).toBe(`/api/local-updater/jobs/${job.id}/artifact`);
+    expect(job.targetSizeBytes).toBe(1024);
+    expect(job.manifestRaw).toBe("");
     expect(job.baselineBuildId).toBe(BASELINE_SHA);
     expect(job.actor).toBe("alice");
     expect(job.error).toBeNull();
@@ -888,13 +887,11 @@ describe("reconciliation", () => {
 // ── GET /agent-update state precedence ──────────────────────────────────
 
 describe("getAgentUpdate", () => {
-  it("reports release_unavailable when the catalog is down", async () => {
+  it("reports release_unavailable when bundled agent is missing", async () => {
     await localVps();
-    const { service, catalog } = makeService();
-    vi.mocked(catalog.getCompatibleRelease).mockResolvedValue({
-      status: "unavailable",
-      reason: "not_configured",
-    } as never);
+    const { service, bundledAgent } = makeService();
+    vi.mocked(bundledAgent.getMetadata).mockReturnValue(null);
+    await upsertBuild(BASELINE_SHA);
 
     const view = await service.getAgentUpdate(LOCAL_VPS_ID);
     expect(view.state).toBe("release_unavailable");
@@ -905,8 +902,7 @@ describe("getAgentUpdate", () => {
 
   it("reports unknown without a fresh installed build", async () => {
     await localVps();
-    const { service, catalog } = makeService();
-    vi.mocked(catalog.getCompatibleRelease).mockResolvedValue(okRelease() as never);
+    const { service } = makeService();
 
     const missing = await service.getAgentUpdate(LOCAL_VPS_ID);
     expect(missing.state).toBe("unknown");
@@ -919,8 +915,7 @@ describe("getAgentUpdate", () => {
 
   it("reports current when the installed build matches the release", async () => {
     await localVps();
-    const { service, catalog } = makeService();
-    vi.mocked(catalog.getCompatibleRelease).mockResolvedValue(okRelease() as never);
+    const { service } = makeService();
     await upsertBuild(RELEASE_SHA);
 
     const view = await service.getAgentUpdate(LOCAL_VPS_ID);
@@ -929,23 +924,6 @@ describe("getAgentUpdate", () => {
     expect(view.available?.releaseId).toBe(RELEASE_SHA);
     expect(view.compatibility.compatible).toBe(true);
     expect(view.compatibility.reason).toBe("ok");
-  });
-
-  it("reports incompatible when the release excludes this contract", async () => {
-    await localVps();
-    const { service, catalog } = makeService();
-    vi.mocked(catalog.getCompatibleRelease).mockResolvedValue(
-      okRelease({ apiCompatibility: { min: 5, max: 6 } }) as never,
-    );
-    await upsertBuild(BASELINE_SHA);
-
-    const view = await service.getAgentUpdate(LOCAL_VPS_ID);
-    expect(view.state).toBe("incompatible");
-    expect(view.compatibility.compatible).toBe(false);
-    expect(view.compatibility.reason).toBe("api_incompatible");
-    expect(view.compatibility.apiContractVersion).toBe(
-      AGENT_API_CONTRACT_VERSION,
-    );
   });
 
   it("reports incompatible when the reported architecture is unknown", async () => {
@@ -995,8 +973,6 @@ describe("getAgentUpdate", () => {
       releaseId: RELEASE_SHA,
       version: "1.4.0",
       buildId: RELEASE_SHA,
-      manifestUrl: "https://example.com/manifest.json",
-      publicKey: "cHVibGlja2V5",
     });
     expect(view.available?.artifacts).toHaveLength(1);
     expect(view.compatibility.compatible).toBe(true);
@@ -1303,7 +1279,7 @@ describe("restart resilience", () => {
   it("a fresh service instance continues the durable job", async () => {
     await localVps();
     const cred = await credential();
-    const { service, catalog } = makeService();
+    const { service, catalog, bundledAgent } = makeService();
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     const { job } = await createJob(service);
 
@@ -1315,10 +1291,6 @@ describe("restart resilience", () => {
       dataDir: join(tempDir, "data"),
       privateDir: join(tempDir, "private"),
     };
-    const restartedCatalog = {
-      getCompatibleRelease: vi.fn(),
-      getReleaseById: vi.fn(),
-    } as unknown as ReleaseCatalog;
     const restarted = new LocalUpgradeService(
       config,
       createJsonLocalUpgradeRepository(
@@ -1326,7 +1298,7 @@ describe("restart resilience", () => {
       ),
       createJsonAgentRepository(join(tempDir, "data", "agents.json")),
       createVpsStore(join(tempDir, "data", "vps.json")),
-      restartedCatalog,
+      bundledAgent,
       new AuditService(
         config,
         createJsonAuditRepository(join(tempDir, "data", "audit.json")),

@@ -471,7 +471,7 @@ export function deleteVps(id: string) {
 //   POST /api/vps/:id/local-agent-upgrades  { releaseId }  (+ Idempotency-Key)
 //   GET  /api/vps/:id/local-agent-upgrades/:jobId
 // The browser never sends a URL, path, command or token; the server pins the
-// signed release and the host updater performs the swap. Local upgrade jobs
+// bundled agent binary and the host updater performs the swap. Local upgrade jobs
 // live in a separate durable store (never in the dashboard jobs feed/SSE), so
 // progress is read back from the persisted job endpoint.
 
@@ -495,10 +495,6 @@ export type AgentUpdateAvailable = {
   version: string;
   buildId: string;
   publishedAt: string;
-  /** Immutable signed manifest URL for the release (manual verification). */
-  manifestUrl: string;
-  /** Base64 raw 32-byte Ed25519 public key pinned for manifest verification. */
-  publicKey: string;
   artifacts: AgentUpdateArtifact[];
 } | null;
 

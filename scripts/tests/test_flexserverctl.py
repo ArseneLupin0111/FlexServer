@@ -198,6 +198,10 @@ class TestConfigValidation(LinuxGuard):
     def test_updater_config_ok(self):
         flexserverctl.validate_updater_config(dict(UPDATER_CFG))
 
+    def test_updater_config_without_pinned_key_ok(self):
+        cfg = dict(UPDATER_CFG)
+        del cfg["pinnedPublicKey"]
+        flexserverctl.validate_updater_config(cfg)
     def test_updater_config_rejects_bad_key_length(self):
         cfg = dict(UPDATER_CFG)
         cfg["pinnedPublicKey"] = "AAA="

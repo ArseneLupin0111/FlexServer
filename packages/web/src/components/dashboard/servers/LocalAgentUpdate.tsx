@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, LoaderCircle, RefreshCw, Wrench } from "lucide-react";
+import { AlertTriangle, CheckCircle2, LoaderCircle, RefreshCw } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -51,8 +51,8 @@ const LIVE_REFRESH_DEBOUNCE_MS = 250;
 const PHASE_LABELS: Record<LocalAgentUpgradeState, string> = {
   queued: "Queued",
   claimed: "Claimed by updater",
-  downloading: "Downloading release",
-  verifying: "Verifying signature and checksum",
+  downloading: "Downloading update",
+  verifying: "Verifying binary checksum",
   staging: "Staging update",
   restarting: "Restarting agent",
   awaiting_heartbeat: "Waiting for fresh heartbeat",
@@ -71,16 +71,16 @@ const STATE_CHIPS: Record<
   current: { label: "Agent up to date", variant: "ready" },
   available: { label: "Update available", variant: "pending" },
   incompatible: { label: "Update blocked", variant: "destructive" },
-  release_unavailable: { label: "Release unavailable", variant: "pending" },
+  release_unavailable: { label: "Bundled agent unavailable", variant: "pending" },
   updater_unavailable: { label: "Updater not installed", variant: "pending" },
 };
 
 const INCOMPATIBLE_REASONS: Record<AgentUpdateCompatibility["reason"], string> = {
-  ok: "This release is not compatible with this server.",
-  api_incompatible: "The release targets a newer dashboard API contract than this one.",
-  unsupported_architecture: "No release artifact matches this host's operating system and architecture.",
-  release_unavailable: "The release catalog is unavailable — try again shortly.",
-  unknown: "Compatibility could not be determined from the release catalog.",
+  ok: "This build is not compatible with this server.",
+  api_incompatible: "The bundled build targets a newer dashboard API contract than this one.",
+  unsupported_architecture: "No bundled agent artifact matches this host's operating system and architecture.",
+  release_unavailable: "The bundled agent binary is unavailable in this deployment — try again shortly.",
+  unknown: "Compatibility could not be determined for the bundled agent build.",
 };
 
 const JOB_RUNNING_REASON = "An upgrade job is already running for this server.";
@@ -95,8 +95,8 @@ const STATE_DISABLED_REASONS: Record<AgentUpdateState, string> = {
   unknown: "Cannot verify the running build: the agent heartbeat is stale or the build ID is missing.",
   current: "The agent is already up to date.",
   available: "The updater is not reporting a healthy heartbeat.",
-  incompatible: "This release is not compatible with this server.",
-  release_unavailable: "The release catalog is unavailable — try again shortly.",
+  incompatible: "This build is not compatible with this server.",
+  release_unavailable: "The bundled agent binary is unavailable in this deployment — try again shortly.",
   updater_unavailable: "The updater is not installed on this server.",
 };
 
@@ -113,59 +113,6 @@ function apiErrorCode(error: unknown): { code?: string; jobId?: string } {
   };
 }
 
-type ManualInstructions = { intro: string; script: string; notes: string[] };
-
-/** Canonical manual block (HostOwner runbook), values from the release catalog only. */
-function buildManualInstructions(
-  status: AgentUpdateStatus,
-  displayName: string,
-): ManualInstructions | null {
-  const available = status.available;
-  if (!available) return null;
-  const artifact =
-    available.artifacts.find((candidate) => candidate.os === "linux" && candidate.arch === "amd64") ??
-    available.artifacts[0];
-  if (!artifact) return null;
-
-  const binary = `vps-agent-${artifact.os}-${artifact.arch}`;
-  const intro = status.updater.installed
-    ? `The updater is not reporting a healthy heartbeat, so apply the release manually as root on ${displayName} (linux/amd64 only). Values come from the release catalog; verify the release ID matches what the dashboard shows.`
-    : `Updater not installed — upgrade manually as root on ${displayName} (linux/amd64 only). Values below come from the release catalog; verify the release ID matches what the dashboard shows.`;
-
-  const script = [
-    `# 1) Fetch the signed release manifest for release ${available.releaseId}`,
-    `curl -fsSL -o manifest.json "${available.manifestUrl}"`,
-    ``,
-    `# 2) Verify the Ed25519 signature with the pinned public key (fail-closed)`,
-    `export AGENT_RELEASE_PUBLIC_KEY="${available.publicKey}"`,
-    `node scripts/release/verify-manifest.mjs --manifest manifest.json --pubkey-env AGENT_RELEASE_PUBLIC_KEY`,
-    ``,
-    `# 3) Download the ${artifact.os}/${artifact.arch} artifact exactly as listed in the verified manifest`,
-    `curl -fsSL -o ${binary} "${artifact.url}"`,
-    ``,
-    `# 4) Verify the SHA-256 printed in the manifest (release ${available.releaseId})`,
-    `echo "${artifact.sha256}  ${binary}" | sha256sum -c -`,
-    ``,
-    `# 5) Identity check BEFORE install: output must be ${available.version}+${available.buildId}`,
-    `chmod +x ${binary} && ./${binary} -version`,
-    ``,
-    `# 6) Replace binary only — agent config/state/credentials untouched`,
-    `sudo systemctl stop vps-manager-agent.service`,
-    `sudo install -o root -g root -m 0755 ${binary} /usr/local/bin/vps-manager-agent`,
-    `sudo systemctl start vps-manager-agent.service`,
-    ``,
-    `# 7) Confirm within one heartbeat interval: dashboard must show buildId ${available.buildId} as fresh`,
-    `sudo systemctl status vps-manager-agent.service`,
-  ].join("\n");
-
-  const notes = [
-    `sha256sum -c fails if the checksum differs — abort, do not install.`,
-    `If -version has no +<buildId> suffix, the binary is a dev build — abort.`,
-    `Rollback: restore your backup at /usr/local/bin/vps-manager-agent.<previous> with step 6, otherwise re-download the previous release manifest.`,
-    `Manifest URL, public key, artifact URL and checksum come from the API release catalog; verify the release ID matches this dashboard.`,
-  ];
-  return { intro, script, notes };
-}
 
 export type LocalAgentUpdateProps = {
   vps: VpsRecord;
@@ -180,7 +127,6 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
   const [loadError, setLoadError] = useState(false);
   const [job, setJob] = useState<LocalAgentUpgradeJob | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [instructionsOpen, setInstructionsOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const previousJobStateRef = useRef<LocalAgentUpgradeState | null>(null);
@@ -210,7 +156,7 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
   }, [vps.id, applyStatus]);
 
   // Agent-update: load once on mount, then refresh every 30s (freshness,
-  // catalog pointer, jobs started elsewhere).
+  // bundled build pointer, jobs started elsewhere).
   useEffect(() => {
     if (!isLocal) return;
     let cancelled = false;
@@ -340,7 +286,7 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
       } else if (code === "release_changed") {
         void refreshStatus();
         setActionError(
-          "The stable release changed since this dialog opened. Review the new target and confirm again.",
+          "The target build changed since this dialog opened. Review the new target and confirm again.",
         );
       } else {
         setActionError(
@@ -360,7 +306,6 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
   const activeJob = job && !isTerminalLocalUpgrade(job.state) ? job : null;
   const resultJob = job && isTerminalLocalUpgrade(job.state) ? job : null;
   const chip = status ? STATE_CHIPS[status.state] : null;
-  const instructions = status ? buildManualInstructions(status, displayName) : null;
   const dense = variant !== "workspace";
 
   const showUpgrade = Boolean(
@@ -371,12 +316,6 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
   );
   const upgradeEnabled = Boolean(
     showUpgrade && !activeJob && status?.state === "available" && updater?.healthy && !submitting,
-  );
-  const showInstructions = Boolean(
-    !activeJob &&
-      available &&
-      instructions &&
-      (!updater?.installed || !updater?.healthy || status?.state === "updater_unavailable"),
   );
 
   // Every disabled state carries a concrete reason; no generic fallback.
@@ -477,11 +416,20 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
         resultJob.result?.heartbeatBuildId ??
         resultJob.result?.reportedBuildId ??
         resultJob.releaseBuildId;
+      const isHistorical = Boolean(status?.state === "available");
       liveContent = (
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-signal">
-          <CheckCircle2 size={13} aria-hidden="true" />
+        <div
+          className={
+            isHistorical
+              ? "flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-dim"
+              : "flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-signal"
+          }
+        >
+          <CheckCircle2 size={13} aria-hidden="true" className={isHistorical ? "text-dim" : undefined} />
           <span>
-            Upgrade confirmed — {resultJob.releaseVersion} ({shortBuild(confirmedBuild)}) is sending a fresh heartbeat.
+            {isHistorical
+              ? `Previous upgrade — ${resultJob.releaseVersion} (${shortBuild(confirmedBuild)}) was confirmed by heartbeat.`
+              : `Upgrade confirmed — ${resultJob.releaseVersion} (${shortBuild(confirmedBuild)}) is sending a fresh heartbeat.`}
           </span>
           {finishedAt ? (
             <span className="text-dim" title={formatDate(completedAt)}>
@@ -551,39 +499,23 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
     }
   }
 
-  const actions = (
-    <>
-      {showUpgrade ? (
-        <Button
-          ref={upgradeTriggerRef}
-          type="button"
-          size="sm"
-          variant="default"
-          className={dense ? "text-[11px]" : undefined}
-          disabled={!upgradeEnabled}
-          aria-describedby={upgradeReason ? reasonId : undefined}
-          onClick={() => {
-            setActionError(null);
-            setConfirmOpen(true);
-          }}
-        >
-          Upgrade agent
-        </Button>
-      ) : null}
-      {showInstructions ? (
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className={dense ? "text-[11px]" : undefined}
-          onClick={() => setInstructionsOpen(true)}
-        >
-          <Wrench size={13} />
-          View update instructions
-        </Button>
-      ) : null}
-    </>
-  );
+  const actions = showUpgrade ? (
+    <Button
+      ref={upgradeTriggerRef}
+      type="button"
+      size="sm"
+      variant="default"
+      className={dense ? "text-[11px]" : undefined}
+      disabled={!upgradeEnabled}
+      aria-describedby={upgradeReason ? reasonId : undefined}
+      onClick={() => {
+        setActionError(null);
+        setConfirmOpen(true);
+      }}
+    >
+      Upgrade agent
+    </Button>
+  ) : null;
 
   const retryRow = loadError ? (
     <div className="flex flex-wrap items-center gap-2 text-[11px] text-dim">
@@ -628,12 +560,15 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
           />
           {available ? (
             <>
-              <DetailRow label="Release" value={`${available.version} (${shortBuild(available.buildId)})`} />
-              <DetailRow label="Release ID" value={available.releaseId} mono />
-              <DetailRow label="Published" value={formatDate(available.publishedAt)} />
+              <DetailRow label="Bundled build" value={`${available.version} (${shortBuild(available.buildId)})`} />
+              <DetailRow label="Build ID" value={available.buildId} mono />
+              <DetailRow label="Source" value="Deployed API image" />
             </>
           ) : (
-            <DetailRow label="Release" value={status.state === "release_unavailable" ? "Catalog unavailable" : "No newer release"} />
+            <DetailRow
+              label="Bundled build"
+              value={status.state === "release_unavailable" ? "Bundled binary unavailable" : "Already running bundled build"}
+            />
           )}
           {status.compatibility.reason !== "ok" ? (
             <DetailRow label="Compatibility" value={INCOMPATIBLE_REASONS[status.compatibility.reason]} />
@@ -648,7 +583,7 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
           <div className={dense ? "mt-1" : "mt-2"}>{liveContent}</div>
         ) : null}
       </div>
-      {showUpgrade || showInstructions ? (
+      {showUpgrade ? (
         <div className={dense ? "mt-1 flex flex-wrap items-center gap-2" : "mt-2 flex flex-wrap items-center gap-2"}>
           {actions}
         </div>
@@ -675,7 +610,7 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
           <CardHeader>
             <CardTitle>Agent updates</CardTitle>
             <CardDescription>
-              Upgrade {displayName} from the signed release catalog. Progress is confirmed by a fresh agent
+              Upgrade {displayName} using the bundled agent binary in this deployment. Progress is confirmed by a fresh agent
               heartbeat, not by the service status.
             </CardDescription>
           </CardHeader>
@@ -735,6 +670,10 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
                 <span className="break-all text-right font-mono">{available?.releaseId ?? ""}</span>
               </div>
               <div className="flex justify-between gap-4">
+                <span className="text-dim">Source</span>
+                <span className="text-right">Deployed API image</span>
+              </div>
+              <div className="flex justify-between gap-4">
                 <span className="text-dim">Downtime</span>
                 <span className="text-right">
                   Monitoring pauses for a few seconds while the agent restarts.
@@ -762,36 +701,6 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
               >
                 {submitting ? "Starting…" : "Upgrade agent"}
               </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-        <AlertDialog
-          open={instructionsOpen}
-          onOpenChange={(open) => {
-            if (!open) setInstructionsOpen(false);
-          }}
-        >
-          <AlertDialogContent className="max-w-2xl">
-            <AlertDialogHeader>
-              <AlertDialogTitle>Update the agent manually</AlertDialogTitle>
-              <AlertDialogDescription>{instructions?.intro ?? ""}</AlertDialogDescription>
-            </AlertDialogHeader>
-            {instructions ? (
-              <>
-                <pre className="max-h-64 overflow-auto border border-line bg-ink p-3 text-[11px] leading-relaxed text-text">
-                  {instructions.script}
-                </pre>
-                <ul className="list-disc space-y-1 pl-4 text-[11px] text-dim">
-                  {instructions.notes.map((note) => (
-                    <li key={note}>{note}</li>
-                  ))}
-                </ul>
-              </>
-            ) : (
-              <p className="text-xs text-dim">No published release is available to install.</p>
-            )}
-            <AlertDialogFooter>
-              <AlertDialogCancel>Close</AlertDialogCancel>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>

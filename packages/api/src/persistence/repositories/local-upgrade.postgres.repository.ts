@@ -54,6 +54,7 @@ type UpdaterHeartbeatRow = {
   vps_id: string;
   last_seen_at: Date | string;
   credential_id: string | null;
+  protocol_version: number | null;
 };
 
 function rowToJob(row: LocalUpgradeRow): LocalUpgradeJob {
@@ -301,15 +302,17 @@ export function createPostgresLocalUpgradeRepository(
 
     async recordUpdaterHeartbeat(heartbeat) {
       await pool.query(
-        `INSERT INTO updater_heartbeats (vps_id, last_seen_at, credential_id)
-         VALUES ($1, $2, $3)
+        `INSERT INTO updater_heartbeats (vps_id, last_seen_at, credential_id, protocol_version)
+         VALUES ($1, $2, $3, $4)
          ON CONFLICT (vps_id) DO UPDATE SET
            last_seen_at = EXCLUDED.last_seen_at,
-           credential_id = EXCLUDED.credential_id`,
+           credential_id = EXCLUDED.credential_id,
+           protocol_version = EXCLUDED.protocol_version`,
         [
           heartbeat.vpsId,
           new Date(heartbeat.lastSeenAt),
           heartbeat.credentialId ?? null,
+          heartbeat.protocolVersion ?? 1,
         ],
       );
     },
@@ -324,6 +327,7 @@ export function createPostgresLocalUpgradeRepository(
       return {
         vpsId: row.vps_id,
         lastSeenAt: requiredIsoString(row.last_seen_at),
+        protocolVersion: row.protocol_version ?? 1,
         ...(row.credential_id == null
           ? {}
           : { credentialId: row.credential_id }),

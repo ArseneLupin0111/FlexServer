@@ -37,6 +37,11 @@ type Daemon struct {
 
 // NewDaemon wires a daemon from config.
 func NewDaemon(cfg *Config, api API) *Daemon {
+	if cfg.testMode && cfg.testAuthorizer == nil {
+		if auth, ok := api.(JobAuthorizer); ok {
+			cfg.testAuthorizer = auth
+		}
+	}
 	return &Daemon{
 		cfg:     cfg,
 		api:     api,
@@ -111,17 +116,27 @@ func (d *Daemon) stepClaim(ctx context.Context) {
 		d.logf("claim returned job with invalid id, ignoring")
 		return
 	}
+	targetSha := job.TargetSha256
+	if targetSha == "" {
+		targetSha = job.Release.TargetSha256
+	}
+	targetURL := job.TargetURL
+	if targetURL == "" {
+		targetURL = "/api/local-updater/jobs/" + job.JobID + "/artifact"
+	}
 	j := &Journal{
-		JobID:            job.JobID,
-		FencingToken:     job.FencingToken,
+		JobID:             job.JobID,
+		FencingToken:      job.FencingToken,
 		RequiresReconcile: job.RequiresReconcile,
-		ReleaseID:        job.Release.ReleaseID,
-		Version:          job.Release.Version,
-		BuildID:          job.Release.BuildID,
-		TargetSha256:     job.Release.TargetSha256,
-		ManifestRaw:      job.ManifestRaw,
-		Phase:            PhaseDownloading,
-		CreatedAt:        time.Now().UTC(),
+		ReleaseID:         job.Release.ReleaseID,
+		Version:           job.Release.Version,
+		BuildID:           job.Release.BuildID,
+		TargetSha256:      targetSha,
+		TargetURL:         targetURL,
+		TargetSizeBytes:   job.TargetSizeBytes,
+		ManifestRaw:       job.ManifestRaw,
+		Phase:             PhaseDownloading,
+		CreatedAt:         time.Now().UTC(),
 	}
 	if err := d.journal.Save(j); err != nil {
 		d.logf("cannot persist journal (disk full?): %v", err)
@@ -200,12 +215,6 @@ func (d *Daemon) reconcile(ctx context.Context, j *Journal) error {
 		}
 		target := j.NewSha256
 		if target == "" {
-			target = d.manifestArtifactSha(j)
-		}
-		if target == "" {
-			// An unusable manifest must never widen the reapply window:
-			// fall back to the server-issued target sha so the "binary is
-			// already the new build" guard still fires. Hold more, mutate less.
 			target = j.TargetSha256
 		}
 		if target != "" && actual == target {
@@ -282,18 +291,21 @@ func (d *Daemon) reconcile(ctx context.Context, j *Journal) error {
 // runPreSwap covers downloading → verifying → staging, then hands off to the
 // privileged helper. Nothing privileged happens here.
 func (d *Daemon) runPreSwap(ctx context.Context, j *Journal) error {
-	m, err := d.ensureManifestValid(j)
-	if err != nil {
-		return d.failPreSwap(ctx, j, "manifest: "+err.Error())
-	}
-	artifact, err := m.AgentArtifact(d.cfg.AllowedHosts)
-	if err != nil {
-		return d.failPreSwap(ctx, j, err.Error())
-	}
-
 	staging := stagingDir(d.cfg.StateDir, j.JobID)
 	if err := os.MkdirAll(staging, 0o755); err != nil {
 		return fmt.Errorf("staging dir (disk full?): %w", err)
+	}
+
+	targetSha := j.TargetSha256
+	if targetSha == "" {
+		targetSha = j.ReleaseID
+	}
+	if targetSha == "" {
+		return d.failPreSwap(ctx, j, "job carries no target sha256")
+	}
+	targetURL := j.TargetURL
+	if targetURL == "" {
+		targetURL = "/api/local-updater/jobs/" + j.JobID + "/artifact"
 	}
 
 	if j.Phase == PhaseDownloading {
@@ -301,11 +313,11 @@ func (d *Daemon) runPreSwap(ctx context.Context, j *Journal) error {
 			return err
 		}
 		dest := filepath.Join(staging, "artifact.bin")
-		if cur, err := sha256File(dest); err == nil && cur == artifact.SHA256 {
+		if cur, err := sha256File(dest); err == nil && targetSha != "" && cur == targetSha {
 			d.logf("job %s: reuse already-downloaded artifact", j.JobID)
 		} else {
 			d.logf("job %s: downloading artifact", j.JobID)
-			if _, err := DownloadArtifact(ctx, d.cfg, d.dl, artifact, dest); err != nil {
+			if _, err := DownloadBundledArtifact(ctx, d.cfg, d.dl, targetURL, targetSha, j.TargetSizeBytes, dest); err != nil {
 				return fmt.Errorf("download (offline/full disk?): %w", err)
 			}
 		}
@@ -323,10 +335,9 @@ func (d *Daemon) runPreSwap(ctx context.Context, j *Journal) error {
 		if err != nil {
 			return fmt.Errorf("hash artifact: %w", err)
 		}
-		if got != artifact.SHA256 {
-			return d.failPreSwap(ctx, j, fmt.Sprintf("staged artifact sha %s != signed %s", got, artifact.SHA256))
+		if targetSha != "" && got != targetSha {
+			return d.failPreSwap(ctx, j, fmt.Sprintf("staged artifact sha %s != target %s", got, targetSha))
 		}
-		// Execute the staged binary to confirm it reports the signed buildId.
 		binPath := filepath.Join(staging, "artifact.bin")
 		if err := os.Chmod(binPath, 0o755); err != nil {
 			return d.failPreSwap(ctx, j, "staged artifact permissions: "+err.Error())
@@ -354,18 +365,24 @@ func (d *Daemon) runPreSwap(ctx context.Context, j *Journal) error {
 		if err := d.reportPhase(ctx, j, PhaseStaging, ""); err != nil {
 			return err
 		}
-		// The helper reads the signed manifest bytes straight from staging.
-		if err := atomicWriteFile(filepath.Join(staging, "manifest.json"), []byte(j.ManifestRaw), 0o644); err != nil {
-			return fmt.Errorf("write staging manifest (disk full?): %w", err)
+		metaBytes, err := json.Marshal(map[string]any{
+			"jobId":   j.JobID,
+			"buildId": j.BuildID,
+			"sha256":  targetSha,
+			"size":    j.TargetSizeBytes,
+		})
+		if err != nil {
+			return err
 		}
-		// Record swap intent durably BEFORE the privileged request exists.
+		if err := atomicWriteFile(filepath.Join(staging, "meta.json"), metaBytes, 0o644); err != nil {
+			return fmt.Errorf("write staging meta: %w", err)
+		}
+
 		j.SwapRequested = true
 		j.Phase = PhaseRestarting
 		if err := d.journal.Save(j); err != nil {
 			return err
 		}
-		// Server records the heartbeat baseline at first "restarting"; it must
-		// precede the restart so the first post-restart heartbeat is fresher.
 		if err := d.reportPhase(ctx, j, PhaseRestarting, ""); err != nil {
 			return err
 		}
@@ -736,35 +753,6 @@ func (d *Daemon) ensureAction(ctx context.Context, action, jobID string) (*Helpe
 	return nil, fmt.Errorf("helper %s for %s timed out after %s", action, jobID, d.cfg.HelperTimeout)
 }
 
-// ensureManifestValid parses and verifies the signed manifest from the job.
-func (d *Daemon) ensureManifestValid(j *Journal) (*Manifest, error) {
-	if j.ManifestRaw == "" {
-		return nil, errors.New("job carries no manifest")
-	}
-	m, err := VerifyManifest([]byte(j.ManifestRaw), d.cfg.PinnedPublicKey)
-	if err != nil {
-		return nil, err
-	}
-	if m.ReleaseID != j.ReleaseID || m.BuildID != j.BuildID {
-		return nil, fmt.Errorf("manifest ids %s/%s do not match job %s/%s",
-			m.ReleaseID, m.BuildID, j.ReleaseID, j.BuildID)
-	}
-	return m, nil
-}
-
-// manifestArtifactSha best-effort extracts the signed target sha256 for
-// reconcile decisions; "" when the manifest is unusable.
-func (d *Daemon) manifestArtifactSha(j *Journal) string {
-	m, err := d.ensureManifestValid(j)
-	if err != nil {
-		return ""
-	}
-	a, err := m.AgentArtifact(d.cfg.AllowedHosts)
-	if err != nil {
-		return ""
-	}
-	return a.SHA256
-}
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)

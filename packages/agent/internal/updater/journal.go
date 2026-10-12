@@ -33,6 +33,8 @@ type Journal struct {
 	Version          string    `json:"version"`
 	BuildID          string    `json:"buildId"`
 	TargetSha256     string    `json:"targetSha256"`
+	TargetURL        string    `json:"targetUrl,omitempty"`
+	TargetSizeBytes  int64     `json:"targetSizeBytes,omitempty"`
 	ManifestRaw      string    `json:"manifestRaw"`
 	Phase            string    `json:"phase"`
 	SwapRequested    bool      `json:"swapRequested"`

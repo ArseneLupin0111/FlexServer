@@ -1,7 +1,6 @@
 package updater
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -39,10 +38,6 @@ type Config struct {
 	APIBase string `json:"apiBase"`
 	// Credential is the scoped local-updater bearer (vma_<credentialId>_<secret>).
 	Credential string `json:"credential"`
-	// PinnedPublicKey is base64 of the raw 32-byte Ed25519 release key.
-	PinnedPublicKey string `json:"pinnedPublicKey"`
-	// AllowedHosts overrides the download allowlist (tests/offline harness only).
-	AllowedHosts []string `json:"allowedHosts,omitempty"`
 
 	// AgentBinary is the fixed absolute path of the agent binary the helper may replace.
 	AgentBinary string `json:"agentBinary"`
@@ -75,7 +70,8 @@ type Config struct {
 	// testMode opts out of the fixed production invariants. It is unexported
 	// so no config file can ever enable it; only in-process test harnesses
 	// call EnableTestOverrides.
-	testMode bool
+	testMode       bool
+	testAuthorizer JobAuthorizer
 }
 
 // Fixed production targets: the helper may only replace this binary and
@@ -92,6 +88,7 @@ const (
 // enable it.
 func (c *Config) EnableTestOverrides() { c.testMode = true }
 
+func (c *Config) SetTestAuthorizer(auth JobAuthorizer) { c.testAuthorizer = auth }
 // Defaults applied when duration fields are absent or zero.
 const (
 	defaultHTTPTimeout         = 30 * time.Second
@@ -104,6 +101,21 @@ const (
 
 // LoadConfig reads and validates the root-owned config file.
 func LoadConfig(path string) (*Config, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat config %s: %w", path, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("config %s must not be a symlink", path)
+	}
+	if fi.Mode().Perm()&0022 != 0 && os.Geteuid() == 0 {
+		return nil, fmt.Errorf("config %s must not be group- or world-writable (mode %o)", path, fi.Mode().Perm())
+	}
+	if os.Geteuid() == 0 {
+		if rooted, ok := statIsRootOwned(fi); ok && !rooted {
+			return nil, fmt.Errorf("config %s must be owned by root", path)
+		}
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
@@ -117,7 +129,6 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	return &c, nil
 }
-
 // NormalizeAndValidate fills defaults and enforces fail-closed invariants.
 //
 // Production (config file) invariants: apiBase must be https, agentBinary
@@ -142,16 +153,6 @@ func (c *Config) NormalizeAndValidate() error {
 	}
 	if !strings.HasPrefix(c.Credential, "vma_") {
 		return fmt.Errorf("credential must be a scoped vma_ bearer")
-	}
-	if c.PinnedPublicKey == "" {
-		return fmt.Errorf("pinnedPublicKey is required (fail closed without a pinned key)")
-	}
-	rawKey, err := base64.StdEncoding.DecodeString(c.PinnedPublicKey)
-	if err != nil {
-		return fmt.Errorf("pinnedPublicKey is not valid base64: %w", err)
-	}
-	if len(rawKey) != 32 {
-		return fmt.Errorf("pinnedPublicKey must decode to a 32-byte Ed25519 key, got %d bytes", len(rawKey))
 	}
 	if c.AgentBinary == "" {
 		if c.testMode {
@@ -203,10 +204,5 @@ func (c *Config) NormalizeAndValidate() error {
 	c.HeartbeatInterval = time.Duration(c.HeartbeatIntervalSec) * time.Second
 	c.AwaitHeartbeatGrace = time.Duration(c.AwaitHeartbeatGraceSec) * time.Second
 	c.HelperTimeout = time.Duration(c.HelperTimeoutSec) * time.Second
-	if len(c.AllowedHosts) == 0 {
-		c.AllowedHosts = append([]string(nil), DefaultAllowedHosts...)
-	} else if !c.testMode {
-		return fmt.Errorf("allowedHosts cannot be overridden in production (pinned allowlist ships with the binary)")
-	}
 	return nil
 }

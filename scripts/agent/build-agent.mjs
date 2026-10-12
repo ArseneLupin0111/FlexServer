@@ -14,7 +14,8 @@
  */
 
 import { execSync } from "child_process";
-import { existsSync, mkdirSync, statSync, readFileSync } from "fs";
+import { existsSync, mkdirSync, statSync, readFileSync, writeFileSync } from "fs";
+import { createHash } from "crypto";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -107,5 +108,19 @@ for (const out of [agentOutputPath, updaterOutputPath]) {
   console.log(
     `\n✓ Built: packages/agent/dist/${out === agentOutputPath ? "vps-agent-linux-amd64" : "vps-updater-linux-amd64"} (${sizeKB} KB)`,
   );
+}
+if (existsSync(agentOutputPath)) {
+  const agentBuf = readFileSync(agentOutputPath);
+  const agentSha = createHash("sha256").update(agentBuf).digest("hex");
+  const agentMeta = {
+    os: "linux",
+    arch: "amd64",
+    version: agentVersion,
+    buildId: buildId,
+    sha256: agentSha,
+    size: agentBuf.length,
+    publishedAt: new Date().toISOString(),
+  };
+  writeFileSync(`${agentOutputPath}.json`, JSON.stringify(agentMeta, null, 2));
 }
 console.log(`  identity: ${identity}`);

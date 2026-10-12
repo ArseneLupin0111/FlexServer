@@ -123,6 +123,18 @@ func VerifyManifest(manifestRaw []byte, rawKey string) (*Manifest, error) {
 	return &m, nil
 }
 
+// ParseManifest parses and validates the manifest fields without requiring a signature verification.
+func ParseManifest(manifestRaw []byte) (*Manifest, error) {
+	var m Manifest
+	if err := json.Unmarshal(manifestRaw, &m); err != nil {
+		return nil, fmt.Errorf("manifest parse: %w", err)
+	}
+	if err := validateManifestFields(&m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 func validateManifestFields(m *Manifest) error {
 	if !hex40Re.MatchString(m.ReleaseID) {
 		return fmt.Errorf("releaseId %q is not a full 40-hex git SHA", m.ReleaseID)

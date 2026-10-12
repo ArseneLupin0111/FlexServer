@@ -48,7 +48,7 @@ import { AgentService } from "./agents/agent.service.js";
 import { LocalUpgradeController } from "./local-upgrade/local-upgrade.controller.js";
 import { LocalUpgradeService } from "./local-upgrade/local-upgrade.service.js";
 import { LocalUpdaterController } from "./local-upgrade/local-updater.controller.js";
-import { RELEASE_CATALOG, ReleaseCatalogService } from "./release/index.js";
+import { BundledAgentService } from "./local-upgrade/bundled-agent.service.js";
 import { JobActivityService } from "./jobs/job-activity.service.js";
 import { VpsService } from "./vps/vps.service.js";
 import type { VpsRepository } from "./persistence/repositories/vps.repository.js";
@@ -272,8 +272,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
         provide: LOCAL_UPGRADE_REPOSITORY,
         useValue: deps.localUpgrades ?? repositories!.localUpgrades,
       },
-      ReleaseCatalogService,
-      { provide: RELEASE_CATALOG, useExisting: ReleaseCatalogService },
+      BundledAgentService,
       LocalUpgradeService,
        DockerActivityService,
        DockerMonitoringService,

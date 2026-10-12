@@ -3,6 +3,7 @@
 ## Unreleased — bundled updater CI verification
 
 - Replace obsolete signed-manifest and source-text assertions in the updater CI gate with keyless bundled-install dry runs, generated systemd isolation checks, checksum and configuration rejection checks. Keep Go vet, tests and Linux compilation mandatory; the Trivy release gate is unchanged.
+- Check out installer assets in the SSH deployment job and transfer updater scripts plus the CLI asset over the existing SSH connection, avoiding incompatible `scp` port options.
 
 ## Unreleased — Termius-inspired natural-flow landing hero
 

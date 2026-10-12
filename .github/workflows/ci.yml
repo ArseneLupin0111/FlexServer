@@ -656,6 +656,10 @@ jobs:
           fi
           echo "deploy_path=${DEPLOY_PATH:-/opt/vps-manager-nodejs}" >> "$GITHUB_OUTPUT"
 
+      - name: Checkout installer assets
+        if: steps.config.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+
       - name: Prepare SSH key
         if: steps.config.outputs.enabled == 'true'
         env:
@@ -917,8 +921,8 @@ jobs:
           $SSH "for i in \$(seq 1 30); do curl -fsS http://127.0.0.1:3000/api/health && exit 0; sleep 2; done; docker compose -f '$DEPLOY_PATH/docker-compose.yml' logs --tail=80; exit 1"
           # Refresh or bootstrap local updater on the host using the bundled binary from API image
           echo "Updating host local-updater from API image..."
-          scp "${SSH_OPTS[@]}" scripts/install/install-updater.sh scripts/install/installer-lib.sh "${VPS_USER}@${VPS_HOST}:/tmp/"
-          $SSH "chmod 0755 /tmp/install-updater.sh /tmp/installer-lib.sh"
+          # Reuse the authenticated SSH connection; scp uses -P, not ssh's -p.
+          tar -C scripts/install -cf - install-updater.sh installer-lib.sh flexserverctl.py | $SSH "tar -xf - -C /tmp && chmod 0755 /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py"
           $SSH "
             set -euo pipefail
             SUDO=\"\"
@@ -929,7 +933,7 @@ jobs:
             UPDATER_TMP=\"\$(mktemp /tmp/vps-updater-bundled.XXXXXX)\"
             if ! docker run --rm --entrypoint cat '$API_IMAGE' /app/agent/vps-updater-linux-amd64 > \"\$UPDATER_TMP\" || [ ! -s \"\$UPDATER_TMP\" ]; then
               echo 'Error: Failed to extract bundled updater binary from API image.' >&2
-              rm -f \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh
+              rm -f \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py
               exit 1
             fi
             chmod 0755 \"\$UPDATER_TMP\"
@@ -938,7 +942,7 @@ jobs:
               echo 'Upgrading existing local updater to bundled protocol daemon...'
               if ! \$SUDO /tmp/install-updater.sh --upgrade --binary \"\$UPDATER_TMP\" --config /etc/vps-updater/config.json; then
                 echo 'Error: Failed to upgrade existing local updater on host.' >&2
-                rm -f \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh
+                rm -f \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py
                 exit 1
               fi
               echo 'Local updater successfully upgraded.'
@@ -951,14 +955,14 @@ jobs:
                 TOKEN=\"\$(printf '%s' \"\$JSON_OUT\" | sed -n 's/.*\"token\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' | head -1)\"
                 if [ -z \"\$TOKEN\" ]; then
                   echo 'Error: Failed to provision absent local updater credential from API.' >&2
-                  rm -f \"\$CONFIG_TMP\" \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh
+                  rm -f \"\$CONFIG_TMP\" \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py
                   exit 1
                 fi
                 printf '{\n  \"apiBase\": \"%s\",\n  \"credential\": \"%s\",\n  \"agentBinary\": \"/usr/local/bin/vps-manager-agent\",\n  \"agentUnit\": \"vps-manager-agent.service\",\n  \"stateDir\": \"/var/lib/vps-updater\"\n}\n' \"\$UPDATER_URL\" \"\$TOKEN\" > \"\$CONFIG_TMP\"
                 chmod 0600 \"\$CONFIG_TMP\"
                 if ! \$SUDO /tmp/install-updater.sh --upgrade --binary \"\$UPDATER_TMP\" --config \"\$CONFIG_TMP\"; then
                   echo 'Error: Failed to bootstrap absent local updater on host.' >&2
-                  rm -f \"\$CONFIG_TMP\" \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh
+                  rm -f \"\$CONFIG_TMP\" \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py
                   exit 1
                 fi
                 rm -f \"\$CONFIG_TMP\"
@@ -967,6 +971,6 @@ jobs:
                 echo 'Local updater is absent and no HTTPS backend URL configured; skipping updater bootstrap.'
               fi
             fi
-            rm -f \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh
+            rm -f \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py
           "
           echo "Host local-updater refresh completed."

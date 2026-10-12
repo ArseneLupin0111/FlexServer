@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — bundled updater CI verification
+
+- Replace obsolete signed-manifest and source-text assertions in the updater CI gate with keyless bundled-install dry runs, generated systemd isolation checks, checksum and configuration rejection checks. Keep Go vet, tests and Linux compilation mandatory; the Trivy release gate is unchanged.
+
 ## Unreleased — Termius-inspired natural-flow landing hero
 
 - Replace the 200vh pinned hero storytelling scroll controller with a Termius-inspired natural-flow hero.

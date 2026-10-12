@@ -880,21 +880,20 @@ export function LandingPage() {
 
   const { scrollYProgress } = useScroll({
     target: storyTrackRef,
-    offset:
-      featuresActive && isDesktop
-        ? [
-            `start ${storyMetrics.stickyTop}px`,
-            `end ${storyMetrics.stickyTop + storyMetrics.stageHeight}px`,
-          ]
-        : undefined,
+    offset: featuresActive
+      ? [
+          `start ${storyMetrics.stickyTop}px`,
+          `end ${storyMetrics.stickyTop + storyMetrics.stageHeight}px`,
+        ]
+      : undefined,
   });
 
   useMotionValueEvent(scrollYProgress, "change", (progress) => {
-    if (!featuresActive || !isDesktop) return;
+    if (!featuresActive) return;
     const scene = featuresSceneRef.current;
     if (scene) {
       const activeDescs = scene.querySelectorAll<HTMLElement>(
-        ".landing-story-desc:not([hidden]), .landing-story-mobile-desc"
+        ".landing-story-desc:not([hidden])"
       );
       let isDescFocused = false;
       if (document.activeElement) {
@@ -916,6 +915,15 @@ export function LandingPage() {
       activeFeatureIndexRef.current = nextIndex;
       if (scene) {
         scene.setAttribute("data-active-step", String(nextIndex));
+        const activeTab = scene.querySelector<HTMLElement>(
+          `#mobile-tab-${nextIndex}`
+        );
+        if (activeTab && activeTab.parentElement) {
+          activeTab.parentElement.scrollTo({
+            left: Math.max(0, activeTab.offsetLeft - 16),
+            behavior: isReducedMotion ? "auto" : "smooth",
+          });
+        }
       }
       setActiveFeatureIndex(nextIndex);
     }
@@ -1059,13 +1067,11 @@ export function LandingPage() {
     };
   }, []);
 
-  // Pinned storytelling scene powered by Motion:
-  // Desktop (>= 64rem): ALWAYS pinned independent of viewport height. Short desktop
-  // viewports (e.g. 1024x500) use compact styling and stable sticky positioning.
-  // Mobile (< 64rem): Dedicated single-column pinned storytelling layout. Fits
-  // viewports pin the full stage; very short viewports keep sticky navigation with
-  // natural readable document scrolling without clipping or traps.
-  // Reduced motion: plain static flow.
+  // Universal Pinned Storytelling Scene:
+  // Desktop (>= 64rem): Stationary two-column stage (nav list + synchronized preview).
+  // Mobile (< 64rem): Stationary single-column stage (in-stage tabs + active feature body + preview).
+  // All viewports apply measured proportional scaling without clipping when natural height exceeds available space.
+  // Reduced motion retains identical pin geometry with instant step swaps (transitions disabled).
   useEffect(() => {
     const scene = featuresSceneRef.current;
     if (!scene) return;
@@ -1079,7 +1085,7 @@ export function LandingPage() {
     // sees the tallest possible stage across all steps without layout jump.
     const measure = () => {
       const stage = scene.querySelector<HTMLElement>(
-        ".landing-story-desktop-stage, .landing-story-stage"
+        ".landing-story-desktop-stage, .landing-story-mobile-stage, .landing-story-stage"
       );
       if (!stage) return 0;
       scene.style.removeProperty("--story-scale");
@@ -1087,10 +1093,12 @@ export function LandingPage() {
       stage.style.removeProperty("--story-scale");
       stage.style.removeProperty("--story-stage-height");
       const wrap = stage.querySelector<HTMLElement>(
-        ".landing-story-desktop-wrap, .landing-story-wrap"
+        ".landing-story-desktop-wrap, .landing-story-mobile-wrap, .landing-story-wrap"
       );
       const items = Array.from(
-        stage.querySelectorAll<HTMLElement>(".landing-story-nav-item")
+        stage.querySelectorAll<HTMLElement>(
+          ".landing-story-nav-item, .landing-story-mobile-tab-btn"
+        )
       );
       const descriptions = Array.from(
         stage.querySelectorAll<HTMLElement>(".landing-story-desc")
@@ -1126,7 +1134,6 @@ export function LandingPage() {
       scene.removeAttribute("data-features-active");
       scene.removeAttribute("data-features-measuring");
       scene.removeAttribute("data-active-step");
-      scene.removeAttribute("data-mobile-mode");
       const track =
         storyTrackRef.current ??
         scene.querySelector<HTMLElement>(".landing-story-track");
@@ -1137,59 +1144,15 @@ export function LandingPage() {
       scene.style.removeProperty("--story-stage-height");
       scene.style.removeProperty("--story-scale");
       const stage = scene.querySelector<HTMLElement>(
-        ".landing-story-desktop-stage, .landing-story-stage"
+        ".landing-story-desktop-stage, .landing-story-mobile-stage, .landing-story-stage"
       );
       if (stage) {
         stage.style.removeProperty("--story-stage-height");
         stage.style.removeProperty("--story-scale");
       }
     };
-    const syncMobileScroll = () => {
-      if (desktopMedia.matches || reduceMotion.matches) return;
-      const panels = scene.querySelectorAll<HTMLElement>(
-        ".landing-story-mobile-panel"
-      );
-      if (!panels.length) return;
-      const headerEl = document.querySelector<HTMLElement>(
-        "header.landing-header, .landing-header"
-      );
-      const headerH = headerEl ? headerEl.offsetHeight : 56;
-      const stickyBar = scene.querySelector<HTMLElement>(
-        ".landing-story-mobile-sticky-bar"
-      );
-      const stickyBarH = stickyBar ? stickyBar.offsetHeight : 52;
-      const threshold = headerH + stickyBarH + 32;
-
-      let currentIdx = 0;
-      panels.forEach((panel, i) => {
-        const rect = panel.getBoundingClientRect();
-        if (rect.top <= threshold) {
-          currentIdx = i;
-        }
-      });
-
-      if (currentIdx !== activeFeatureIndexRef.current) {
-        activeFeatureIndexRef.current = currentIdx;
-        setActiveFeatureIndex(currentIdx);
-        scene.setAttribute("data-active-step", String(currentIdx));
-        const activeTab = scene.querySelector<HTMLElement>(
-          `#mobile-tab-${currentIdx}`
-        );
-        if (activeTab && activeTab.parentElement) {
-          activeTab.parentElement.scrollTo({
-            left: activeTab.offsetLeft - 16,
-            behavior: "smooth",
-          });
-        }
-      }
-    };
 
     const sync = () => {
-      if (reduceMotion.matches) {
-        reset();
-        return;
-      }
-
       scene.setAttribute("data-features-active", "");
       scene.setAttribute("data-features-measuring", "");
 
@@ -1198,14 +1161,16 @@ export function LandingPage() {
       );
       const headerH = headerEl
         ? headerEl.offsetHeight
-        : (desktopMedia.matches ? 72 : 56);
+        : desktopMedia.matches
+        ? 72
+        : 56;
       const isShortScreen = window.innerHeight < 640;
 
       const track =
         storyTrackRef.current ??
         scene.querySelector<HTMLElement>(".landing-story-track");
       const stage = scene.querySelector<HTMLElement>(
-        ".landing-story-desktop-stage, .landing-story-stage"
+        ".landing-story-desktop-stage, .landing-story-mobile-stage, .landing-story-stage"
       );
       if (!track || !stage) {
         scene.removeAttribute("data-features-measuring");
@@ -1215,86 +1180,55 @@ export function LandingPage() {
 
       track.style.removeProperty("--story-stage-height");
 
-      if (desktopMedia.matches) {
-        // Desktop (>= 64rem): ALWAYS pinned independent of viewport height.
-        // Entire stage stays strictly below the fixed header at all times.
-        const naturalH = measure();
-        scene.removeAttribute("data-features-measuring");
+      const naturalH = measure();
+      scene.removeAttribute("data-features-measuring");
 
-        // Positive stickyTop clearance below header:
-        const isShortScreen = window.innerHeight < 640;
-        const minClearance = isShortScreen ? 8 : 16;
-        const bottomGap = isShortScreen ? 8 : 16;
-        const availableH = Math.max(
-          160,
-          window.innerHeight - (headerH + minClearance) - bottomGap
-        );
+      // Positive stickyTop clearance below header:
+      const minClearance = isShortScreen ? 8 : 16;
+      const bottomGap = isShortScreen ? 8 : 16;
+      const availableH = Math.max(
+        160,
+        window.innerHeight - (headerH + minClearance) - bottomGap
+      );
 
-        // Measured proportional scale ONLY when natural stage exceeds available height:
-        const needsScale = naturalH > availableH;
-        const scale = needsScale
-          ? Math.min(1, Math.max(0.35, Number((availableH / naturalH).toFixed(4))))
-          : 1;
-        const scaledStageH = Math.round(naturalH * scale);
+      // Measured proportional scale ONLY when natural stage exceeds available height:
+      const needsScale = naturalH > availableH;
+      const scale = needsScale
+        ? Math.min(1, Number((availableH / naturalH).toFixed(4)))
+        : 1;
+      const scaledStageH = Math.round(naturalH * scale);
 
-        // Positive stickyTop: when fitting naturally (scale = 1), center the stage
-        // vertically in available space below header; when scaled down to fit,
-        // anchor stickyTop with positive clearance below header.
-        const excessSpace = availableH - scaledStageH;
-        const topClearance = needsScale
-          ? minClearance
-          : Math.min(
-              isShortScreen ? 16 : 48,
-              minClearance + Math.max(0, Math.round(excessSpace / 2))
-            );
-        const stickyTop = headerH + topClearance;
+      // Positive stickyTop: when fitting naturally (scale = 1), center the stage
+      // vertically in available space below header; when scaled down to fit,
+      // anchor stickyTop with positive clearance below header.
+      const excessSpace = availableH - scaledStageH;
+      const topClearance = needsScale
+        ? minClearance
+        : Math.min(
+            isShortScreen ? 16 : 48,
+            minClearance + Math.max(0, Math.round(excessSpace / 2))
+          );
+      const stickyTop = headerH + topClearance;
 
-        scene.style.setProperty("--story-scale", String(scale));
-        scene.style.setProperty("--story-sticky-top", `${stickyTop}px`);
-        scene.style.setProperty("--story-stage-height", `${scaledStageH}px`);
-        stage.style.setProperty("--story-scale", String(scale));
-        stage.style.setProperty("--story-stage-height", `${scaledStageH}px`);
-        track.style.setProperty("--story-stage-height", `${scaledStageH}px`);
+      scene.style.setProperty("--story-scale", String(scale));
+      scene.style.setProperty("--story-sticky-top", `${stickyTop}px`);
+      scene.style.setProperty("--story-stage-height", `${scaledStageH}px`);
+      stage.style.setProperty("--story-scale", String(scale));
+      stage.style.setProperty("--story-stage-height", `${scaledStageH}px`);
+      track.style.setProperty("--story-stage-height", `${scaledStageH}px`);
 
-        isEffectActive = true;
-        setStoryMetrics({
-          stickyTop,
-          stageHeight: scaledStageH,
-        });
-        setFeaturesActive(true);
-        scene.setAttribute("data-features-active", "");
-        scene.setAttribute(
-          "data-active-step",
-          String(activeFeatureIndexRef.current)
-        );
+      isEffectActive = true;
+      setStoryMetrics({
+        stickyTop,
+        stageHeight: scaledStageH,
+      });
+      setFeaturesActive(true);
+      scene.setAttribute("data-features-active", "");
+      scene.setAttribute(
+        "data-active-step",
+        String(activeFeatureIndexRef.current)
+      );
 
-        const progress = scrollYProgress.get();
-        const nextIndex = Math.min(
-          FEATURES.length - 1,
-          Math.max(0, Math.floor(progress * FEATURES.length))
-        );
-        if (nextIndex !== activeFeatureIndexRef.current) {
-          activeFeatureIndexRef.current = nextIndex;
-          scene.setAttribute("data-active-step", String(nextIndex));
-          setActiveFeatureIndex(nextIndex);
-        }
-      } else {
-        // Mobile layout (< 64rem):
-        // Dedicated natural-flow layout rendering all six full articles
-        // with sticky control bar under the header across all articles.
-        scene.removeAttribute("data-features-measuring");
-        track.style.removeProperty("--story-stage-height");
-        scene.style.removeProperty("--story-sticky-top");
-        scene.setAttribute("data-features-active", "");
-        scene.setAttribute("data-mobile-mode", "nav-only");
-        isEffectActive = true;
-        setFeaturesActive(true);
-        syncMobileScroll();
-      }
-    };
-
-    const onFocusOut = () => {
-      if (!isEffectActive || !desktopMedia.matches) return;
       const progress = scrollYProgress.get();
       const nextIndex = Math.min(
         FEATURES.length - 1,
@@ -1307,18 +1241,42 @@ export function LandingPage() {
       }
     };
 
+    const onFocusOut = () => {
+      if (!isEffectActive) return;
+      const progress = scrollYProgress.get();
+      const nextIndex = Math.min(
+        FEATURES.length - 1,
+        Math.max(0, Math.floor(progress * FEATURES.length))
+      );
+      if (nextIndex !== activeFeatureIndexRef.current) {
+        activeFeatureIndexRef.current = nextIndex;
+        scene.setAttribute("data-active-step", String(nextIndex));
+        setActiveFeatureIndex(nextIndex);
+      }
+    };
+
+    const headerEl = document.querySelector<HTMLElement>(
+      "header.landing-header, .landing-header"
+    );
+    let headerObserver: ResizeObserver | null = null;
+    if (headerEl && typeof ResizeObserver !== "undefined") {
+      headerObserver = new ResizeObserver(() => {
+        sync();
+      });
+      headerObserver.observe(headerEl);
+    }
+
     scene.addEventListener("focusout", onFocusOut);
     desktopMedia.addEventListener("change", sync);
     reduceMotion.addEventListener("change", sync);
     window.addEventListener("resize", sync);
-    window.addEventListener("scroll", syncMobileScroll, { passive: true });
     sync();
 
     return () => {
+      headerObserver?.disconnect();
       desktopMedia.removeEventListener("change", sync);
       reduceMotion.removeEventListener("change", sync);
       window.removeEventListener("resize", sync);
-      window.removeEventListener("scroll", syncMobileScroll);
       scene.removeEventListener("focusout", onFocusOut);
       reset();
     };
@@ -1331,34 +1289,13 @@ export function LandingPage() {
     if (!scene) return;
     scene.setAttribute("data-active-step", String(index));
 
-    if (!isDesktop) {
-      // Mobile: Native scroll alignment directly to target article panel
-      const targetPanel = document.getElementById(`mobile-feature-${index}`);
-      if (targetPanel) {
-        const headerEl = document.querySelector<HTMLElement>(
-          "header.landing-header, .landing-header"
-        );
-        const headerH = headerEl ? headerEl.offsetHeight : 56;
-        const stickyBar = scene.querySelector<HTMLElement>(
-          ".landing-story-mobile-sticky-bar"
-        );
-        const stickyBarH = stickyBar ? stickyBar.offsetHeight : 52;
-        const offset = headerH + stickyBarH + 8;
-        const targetY =
-          window.scrollY + targetPanel.getBoundingClientRect().top - offset;
-        window.scrollTo({
-          top: Math.max(0, Math.round(targetY)),
-          behavior: "auto",
-        });
-      }
-      return;
-    }
-
     if (!scene.hasAttribute("data-features-active")) return;
     const track =
       storyTrackRef.current ??
       scene.querySelector<HTMLElement>(".landing-story-track");
-    const stage = scene.querySelector<HTMLElement>(".landing-story-stage");
+    const stage = scene.querySelector<HTMLElement>(
+      ".landing-story-desktop-stage, .landing-story-mobile-stage, .landing-story-stage"
+    );
     if (!track || !stage) return;
 
     const trackRect = track.getBoundingClientRect();
@@ -1370,6 +1307,16 @@ export function LandingPage() {
       const targetY =
         trackScrollTop - storyMetrics.stickyTop + stepFraction * scrollTravel;
       window.scrollTo({ top: Math.round(targetY), behavior: "auto" });
+    }
+
+    const activeTab = scene.querySelector<HTMLElement>(
+      `#mobile-tab-${index}`
+    );
+    if (activeTab && activeTab.parentElement) {
+      activeTab.parentElement.scrollTo({
+        left: Math.max(0, activeTab.offsetLeft - 16),
+        behavior: isReducedMotion ? "auto" : "smooth",
+      });
     }
   };
 
@@ -1734,241 +1681,25 @@ export function LandingPage() {
           className="landing-section landing-features-section"
           id="features"
           aria-labelledby={
-            isReducedMotion
-              ? "landing-features-fallback-title"
-              : isDesktop
+            isDesktop
               ? "landing-features-title"
               : "landing-features-mobile-title"
           }
         >
           <div className="landing-features-scene" ref={featuresSceneRef}>
-            {isReducedMotion ? (
-              /* Fallback Static Flow (reduced-motion) */
-              <div className="landing-story-fallback">
-                <div className="landing-wrap">
-                  <div className="landing-section-head">
-                    <p className="landing-section-eyebrow">Features</p>
-                    <h2
-                      className="landing-section-title"
-                      id="landing-features-fallback-title"
-                    >
-                      One place for everyday VPS operations
-                    </h2>
-                    <p className="landing-section-sub">
-                      Concrete capabilities you get after you deploy the
-                      dashboard on your own infrastructure. Everything below
-                      describes the dashboard you run — not a service hosted
-                      by FlexTechnology.
-                    </p>
-                  </div>
-
-                  <div className="landing-story-fallback-list">
-                    {FEATURES.map((feature) => (
-                      <article
-                        key={feature.id}
-                        className="landing-story-fallback-item"
-                      >
-                        <div className="landing-story-fallback-header">
-                          <span
-                            className="landing-feature-icon"
-                            aria-hidden="true"
-                          >
-                            <feature.icon size={20} />
-                          </span>
-                          <span
-                            className="landing-story-fallback-tag tnum"
-                            aria-hidden="true"
-                          >
-                            {feature.tag}
-                          </span>
-                        </div>
-                        <div className="landing-story-fallback-body">
-                          <h3 className="landing-feature-title">
-                            {feature.title}
-                          </h3>
-                          <p className="landing-feature-desc">{feature.desc}</p>
-                        </div>
-                        <div className="landing-story-fallback-preview">
-                          <div className="landing-story-preview-container">
-                            {feature.preview}
-                          </div>
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              /* Pinned Storytelling (Desktop Two-Column or Mobile Single-Column) */
-              <div className="landing-story-pinned">
-                <div className="landing-story-track" ref={storyTrackRef}>
-                  {isDesktop ? (
-                    /* Desktop Two-Column Layout (>= 64rem) */
-                    <div className="landing-story-stage landing-story-desktop-stage">
-                      <div className="landing-wrap landing-story-wrap landing-story-desktop-wrap">
-                        {/* Left Column: Eyebrow + Headline + Interactive Capabilities List */}
-                        <div className="landing-story-col-left">
-                          <div className="landing-story-head">
-                            <p className="landing-section-eyebrow">Features</p>
-                            <h2
-                              className="landing-section-title"
-                              id="landing-features-title"
-                            >
-                              One place for everyday VPS operations
-                            </h2>
-                            <p className="landing-story-lead">
-                              Concrete capabilities you get after you deploy the
-                              dashboard on your own infrastructure. Everything below
-                              describes the dashboard you run — not a service hosted
-                              by FlexTechnology.
-                            </p>
-                          </div>
-
-                          <div
-                            className="landing-story-nav"
-                            role="tablist"
-                            aria-label="Capabilities"
-                            aria-orientation="vertical"
-                          >
-                            {FEATURES.map((feature, idx) => {
-                              const isActive = idx === activeFeatureIndex;
-                              return (
-                                <div
-                                  key={feature.id}
-                                  className={`landing-story-nav-item ${isActive ? "is-active" : ""}`}
-                                  data-index={idx}
-                                >
-                                  <button
-                                    type="button"
-                                    className="landing-story-nav-btn"
-                                    role="tab"
-                                    id={`story-tab-${idx}`}
-                                    aria-selected={isActive}
-                                    aria-controls={`story-preview-${idx}`}
-                                    aria-describedby={`story-desc-${idx}`}
-                                    tabIndex={isActive ? 0 : -1}
-                                    onKeyDown={(event) => {
-                                      let next = idx;
-                                      if (event.key === "ArrowDown") next = (idx + 1) % FEATURES.length;
-                                      else if (event.key === "ArrowUp") next = (idx - 1 + FEATURES.length) % FEATURES.length;
-                                      else if (event.key === "Home") next = 0;
-                                      else if (event.key === "End") next = FEATURES.length - 1;
-                                      else return;
-                                      event.preventDefault();
-                                      document.getElementById(`story-tab-${next}`)?.focus({ preventScroll: true });
-                                      handleSelectFeature(next);
-                                    }}
-                                    onClick={() => handleSelectFeature(idx)}
-                                  >
-                                    {isActive && (
-                                      <span
-                                        className="landing-story-indicator"
-                                        aria-hidden="true"
-                                      />
-                                    )}
-                                    <span className="landing-story-nav-num tnum" aria-hidden="true">
-                                      0{idx + 1}
-                                    </span>
-                                    <span className="landing-story-title">
-                                      {feature.title}
-                                    </span>
-                                  </button>
-                                  <motion.div
-                                    className="landing-story-desc"
-                                    id={`story-desc-${idx}`}
-                                    hidden={!isActive}
-                                    initial={false}
-                                    animate={
-                                      isActive
-                                        ? { opacity: 1, y: 0 }
-                                        : { opacity: 0, y: 6 }
-                                    }
-                                    transition={{
-                                      duration: 0.18,
-                                      ease: [0.16, 1, 0.3, 1],
-                                    }}
-                                  >
-                                    <p>{feature.desc}</p>
-                                  </motion.div>
-                                </div>
-                              );
-                            })}
-                          </div>
-
-                          <div className="landing-story-progress-card">
-                            <div className="landing-story-progress-header">
-                              <div className="landing-story-progress-counter tnum">
-                                <span className="landing-story-progress-current">
-                                  0{activeFeatureIndex + 1}
-                                </span>
-                                <span className="landing-story-progress-divider">/</span>
-                                <span className="landing-story-progress-total">
-                                  0{FEATURES.length}
-                                </span>
-                              </div>
-                              <span className="landing-story-progress-title">
-                                {FEATURES[activeFeatureIndex].title}
-                              </span>
-                            </div>
-                            <div className="landing-story-progress-track" aria-hidden="true">
-                              <motion.div
-                                className="landing-story-progress-fill"
-                                style={{ scaleX: scrollYProgress, transformOrigin: "0% 50%" }}
-                              />
-                            </div>
-                            <div className="landing-story-progress-footer">
-                              <span className="landing-story-progress-hint">
-                                Scroll to navigate · Click or ↑↓ to switch
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Right Column: Synchronized Realistic App Preview */}
-                        <div className="landing-story-col-right">
-                          <div className="landing-story-preview-container">
-                            {FEATURES.map((feature, idx) => {
-                              const isActive = idx === activeFeatureIndex;
-                              return (
-                                <motion.div
-                                  key={feature.id}
-                                  id={`story-preview-${idx}`}
-                                  role="tabpanel"
-                                  aria-labelledby={`story-tab-${idx}`}
-                                  tabIndex={0}
-                                  className={`landing-story-preview-pane ${
-                                    isActive ? "is-active" : ""
-                                  }`}
-                                  hidden={!isActive}
-                                  initial={false}
-                                  animate={
-                                    isActive
-                                      ? { opacity: 1, y: 0, scale: 1 }
-                                      : { opacity: 0, y: 8, scale: 0.99 }
-                                  }
-                                  transition={{
-                                    duration: 0.22,
-                                    ease: [0.16, 1, 0.3, 1],
-                                  }}
-                                >
-                                  {feature.preview}
-                                </motion.div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    /* Mobile Dedicated Layout (< 64rem) */
-                    <div className="landing-story-stage landing-story-mobile-stage">
-                      <div className="landing-wrap landing-story-mobile-wrap">
-                        {/* Mobile Header */}
-                        <div className="landing-story-head landing-story-mobile-head">
+            <div className="landing-story-pinned">
+              <div className="landing-story-track" ref={storyTrackRef}>
+                {isDesktop ? (
+                  /* Desktop Two-Column Layout (>= 64rem) */
+                  <div className="landing-story-stage landing-story-desktop-stage">
+                    <div className="landing-wrap landing-story-wrap landing-story-desktop-wrap">
+                      {/* Left Column: Eyebrow + Headline + Interactive Capabilities List */}
+                      <div className="landing-story-col-left">
+                        <div className="landing-story-head">
                           <p className="landing-section-eyebrow">Features</p>
                           <h2
                             className="landing-section-title"
-                            id="landing-features-mobile-title"
+                            id="landing-features-title"
                           >
                             One place for everyday VPS operations
                           </h2>
@@ -1980,73 +1711,97 @@ export function LandingPage() {
                           </p>
                         </div>
 
-                        {/* Mobile Sticky Navigation & Real-time Progress Bar */}
-                        <div className="landing-story-mobile-sticky-bar">
-                          <div
-                            className="landing-story-mobile-nav"
-                            role="tablist"
-                            aria-label="Capabilities"
-                            aria-orientation="horizontal"
-                          >
-                            {FEATURES.map((feature, idx) => {
-                              const isActive = idx === activeFeatureIndex;
-                              return (
+                        <div
+                          className="landing-story-nav"
+                          role="tablist"
+                          aria-label="Capabilities"
+                          aria-orientation="vertical"
+                        >
+                          {FEATURES.map((feature, idx) => {
+                            const isActive = idx === activeFeatureIndex;
+                            return (
+                              <div
+                                key={feature.id}
+                                className={`landing-story-nav-item ${
+                                  isActive ? "is-active" : ""
+                                }`}
+                                data-index={idx}
+                              >
                                 <button
-                                  key={feature.id}
                                   type="button"
-                                  className={`landing-story-mobile-tab-btn ${
-                                    isActive ? "is-active" : ""
-                                  }`}
+                                  className="landing-story-nav-btn"
                                   role="tab"
-                                  id={`mobile-tab-${idx}`}
+                                  id={`story-tab-${idx}`}
                                   aria-selected={isActive}
-                                  aria-controls={`mobile-feature-${idx}`}
-                                  aria-describedby={`mobile-desc-${idx}`}
+                                  aria-controls={`story-preview-${idx}`}
+                                  aria-describedby={`story-desc-${idx}`}
                                   tabIndex={isActive ? 0 : -1}
                                   onKeyDown={(event) => {
                                     let next = idx;
-                                    if (
-                                      event.key === "ArrowRight" ||
-                                      event.key === "ArrowDown"
-                                    ) {
+                                    if (event.key === "ArrowDown")
                                       next = (idx + 1) % FEATURES.length;
-                                    } else if (
-                                      event.key === "ArrowLeft" ||
-                                      event.key === "ArrowUp"
-                                    ) {
+                                    else if (event.key === "ArrowUp")
                                       next =
                                         (idx - 1 + FEATURES.length) %
                                         FEATURES.length;
-                                    } else if (event.key === "Home") {
-                                      next = 0;
-                                    } else if (event.key === "End") {
+                                    else if (event.key === "Home") next = 0;
+                                    else if (event.key === "End")
                                       next = FEATURES.length - 1;
-                                    } else {
-                                      return;
-                                    }
+                                    else return;
                                     event.preventDefault();
                                     document
-                                      .getElementById(`mobile-tab-${next}`)
+                                      .getElementById(`story-tab-${next}`)
                                       ?.focus({ preventScroll: true });
                                     handleSelectFeature(next);
                                   }}
                                   onClick={() => handleSelectFeature(idx)}
                                 >
+                                  {isActive && (
+                                    <span
+                                      className="landing-story-indicator"
+                                      aria-hidden="true"
+                                    />
+                                  )}
                                   <span
-                                    className="landing-story-mobile-tab-num tnum"
+                                    className="landing-story-nav-num tnum"
                                     aria-hidden="true"
                                   >
                                     0{idx + 1}
                                   </span>
-                                  <span className="landing-story-mobile-tab-title">
-                                    {feature.shortTitle}
+                                  <span className="landing-story-title">
+                                    {feature.title}
                                   </span>
                                 </button>
-                              );
-                            })}
-                          </div>
+                                <motion.div
+                                  className="landing-story-desc"
+                                  id={`story-desc-${idx}`}
+                                  hidden={!isActive}
+                                  initial={false}
+                                  animate={
+                                    isReducedMotion
+                                      ? undefined
+                                      : isActive
+                                      ? { opacity: 1, y: 0 }
+                                      : { opacity: 0, y: 6 }
+                                  }
+                                  transition={
+                                    isReducedMotion
+                                      ? { duration: 0 }
+                                      : {
+                                          duration: 0.18,
+                                          ease: [0.16, 1, 0.3, 1],
+                                        }
+                                  }
+                                >
+                                  <p>{feature.desc}</p>
+                                </motion.div>
+                              </div>
+                            );
+                          })}
+                        </div>
 
-                          <div className="landing-story-mobile-progress-row">
+                        <div className="landing-story-progress-card">
+                          <div className="landing-story-progress-header">
                             <div className="landing-story-progress-counter tnum">
                               <span className="landing-story-progress-current">
                                 0{activeFeatureIndex + 1}
@@ -2058,72 +1813,263 @@ export function LandingPage() {
                                 0{FEATURES.length}
                               </span>
                             </div>
-                            <div
-                              className="landing-story-progress-track"
-                              aria-hidden="true"
-                            >
-                              <div
-                                className="landing-story-progress-fill"
-                                style={{
-                                  transform: `scaleX(${(activeFeatureIndex + 1) / FEATURES.length})`,
-                                  transformOrigin: "0% 50%",
-                                }}
-                              />
-                            </div>
+                            <span className="landing-story-progress-title">
+                              {FEATURES[activeFeatureIndex].title}
+                            </span>
+                          </div>
+                          <div
+                            className="landing-story-progress-track"
+                            aria-hidden="true"
+                          >
+                            <motion.div
+                              className="landing-story-progress-fill"
+                              style={{
+                                scaleX: scrollYProgress,
+                                transformOrigin: "0% 50%",
+                              }}
+                            />
+                          </div>
+                          <div className="landing-story-progress-footer">
+                            <span className="landing-story-progress-hint">
+                              Scroll to navigate · Click or ↑↓ to switch
+                            </span>
                           </div>
                         </div>
-
-                        {/* Mobile Feature Panels: Six Natural-Flow Full Articles */}
-                        <div
-                          className="landing-story-mobile-panels"
-                          role="region"
-                          aria-label="Feature details"
-                        >
-                          {FEATURES.map((feature, idx) => {
-                            return (
-                              <article
-                                key={feature.id}
-                                id={`mobile-feature-${idx}`}
-                                className="landing-story-mobile-panel"
-                                aria-labelledby={`mobile-step-title-${idx}`}
-                              >
-                                <div className="landing-story-mobile-step-header">
-                                  <span
-                                    className="landing-story-mobile-step-tag tnum"
-                                    aria-hidden="true"
-                                  >
-                                    {feature.tag}
-                                  </span>
-                                  <h3
-                                    className="landing-story-mobile-step-title"
-                                    id={`mobile-step-title-${idx}`}
-                                  >
-                                    {feature.title}
-                                  </h3>
-                                </div>
-
-                                <div
-                                  className="landing-story-mobile-desc"
-                                  id={`mobile-desc-${idx}`}
-                                >
-                                  <p>{feature.desc}</p>
-                                </div>
-
-                                <div className="landing-story-preview-container landing-story-mobile-preview-container">
-                                  {feature.preview}
-                                </div>
-                              </article>
-                            );
-                          })}
-                        </div>
                       </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        </section>
+
+                      {/* Right Column: Synchronized Realistic App Preview */}
+                      <div className="landing-story-col-right">
+                        <div className="landing-story-preview-container">
+                          {FEATURES.map((feature, idx) => {
+                            const isActive = idx === activeFeatureIndex;
+                            return (
+                              <motion.div
+                                key={feature.id}
+                                 id={`story-preview-${idx}`}
+                                 role="tabpanel"
+                                 aria-labelledby={`story-tab-${idx}`}
+                                 tabIndex={0}
+                                 className={`landing-story-preview-pane ${
+                                   isActive ? "is-active" : ""
+                                 }`}
+                                 hidden={!isActive}
+                                 initial={false}
+                                 animate={
+                                   isReducedMotion
+                                     ? undefined
+                                     : isActive
+                                     ? { opacity: 1, y: 0, scale: 1 }
+                                     : { opacity: 0, y: 8, scale: 0.99 }
+                                 }
+                                 transition={
+                                   isReducedMotion
+                                     ? { duration: 0 }
+                                     : {
+                                         duration: 0.22,
+                                         ease: [0.16, 1, 0.3, 1],
+                                       }
+                                 }
+                               >
+                                 {feature.preview}
+                               </motion.div>
+                             );
+                           })}
+                         </div>
+                       </div>
+                     </div>
+                   </div>
+                 ) : (
+                   /* Mobile Dedicated Stationary Layout (< 64rem) */
+                   <div className="landing-story-stage landing-story-mobile-stage">
+                     <div className="landing-wrap landing-story-mobile-wrap">
+                       {/* Mobile Header */}
+                       <div className="landing-story-head landing-story-mobile-head">
+                         <p className="landing-section-eyebrow">Features</p>
+                         <h2
+                           className="landing-section-title"
+                           id="landing-features-mobile-title"
+                         >
+                           One place for everyday VPS operations
+                         </h2>
+                         <p className="landing-story-lead">
+                           Concrete capabilities you get after you deploy the
+                           dashboard on your own infrastructure. Everything below
+                           describes the dashboard you run — not a service hosted
+                           by FlexTechnology.
+                         </p>
+                       </div>
+
+                       {/* Mobile In-Stage Control Bar: Tabs + Counter + Progress */}
+                       <div className="landing-story-mobile-control-bar">
+                         <div
+                           className="landing-story-mobile-tablist"
+                           role="tablist"
+                           aria-label="Capabilities"
+                           aria-orientation="horizontal"
+                         >
+                           {FEATURES.map((feature, idx) => {
+                             const isActive = idx === activeFeatureIndex;
+                             return (
+                               <button
+                                 key={feature.id}
+                                 type="button"
+                                 className={`landing-story-mobile-tab-btn ${
+                                   isActive ? "is-active" : ""
+                                 }`}
+                                 role="tab"
+                                 id={`mobile-tab-${idx}`}
+                                 aria-selected={isActive}
+                                 aria-controls={`mobile-preview-${idx}`}
+                                 aria-describedby={`mobile-desc-${idx}`}
+                                 tabIndex={isActive ? 0 : -1}
+                                 onKeyDown={(event) => {
+                                   let next = idx;
+                                   if (event.key === "ArrowRight")
+                                     next = (idx + 1) % FEATURES.length;
+                                   else if (event.key === "ArrowLeft")
+                                     next =
+                                       (idx - 1 + FEATURES.length) %
+                                       FEATURES.length;
+                                   else if (event.key === "Home") next = 0;
+                                   else if (event.key === "End")
+                                     next = FEATURES.length - 1;
+                                   else return;
+                                   event.preventDefault();
+                                   document
+                                     .getElementById(`mobile-tab-${next}`)
+                                     ?.focus({ preventScroll: true });
+                                   handleSelectFeature(next);
+                                 }}
+                                 onClick={() => handleSelectFeature(idx)}
+                               >
+                                 {isActive && (
+                                   <span
+                                     className="landing-story-indicator"
+                                     aria-hidden="true"
+                                   />
+                                 )}
+                                 <span
+                                   className="landing-story-nav-num tnum"
+                                   aria-hidden="true"
+                                 >
+                                   0{idx + 1}
+                                 </span>
+                                 <span className="landing-story-mobile-tab-label">
+                                   {feature.shortTitle}
+                                 </span>
+                               </button>
+                             );
+                           })}
+                         </div>
+
+                         <div className="landing-story-mobile-progress-row">
+                           <div className="landing-story-progress-counter tnum">
+                             <span className="landing-story-progress-current">
+                               0{activeFeatureIndex + 1}
+                             </span>
+                             <span className="landing-story-progress-divider">
+                               /
+                             </span>
+                             <span className="landing-story-progress-total">
+                               0{FEATURES.length}
+                             </span>
+                             <span className="landing-story-mobile-step-title">
+                               {FEATURES[activeFeatureIndex].title}
+                             </span>
+                           </div>
+                           <div
+                             className="landing-story-progress-track"
+                             aria-hidden="true"
+                           >
+                             <motion.div
+                               className="landing-story-progress-fill"
+                               style={{
+                                 scaleX: scrollYProgress,
+                                 transformOrigin: "0% 50%",
+                               }}
+                             />
+                           </div>
+                         </div>
+                       </div>
+
+                       {/* Mobile Stationary Body: Active Description + Preview */}
+                       <div className="landing-story-mobile-body">
+                         <div className="landing-story-mobile-desc-container">
+                           {FEATURES.map((feature, idx) => {
+                             const isActive = idx === activeFeatureIndex;
+                             return (
+                               <motion.div
+                                 key={feature.id}
+                                 id={`mobile-desc-${idx}`}
+                                 className="landing-story-desc landing-story-mobile-desc"
+                                 hidden={!isActive}
+                                 initial={false}
+                                 animate={
+                                   isReducedMotion
+                                     ? undefined
+                                     : isActive
+                                     ? { opacity: 1, y: 0 }
+                                     : { opacity: 0, y: 6 }
+                                 }
+                                 transition={
+                                   isReducedMotion
+                                     ? { duration: 0 }
+                                     : {
+                                         duration: 0.18,
+                                         ease: [0.16, 1, 0.3, 1],
+                                       }
+                                 }
+                               >
+                                 <p>{feature.desc}</p>
+                               </motion.div>
+                             );
+                           })}
+                         </div>
+
+                         <div className="landing-story-preview-container landing-story-mobile-preview-container">
+                           {FEATURES.map((feature, idx) => {
+                             const isActive = idx === activeFeatureIndex;
+                             return (
+                               <motion.div
+                                 key={feature.id}
+                                 id={`mobile-preview-${idx}`}
+                                 role="tabpanel"
+                                 aria-labelledby={`mobile-tab-${idx}`}
+                                 tabIndex={0}
+                                 className={`landing-story-preview-pane ${
+                                   isActive ? "is-active" : ""
+                                 }`}
+                                 hidden={!isActive}
+                                 initial={false}
+                                 animate={
+                                   isReducedMotion
+                                     ? undefined
+                                     : isActive
+                                     ? { opacity: 1, y: 0, scale: 1 }
+                                     : { opacity: 0, y: 8, scale: 0.99 }
+                                 }
+                                 transition={
+                                   isReducedMotion
+                                     ? { duration: 0 }
+                                     : {
+                                         duration: 0.22,
+                                         ease: [0.16, 1, 0.3, 1],
+                                       }
+                                 }
+                               >
+                                 {feature.preview}
+                               </motion.div>
+                             );
+                           })}
+                         </div>
+                       </div>
+                     </div>
+                   </div>
+                 )}
+               </div>
+             </div>
+           </div>
+         </section>
 
         <section
           className="landing-section landing-section-alt"

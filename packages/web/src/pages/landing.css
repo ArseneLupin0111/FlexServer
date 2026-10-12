@@ -980,114 +980,74 @@
   position: relative;
 }
 
-/* Baseline static flow (used when reduced-motion is requested) */
-.landing-story-fallback {
-  display: block;
-}
-
-.landing-story-fallback-list {
-  display: flex;
-  flex-direction: column;
-  gap: 3.5rem;
-  margin-top: 2.5rem;
-}
-
-.landing-story-fallback-item {
-  display: flex;
-  flex-direction: column;
-  gap: 1.25rem;
-  padding-bottom: 2.5rem;
-  border-bottom: 1px solid hsl(var(--l-line));
-}
-
-.landing-story-fallback-item:last-child {
-  border-bottom: none;
-  padding-bottom: 0;
-}
-
-.landing-story-fallback-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-}
-
-.landing-story-fallback-tag {
-  display: inline-flex;
-  align-items: center;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  letter-spacing: 0.05em;
-  color: hsl(var(--l-accent));
-  background: hsl(var(--l-accent) / 0.12);
-  border: 1px solid hsl(var(--l-accent) / 0.3);
-  padding: 0.25rem 0.625rem;
-  border-radius: 999px;
-}
-
-.landing-story-fallback-body {
-  min-width: 0;
-}
-
-.landing-story-fallback-preview {
-  margin-top: 0.5rem;
-  width: 100%;
-}
-
-/* Pinned Storytelling Scene: Default block for active motion scenes */
+/* ── Universal Pinned Storytelling Scene (All Viewports & Reduced Motion) ── */
 .landing-story-pinned {
   display: block;
 }
 
-/* Global measuring state overrides: prevent transition jitter during measurement */
-.landing-features-scene[data-features-measuring] .landing-story-nav-item,
-.landing-features-scene[data-features-measuring] .landing-story-mobile-tab-btn,
-.landing-features-scene[data-features-measuring] .landing-story-desc,
-.landing-features-scene[data-features-measuring] .landing-story-preview-pane {
+/* Universal Track & Sticky Stage across all widths and heights */
+.landing-features-scene[data-features-active] .landing-story-track {
+  position: relative;
+  min-height: calc(var(--story-stage-height, 32rem) + 250vh);
+}
+
+@media (max-width: 63.99rem) {
+  .landing-features-scene[data-features-active] .landing-story-track {
+    min-height: calc(var(--story-stage-height, 28rem) + 300vh);
+  }
+}
+
+.landing-features-scene[data-features-active] .landing-story-stage {
+  position: sticky;
+  top: var(--story-sticky-top, calc(var(--landing-header-h) + 1rem));
+  height: var(--story-stage-height, auto);
+  max-height: var(--story-stage-height, none);
+  min-height: var(--story-stage-height, 0px);
+  overflow: visible;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+/* Global measuring state overrides: ignore transitions, animations, and transforms during probe */
+.landing-features-scene[data-features-measuring] * {
   animation: none !important;
   transition: none !important;
 }
 
-/* ── Enhanced Pinned Desktop Mode (>= 64rem) ─────────────────────────
+.landing-features-scene[data-features-measuring] .landing-story-wrap,
+.landing-features-scene[data-features-measuring] .landing-story-desktop-wrap,
+.landing-features-scene[data-features-measuring] .landing-story-mobile-wrap,
+.landing-features-scene[data-features-measuring] .landing-story-stage {
+  transform: none !important;
+}
+
+.landing-features-scene[data-features-measuring] [hidden] {
+  display: none !important;
+}
+
+/* ── Pinned Desktop Stage (>= 64rem) ─────────────────────────────────
    Desktop is ALWAYS pinned independent of viewport height. Short
-   desktop viewports (e.g. 1024x500) use compact spacing so the stage
-   remains entirely visible without clipping or scrollbars. */
+   desktop viewports (e.g. 1024x500) use compact spacing and measured
+   scaling so the stage remains entirely visible without clipping. */
 @media (min-width: 64rem) {
-  @media not (prefers-reduced-motion: reduce) {
-    .landing-features-scene[data-features-active] .landing-story-track {
-      position: relative;
-      min-height: calc(var(--story-stage-height, 32rem) + 250vh);
-    }
+  .landing-features-scene[data-features-active] .landing-story-wrap,
+  .landing-features-scene[data-features-active] .landing-story-desktop-wrap {
+    display: grid;
+    grid-template-columns: minmax(20rem, 25rem) minmax(26rem, 1fr);
+    column-gap: clamp(2rem, 3.5vw, 3.5rem);
+    align-items: start;
+    width: 100%;
+    max-width: 76rem;
+    margin-inline: auto;
+    transform: scale(var(--story-scale, 1));
+    transform-origin: top center;
+  }
 
-    .landing-features-scene[data-features-active] .landing-story-stage {
-      position: sticky;
-      top: var(--story-sticky-top, calc(var(--landing-header-h) + 1.5rem));
-      height: var(--story-stage-height, auto);
-      max-height: var(--story-stage-height, none);
-      min-height: var(--story-stage-height, 0px);
-      overflow: visible;
-      z-index: 2;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: flex-start;
-    }
-
-    .landing-features-scene[data-features-active] .landing-story-wrap {
-      display: grid;
-      grid-template-columns: minmax(20rem, 25rem) minmax(26rem, 1fr);
-      column-gap: clamp(2rem, 3.5vw, 3.5rem);
-      align-items: start;
-      width: 100%;
-      max-width: 76rem;
-      margin-inline: auto;
-      transform: scale(var(--story-scale, 1));
-      transform-origin: top center;
-    }
-
-    .landing-features-section:has(.landing-features-scene[data-features-active]) {
-      padding-block: 2rem 4rem;
-    }
+  .landing-features-section:has(.landing-features-scene[data-features-active]) {
+    padding-block: 2rem 4rem;
   }
 }
 
@@ -1466,11 +1426,6 @@
   display: flex;
 }
 
-/* Fallback preview container */
-.landing-story-fallback-preview .landing-story-preview-container {
-  min-height: auto;
-}
-
 /* Preview Card Anatomy */
 .landing-story-preview-card {
   display: flex;
@@ -1480,9 +1435,6 @@
   min-height: 24rem;
 }
 
-.landing-story-fallback-preview .landing-story-preview-card {
-  min-height: auto;
-}
 
 .landing-preview-chrome {
   display: flex;
@@ -2242,7 +2194,7 @@
   line-height: 1.4;
 }
 
-/* ── Mobile Dedicated Pinned Storytelling (< 64rem) ─────────────────── */
+/* ── Mobile Dedicated Stationary Layout (< 64rem) ───────────────────── */
 .landing-story-mobile-stage {
   width: 100%;
 }
@@ -2250,9 +2202,12 @@
 .landing-story-mobile-wrap {
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
-  max-width: 48rem;
+  gap: 0.875rem;
+  width: 100%;
+  max-width: 44rem;
   margin-inline: auto;
+  transform: scale(var(--story-scale, 1));
+  transform-origin: top center;
 }
 
 .landing-story-mobile-head {
@@ -2264,27 +2219,25 @@
 }
 
 .landing-story-mobile-head .landing-section-title {
-  font-size: clamp(1.375rem, 5vw, 1.75rem);
+  font-size: clamp(1.25rem, 4.5vw, 1.625rem);
   line-height: 1.25;
   letter-spacing: -0.02em;
-  margin: 0 0 0.5rem;
+  margin: 0 0 0.375rem;
 }
 
 .landing-story-mobile-head .landing-story-lead {
-  font-size: 0.84375rem;
-  line-height: 1.45;
+  font-size: 0.8125rem;
+  line-height: 1.4;
   color: hsl(var(--l-dim));
+  margin: 0;
 }
 
-/* Mobile Sticky Control Bar: Horizontal tabs & real-time progress */
-.landing-story-mobile-sticky-bar {
-  position: sticky;
-  top: calc(var(--landing-header-h, 56px) + 0.25rem);
-  z-index: 10;
+/* Mobile In-Stage Control Bar: Horizontal tabs & real-time progress */
+.landing-story-mobile-control-bar {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
+  padding: 0.5rem 0.625rem;
   background: hsl(var(--l-panel) / 0.96);
   border: 1px solid hsl(var(--l-line));
   border-radius: 0.75rem;
@@ -2293,7 +2246,7 @@
   box-shadow: 0 4px 20px hsl(var(--l-bg) / 0.6);
 }
 
-.landing-story-mobile-nav {
+.landing-story-mobile-tablist {
   display: flex;
   align-items: center;
   gap: 0.375rem;
@@ -2303,7 +2256,7 @@
   padding-bottom: 0.125rem;
 }
 
-.landing-story-mobile-nav::-webkit-scrollbar {
+.landing-story-mobile-tablist::-webkit-scrollbar {
   display: none;
 }
 
@@ -2312,7 +2265,7 @@
   background: hsl(var(--l-bg) / 0.7);
   border: 1px solid hsl(var(--l-line) / 0.8);
   border-radius: 999px;
-  padding: 0.3125rem 0.625rem;
+  padding: 0.25rem 0.5625rem;
   display: inline-flex;
   align-items: center;
   gap: 0.375rem;
@@ -2343,13 +2296,20 @@
   font-weight: 600;
 }
 
-.landing-story-mobile-tab-num {
+.landing-story-mobile-tab-btn .landing-story-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: hsl(var(--l-accent));
+}
+
+.landing-story-mobile-tab-btn .landing-story-nav-num {
   font-size: 0.6875rem;
   font-weight: 600;
   color: hsl(var(--l-accent));
 }
 
-.landing-story-mobile-tab-title {
+.landing-story-mobile-tab-label {
   font-size: 0.75rem;
 }
 
@@ -2362,104 +2322,81 @@
 .landing-story-mobile-progress-row .landing-story-progress-counter {
   font-size: 0.75rem;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.landing-story-mobile-step-title {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: hsl(var(--l-text));
+  margin-left: 0.5rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .landing-story-mobile-progress-row .landing-story-progress-track {
   flex: 1;
   height: 3px;
-}
-
-/* Mobile Feature Panels: Six Natural-Flow Full Articles */
-.landing-story-mobile-panels {
-  display: flex;
-  flex-direction: column;
-  gap: 2.5rem;
-  margin-top: 0.75rem;
-}
-
-.landing-story-mobile-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 0.875rem;
-  padding-bottom: 2rem;
-  border-bottom: 1px solid hsl(var(--l-line) / 0.4);
-  scroll-margin-top: calc(var(--landing-header-h, 56px) + 5rem);
-}
-
-.landing-story-mobile-panel:last-child {
-  border-bottom: none;
-  padding-bottom: 0;
-}
-
-.landing-story-mobile-step-header {
-  display: flex;
-  align-items: baseline;
-  gap: 0.625rem;
-}
-
-.landing-story-mobile-step-tag {
-  display: inline-flex;
-  align-items: center;
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: hsl(var(--l-accent));
-  background: hsl(var(--l-accent) / 0.12);
-  border: 1px solid hsl(var(--l-accent) / 0.3);
-  padding: 0.1875rem 0.5rem;
+  background: hsl(var(--l-raised));
   border-radius: 999px;
-  flex-shrink: 0;
+  overflow: hidden;
+  position: relative;
 }
 
-.landing-story-mobile-step-title {
-  margin: 0;
-  font-size: 1.0625rem;
-  font-weight: 600;
-  line-height: 1.35;
-  letter-spacing: -0.01em;
-  color: hsl(var(--l-text));
+.landing-story-mobile-progress-row .landing-story-progress-fill {
+  height: 100%;
+  width: 100%;
+  background: hsl(var(--l-accent));
+  border-radius: 999px;
+}
+
+/* Mobile Stationary Body: Active Description + Preview */
+.landing-story-mobile-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 100%;
+}
+
+.landing-story-mobile-desc-container {
+  position: relative;
+  min-height: 2.5rem;
 }
 
 .landing-story-mobile-desc {
   padding-left: 0;
-  margin-top: 0;
+  margin: 0;
 }
 
 .landing-story-mobile-desc p {
   font-size: 0.84375rem;
   line-height: 1.45;
   color: hsl(var(--l-dim));
-  max-width: none;
   margin: 0;
 }
 
 .landing-story-mobile-preview-container {
-  min-height: auto;
+  position: relative;
+  width: 100%;
+  border-radius: 0.75rem;
   box-shadow: 0 12px 32px -8px hsl(var(--l-bg) / 0.9);
+}
+
+.landing-story-mobile-preview-container .landing-story-preview-pane {
+  width: 100%;
 }
 
 .landing-story-mobile-preview-container .landing-story-preview-card {
   min-height: auto;
 }
 
-/* Mobile Track Rules (< 64rem) */
-@media (max-width: 63.99rem) {
-  @media not (prefers-reduced-motion: reduce) {
-    .landing-features-scene[data-features-active] .landing-story-track {
-      position: static;
-      min-height: auto;
-    }
-
-    .landing-features-scene[data-features-active] .landing-story-mobile-stage {
-      position: static;
-      min-height: auto;
-    }
-  }
-}
-
 /* Landscape / Short mobile viewports (e.g. 667x375) */
-@media (max-width: 63.99rem) and (max-height: 30rem) {
+@media (max-width: 63.99rem) and (max-height: 36rem) {
   .landing-story-mobile-wrap {
-    gap: 0.75rem;
+    gap: 0.5rem;
   }
 
   .landing-story-mobile-head {
@@ -2475,17 +2412,16 @@
     display: none;
   }
 
-  .landing-story-mobile-sticky-bar {
-    padding: 0.375rem 0.625rem;
+  .landing-story-mobile-control-bar {
+    padding: 0.375rem 0.5rem;
     gap: 0.375rem;
   }
 
   .landing-story-mobile-tab-btn {
-    padding: 0.25rem 0.5rem;
+    padding: 0.1875rem 0.4375rem;
     font-size: 0.6875rem;
   }
 }
-
 /* Animations */
 @keyframes landingStoryFadeIn {
   from {
@@ -2902,11 +2838,6 @@
     column-gap: 3rem;
   }
 
-  .landing-story-fallback-list {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 3.5rem 3rem;
-  }
 
   .landing-workflow {
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -3010,15 +2941,7 @@
   .landing-page *,
   .landing-page *::before,
   .landing-page *::after {
-    animation: none;
-    transition: none;
-  }
-
-  .landing-story-pinned {
-    display: none !important;
-  }
-
-  .landing-story-fallback {
-    display: block !important;
+    animation: none !important;
+    transition: none !important;
   }
 }

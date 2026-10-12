@@ -525,7 +525,8 @@ if ! CFG_ERR="$(node -e '
   if (api.protocol !== "https:" || api.username || api.password) throw new Error("apiBase must be HTTPS without userinfo");
   if (!c.credential.startsWith("vma_")) throw new Error("credential must be a scoped vma_ bearer");
   if (c.agentBinary !== "/usr/local/bin/vps-manager-agent") throw new Error("agentBinary must be /usr/local/bin/vps-manager-agent");
-  if ((c.agentUnit ?? "vps-manager-agent.service") !== "vps-manager-agent.service") throw new Error("agentUnit must be vps-manager-agent.service");
+  const agentUnit = c.agentUnit == null ? "vps-manager-agent.service" : c.agentUnit;
+  if (agentUnit !== "vps-manager-agent.service") throw new Error("agentUnit must be vps-manager-agent.service");
   if (c.stateDir !== "/var/lib/vps-updater") throw new Error("stateDir must be /var/lib/vps-updater");
   if ("allowedHosts" in c) throw new Error("allowedHosts is pinned in the binary");
   if (c.pinnedPublicKey) {
@@ -579,8 +580,49 @@ if [[ -d "$STATE_DIR" ]]; then
     exit 1
   fi
   if [[ -f "${STATE_DIR}/helper/journal.json" ]]; then
-    echo "Error: Active helper journal detected at ${STATE_DIR}/helper/journal.json; refusing upgrade while helper transaction is in flight." >&2
-    exit 1
+    # Helper journal is durable after a completed job: handleCleanup removes it
+    # only best-effort, leaving a settled record behind. When no helper service
+    # is active, no pending queue entries exist, and no daemon journal exists,
+    # a settled "restarted" or "rolled_back" record is quiescent, not in flight.
+    # In-flight phases ("intent", "renamed") and malformed/unrecognised records fail closed.
+    if ! HJ_ERR="$(node -e '
+      const fs = require("fs");
+      let raw;
+      try {
+        raw = fs.readFileSync(process.argv[1], "utf8");
+      } catch (e) {
+        console.error("cannot read helper journal: " + (e.message || e));
+        process.exit(1);
+      }
+      let hj;
+      try {
+        hj = JSON.parse(raw);
+      } catch (e) {
+        console.error("corrupt helper journal (not valid JSON): " + (e.message || e));
+        process.exit(1);
+      }
+      if (!hj || typeof hj !== "object" || Array.isArray(hj) || Object.keys(hj).length === 0) {
+        console.error("helper journal is present but empty or not an object");
+        process.exit(1);
+      }
+      const phase = hj.phase;
+      const job = typeof hj.jobId === "string" ? hj.jobId : "unknown";
+      if (!phase) {
+        console.error("helper journal is missing a valid phase (job " + job + ")");
+        process.exit(1);
+      }
+      if (phase === "intent" || phase === "renamed") {
+        console.error("helper transaction is mid-swap with in-flight phase " + JSON.stringify(phase) + " (job " + job + ")");
+        process.exit(1);
+      }
+      if (phase !== "restarted" && phase !== "rolled_back") {
+        console.error("helper journal has unrecognised phase " + JSON.stringify(phase) + " (job " + job + ")");
+        process.exit(1);
+      }
+    ' "${STATE_DIR}/helper/journal.json" 2>&1)"; then
+      echo "Error: Active or unrecognised helper journal detected at ${STATE_DIR}/helper/journal.json; refusing upgrade: ${HJ_ERR}" >&2
+      exit 1
+    fi
   fi
 fi
 

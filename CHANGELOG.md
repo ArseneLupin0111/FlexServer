@@ -4,6 +4,7 @@
 
 - Replace obsolete signed-manifest and source-text assertions in the updater CI gate with keyless bundled-install dry runs, generated systemd isolation checks, checksum and configuration rejection checks. Keep Go vet, tests and Linux compilation mandatory; the Trivy release gate is unchanged.
 - Check out installer assets in the SSH deployment job and transfer updater scripts plus the CLI asset over the existing SSH connection, avoiding incompatible `scp` port options.
+- Keep updater config validation compatible with the host Node runtime and permit only quiescent `restarted`/`rolled_back` helper journals while preserving recovery state. Reject active, pending, malformed and unknown states; do not replay updater installation through generic SSH retries.
 
 ## Unreleased — Termius-inspired natural-flow landing hero
 

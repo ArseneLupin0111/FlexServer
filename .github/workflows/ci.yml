@@ -922,8 +922,8 @@ jobs:
           # Refresh or bootstrap local updater on the host using the bundled binary from API image
           echo "Updating host local-updater from API image..."
           # Reuse the authenticated SSH connection; scp uses -P, not ssh's -p.
-          tar -C scripts/install -cf - install-updater.sh installer-lib.sh flexserverctl.py | $SSH "tar -xf - -C /tmp && chmod 0755 /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py"
-          $SSH "
+          tar -C scripts/install -cf - install-updater.sh installer-lib.sh flexserverctl.py | "${SSH_BASE[@]}" "tar -xf - -C /tmp && chmod 0755 /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py"
+          "${SSH_BASE[@]}" "
             set -euo pipefail
             SUDO=\"\"
             if [ \"\$(id -u)\" -ne 0 ]; then

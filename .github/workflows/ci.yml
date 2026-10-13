@@ -183,9 +183,8 @@ jobs:
         run: npm run typecheck
 
       - name: Build Node app
-        # Fallback compile check only when no Docker target builds: both
-        # image targets run the same `npm run build` in their shared build
-        # stage, so a scheduled image build already covers compilation.
+        # Fallback compile check when no Docker target builds; scheduled
+        # API/Web image builds compile their respective workspaces.
         if: needs.changes.outputs.node == 'true' && needs.changes.outputs.api != 'true' && needs.changes.outputs.web != 'true'
         run: npm run build
 
@@ -249,6 +248,17 @@ jobs:
     name: Verify
     needs: changes
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      packages: write
+      contents: read
+    outputs:
+      api_image: ${{ steps.meta.outputs.api_image }}
+      api_sha_tag: ${{ steps.meta.outputs.api_sha_tag }}
+      web_image: ${{ steps.meta.outputs.web_image }}
+      web_sha_tag: ${{ steps.meta.outputs.web_sha_tag }}
+      api_digest: ${{ steps.push.outputs.api_digest }}
+      web_digest: ${{ steps.push.outputs.web_digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -291,8 +301,8 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=vps-manager-nodejs-api
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=api-runtime
+          cache-to: type=gha,mode=max,scope=api-runtime
 
       - name: Smoke test API runtime migration assets and agent binary
         # `set -eu` makes the shell abort on the first failed assertion so a
@@ -353,8 +363,8 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=vps-manager-nodejs-web
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=web-runtime
+          cache-to: type=gha,mode=max,scope=web-runtime
 
       - name: Assert no Docker socket on Compose surfaces
         # Primary guard: the socket is mounted at *run* time via Compose, not
@@ -509,31 +519,111 @@ jobs:
           normalize() { [ "$1" = "true" ] && echo 1 || echo 0; }
           EXPECT_API="$(normalize "$EXPECT_API")" EXPECT_WEB="$(normalize "$EXPECT_WEB")" node scripts/ci/gate-trivy-critical.mjs
 
-      - name: Save verified images for publishing
-        # Only on publishable main runs, and only after every gate above
-        # passed (implicit success()): both loaded images go into one archive
-        # with a sha256 checksum and the image IDs that were just scanned.
-        if: needs.changes.outputs.full == 'true'
+      - name: Capture scanned image IDs
+        # Capture local scanned image IDs before waiting and tagging/pushing so
+        # we can assert the exact same daemon images are published without mutation.
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.changes.outputs.full == 'true'
+        id: scanned-images
         run: |
-          docker save --output verified-images.tar vps-manager-nodejs-api:ci vps-manager-nodejs-web:ci
-          sha256sum verified-images.tar > verified-images.tar.sha256
+          set -eu
+          SCANNED_API_ID="$(docker image inspect --format '{{.Id}}' vps-manager-nodejs-api:ci)"
+          SCANNED_WEB_ID="$(docker image inspect --format '{{.Id}}' vps-manager-nodejs-web:ci)"
+          test -n "$SCANNED_API_ID"
+          test -n "$SCANNED_WEB_ID"
           {
-            echo "api=$(docker image inspect --format '{{.Id}}' vps-manager-nodejs-api:ci)"
-            echo "web=$(docker image inspect --format '{{.Id}}' vps-manager-nodejs-web:ci)"
-          } > verified-image-ids.txt
+            echo "api_id=$SCANNED_API_ID"
+            echo "web_id=$SCANNED_WEB_ID"
+          } >> "$GITHUB_OUTPUT"
+          echo "Scanned image IDs: API=$SCANNED_API_ID WEB=$SCANNED_WEB_ID"
 
-      - name: Upload verified images
-        if: needs.changes.outputs.full == 'true'
-        uses: actions/upload-artifact@v4
+      - name: Wait for peer release checks
+        # Poll current run attempt jobs endpoint for the four required peer jobs:
+        # Verify checks, Verify Go checks, TimescaleDB PostgreSQL migration integration,
+        # Docker monitoring PostgreSQL 16. Fails closed on any non-success conclusion,
+        # missing job at timeout, duplicate, or cancellation.
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.changes.outputs.full == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/ci/wait-release-checks.mjs
+
+      - name: Docker metadata
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.changes.outputs.full == 'true'
+        id: meta
+        # Every main run publishes BOTH images pinned to the current commit
+        # SHA, even when path filters saw no change. The images are the exact
+        # ones built, scanned, and gated in verify on this same runner. SHA tags
+        # stay immutable and rollback-reproducible (redeploy a prior SHA tag);
+        # deploy pulls the digest references recorded after the push.
+        run: |
+          set -eu
+          BASE_IMAGE="${IMAGE_NAME,,}"
+          API_IMAGE="${BASE_IMAGE}-api"
+          WEB_IMAGE="${BASE_IMAGE}-web"
+          API_SHA_TAG="$API_IMAGE:${GITHUB_SHA}"
+          WEB_SHA_TAG="$WEB_IMAGE:${GITHUB_SHA}"
+          {
+            echo "api_image=$API_IMAGE"
+            echo "api_sha_tag=$API_SHA_TAG"
+            echo "web_image=$WEB_IMAGE"
+            echo "web_sha_tag=$WEB_SHA_TAG"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "API_IMAGE=$API_IMAGE"
+            echo "API_SHA_TAG=$API_SHA_TAG"
+            echo "WEB_IMAGE=$WEB_IMAGE"
+            echo "WEB_SHA_TAG=$WEB_SHA_TAG"
+          } >> "$GITHUB_ENV"
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.changes.outputs.full == 'true'
+        uses: docker/login-action@v3
         with:
-          name: verified-images-${{ github.sha }}
-          path: |
-            verified-images.tar
-            verified-images.tar.sha256
-            verified-image-ids.txt
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Tag and push verified images
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.changes.outputs.full == 'true'
+        id: push
+        run: |
+          set -eu
+          CURRENT_API_ID="$(docker image inspect --format '{{.Id}}' vps-manager-nodejs-api:ci)"
+          CURRENT_WEB_ID="$(docker image inspect --format '{{.Id}}' vps-manager-nodejs-web:ci)"
+          test "$CURRENT_API_ID" = "${{ steps.scanned-images.outputs.api_id }}"
+          test "$CURRENT_WEB_ID" = "${{ steps.scanned-images.outputs.web_id }}"
+          echo "Daemon images match scanned images: API=$CURRENT_API_ID WEB=$CURRENT_WEB_ID"
+
+          docker tag vps-manager-nodejs-api:ci "$API_SHA_TAG"
+          docker tag vps-manager-nodejs-web:ci "$WEB_SHA_TAG"
+
+          # Push API and web images concurrently with explicit wait statuses
+          docker push "$API_SHA_TAG" &
+          pid_api=$!
+          docker push "$WEB_SHA_TAG" &
+          pid_web=$!
+
+          status_api=0
+          status_web=0
+          wait "$pid_api" || status_api=$?
+          wait "$pid_web" || status_web=$?
+
+          if [ "$status_api" -ne 0 ] || [ "$status_web" -ne 0 ]; then
+            echo "Error: One or more image pushes failed (API: $status_api, Web: $status_web)." >&2
+            exit 1
+          fi
+
+          # RepoDigests exists only after the push; record the immutable
+          # name@digest references that deploy pulls by.
+          API_DIGEST="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$API_SHA_TAG" | grep -F "$API_IMAGE@" | head -n 1)"
+          WEB_DIGEST="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$WEB_SHA_TAG" | grep -F "$WEB_IMAGE@" | head -n 1)"
+          test -n "$API_DIGEST"
+          test -n "$WEB_DIGEST"
+          {
+            echo "api_digest=$API_DIGEST"
+            echo "web_digest=$WEB_DIGEST"
+          } >> "$GITHUB_OUTPUT"
+          echo "pushed $API_SHA_TAG -> $API_DIGEST"
+          echo "pushed $WEB_SHA_TAG -> $WEB_DIGEST"
 
   postgres-integration:
     name: TimescaleDB PostgreSQL migration integration
@@ -600,114 +690,9 @@ jobs:
           VPS_MANAGER_TEST_POSTGRES_URL: postgres://vps_manager:vps_manager@localhost:5432/vps_manager
         run: npx vitest run packages/api/tests/docker-migration-009.postgres.test.ts packages/api/tests/docker-migration-013.postgres.test.ts packages/api/tests/docker-migration-014.postgres.test.ts packages/api/tests/docker-monitoring-repository.postgres.test.ts packages/api/tests/docker-monitoring-maintenance.postgres.test.ts
 
-  publish:
-    name: Publish Docker image
-    needs: [verify, verify-checks, verify-go, postgres-integration, docker-monitoring-postgres16]
-    runs-on: ubuntu-latest
-    # always() makes the explicit needs results authoritative. On main all
-    # five jobs are forced to run (full scope), so publish requires all of
-    # them to succeed; a failed or skipped gate fails closed (publish skips,
-    # deploy never sees unverified images).
-    if: >-
-      always() &&
-      github.event_name != 'pull_request' &&
-      github.ref == 'refs/heads/main' &&
-      needs.verify.result == 'success' &&
-      needs.verify-checks.result == 'success' &&
-      needs.verify-go.result == 'success' &&
-      needs.postgres-integration.result == 'success' &&
-      needs.docker-monitoring-postgres16.result == 'success'
-    permissions:
-      contents: read
-      packages: write
-    outputs:
-      api_image: ${{ steps.meta.outputs.api_image }}
-      api_sha_tag: ${{ steps.meta.outputs.api_sha_tag }}
-      web_image: ${{ steps.meta.outputs.web_image }}
-      web_sha_tag: ${{ steps.meta.outputs.web_sha_tag }}
-      api_digest: ${{ steps.push.outputs.api_digest }}
-      web_digest: ${{ steps.push.outputs.web_digest }}
-    steps:
-      - name: Download verified images
-        uses: actions/download-artifact@v4
-        with:
-          name: verified-images-${{ github.sha }}
-          path: .ci-images
-
-      - name: Verify checksum and load verified images
-        # Fail closed if the archive bytes changed after the verify gates,
-        # then prove the loaded image IDs are the exact images that were
-        # scanned, gated, and saved in verify (no rebuild happens here).
-        run: |
-          set -eu
-          cd .ci-images
-          sha256sum --check verified-images.tar.sha256
-          docker load --input verified-images.tar
-          . ./verified-image-ids.txt
-          API_ID="$(docker image inspect --format '{{.Id}}' vps-manager-nodejs-api:ci)"
-          WEB_ID="$(docker image inspect --format '{{.Id}}' vps-manager-nodejs-web:ci)"
-          test "$API_ID" = "$api"
-          test "$WEB_ID" = "$web"
-          echo "loaded verified images: api=$API_ID web=$WEB_ID"
-
-      - name: Docker metadata
-        id: meta
-        # Every main run publishes BOTH images pinned to the current commit
-        # SHA, even when path filters saw no change. The images are the exact
-        # ones built, scanned, and gated in verify (transferred via artifact;
-        # this job never rebuilds). SHA tags stay immutable and
-        # rollback-reproducible (redeploy a prior SHA tag); deploy pulls the
-        # digest references recorded after the push.
-        run: |
-          BASE_IMAGE="${IMAGE_NAME,,}"
-          API_IMAGE="${BASE_IMAGE}-api"
-          WEB_IMAGE="${BASE_IMAGE}-web"
-          API_SHA_TAG="$API_IMAGE:${GITHUB_SHA}"
-          WEB_SHA_TAG="$WEB_IMAGE:${GITHUB_SHA}"
-          {
-            echo "api_image=$API_IMAGE"
-            echo "api_sha_tag=$API_SHA_TAG"
-            echo "web_image=$WEB_IMAGE"
-            echo "web_sha_tag=$WEB_SHA_TAG"
-          } >> "$GITHUB_OUTPUT"
-          {
-            echo "API_IMAGE=$API_IMAGE"
-            echo "API_SHA_TAG=$API_SHA_TAG"
-            echo "WEB_IMAGE=$WEB_IMAGE"
-            echo "WEB_SHA_TAG=$WEB_SHA_TAG"
-          } >> "$GITHUB_ENV"
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Tag and push verified images
-        id: push
-        run: |
-          set -eu
-          docker tag vps-manager-nodejs-api:ci "$API_SHA_TAG"
-          docker tag vps-manager-nodejs-web:ci "$WEB_SHA_TAG"
-          docker push "$API_SHA_TAG"
-          docker push "$WEB_SHA_TAG"
-          # RepoDigests exists only after the push; record the immutable
-          # name@digest references that deploy pulls by.
-          API_DIGEST="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$API_SHA_TAG" | grep -F "$API_IMAGE@" | head -n 1)"
-          WEB_DIGEST="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$WEB_SHA_TAG" | grep -F "$WEB_IMAGE@" | head -n 1)"
-          test -n "$API_DIGEST"
-          test -n "$WEB_DIGEST"
-          {
-            echo "api_digest=$API_DIGEST"
-            echo "web_digest=$WEB_DIGEST"
-          } >> "$GITHUB_OUTPUT"
-          echo "pushed $API_SHA_TAG -> $API_DIGEST"
-          echo "pushed $WEB_SHA_TAG -> $WEB_DIGEST"
-
   deploy:
     name: Deploy over SSH
-    needs: publish
+    needs: verify
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     permissions:
@@ -766,8 +751,8 @@ jobs:
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_PORT: ${{ secrets.VPS_PORT }}
           DEPLOY_PATH: ${{ steps.config.outputs.deploy_path }}
-          API_IMAGE: ${{ needs.publish.outputs.api_digest }}
-          WEB_IMAGE: ${{ needs.publish.outputs.web_digest }}
+          API_IMAGE: ${{ needs.verify.outputs.api_digest }}
+          WEB_IMAGE: ${{ needs.verify.outputs.web_digest }}
           DASHBOARD_SESSION_SECRET: ${{ secrets.DASHBOARD_SESSION_SECRET }}
           DASHBOARD_ADMIN_PASSWORD: ${{ secrets.DASHBOARD_ADMIN_PASSWORD }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}

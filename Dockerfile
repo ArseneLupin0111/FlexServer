@@ -5,13 +5,15 @@ COPY packages/api/package.json packages/api/package.json
 COPY packages/web/package.json packages/web/package.json
 RUN npm ci
 
-FROM deps AS build
-COPY tsconfig.json ./
+FROM deps AS api-build
 COPY packages/api/tsconfig.json packages/api/tsconfig.json
 COPY packages/api/src packages/api/src
 COPY packages/api/db packages/api/db
+RUN npm run build:api
+
+FROM deps AS web-build
 COPY packages/web packages/web
-RUN npm run build
+RUN npm run build:web
 
 FROM deps AS prod-deps
 RUN npm prune --omit=dev
@@ -43,9 +45,9 @@ WORKDIR /app
 RUN apk add --no-cache openssh-client
 RUN addgroup -S app && adduser -S app -G app
 COPY --from=prod-deps --chown=app:app /app/node_modules ./node_modules
-COPY --from=build --chown=app:app /app/package.json ./package.json
-COPY --from=build --chown=app:app /app/dist ./dist
-COPY --from=build --chown=app:app /app/packages/api/db ./db
+COPY --from=api-build --chown=app:app /app/package.json ./package.json
+COPY --from=api-build --chown=app:app /app/dist ./dist
+COPY --from=api-build --chown=app:app /app/packages/api/db ./db
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-agent-linux-amd64 /app/agent/vps-agent-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-updater-linux-amd64 /app/agent/vps-updater-linux-amd64
 RUN mkdir -p /app/data /app/private && chown -R app:app /app/data /app/private
@@ -57,6 +59,6 @@ CMD ["node", "dist/server.js"]
 FROM nginx:1.30.5-alpine3.24 AS web-runtime
 RUN apk upgrade --no-cache libcrypto3 libssl3 openssl
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=build /app/public /usr/share/nginx/html
+COPY --from=web-build /app/public /usr/share/nginx/html
 EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD wget -qO- http://127.0.0.1/ >/dev/null || exit 1

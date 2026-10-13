@@ -2,10 +2,11 @@
 
 ## Unreleased — parallel CI verification
 
-- Run Node, installer, updater and Go checks independently of Docker image build/security verification after change detection. Publishing requires both verification jobs and both PostgreSQL integration jobs to succeed; scanned-image checksums, identity checks, SBOMs and digest-based deployment remain unchanged.
-- Reuse the runner's installed GCC for Go race tests, installing it only when missing. Keep API/web builds together to reuse their shared Docker build stage, and preserve the existing `Verify` status-check name.
+- Run Node, installer, updater and Go checks independently of Docker image build/security verification after change detection. Keep identity checks, SBOMs and digest-based deployment mandatory.
+- Reuse the runner's installed GCC for Go race tests, installing it only when missing, and preserve the existing `Verify` status-check name.
 - Narrow Docker application build inputs and cache Go modules/compiler objects with BuildKit. Replace redundant standalone identity compilation in container CI with direct checks of both embedded binaries. Run pinned Trivy scans concurrently after one database download, using isolated in-memory analysis caches; retain all release gates and SBOMs.
 - Split Node validation from Go/installer/updater/Compose validation into independent jobs. Keep Node 24 for updater config checks without npm installation; require the new Go check alongside all existing gates before publishing.
+- Separate API/Web Docker compilation and cache scopes. Publish exact scanned images directly from the verification runner only after the authenticated current-attempt peer-job gate succeeds; remove image archive transfers and push both images concurrently without rebuilding.
 
 ## Unreleased — bundled updater CI verification
 

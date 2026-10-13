@@ -195,6 +195,20 @@ jobs:
           npx tsx scripts/agent/create-agent-token.ts --help
           npx tsx scripts/agent/install-agent-from-env.ts --help
 
+  verify-go:
+    name: Verify Go checks
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js for updater validation
+        if: needs.changes.outputs.full == 'true' || needs.changes.outputs.updater == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: Validate installer hardening
         if: needs.changes.outputs.full == 'true' || needs.changes.outputs.installer == 'true'
         run: bash scripts/tests/test-installer-docker-access.sh
@@ -220,8 +234,7 @@ jobs:
         run: docker compose config --quiet
 
       - name: Test Go agent with race detector
-        # Race + vet only: the standalone `go build` was redundant (the API
-        # image build and the identity parity check both compile the agent).
+        # Race + vet: release binaries are compiled by the API image build.
         if: needs.changes.outputs.full == 'true' || needs.changes.outputs.agent == 'true'
         run: |
           if ! command -v gcc >/dev/null 2>&1; then
@@ -524,7 +537,7 @@ jobs:
 
   postgres-integration:
     name: TimescaleDB PostgreSQL migration integration
-    # Runs concurrently with verify and verify-checks: only change detection gates it.
+    # Runs concurrently with verify, verify-checks, and verify-go: only change detection gates it.
     needs: changes
     if: needs.changes.outputs.full == 'true' || needs.changes.outputs.db == 'true'
     runs-on: ubuntu-latest
@@ -589,10 +602,10 @@ jobs:
 
   publish:
     name: Publish Docker image
-    needs: [verify, verify-checks, postgres-integration, docker-monitoring-postgres16]
+    needs: [verify, verify-checks, verify-go, postgres-integration, docker-monitoring-postgres16]
     runs-on: ubuntu-latest
     # always() makes the explicit needs results authoritative. On main all
-    # four jobs are forced to run (full scope), so publish requires all of
+    # five jobs are forced to run (full scope), so publish requires all of
     # them to succeed; a failed or skipped gate fails closed (publish skips,
     # deploy never sees unverified images).
     if: >-
@@ -601,6 +614,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       needs.verify.result == 'success' &&
       needs.verify-checks.result == 'success' &&
+      needs.verify-go.result == 'success' &&
       needs.postgres-integration.result == 'success' &&
       needs.docker-monitoring-postgres16.result == 'success'
     permissions:

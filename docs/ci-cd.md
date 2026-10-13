@@ -11,7 +11,7 @@ Workflow file: `.github/workflows/ci.yml`
 Pull requests run conditional verification behind a lightweight `changes` job (path filters, no toolchains installed): Node, Go, installer, updater, database, and image steps run only when their paths change, so a docs-only PR skips almost everything. Pushes to `main` force the full check matrix and both image builds. Pull requests do not publish images to GHCR and do not run the production deploy job.
 
 Image filters intentionally include both Node workspaces: the current Dockerfile builds both in its shared build stage, so a web-only change still rebuilds both runtime images. Database integrations skip web-only changes; docs-only changes skip Node, Go, image, installer/updater, and database checks. Workflow and hardening-fixture changes re-run the affected safety checks.
-After change detection, `verify-checks` (Node, Go, installer/updater and Compose checks), `verify` (image builds, identity checks, scans and artifacts), and the two database jobs run independently. The existing `Verify` check name remains attached to image verification; `Verify checks` is the separate validation status. API/web builds stay on one runner to reuse their shared Docker build stage. Go race tests use the runner's GCC, installing it only when absent.
+After change detection, `verify-checks` (Node tests/typecheck/CLI smoke), `verify-go` (Go, installer/updater and Compose checks), `verify` (image builds, identity checks, scans and artifacts), and the two database jobs run independently. The existing `Verify` and `Verify checks` status names remain; `Verify Go checks` is an additional mandatory gate. The Go job pins Node 24 for updater validation without installing npm dependencies. API/web builds stay on one runner to reuse their shared Docker build stage. Go race tests use the runner's GCC, installing it only when absent.
 
 
 Every pull request runs change detection, then only the matching checks:
@@ -40,7 +40,7 @@ Pushes to `main` force the full verification matrix (`full` scope: all checks an
 - Web:
   - `ghcr.io/sondoan17/vps-manager-nodejs-web:<commit-sha>`
 
-Transfer flow: `verify` saves both loaded images into one `docker save` archive (`verified-images-<sha>`, checksum + image-ID manifest, 1-day retention), and `publish` downloads it, verifies the checksum, loads it, asserts the image IDs match the scanned/saved images, then tags and pushes the SHA tags — build once, publish without rebuild. `publish` fails closed via an explicit `always()` needs check: every gate (`verify`, `verify-checks`, both database jobs) must report `success`. Because `main` forces all jobs to run, a skipped gate can never slip through.
+Transfer flow: `verify` saves both loaded images into one `docker save` archive (`verified-images-<sha>`, checksum + image-ID manifest, 1-day retention), and `publish` downloads it, verifies the checksum, loads it, asserts the image IDs match the scanned/saved images, then tags and pushes the SHA tags — build once, publish without rebuild. `publish` fails closed via an explicit `always()` needs check: every gate (`verify`, `verify-checks`, `verify-go`, both database jobs) must report `success`. Because `main` forces all jobs to run, a skipped gate can never slip through.
 
 Deploy pulls by immutable digest (`name@sha256:...` references recorded from `RepoDigests` after the push), not by SHA tag. Rollback stays reproducible by redeploying the image for an earlier commit SHA.
 

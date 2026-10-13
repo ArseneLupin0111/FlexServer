@@ -241,9 +241,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Node.js
-        # Pinned when the API image builds: the agent identity step and
-        # the parity check run `node` without installing dependencies.
-        if: needs.changes.outputs.api == 'true'
+        # Pinned when either image builds: agent identity resolution and the
+        # Trivy critical findings gate run `node` without npm dependencies.
+        if: needs.changes.outputs.api == 'true' || needs.changes.outputs.web == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -254,8 +254,8 @@ jobs:
 
       - name: Resolve agent build identity
         id: agent-identity
-        # Immutable identity shared by the Docker image build, the standalone
-        # build, and the parity check below (releaseId/buildId = git SHA).
+        # Immutable identity shared by the Docker image build and the embedded
+        # binary -version check below (releaseId/buildId = git SHA).
         if: needs.changes.outputs.api == 'true'
         run: |
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
@@ -307,37 +307,24 @@ jobs:
             test -f /app/db/migrations/015_docker_metric_rollup_metric_name.sql
             test -f /app/db/migrations/016_docker_alert_resolution.sql
             test -x /app/agent/vps-agent-linux-amd64
+            test -x /app/agent/vps-updater-linux-amd64
           '
 
-      - name: Setup Go
-        # Only needed when the standalone agent binary must be compiled for
-        # identity parity cross-checking against the API image binary.
-        if: needs.changes.outputs.agent == 'true' && needs.changes.outputs.api == 'true'
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.23.x"
-          cache-dependency-path: packages/agent/go.mod
-
-      - name: Parity check agent identity (image vs standalone)
-        if: needs.changes.outputs.agent == 'true' && needs.changes.outputs.api == 'true'
+      - name: Verify embedded agent and updater identity
+        # Direct -version checks on the embedded binaries inside the API image.
+        # Validates that both the agent and updater binaries built into the image
+        # match the expected package version + git SHA without host Go compilation.
+        if: needs.changes.outputs.api == 'true'
         run: |
-          AGENT_VERSION="${{ steps.agent-identity.outputs.version }}" \
-          AGENT_BUILD_ID="${{ steps.agent-identity.outputs.build_id }}" \
-            node scripts/agent/build-agent.mjs
-          IMAGE_ID="$(docker run --rm --entrypoint /app/agent/vps-agent-linux-amd64 vps-manager-nodejs-api:ci -version)"
-          STANDALONE_ID="$(docker run --rm -v "$PWD/packages/agent/dist:/standalone:ro" --entrypoint /standalone/vps-agent-linux-amd64 vps-manager-nodejs-api:ci -version)"
-          echo "image:      $IMAGE_ID"
-          echo "standalone: $STANDALONE_ID"
-          test "$IMAGE_ID" = "$STANDALONE_ID"
           EXPECTED="${{ steps.agent-identity.outputs.version }}+${{ steps.agent-identity.outputs.build_id }}"
-          test "$IMAGE_ID" = "$EXPECTED"
-          # The bootstrap updater ships in releases with the same identity
-          # (the API image does not carry it); assert it here so a broken
-          # updater build fails before a release can publish it.
-          UPDATER_ID="$(docker run --rm -v "$PWD/packages/agent/dist:/standalone:ro" --entrypoint /standalone/vps-updater-linux-amd64 vps-manager-nodejs-api:ci -version)"
-          echo "standalone updater: $UPDATER_ID"
+          AGENT_ID="$(docker run --rm --entrypoint /app/agent/vps-agent-linux-amd64 vps-manager-nodejs-api:ci -version)"
+          UPDATER_ID="$(docker run --rm --entrypoint /app/agent/vps-updater-linux-amd64 vps-manager-nodejs-api:ci -version)"
+          echo "agent:    $AGENT_ID"
+          echo "updater:  $UPDATER_ID"
+          echo "expected: $EXPECTED"
+          test "$AGENT_ID" = "$EXPECTED"
           test "$UPDATER_ID" = "$EXPECTED"
-          echo "identity parity OK: $IMAGE_ID"
+          echo "embedded binary identity OK: $EXPECTED"
 
       - name: Build web Docker image
         id: web-build
@@ -382,37 +369,87 @@ jobs:
           fi
           echo "No Docker socket references in built API/web image metadata."
 
-      - name: Scan API image for critical fixable vulnerabilities
-        # Report-only scan (exit-code 0) so the web scan and both SBOMs still
-        # run even if this image has findings; the final gate below fails.
-        # Scan only images successfully built in this job; a failed prerequisite
-        # already fails verification and must not trigger a registry fallback.
-        if: (success() || failure()) && needs.changes.outputs.api == 'true' && steps['api-build'].outcome == 'success'
-        uses: aquasecurity/trivy-action@v0.36.0
+      - name: Setup Trivy
+        # Pin same Trivy version as aquasecurity/trivy-action@v0.36.0 (v0.70.0).
+        if: |
+          (success() || failure()) && (
+            (needs.changes.outputs.api == 'true' && steps['api-build'].outcome == 'success') ||
+            (needs.changes.outputs.web == 'true' && steps['web-build'].outcome == 'success')
+          )
+        uses: aquasecurity/setup-trivy@v0.2.6
         with:
-          scan-type: image
-          scan-ref: vps-manager-nodejs-api:ci
-          format: json
-          output: trivy-api-results.json
-          severity: CRITICAL
-          scanners: vuln
-          ignore-unfixed: true
-          exit-code: "0"
+          version: v0.70.0
+          cache: true
 
-      - name: Scan web image for critical fixable vulnerabilities
-        # A failed API scan is itself a release failure, not a reason to skip
-        # the independent web scan.
-        if: (success() || failure()) && needs.changes.outputs.web == 'true' && steps['web-build'].outcome == 'success'
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          scan-ref: vps-manager-nodejs-web:ci
-          format: json
-          output: trivy-web-results.json
-          severity: CRITICAL
-          scanners: vuln
-          ignore-unfixed: true
-          exit-code: "0"
+      - name: Scan built images for critical fixable vulnerabilities
+        # Run API and web Trivy scans concurrently using background subprocesses.
+        # Prefetch the DB first to prevent concurrent DB download races, then run
+        # scans with --skip-db-update.
+        # Both scans run independently to completion even if one fails. Exit codes
+        # are surfaced, and reports are gated fail-closed by gate-trivy-critical.mjs.
+        # Scan only images successfully built in this job; never trigger registry fallback.
+        if: |
+          (success() || failure()) && (
+            (needs.changes.outputs.api == 'true' && steps['api-build'].outcome == 'success') ||
+            (needs.changes.outputs.web == 'true' && steps['web-build'].outcome == 'success')
+          )
+        env:
+          SCAN_API: ${{ needs.changes.outputs.api == 'true' && steps['api-build'].outcome == 'success' }}
+          SCAN_WEB: ${{ needs.changes.outputs.web == 'true' && steps['web-build'].outcome == 'success' }}
+        run: |
+          echo "Prefetching Trivy vulnerability database..."
+          trivy image --download-db-only
+
+          pid_api=""
+          pid_web=""
+
+          if [ "$SCAN_API" = "true" ]; then
+            echo "Starting parallel Trivy scan for API image..."
+            trivy image \
+              --format json \
+              --output trivy-api-results.json \
+              --severity CRITICAL \
+              --scanners vuln \
+              --ignore-unfixed \
+              --exit-code 0 \
+              --cache-backend memory \
+              --skip-db-update \
+              vps-manager-nodejs-api:ci &
+            pid_api=$!
+          fi
+
+          if [ "$SCAN_WEB" = "true" ]; then
+            echo "Starting parallel Trivy scan for web image..."
+            trivy image \
+              --format json \
+              --output trivy-web-results.json \
+              --severity CRITICAL \
+              --scanners vuln \
+              --ignore-unfixed \
+              --exit-code 0 \
+              --cache-backend memory \
+              --skip-db-update \
+              vps-manager-nodejs-web:ci &
+            pid_web=$!
+          fi
+
+          status_api=0
+          status_web=0
+
+          if [ -n "$pid_api" ]; then
+            wait "$pid_api" || status_api=$?
+            echo "API image Trivy scan finished with exit code: $status_api"
+          fi
+
+          if [ -n "$pid_web" ]; then
+            wait "$pid_web" || status_web=$?
+            echo "Web image Trivy scan finished with exit code: $status_web"
+          fi
+
+          if [ "$status_api" -ne 0 ] || [ "$status_web" -ne 0 ]; then
+            echo "Error: One or more Trivy scans failed (API: $status_api, Web: $status_web)." >&2
+            exit 1
+          fi
 
       - name: Generate SBOM for API image
         # SBOMs are release attestations: generate them only on runs that can

@@ -6,7 +6,11 @@ COPY packages/web/package.json packages/web/package.json
 RUN npm ci
 
 FROM deps AS build
-COPY . .
+COPY tsconfig.json ./
+COPY packages/api/tsconfig.json packages/api/tsconfig.json
+COPY packages/api/src packages/api/src
+COPY packages/api/db packages/api/db
+COPY packages/web packages/web
 RUN npm run build
 
 FROM deps AS prod-deps
@@ -20,9 +24,12 @@ ARG AGENT_VERSION=dev
 ARG AGENT_BUILD_ID
 WORKDIR /src
 COPY packages/agent/go.mod ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 COPY packages/agent/ .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${AGENT_BUILD_ID}" \
     -o /out/vps-agent-linux-amd64 ./cmd/vps-agent && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \

@@ -4,6 +4,7 @@
 
 - Run Node, installer, updater and Go checks independently of Docker image build/security verification after change detection. Publishing requires both verification jobs and both PostgreSQL integration jobs to succeed; scanned-image checksums, identity checks, SBOMs and digest-based deployment remain unchanged.
 - Reuse the runner's installed GCC for Go race tests, installing it only when missing. Keep API/web builds together to reuse their shared Docker build stage, and preserve the existing `Verify` status-check name.
+- Narrow Docker application build inputs and cache Go modules/compiler objects with BuildKit. Replace redundant standalone identity compilation in container CI with direct checks of both embedded binaries. Run pinned Trivy scans concurrently after one database download, using isolated in-memory analysis caches; retain all release gates and SBOMs.
 
 ## Unreleased — bundled updater CI verification
 

@@ -155,8 +155,8 @@ jobs:
             echo "db=$(resolve "$RAW_DB" false)"
           } >> "$GITHUB_OUTPUT"
 
-  verify:
-    name: Verify
+  verify-checks:
+    name: Verify checks
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -164,10 +164,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Node.js
-        # Also pinned when the API image builds: the agent identity step and
-        # the parity check run `node` even when no Node paths changed
-        # (e.g. a Dockerfile-only change).
-        if: needs.changes.outputs.full == 'true' || needs.changes.outputs.node == 'true' || needs.changes.outputs.api == 'true'
+        if: needs.changes.outputs.full == 'true' || needs.changes.outputs.node == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -216,7 +213,6 @@ jobs:
         if: needs.changes.outputs.full == 'true' || needs.changes.outputs.updater == 'true'
         run: bash scripts/tests/test-updater.sh
 
-
       - name: Validate Docker Compose configuration
         env:
           POSTGRES_PASSWORD: ci-compose-password
@@ -228,11 +224,29 @@ jobs:
         # image build and the identity parity check both compile the agent).
         if: needs.changes.outputs.full == 'true' || needs.changes.outputs.agent == 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc
+          if ! command -v gcc >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y gcc
+          fi
           cd packages/agent
           CGO_ENABLED=1 go test -race ./...
           go vet ./...
+
+  verify:
+    name: Verify
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        # Pinned when the API image builds: the agent identity step and
+        # the parity check run `node` without installing dependencies.
+        if: needs.changes.outputs.api == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
 
       - name: Setup Docker Buildx
         if: needs.changes.outputs.api == 'true' || needs.changes.outputs.web == 'true'
@@ -294,6 +308,15 @@ jobs:
             test -f /app/db/migrations/016_docker_alert_resolution.sql
             test -x /app/agent/vps-agent-linux-amd64
           '
+
+      - name: Setup Go
+        # Only needed when the standalone agent binary must be compiled for
+        # identity parity cross-checking against the API image binary.
+        if: needs.changes.outputs.agent == 'true' && needs.changes.outputs.api == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+          cache-dependency-path: packages/agent/go.mod
 
       - name: Parity check agent identity (image vs standalone)
         if: needs.changes.outputs.agent == 'true' && needs.changes.outputs.api == 'true'
@@ -464,7 +487,7 @@ jobs:
 
   postgres-integration:
     name: TimescaleDB PostgreSQL migration integration
-    # Runs concurrently with verify: only change detection gates it.
+    # Runs concurrently with verify and verify-checks: only change detection gates it.
     needs: changes
     if: needs.changes.outputs.full == 'true' || needs.changes.outputs.db == 'true'
     runs-on: ubuntu-latest
@@ -529,10 +552,10 @@ jobs:
 
   publish:
     name: Publish Docker image
-    needs: [verify, postgres-integration, docker-monitoring-postgres16]
+    needs: [verify, verify-checks, postgres-integration, docker-monitoring-postgres16]
     runs-on: ubuntu-latest
     # always() makes the explicit needs results authoritative. On main all
-    # three jobs are forced to run (full scope), so publish requires all of
+    # four jobs are forced to run (full scope), so publish requires all of
     # them to succeed; a failed or skipped gate fails closed (publish skips,
     # deploy never sees unverified images).
     if: >-
@@ -540,6 +563,7 @@ jobs:
       github.event_name != 'pull_request' &&
       github.ref == 'refs/heads/main' &&
       needs.verify.result == 'success' &&
+      needs.verify-checks.result == 'success' &&
       needs.postgres-integration.result == 'success' &&
       needs.docker-monitoring-postgres16.result == 'success'
     permissions:

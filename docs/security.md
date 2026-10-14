@@ -65,8 +65,10 @@ Managed local installs retain a root-owned `docker-identity.json` (`0600`) and s
 - **Origin & Session Gating**: WebSocket upgrades at `/api/vps/:vpsId/terminal` verify the HttpOnly dashboard session cookie, validate `Origin` against `DASHBOARD_PUBLIC_ORIGIN`, and verify that the effective runtime `webTerminalEnabled` setting is active.
 - **Local vs Remote Execution**:
   - **Local VPS**: Uses dedicated host-level PTY execution (`host-pty` binary or daemon socket transport). Even when the API runs inside a Docker container, it attaches to the host environment via the `/var/run/flexserver/host-pty.sock` Unix domain socket rather than executing within the API container.
-  - **Host PTY Socket Security**: In containerized deployments, only the dedicated PTY socket (`/var/run/flexserver/host-pty.sock`) is mounted into the API container via `docker-compose.terminal.yml`. The Docker engine socket (`/var/run/docker.sock`) is NEVER mounted or exposed to any container or installer. Socket files are restricted (mode `0660`) and granted to the container runtime UID/GID (`app`).
-  - **Host Daemon & Compose Deployment**:
+  - **Host PTY Socket Security**: In containerized deployments, only the dedicated PTY socket directory (`/var/run/flexserver:/var/run/flexserver`) is mounted into the API container (via CI production Compose or `docker-compose.terminal.yml`), with canonical socket path `LOCAL_PTY_SOCKET_PATH=/var/run/flexserver/host-pty.sock`. The Docker engine socket (`/var/run/docker.sock`) is NEVER mounted or exposed to any container or installer. Socket files are restricted (mode `0660`) and granted to the container runtime UID/GID dynamically resolved from the API container `app` user (never hardcoded). The host systemd daemon (`flexserver-host-pty.service`) configures `RuntimeDirectory=flexserver` and `RuntimeDirectoryMode=0755` so that the socket directory is automatically recreated across system boots.
+  - **CI/CD & Compose Deployment**:
+    In automated CI/CD deployment (`.github/workflows/ci.yml`), the deployment workflow automatically provisions the packaged `host-pty` binary (`/app/agent/host-pty-linux-amd64`) directly from the deployed API container image, performs an atomic binary installation to `/usr/local/bin/flexserver-host-pty`, installs the root systemd daemon unit with `RuntimeDirectory=flexserver` and dynamically resolved `app` runtime UID/GID, and restarts the service on every image digest upgrade before starting the API container.
+    For manual host installs:
     ```bash
     # Install local agent and host-pty daemon on host:
     sudo ./scripts/install/install-local-agent.sh --binary packages/agent/dist/vps-agent-linux-amd64 --config /etc/vps-manager-agent/config.json --install-host-pty
@@ -78,3 +80,74 @@ Managed local installs retain a root-owned `docker-identity.json` (`0600`) and s
     - On Windows: Terminal processes are bound to an OS JobObject configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. When the session handle closes, the Windows kernel guarantees atomic termination of the shell and all descendant child processes.
   - **Remote VPS**: Connects via `ssh2` with strict host-key verification against stored pinned host keys and managed SSH keys.
 - **Audit & Resource Quotas**: Both local and remote terminal sessions enforce global and per-session capacity limits, activity heartbeats, idle timeouts, and record lifecycle audit events (`terminal.opened`, `terminal.closed`) without logging sensitive shell input or output.
+- **Accidental Command Guard (`terminalCommandGuardEnabled`)**:
+  - **Client-Side Accidental Command Guard**: Configurable via the Settings toggle (`terminalCommandGuardEnabled`, defaulted to `false` for new and existing deployments). It cancels recognized destructive commands typed into the web terminal and rejects dangerous clipboard pastes before forwarding them, then displays a dismiss-only warning. Dismissing the warning does not execute the blocked command. Detection covers common high-impact commands such as `rm -rf /`, `mkfs`, `dd`, `shutdown`, `reboot`, and root block-device writes; it cannot inspect shell history, aliases, custom scripts, or fullscreen terminal applications.
+  - **Explicit Non-Security Boundary & Root Unchanged**: This guard is strictly an ergonomic safety net against paste accidents or fat-finger execution. It is **NOT** a security sandbox, privilege boundary, or authorization restriction. Interactive PTY transports stream raw byte sequences rather than structured command invocations, making server-side or stream-level command denylisting unsound without breaking interactive curses applications, text editors, subshells, pipelines, and terminal escape sequences. Therefore, no server-side runtime input filtering or stream blocking is performed.
+  - **Execution Identity**: The underlying host PTY process executes with host root privileges, and remote SSH sessions execute with the configured SSH credentials. Enabling the accidental command guard does not alter the runtime UID/GID or drop root privileges. Disabling it restores raw terminal input forwarding.
+  - **Persistence**: Persisted globally across storage backends (PostgreSQL `dashboard_settings.terminal_command_guard_enabled` via migration `025_terminal_command_guard.sql` and JSON `data/settings.json`), exposed via `DashboardOverview.settings.terminalCommandGuardEnabled`, and updated via `PATCH /api/dashboard/settings` with support for independent partial updates.
+## SSH Private Key Envelope Encryption & Management
+
+### Envelope Architecture & Cryptography
+
+SSH private keys at rest under `private/keys/` are protected using AES-256-GCM envelope encryption:
+- **Data Encryption Key (DEK)**: A dedicated 32-byte (256-bit) cryptographically random DEK is generated for each managed keypair.
+- **Authenticated Encryption**: Both the DEK and the private key payload are encrypted using AES-256-GCM with fresh 12-byte random IVs and 16-byte authentication tags.
+- **Cryptographic AAD Binding**:
+  - DEK AAD: `<vpsId>:dek:v1` cryptographically binds the encrypted DEK to the specific VPS identity and format version.
+  - Payload AAD: `<vpsId>:payload:v1` binds the encrypted OpenSSH private key payload.
+  - Substituting an envelope from another VPS or corrupting authenticated ciphertext, IV or tag causes decryption to fail closed.
+- **In-Memory Consumers**: SSH connection handlers (e.g. `ssh2`) receive the decrypted OpenSSH private key string strictly in memory; decrypted keys are never written to disk or logs.
+
+### External KEK Keyring & Storage Isolation
+
+The Key Encryption Key (KEK) is managed outside the application repository and data stores:
+- **Configuration**: Set `SSH_KEY_ENCRYPTION_KEY_FILE` to the external keyring path. The setup CLI suggests `/etc/flexserver/ssh-keyring.json` on Linux and `%ProgramData%\flexserver\ssh-keyring.json` on Windows; the application requires an explicit path.
+- **Boundary Validation**: The path is resolved canonically (following symlinks) and strictly prohibited from residing inside `DATA_DIR`, `PRIVATE_DIR`, or the project root.
+- **File Permissions**: Must be secured with mode `0600` (owner read/write only) on POSIX, or restricted owner ACLs on Windows NTFS.
+- **Fail-Closed Semantics**: If the keyring file is missing, invalid, or corrupted, SSH operations fail closed. The application never silently falls back to plaintext or auto-generates a production KEK on read.
+- **Host Compromise Threat Boundary**: When the KEK resides on the same physical or virtual host as the application, a full host compromise (root access) compromises both the application files and the keyring. Storing the KEK in a distinct external location protects against accidental directory leaks, repository commits, and application-level backup exposures.
+
+### Plaintext Historical Backup Exposure & Purging
+
+**CRITICAL OPERATOR NOTICE**:
+Prior releases stored Ed25519 private keys as unencrypted OpenSSH files. Any application backups taken prior to envelope encryption contain unencrypted private keys.
+- Operators must audit and purge historical application backups that contain unencrypted `private/keys/` files.
+- If historical backup copies cannot be verified as secure, consider rotating all managed VPS host access keys.
+
+### Separate Offline Recovery Copy
+
+- **Keyring Backup**: The external KEK keyring file must be excluded from routine application backups and backed up to a separate, offline location (such as an offline vault, hardware token, or air-gapped backup).
+- **Disaster Recovery**: Restoring application data without the corresponding KEK keyring renders all managed private keys permanently unrecoverable.
+
+### Key Migration & Non-Destructive Protection
+
+- **Zero-Downtime Migration**: Existing unencrypted OpenSSH private keys are automatically detected upon access, encrypted into the envelope format, and saved via atomic write without altering the keypair identity.
+- **Batch Migration**: Operators can migrate all stored keys using `npm run manage-ssh-keys -- migrate`.
+- **Safe Regeneration Guard**: If a private key exists without a public key (or vice-versa), the service refuses to regenerate the keypair to prevent accidental loss or mispairing.
+- **Corruption Protection**: Decryption errors, authentication tag failures, or missing KEK entries immediately abort and never overwrite or regenerate damaged key files.
+
+### Operator CLI & Rotation Procedures
+
+A dedicated CLI tool manages keyrings and key envelopes without printing secret key material:
+
+```bash
+# 1. Initialize external keyring (creates file with initial 256-bit KEK)
+npm run manage-ssh-keys -- init --path /etc/flexserver/ssh-keyring.json
+# Set SSH_KEY_ENCRYPTION_KEY_FILE=/etc/flexserver/ssh-keyring.json in .env before starting the app.
+# Grant only the application service account access; on Windows restrict NTFS ACLs explicitly.
+
+# 2. Migrate existing plaintext keys to envelope encryption
+npm run manage-ssh-keys -- migrate
+
+# 3. Rotate active KEK (generates new KEK, sets as active, and rewraps existing keys)
+npm run manage-ssh-keys -- rotate
+
+# Rotate keyring without immediate key rewrapping:
+npm run manage-ssh-keys -- rotate --skip-rewrap
+```
+
+## Web terminal origin during domain changes
+
+`DASHBOARD_PUBLIC_ORIGIN` must match the browser dashboard origin exactly (scheme, hostname, and optional port). After changing the public dashboard domain, update both the deployment `.env` and the GitHub Actions repository variable `DASHBOARD_PUBLIC_ORIGIN`, then recreate the API container so it receives the new environment. Do not disable origin checks or add a permissive host fallback.
+
+A rejected WebSocket upgrade can appear as a connection error before any SSH connection is attempted. An unauthenticated upgrade with the configured Origin reaches the authentication gate (`401`); a mismatched Origin is rejected with `403` while terminal access is enabled. Verify the authenticated terminal path as well, using a real command output rather than the shell's input echo.

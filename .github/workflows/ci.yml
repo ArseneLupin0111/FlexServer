@@ -899,6 +899,7 @@ jobs:
           TERMINAL_OUTPUT_BUFFER_BYTES=$TERMINAL_OUTPUT_BUFFER_BYTES_VALUE
           TERMINAL_INPUT_BUFFER_BYTES=$TERMINAL_INPUT_BUFFER_BYTES_VALUE
           TERMINAL_SLOW_CONSUMER_TIMEOUT_MS=$TERMINAL_SLOW_CONSUMER_TIMEOUT_MS_VALUE
+          LOCAL_PTY_SOCKET_PATH=/var/run/flexserver/host-pty.sock
           STORAGE_DRIVER=postgres
 
           POSTGRES_DB=vps_manager
@@ -937,9 +938,11 @@ jobs:
                 AGENT_RELEASE_PUBLIC_KEY: \${AGENT_RELEASE_PUBLIC_KEY:-}
                 AGENT_RELEASE_MANIFEST_URL: \${AGENT_RELEASE_MANIFEST_URL:-}
                 AGENT_RELEASE_TTL_SECONDS: \${AGENT_RELEASE_TTL_SECONDS:-300}
+                LOCAL_PTY_SOCKET_PATH: \${LOCAL_PTY_SOCKET_PATH:-/var/run/flexserver/host-pty.sock}
               volumes:
                 - vps-manager-data:/app/data
                 - vps-manager-private:/app/private
+                - /var/run/flexserver:/var/run/flexserver
               healthcheck:
                 test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
                 interval: 30s
@@ -976,6 +979,56 @@ jobs:
           else
             echo "DASHBOARD_ADMIN_PASSWORD secret not set — dashboard password must be set manually via SSH after deploy."
           fi
+          # Provision or upgrade host-pty daemon from API image before starting API container
+          echo "Provisioning host-pty daemon from API image..."
+          "${SSH_BASE[@]}" "
+            set -euo pipefail
+            SUDO=\"\"
+            if [ \"\$(id -u)\" -ne 0 ]; then
+              SUDO=\"sudo\"
+            fi
+
+            # Determine API container runtime UID/GID dynamically from the pulled image
+            API_UID_GID=\"\$(docker run --rm --entrypoint sh '$API_IMAGE' -lc 'printf \"%s:%s\" \"\$(id -u)\" \"\$(id -g)\"')\"
+            if [[ ! \"\$API_UID_GID\" =~ ^[0-9]+:[0-9]+$ ]]; then
+              echo \"Error: Could not determine API container runtime UID/GID for $API_IMAGE.\" >&2
+              exit 1
+            fi
+            API_UID=\"\${API_UID_GID%%:*}\"
+            API_GID=\"\${API_UID_GID##*:}\"
+
+            # Extract packaged host-pty binary from API image
+            HOST_PTY_TMP=\"\$(mktemp /tmp/host-pty-bundled.XXXXXX)\"
+            if ! docker run --rm --entrypoint cat '$API_IMAGE' /app/agent/host-pty-linux-amd64 > \"\$HOST_PTY_TMP\" || [ ! -s \"\$HOST_PTY_TMP\" ]; then
+              echo 'Error: Failed to extract bundled host-pty binary from API image.' >&2
+              rm -f \"\$HOST_PTY_TMP\"
+              exit 1
+            fi
+            chmod 0755 \"\$HOST_PTY_TMP\"
+
+            # Atomic binary install into /usr/local/bin/flexserver-host-pty
+            DEST=\"/usr/local/bin/flexserver-host-pty\"
+            TMP_DEST=\"\${DEST}.tmp.\$\$\"
+            \$SUDO cp -f \"\$HOST_PTY_TMP\" \"\$TMP_DEST\"
+            \$SUDO chown root:root \"\$TMP_DEST\"
+            \$SUDO chmod 0755 \"\$TMP_DEST\"
+            \$SUDO mv -f \"\$TMP_DEST\" \"\$DEST\"
+            rm -f \"\$HOST_PTY_TMP\"
+
+            # Install systemd root daemon unit with RuntimeDirectory for boot directory recreation
+            UNIT_FILE=\"/etc/systemd/system/flexserver-host-pty.service\"
+            UNIT_TMP=\"\$(mktemp /tmp/flexserver-host-pty.XXXXXX.service)\"
+            printf '[Unit]\nDescription=VPS Manager Host PTY Daemon\nDocumentation=https://github.com/sondoan17/vps-manager-nodejs\nAfter=network.target\n\n[Service]\nType=simple\nUser=root\nGroup=root\nRuntimeDirectory=flexserver\nRuntimeDirectoryMode=0755\nExecStart=/usr/local/bin/flexserver-host-pty -socket /var/run/flexserver/host-pty.sock -socket-mode 0660 -socket-uid %s -socket-gid %s\nRestart=always\nRestartSec=5\n\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectClock=true\n\n[Install]\nWantedBy=multi-user.target\n' \"\$API_UID\" \"\$API_GID\" > \"\$UNIT_TMP\"
+            \$SUDO chown root:root \"\$UNIT_TMP\"
+            \$SUDO chmod 0644 \"\$UNIT_TMP\"
+            \$SUDO mv -f \"\$UNIT_TMP\" \"\$UNIT_FILE\"
+
+            # Enable and restart service so socket exists before API container starts
+            \$SUDO systemctl daemon-reload
+            \$SUDO systemctl enable flexserver-host-pty.service
+            \$SUDO systemctl restart flexserver-host-pty.service
+            echo \"Host PTY daemon started (socket: /var/run/flexserver/host-pty.sock, uid=\${API_UID}, gid=\${API_GID}).\"
+          "
           $SSH "cd '$DEPLOY_PATH' && docker compose up -d --remove-orphans"
           $SSH "cd '$DEPLOY_PATH' && docker compose ps"
           $SSH "for i in \$(seq 1 30); do curl -fsS http://127.0.0.1:3000/api/health && exit 0; sleep 2; done; docker compose -f '$DEPLOY_PATH/docker-compose.yml' logs --tail=80; exit 1"

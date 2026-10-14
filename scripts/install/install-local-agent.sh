@@ -635,6 +635,15 @@ if [[ "$INSTALL_HOST_PTY" == "true" || -n "$HOST_PTY_SRC" ]] && [[ -n "$HOST_PTY
     HOST_PTY_EXTRA_ARGS="${HOST_PTY_EXTRA_ARGS} -socket-gid ${HOST_PTY_SOCKET_GID}"
   fi
 
+  HOST_PTY_SOCKET_DIR="$(basename "$(dirname "$HOST_PTY_SOCKET_PATH")")"
+  if [[ "$HOST_PTY_SOCKET_DIR" != "run" && -n "$HOST_PTY_SOCKET_DIR" && "$HOST_PTY_SOCKET_DIR" != "." && "$HOST_PTY_SOCKET_DIR" != "/" ]]; then
+    HOST_PTY_RUNTIME_DIR_CONFIG="RuntimeDirectory=${HOST_PTY_SOCKET_DIR}
+RuntimeDirectoryMode=0755
+"
+  else
+    HOST_PTY_RUNTIME_DIR_CONFIG=""
+  fi
+
   HOST_PTY_UNIT_CONTENT=$(cat <<PTYUNIT
 [Unit]
 Description=VPS Manager Host PTY Daemon
@@ -645,7 +654,7 @@ After=network.target
 Type=simple
 User=root
 Group=root
-ExecStart=${HOST_PTY_DEST} -socket ${HOST_PTY_SOCKET_PATH} -socket-mode 0660${HOST_PTY_EXTRA_ARGS}
+${HOST_PTY_RUNTIME_DIR_CONFIG}ExecStart=${HOST_PTY_DEST} -socket ${HOST_PTY_SOCKET_PATH} -socket-mode 0660${HOST_PTY_EXTRA_ARGS}
 Restart=always
 RestartSec=5
 

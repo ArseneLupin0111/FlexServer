@@ -8,6 +8,17 @@ const SECRET_KEYS = new Set([
   "authorization",
   "token",
   "localauthtoken",
+  "dek",
+  "kek",
+  "ciphertext",
+  "encryptedkey",
+  "encrypted_key",
+  "kekid",
+  "kek_id",
+  "sshkeyencryptionkey",
+  "ssh_key_encryption_key",
+  "authtag",
+  "auth_tag",
 ]);
 const SECRET_PATTERNS = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,

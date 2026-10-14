@@ -209,6 +209,7 @@ export type DashboardOverview = {
   settings: {
     appMode: "demo" | "local";
     webTerminalEnabled: boolean;
+    terminalCommandGuardEnabled: boolean;
     realSshEnabled: boolean;
     authRequiredInLocalMode: boolean;
   };
@@ -217,11 +218,13 @@ export type DashboardOverview = {
 export type DashboardSettings = DashboardOverview["settings"];
 
 export type UpdateDashboardSettingsPayload = {
-  webTerminalEnabled: boolean;
+  webTerminalEnabled?: boolean;
+  terminalCommandGuardEnabled?: boolean;
 };
 
 export type DashboardSettingsResponse = {
   webTerminalEnabled: boolean;
+  terminalCommandGuardEnabled: boolean;
 };
 
 export type DashboardMetric = DashboardOverview["metrics"][number];

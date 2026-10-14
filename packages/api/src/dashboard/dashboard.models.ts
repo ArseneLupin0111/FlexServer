@@ -30,6 +30,7 @@ export type DemoTerminalOverview = {
 export type DashboardSettings = {
   appMode: AppMode;
   webTerminalEnabled: boolean;
+  terminalCommandGuardEnabled: boolean;
   realSshEnabled: boolean;
   authRequiredInLocalMode: boolean;
 };

@@ -42,6 +42,33 @@ import {
 
 const DIR = ".vps-manager-agent";
 const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
+const GIT_SHA_RE = /^[0-9a-f]{40}$/;
+
+type AgentIdentity = {
+  raw: string;
+  version: string;
+  buildId?: string;
+};
+
+function parseAgentIdentity(raw: string): AgentIdentity {
+  const trimmed = raw.trim();
+  const plusIdx = trimmed.lastIndexOf("+");
+  if (plusIdx !== -1) {
+    const candidateBuildId = trimmed.slice(plusIdx + 1);
+    const candidateVersion = trimmed.slice(0, plusIdx);
+    if (GIT_SHA_RE.test(candidateBuildId) && candidateVersion.length > 0) {
+      return {
+        raw: trimmed,
+        version: candidateVersion,
+        buildId: candidateBuildId,
+      };
+    }
+  }
+  return {
+    raw: trimmed,
+    version: trimmed,
+  };
+}
 export type AgentUpgradePolling = {
   intervalMs: number;
   timeoutMs: number;
@@ -199,7 +226,7 @@ export class AgentUpgraderService {
     if (lockResult.stdout.trim() !== "acquired")
       throw new ConflictException("Agent upgrade lock is already held");
     let swapped = false,
-      candidateVersion = "";
+      candidateIdentity: AgentIdentity = { raw: "", version: "" };
     try {
       await ctx.update("staging", 15);
       await this.ssh.uploadFile(vps, staged, candidate, 0o700, auth);
@@ -214,7 +241,9 @@ export class AgentUpgraderService {
       ).stdout.trim();
       if (!VERSION_RE.test(versionOut))
         throw new Error("Candidate returned an invalid version");
-      candidateVersion = versionOut;
+      candidateIdentity = parseAgentIdentity(versionOut);
+      if (!VERSION_RE.test(candidateIdentity.version))
+        throw new Error("Candidate returned an invalid version");
       await ctx.update("validating", 30);
       // Provision Docker identity/runtime state with the staged binary
       // BEFORE touching the live service. Fail-closed: a non-zero exit rejects
@@ -266,9 +295,9 @@ export class AgentUpgraderService {
       swapped = true;
       await this.start(vps, auth, binary, config, pidFile);
       await ctx.update("verifying-ingest", 80);
-      await this.waitForObservation(vps.id, postStopBaseline, candidateVersion);
+      await this.waitForObservation(vps.id, postStopBaseline, candidateIdentity);
       await this.ssh.execCommand(vps, `rm -f -- ${q(backup)}`, auth, 10_000);
-      return candidateVersion;
+      return candidateIdentity.raw;
     } catch (candidateError) {
       if (!swapped) {
         await this.ssh
@@ -287,7 +316,10 @@ export class AgentUpgraderService {
         );
         const beforeRollback = (await this.agents.getState(vps.id))?.lastSeenAt;
         await this.start(vps, auth, binary, config, pidFile);
-        await this.waitForObservation(vps.id, beforeRollback, prior.version!);
+        await this.waitForObservation(vps.id, beforeRollback, {
+          version: prior.version!,
+          buildId: prior.buildId,
+        });
         await this.ssh.execCommand(vps, `rm -f -- ${q(staged)}`, auth, 10_000);
       } catch {
         throw new Error(
@@ -353,9 +385,12 @@ export class AgentUpgraderService {
   private async waitForObservation(
     vpsId: string,
     baseline: string | undefined,
-    version: string,
+    expected: { version: string; buildId?: string },
   ) {
-    const base = baseline ? Date.parse(baseline) : 0;
+    const base =
+      baseline && Number.isFinite(Date.parse(baseline))
+        ? Date.parse(baseline)
+        : 0;
     const intervalMs = this.polling?.intervalMs ?? 500;
     const timeoutMs =
       this.polling?.timeoutMs ??
@@ -364,10 +399,12 @@ export class AgentUpgraderService {
     const attempts = Math.max(1, Math.ceil(timeoutMs / intervalMs));
     for (let i = 0; i < attempts; i++) {
       const state = await this.agents.getState(vpsId);
+      const seen = state?.lastSeenAt ? Date.parse(state.lastSeenAt) : NaN;
       if (
-        state?.version === version &&
-        state.lastSeenAt &&
-        Date.parse(state.lastSeenAt) > base
+        state?.version === expected.version &&
+        (!expected.buildId || state.buildId === expected.buildId) &&
+        Number.isFinite(seen) &&
+        seen > base
       )
         return;
       await sleep(intervalMs);

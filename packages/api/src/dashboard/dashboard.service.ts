@@ -128,6 +128,7 @@ export class DashboardService {
         settings: {
           appMode: "demo",
           webTerminalEnabled: false,
+          terminalCommandGuardEnabled: false,
           realSshEnabled: false,
           authRequiredInLocalMode: true,
         },
@@ -202,6 +203,9 @@ export class DashboardService {
         webTerminalEnabled: this.settingsService
           ? await this.settingsService.isWebTerminalEnabled()
           : Boolean(this.config.enableWebTerminal),
+        terminalCommandGuardEnabled: this.settingsService
+          ? await this.settingsService.isTerminalCommandGuardEnabled()
+          : false,
         realSshEnabled: true,
         authRequiredInLocalMode: true,
       },

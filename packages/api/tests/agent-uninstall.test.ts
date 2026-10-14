@@ -10,12 +10,13 @@ import { createJsonAgentRepository } from "../src/persistence/repositories/agent
 import { createJsonAuditRepository } from "../src/persistence/repositories/audit.repository.js";
 import { createJsonJobRepository } from "../src/persistence/repositories/job.repository.js";
 import { createJsonMetricRepository } from "../src/persistence/repositories/metric.repository.js";
-import { createKeyService } from "../src/ssh/keyService.js";
 import { createVpsStore } from "../src/persistence/store/vpsStore.js";
-import { SshService } from "../src/ssh/ssh.service.js";
-import type { KeyService } from "../src/ssh/keyService.js";
+import { createKeyService, type KeyService } from "../src/ssh/keyService.js";
+import { createTestKeyring } from "../src/ssh/key-encryption.js";
 import type { CommandJob } from "../src/jobs/jobs.models.js";
 import type { Dependencies } from "../src/app.js";
+import { createSessionCookie } from "./test-helpers.js";
+import { SshService } from "../src/ssh/ssh.service.js";
 
 const localConfig: AppConfig = {
   mode: "local",
@@ -62,8 +63,10 @@ beforeEach(async () => {
   vpsRepo = createVpsStore(join(tempDir, "data", "vps.json"));
   sharedAgentRepo = createJsonAgentRepository(agentRepoPath());
   sharedJobRepo = createJsonJobRepository(jobRepoPath());
-  keys = createKeyService(join(tempDir, "private", "keys"));
-  const { createSessionCookie } = await import("./test-helpers.js");
+  keys = createKeyService({
+    baseDir: join(tempDir, "private", "keys"),
+    keyring: createTestKeyring("uninstall-test-kek"),
+  });
   sessionCookie = await createSessionCookie(
     tempDir,
     localConfig.dashboardSessionSecret,

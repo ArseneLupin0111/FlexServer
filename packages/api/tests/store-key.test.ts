@@ -1,9 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createVpsStore } from "../src/persistence/store/vpsStore.js";
 import { createKeyService } from "../src/ssh/keyService.js";
+import { createTestKeyring } from "../src/ssh/key-encryption.js";
 
 let tempDir: string;
 
@@ -55,13 +56,36 @@ describe("VPS store", () => {
 });
 
 describe("key service", () => {
-  it("creates an ed25519 key pair with OpenSSH public key and private key outside responses", async () => {
+  it("fails closed when keyring is not configured", async () => {
     const keys = createKeyService(join(tempDir, "private", "keys"));
+    await expect(keys.ensureKeyPair("vps_123")).rejects.toThrow(
+      /keyring is not configured/,
+    );
+  });
+
+  it("creates an ed25519 key pair with encrypted envelope at rest and decrypted in memory", async () => {
+    const keyring = createTestKeyring("kek-test-1");
+    const keys = createKeyService({
+      baseDir: join(tempDir, "private", "keys"),
+      keyring,
+    });
 
     const pair = await keys.ensureKeyPair("vps_123");
 
     expect(pair.publicKey).toMatch(/^ssh-ed25519 /);
     expect(pair.privateKeyPath).toContain(join("private", "keys", "vps_123"));
     expect(pair.privateKey).toContain("PRIVATE KEY");
+
+    // Verify on disk it is an encrypted envelope, not plaintext OpenSSH private key
+    const onDisk = await readFile(pair.privateKeyPath, "utf8");
+    expect(onDisk).not.toContain("-----BEGIN OPENSSH PRIVATE KEY-----");
+    const envelope = JSON.parse(onDisk);
+    expect(envelope.format).toBe("vps-manager-envelope-aes256gcm");
+    expect(envelope.version).toBe(1);
+    expect(envelope.kekId).toBe("kek-test-1");
+
+    // Decrypts in memory via readPrivateKey
+    const readBack = await keys.readPrivateKey("vps_123");
+    expect(readBack).toBe(pair.privateKey);
   });
 });

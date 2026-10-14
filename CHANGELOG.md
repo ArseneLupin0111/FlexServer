@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — web terminal accidental command guard setting
+
+- Add persisted global `terminalCommandGuardEnabled` setting (defaulting to `false`) for web terminal sessions across local host PTY and remote SSH targets.
+- Add migration `025_terminal_command_guard.sql` adding `terminal_command_guard_enabled boolean NOT NULL DEFAULT false` to the `dashboard_settings` table.
+- Support partial settings updates in `PATCH /api/dashboard/settings` so `webTerminalEnabled` and `terminalCommandGuardEnabled` can be toggled independently without overwriting each other.
+- Implement partial update persistence across both JSON (`data/settings.json`) and PostgreSQL (`dashboard_settings` table) repository implementations.
+- Expose `terminalCommandGuardEnabled` in `DashboardOverview.settings` and in the `PATCH /api/dashboard/settings` response payload.
+- Document accidental command guard behavior in `docs/security.md`: a client-side safety net cancels recognized typed destructive commands and rejects dangerous pastes (`rm -rf /`, `mkfs`, `dd`, `shutdown`, etc.), displaying a dismiss-only warning. It does not filter server-side PTY streams or change host root / SSH execution privileges; disabling it restores raw input forwarding.
+
+## Unreleased — production local terminal host-pty deployment
+
+- Update CI/CD deployment workflow (`.github/workflows/ci.yml`) to automatically provision the bundled `host-pty` binary (`/app/agent/host-pty-linux-amd64`) directly from the deployed API container image.
+- Configure root systemd service (`flexserver-host-pty.service`) with `RuntimeDirectory=flexserver` (`RuntimeDirectoryMode=0755`) ensuring `/var/run/flexserver` socket directory recreation across host reboots.
+- Derive API container runtime UID and GID dynamically at deployment time (no hardcoded runtime UID) so socket permissions (`0660`) are granted to the unprivileged `app` container user.
+- Mount `/var/run/flexserver` into the production API container and set canonical `LOCAL_PTY_SOCKET_PATH=/var/run/flexserver/host-pty.sock` in `.env` and `docker-compose.yml`.
+- Ensure atomic binary installation (`/usr/local/bin/flexserver-host-pty`) and daemon update/restart on image digest upgrades, running before the API container starts, with no Docker engine socket mounted.
+- Correct documentation in `docs/security.md` regarding automated CI/CD host PTY daemon provisioning, boot runtime directory management, and least-privilege socket permissions.
+
 ## Unreleased — CI regression cleanup
 
 - Remove the obsolete Overview endpoint-placement test after workspace metadata deduplication. Keep production UI unchanged rather than restoring duplicate endpoint text or re-pinning incidental layout wording.

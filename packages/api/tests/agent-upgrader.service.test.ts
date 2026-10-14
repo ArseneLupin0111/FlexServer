@@ -10,14 +10,20 @@ import type { AgentState } from "../src/agents/agent.models.js";
 const dirs: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true }))); });
 
-async function fixture(options: { lock?: string; ownership?: string | string[]; observations?: AgentState[] } = {}) {
+async function fixture(options: { lock?: string; ownership?: string | string[]; observations?: AgentState[]; getState?: (context: { phase: string; callCount: number }) => AgentState; versionOut?: string; initial?: Partial<AgentState> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "agent-upgrade-")); dirs.push(dir);
   const binaryPath = join(dir, "candidate"); await writeFile(binaryPath, "candidate-binary");
   const vps = { id: "vps-1", name: "remote", host: "203.0.113.2", port: 22, username: "root", keyProvisionedAt: "2026-01-01T00:00:00Z" };
-  const initial: AgentState = { vpsId: vps.id, status: "online", version: "1.0.0", lastSeenAt: "2026-01-01T00:00:00.000Z" };
+  const initial: AgentState = { vpsId: vps.id, status: "online", version: "1.0.0", lastSeenAt: "2026-01-01T00:00:00.000Z", ...options.initial };
   const observations = [...(options.observations ?? [])];
+  let currentPhase = "initial";
+  let callCount = 0;
   const agents = {
-    getState: vi.fn(async () => observations.shift() ?? initial),
+    getState: vi.fn(async () => {
+      callCount++;
+      if (options.getState) return options.getState({ phase: currentPhase, callCount });
+      return observations.shift() ?? initial;
+    }),
     createCredential: vi.fn(), updateCredential: vi.fn(), revokeCredential: vi.fn(),
   };
   const commands: string[] = [];
@@ -28,7 +34,7 @@ async function fixture(options: { lock?: string; ownership?: string | string[]; 
       commands.push(command);
       if (command.includes("$HOME")) return { stdout: "/home/deploy\n", stderr: "" };
       if (command.includes("mkdir --") && command.includes("lifecycle.lock")) return { stdout: options.lock ?? "acquired", stderr: "" };
-      if (command.endsWith(" -version")) return { stdout: "2.0.0\n", stderr: "" };
+      if (command.endsWith(" -version")) return { stdout: options.versionOut ?? "2.0.0\n", stderr: "" };
       if (command.includes("_matches=0")) {
         const out = ownerships ? (ownerships.shift() ?? "owned:42:9001\n") : (options.ownership ?? "owned:42:9001\n");
         return { stdout: out, stderr: "" };
@@ -48,7 +54,7 @@ async function fixture(options: { lock?: string; ownership?: string | string[]; 
     { intervalMs: 1, timeoutMs: 3, sleep: async () => undefined });
   const stopPid = vi.spyOn(service as unknown as { stopPid: (...args: unknown[]) => Promise<void> }, "stopPid");
   const result = await service.upgrade(vps.id);
-  const ctx = { update: vi.fn(async () => undefined), succeed: vi.fn(async () => undefined) };
+  const ctx = { update: vi.fn(async (phase: string) => { currentPhase = phase; }), succeed: vi.fn(async () => { currentPhase = "succeeded"; }) };
   return { service, result, task: () => task!(ctx), ctx, ssh, commands, agents, lifecycle, initial, stopPid };
 }
 
@@ -184,8 +190,138 @@ describe("AgentUpgraderService", () => {
     // Final verification pass validates with the runtime owner uid.
     expect(provisionCmd).toContain("-docker-runtime-owner-uid \"$_u\"");
   });
+
+  it("upgrades candidate with version and build ID when fresh heartbeat matches both", async () => {
+    const buildId = "af467d23a1d5a3d84f078dc1016f3a7a16f344a0";
+    const versionOut = `0.1.0+${buildId}\n`;
+    const f = await fixture({
+      versionOut,
+      observations: [
+        fState("1.0.0", 0),
+        fState("1.0.0", 0),
+        fState("0.1.0", 1, buildId),
+        fState("0.1.0", 2, buildId),
+      ],
+    });
+    await f.task();
+    expect(f.ctx.succeed).toHaveBeenCalledWith("complete");
+    expect(f.commands.some((c) => c.includes("rm -f --") && c.includes("backup-"))).toBe(true);
+    expect(f.commands.some((c) => c.includes("mv -f --") && c.includes("backup-"))).toBe(false);
+  });
+
+  it("rejects observation with same semantic version but wrong build ID and rolls back", async () => {
+    const candidateBuildId = "af467d23a1d5a3d84f078dc1016f3a7a16f344a0";
+    const wrongBuildId = "0000000000000000000000000000000000000000";
+    const versionOut = `0.1.0+${candidateBuildId}\n`;
+    const wrongState = fState("0.1.0", 1, wrongBuildId);
+    const f = await fixture({
+      versionOut,
+      observations: [
+        fState("1.0.0", 0), // prior (upgrade)
+        fState("1.0.0", 0), // postStopBaseline
+        wrongState,         // candidate poll 1
+        wrongState,         // candidate poll 2
+        wrongState,         // candidate poll 3 -> times out
+        fState("1.0.0", 0), // beforeRollback
+        fState("1.0.0", 2), // rollback poll 1 -> succeeds
+      ],
+    });
+    await expect(f.task()).rejects.toThrow(/timed out waiting for upgraded agent observation/i);
+    expect(f.commands.some((c) => c.includes("mv -f --") && c.includes("backup-"))).toBe(true);
+    expect(f.commands.some((c) => c.includes("rm -f --") && c.includes("stage-"))).toBe(true);
+  });
+
+  it("rejects observation with same semantic version but missing build ID when candidate has build ID", async () => {
+    const candidateBuildId = "af467d23a1d5a3d84f078dc1016f3a7a16f344a0";
+    const versionOut = `0.1.0+${candidateBuildId}\n`;
+    const noBuildState = fState("0.1.0", 1, undefined);
+    const f = await fixture({
+      versionOut,
+      observations: [
+        fState("1.0.0", 0), // prior (upgrade)
+        fState("1.0.0", 0), // postStopBaseline
+        noBuildState,       // candidate poll 1
+        noBuildState,       // candidate poll 2
+        noBuildState,       // candidate poll 3 -> times out
+        fState("1.0.0", 0), // beforeRollback
+        fState("1.0.0", 2), // rollback poll 1 -> succeeds
+      ],
+    });
+    await expect(f.task()).rejects.toThrow(/timed out waiting for upgraded agent observation/i);
+    expect(f.commands.some((c) => c.includes("mv -f --") && c.includes("backup-"))).toBe(true);
+    expect(f.commands.some((c) => c.includes("rm -f --") && c.includes("stage-"))).toBe(true);
+  });
+
+  it("rejects stale observation matching version and build ID when timestamp is not newer than baseline", async () => {
+    const buildId = "af467d23a1d5a3d84f078dc1016f3a7a16f344a0";
+    const versionOut = `0.1.0+${buildId}\n`;
+    const staleState = fState("0.1.0", 1, buildId);
+    const f = await fixture({
+      versionOut,
+      observations: [
+        fState("1.0.0", 0), // prior (upgrade)
+        fState("1.0.0", 1), // postStopBaseline (timestamp 1, base = 1000)
+        staleState,         // candidate poll 1 (timestamp 1 <= 1 -> stale)
+        staleState,         // candidate poll 2 (timestamp 1 <= 1 -> stale)
+        staleState,         // candidate poll 3 (timestamp 1 <= 1 -> stale) -> times out
+        fState("1.0.0", 1), // beforeRollback (timestamp 1, base = 1000)
+        fState("1.0.0", 2), // rollback poll 1 (timestamp 2 > 1) -> succeeds
+      ],
+    });
+    await expect(f.task()).rejects.toThrow(/timed out waiting for upgraded agent observation/i);
+    expect(f.commands.some((c) => c.includes("mv -f --") && c.includes("backup-"))).toBe(true);
+    expect(f.commands.some((c) => c.includes("rm -f --") && c.includes("stage-"))).toBe(true);
+  });
+
+  it("safely rolls back to legacy prior agent without build ID", async () => {
+    const candidateBuildId = "af467d23a1d5a3d84f078dc1016f3a7a16f344a0";
+    const versionOut = `0.1.0+${candidateBuildId}\n`;
+    const f = await fixture({
+      versionOut,
+      initial: { version: "1.0.0", buildId: undefined },
+      observations: [
+        fState("1.0.0", 0),           // prior (legacy without buildId)
+        fState("1.0.0", 0),           // postStopBaseline
+        fState("wrong-candidate", 1), // candidate poll 1
+        fState("wrong-candidate", 1), // candidate poll 2
+        fState("wrong-candidate", 1), // candidate poll 3 -> times out
+        fState("1.0.0", 0),           // beforeRollback
+        fState("1.0.0", 2, undefined),// rollback poll 1 (legacy 1.0.0 without buildId, timestamp 2 > 0) -> succeeds
+      ],
+    });
+    await expect(f.task()).rejects.toThrow(/timed out waiting for upgraded agent observation/i);
+    expect(f.commands.some((c) => c.includes("mv -f --") && c.includes("backup-"))).toBe(true);
+    expect(f.commands.some((c) => c.includes("rm -f --") && c.includes("stage-"))).toBe(true);
+  });
+
+  it("verifies prior build ID when rolling back to prior agent that had build ID", async () => {
+    const candidateBuildId = "af467d23a1d5a3d84f078dc1016f3a7a16f344a0";
+    const priorBuildId = "1111111111111111111111111111111111111111";
+    const wrongPriorBuildId = "2222222222222222222222222222222222222222";
+    const versionOut = `0.1.0+${candidateBuildId}\n`;
+    const f = await fixture({
+      versionOut,
+      initial: { version: "1.0.0", buildId: priorBuildId },
+      observations: [
+        fState("1.0.0", 0, priorBuildId),      // prior (upgrade)
+        fState("1.0.0", 0, priorBuildId),      // postStopBaseline
+        fState("wrong-candidate", 1),          // candidate poll 1
+        fState("wrong-candidate", 1),          // candidate poll 2
+        fState("wrong-candidate", 1),          // candidate poll 3 -> times out
+        fState("1.0.0", 0, priorBuildId),      // beforeRollback
+        fState("1.0.0", 2, wrongPriorBuildId), // rollback poll 1: wrong buildId
+        fState("1.0.0", 2, wrongPriorBuildId), // rollback poll 2: wrong buildId
+        fState("1.0.0", 2, wrongPriorBuildId), // rollback poll 3: wrong buildId -> rollback times out
+      ],
+    });
+    await expect(f.task()).rejects.toThrow(
+      /Agent upgrade failed and rollback could not be verified; recovery artifacts were preserved/,
+    );
+    // Stage binary removal is not executed because rollback verification failed and recovery artifacts were preserved
+    expect(f.commands.some((c) => c.includes("rm -f --") && c.includes("stage-"))).toBe(false);
+  });
 });
 
-function fState(version: string, second: number): AgentState {
-  return { vpsId: "vps-1", status: "online", version, lastSeenAt: `2026-01-01T00:00:0${second}.000Z` };
+function fState(version: string, second: number, buildId?: string): AgentState {
+  return { vpsId: "vps-1", status: "online", version, buildId, lastSeenAt: `2026-01-01T00:00:0${second}.000Z` };
 }

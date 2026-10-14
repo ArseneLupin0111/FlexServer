@@ -12,13 +12,27 @@ import { AuditService } from "../audit/audit.service.js";
 
 export const updateDashboardSettingsSchema = z
   .object({
-    webTerminalEnabled: z.boolean(),
+    webTerminalEnabled: z.boolean().optional(),
+    terminalCommandGuardEnabled: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (data) =>
+      data.webTerminalEnabled !== undefined ||
+      data.terminalCommandGuardEnabled !== undefined,
+    {
+      message: "At least one setting must be provided.",
+    },
+  );
 
 export type UpdateDashboardSettingsInput = z.infer<
   typeof updateDashboardSettingsSchema
 >;
+
+export type DashboardSettingsResponse = {
+  webTerminalEnabled: boolean;
+  terminalCommandGuardEnabled: boolean;
+};
 
 @Injectable()
 export class DashboardSettingsService {
@@ -83,7 +97,36 @@ export class DashboardSettingsService {
     if (persisted && typeof persisted.webTerminalEnabled === "boolean") {
       return persisted.webTerminalEnabled;
     }
+    return this.getEffectiveWebTerminalConfigDefault();
+  }
+
+  getEffectiveWebTerminalConfigDefault(): boolean {
+    if (this.config.mode !== "local") {
+      return false;
+    }
+    if (!this.validateOriginPrerequisites()) {
+      return false;
+    }
     return Boolean(this.config.enableWebTerminal);
+  }
+
+  /**
+   * Returns the effective terminal command guard enabled state.
+   * If not explicitly persisted, defaults to false.
+   * In demo mode or non-local modes, command guard is strictly disabled.
+   */
+  async isTerminalCommandGuardEnabled(): Promise<boolean> {
+    if (this.config.mode !== "local") {
+      return false;
+    }
+    const persisted = await this.settingsRepo.get();
+    if (
+      persisted &&
+      typeof persisted.terminalCommandGuardEnabled === "boolean"
+    ) {
+      return persisted.terminalCommandGuardEnabled;
+    }
+    return false;
   }
 
   /**
@@ -93,7 +136,7 @@ export class DashboardSettingsService {
   async updateSettings(
     input: unknown,
     actor = "dashboard",
-  ): Promise<{ webTerminalEnabled: boolean }> {
+  ): Promise<DashboardSettingsResponse> {
     const parseResult = updateDashboardSettingsSchema.safeParse(input);
     if (!parseResult.success) {
       throw new BadRequestException(
@@ -101,7 +144,8 @@ export class DashboardSettingsService {
           "Invalid settings payload.",
       );
     }
-    const { webTerminalEnabled } = parseResult.data;
+    const { webTerminalEnabled, terminalCommandGuardEnabled } =
+      parseResult.data;
 
     if (webTerminalEnabled) {
       if (this.config.mode !== "local") {
@@ -144,28 +188,64 @@ export class DashboardSettingsService {
       }
     }
 
-    const updated = await this.settingsRepo.upsert({
-      webTerminalEnabled,
-    });
+    if (terminalCommandGuardEnabled) {
+      if (this.config.mode !== "local") {
+        throw new BadRequestException(
+          "Terminal command guard is only available in local mode.",
+        );
+      }
+    }
 
-    if (!updated.webTerminalEnabled) {
-      await Promise.allSettled(this.disabledListeners.map((listener) => listener()));
+    const updated = await this.settingsRepo.upsert(
+      {
+        webTerminalEnabled,
+        terminalCommandGuardEnabled,
+      },
+      {
+        webTerminalEnabled: this.getEffectiveWebTerminalConfigDefault(),
+        terminalCommandGuardEnabled: false,
+      },
+    );
+
+    if (webTerminalEnabled === false) {
+      await Promise.allSettled(
+        this.disabledListeners.map((listener) => listener()),
+      );
     }
 
     try {
+      const action =
+        webTerminalEnabled !== undefined &&
+        terminalCommandGuardEnabled === undefined
+          ? "settings.web_terminal.update"
+          : terminalCommandGuardEnabled !== undefined &&
+              webTerminalEnabled === undefined
+            ? "settings.terminal_command_guard.update"
+            : "settings.update";
+
       await this.audit?.record({
         actor,
-        action: "settings.web_terminal.update",
+        action,
         resourceType: "dashboard",
         result: "success",
         metadata: {
-          webTerminalEnabled: updated.webTerminalEnabled,
+          ...(webTerminalEnabled !== undefined
+            ? { webTerminalEnabled: updated.webTerminalEnabled }
+            : {}),
+          ...(terminalCommandGuardEnabled !== undefined
+            ? {
+                terminalCommandGuardEnabled:
+                  updated.terminalCommandGuardEnabled,
+              }
+            : {}),
         },
       });
     } catch {}
 
     return {
       webTerminalEnabled: updated.webTerminalEnabled ?? false,
+      terminalCommandGuardEnabled:
+        updated.terminalCommandGuardEnabled ?? false,
     };
   }
 }

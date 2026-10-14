@@ -24,7 +24,8 @@
     "install-agent-env": "tsx scripts/agent/install-agent-from-env.ts",
     "set-dashboard-password": "tsx scripts/admin/set-dashboard-password.ts",
     "set-dashboard-password:prod": "node dist/scripts/set-dashboard-password.js",
-    "bootstrap-local-agent": "tsx scripts/agent/bootstrap-local-agent.ts",
+    "manage-ssh-keys": "tsx scripts/admin/manage-ssh-keys.ts",
+    "manage-ssh-keys:prod": "node dist/scripts/manage-ssh-keys.js",
     "revoke-agent-credentials": "tsx packages/api/src/scripts/revoke-agent-credentials.ts",
     "migrate:db": "tsx packages/api/src/db/migrate.ts"
   },

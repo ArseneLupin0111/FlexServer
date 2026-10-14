@@ -1,13 +1,39 @@
+import "../../../test/setup";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { TerminalPanel } from "./TerminalPanel";
 import type { VpsRecord } from "../../../lib/api";
 
-const sockets: MockSocket[] = [];
-const terminals: Array<{ cols: number; rows: number; emit: (data: string) => void; key: (event: Partial<KeyboardEvent>) => boolean; selection: string; focus: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }> = [];
-const observers: Array<{ callback: () => void; disconnect: ReturnType<typeof vi.fn> }> = [];
-const fits: Array<{ fit: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }> = [];
+interface MockTerminalInstance {
+  cols: number;
+  rows: number;
+  emit: (data: string) => void;
+  key: (event: Partial<KeyboardEvent>) => boolean;
+  selection: string;
+  focus: Mock;
+  dispose: Mock;
+  open: Mock;
+  loadAddon: Mock;
+  write: Mock;
+}
+interface MockObserverInstance {
+  callback: () => void;
+  disconnect: Mock;
+}
+
+interface MockFitInstance {
+  fit: Mock;
+  dispose: Mock;
+}
+
+const { sockets, terminals, observers, fits } = vi.hoisted(() => ({
+  sockets: [] as MockSocket[],
+  terminals: [] as MockTerminalInstance[],
+  observers: [] as MockObserverInstance[],
+  fits: [] as MockFitInstance[],
+}));
+
 class MockSocket {
   static OPEN = 1;
   readyState = 0;
@@ -21,7 +47,50 @@ class MockSocket {
   message(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
 }
 
-vi.mock("@xterm/xterm", () => ({ Terminal: class { cols = 80; rows = 24; selection = ""; handler?: (data: string) => void; keyHandler?: (event: KeyboardEvent) => boolean; focus = vi.fn(); dispose = vi.fn(); constructor() { terminals.push(this); } onData = vi.fn((handler: (data: string) => void) => { this.handler = handler; return { dispose: vi.fn(() => { this.handler = undefined; }) }; }); attachCustomKeyEventHandler = vi.fn((handler: (event: KeyboardEvent) => boolean) => { this.keyHandler = handler; }); getSelection = vi.fn(() => this.selection); emit(data: string) { this.handler?.(data); } key(event: Partial<KeyboardEvent>) { return this.keyHandler?.({ type: "keydown", ctrlKey: false, shiftKey: false, metaKey: false, key: "", ...event } as KeyboardEvent) ?? true; } open = vi.fn(); loadAddon = vi.fn(); write = vi.fn(); } }));
+vi.mock("@xterm/xterm", () => ({
+  Terminal: class {
+    cols = 80;
+    rows = 24;
+    selection = "";
+    handler?: (data: string) => void;
+    keyHandler?: (event: KeyboardEvent) => boolean;
+    focus = vi.fn();
+    dispose = vi.fn();
+    open = vi.fn();
+    loadAddon = vi.fn();
+    write = vi.fn();
+    constructor() {
+      terminals.push(this);
+    }
+    onData = vi.fn((handler: (data: string) => void) => {
+      this.handler = handler;
+      return {
+        dispose: vi.fn(() => {
+          this.handler = undefined;
+        }),
+      };
+    });
+    attachCustomKeyEventHandler = vi.fn((handler: (event: KeyboardEvent) => boolean) => {
+      this.keyHandler = handler;
+    });
+    getSelection = vi.fn(() => this.selection);
+    emit(data: string) {
+      this.handler?.(data);
+    }
+    key(event: Partial<KeyboardEvent>) {
+      return (
+        this.keyHandler?.({
+          type: "keydown",
+          ctrlKey: false,
+          shiftKey: false,
+          metaKey: false,
+          key: "",
+          ...event,
+        } as KeyboardEvent) ?? true
+      );
+    }
+  },
+}));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); dispose = vi.fn(); constructor() { fits.push(this); } } }));
 
 const vps = { id: "vps-1", name: "demo", displayName: "Demo", host: "example.test", port: 22, username: "admin", createdAt: "", updatedAt: "" } as VpsRecord;
@@ -67,5 +136,267 @@ describe("TerminalPanel", () => {
     expect(screen.getByText("Host terminal")).toBeInTheDocument();
     expect(screen.getByText("Local Host")).toBeInTheDocument();
     expect(screen.queryByText("SSH terminal")).not.toBeInTheDocument();
+  });
+
+  it("renders GUARD ACTIVE badge when commandGuardEnabled is true and GUARD OFF when false", () => {
+    const { rerender } = render(
+      <TerminalPanel vps={vps} commandGuardEnabled={false} />,
+    );
+    expect(screen.getByTestId("terminal-guard-badge")).toHaveTextContent("GUARD OFF");
+
+    rerender(<TerminalPanel vps={vps} commandGuardEnabled={true} />);
+    expect(screen.getByTestId("terminal-guard-badge")).toHaveTextContent("GUARD ACTIVE");
+  });
+
+  it("blocks dangerous command execution on Enter when guard is enabled and cancels server line with Ctrl+U", async () => {
+    render(<TerminalPanel vps={vps} commandGuardEnabled={true} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Connect$/i }));
+    sockets[0].open();
+    sockets[0].message({
+      type: "ready",
+      terminalSessionId: "s1",
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    terminals[0].emit("rm -rf /");
+
+    const sentBeforeEnter = sockets[0].sent.length;
+    terminals[0].emit("\r");
+
+    const lastSent = JSON.parse(sockets[0].sent.at(-1)!);
+    expect(lastSent.data).toContain("\x15");
+    expect(lastSent).toEqual({ type: "input", data: "\x05\x15\x03" });
+
+    const newMessages = sockets[0].sent.slice(sentBeforeEnter).map((m) => JSON.parse(m));
+    expect(newMessages.some((m) => m.data === "\r")).toBe(false);
+
+    const alertDialog = await screen.findByRole("alertdialog");
+    expect(alertDialog).toHaveTextContent("Dangerous Command Blocked");
+    expect(alertDialog).toHaveTextContent("Execution of a potentially destructive command was cancelled before running.");
+    expect(alertDialog).toHaveTextContent("Accidental command guard");
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("allows safe command execution on Enter without blocking when guard is enabled", () => {
+    render(<TerminalPanel vps={vps} commandGuardEnabled={true} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Connect$/i }));
+    sockets[0].open();
+    sockets[0].message({
+      type: "ready",
+      terminalSessionId: "s1",
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    terminals[0].emit("echo 'reboot'");
+    const sentBefore = sockets[0].sent.length;
+    terminals[0].emit("\r");
+
+    expect(sockets[0].sent.length).toBe(sentBefore + 1);
+    expect(JSON.parse(sockets[0].sent.at(-1)!)).toEqual({ type: "input", data: "\r" });
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("blocks single-line dangerous clipboard paste immediately without sending to socket", async () => {
+    vi.mocked(navigator.clipboard.readText).mockResolvedValueOnce("rm -rf /");
+    render(<TerminalPanel vps={vps} commandGuardEnabled={true} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Connect$/i }));
+    sockets[0].open();
+    sockets[0].message({
+      type: "ready",
+      terminalSessionId: "s1",
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    const sentBefore = sockets[0].sent.length;
+    terminals[0].key({ key: "v", ctrlKey: true });
+
+    await waitFor(() => {
+      expect(screen.getByRole("alertdialog")).toHaveTextContent("Dangerous Command Blocked");
+    });
+    expect(screen.getByText(/Paste blocked: dangerous command detected/i)).toBeInTheDocument();
+    expect(sockets[0].sent).toHaveLength(sentBefore);
+  });
+
+  it("blocks multiline dangerous paste immediately without opening multiline confirmation", async () => {
+    vi.mocked(navigator.clipboard.readText).mockResolvedValueOnce("echo safe\nmkfs /dev/sda1\necho done");
+    render(<TerminalPanel vps={vps} commandGuardEnabled={true} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Connect$/i }));
+    sockets[0].open();
+    sockets[0].message({
+      type: "ready",
+      terminalSessionId: "s1",
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    const sentBefore = sockets[0].sent.length;
+    terminals[0].key({ key: "v", ctrlKey: true });
+
+    await waitFor(() => {
+      expect(screen.getByRole("alertdialog")).toHaveTextContent("Dangerous Command Blocked");
+    });
+    expect(screen.queryByText("Paste multiple lines?")).not.toBeInTheDocument();
+    expect(sockets[0].sent).toHaveLength(sentBefore);
+  });
+
+  it("allows safe multiline paste with confirmation dialog and sends after approval", async () => {
+    vi.mocked(navigator.clipboard.readText).mockResolvedValueOnce("git status\ngit diff");
+    render(<TerminalPanel vps={vps} commandGuardEnabled={true} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Connect$/i }));
+    sockets[0].open();
+    sockets[0].message({
+      type: "ready",
+      terminalSessionId: "s1",
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    const sentBefore = sockets[0].sent.length;
+    terminals[0].key({ key: "v", ctrlKey: true });
+
+    const confirmDialog = await screen.findByRole("alertdialog");
+    expect(confirmDialog).toHaveTextContent("Paste multiple lines?");
+
+    fireEvent.click(screen.getByRole("button", { name: "Paste into terminal" }));
+
+    await waitFor(() => {
+      expect(JSON.parse(sockets[0].sent.at(-1)!)).toEqual({
+        type: "input",
+        data: "git status\ngit diff",
+      });
+    });
+    expect(sockets[0].sent.length).toBe(sentBefore + 1);
+  });
+
+  it("updates active session guard behavior when toggle changes without reconnecting (using ref)", async () => {
+    const { rerender } = render(<TerminalPanel vps={vps} commandGuardEnabled={false} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Connect$/i }));
+    sockets[0].open();
+    sockets[0].message({
+      type: "ready",
+      terminalSessionId: "s1",
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    terminals[0].emit("reboot\r");
+    expect(JSON.parse(sockets[0].sent.at(-1)!)).toEqual({ type: "input", data: "reboot\r" });
+
+    rerender(<TerminalPanel vps={vps} commandGuardEnabled={true} />);
+
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0].readyState).toBe(1);
+
+    terminals[0].emit("reboot\r");
+    expect(JSON.parse(sockets[0].sent.at(-1)!).data).toContain("\x15");
+    expect(JSON.parse(sockets[0].sent.at(-1)!)).toEqual({ type: "input", data: "\x05\x15\x03" });
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Dangerous Command Blocked");
+  });
+
+  it("allows Enter through when input tracking was invalidated by history recall escape sequence", async () => {
+    render(<TerminalPanel vps={vps} commandGuardEnabled={true} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Connect$/i }));
+    sockets[0].open();
+    sockets[0].message({
+      type: "ready",
+      terminalSessionId: "s1",
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    terminals[0].emit("\x1b[A");
+    const sentBefore = sockets[0].sent.length;
+
+    terminals[0].emit("\r");
+    expect(sockets[0].sent.length).toBe(sentBefore + 1);
+    expect(JSON.parse(sockets[0].sent.at(-1)!)).toEqual({ type: "input", data: "\r" });
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("blocks dangerous command when assembled from typed prefix and pasted suffix", async () => {
+    render(<TerminalPanel vps={vps} commandGuardEnabled={true} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Connect$/i }));
+    sockets[0].open();
+    sockets[0].message({
+      type: "ready",
+      terminalSessionId: "s1",
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    // User types "rm -rf " into terminal
+    terminals[0].emit("rm -rf ");
+    const sentBeforePaste = sockets[0].sent.length;
+
+    // User pastes "/etc\n" (which combined with prefix forms "rm -rf /etc\n")
+    vi.mocked(navigator.clipboard.readText).mockResolvedValueOnce("/etc\n");
+    terminals[0].key({ key: "v", ctrlKey: true });
+
+    await waitFor(() => {
+      expect(screen.getByRole("alertdialog")).toHaveTextContent("Dangerous Command Blocked");
+    });
+    expect(sockets[0].sent.length).toBe(sentBeforePaste);
+  });
+
+  it("tracks trailing unterminated line from confirmed multiline paste and blocks subsequent dangerous completion", async () => {
+    vi.mocked(navigator.clipboard.readText).mockResolvedValueOnce("echo ok\nrm -rf ");
+    render(<TerminalPanel vps={vps} commandGuardEnabled={true} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Connect$/i }));
+    sockets[0].open();
+    sockets[0].message({
+      type: "ready",
+      terminalSessionId: "s1",
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    terminals[0].key({ key: "v", ctrlKey: true });
+    const confirmDialog = await screen.findByRole("alertdialog");
+    expect(confirmDialog).toHaveTextContent("Paste multiple lines?");
+
+    fireEvent.click(screen.getByRole("button", { name: "Paste into terminal" }));
+
+    await waitFor(() => {
+      expect(JSON.parse(sockets[0].sent.at(-1)!)).toEqual({
+        type: "input",
+        data: "echo ok\nrm -rf ",
+      });
+    });
+
+    // Now user types "/" and hits Enter
+    terminals[0].emit("/");
+    terminals[0].emit("\r");
+
+    const lastSent = JSON.parse(sockets[0].sent.at(-1)!);
+    expect(lastSent.data).toContain("\x15");
+    expect(lastSent).toEqual({ type: "input", data: "\x05\x15\x03" });
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Dangerous Command Blocked");
+  });
+
+  it("sends multi-byte emoji text without splitting surrogate code units", async () => {
+    render(<TerminalPanel vps={vps} commandGuardEnabled={true} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Connect$/i }));
+    sockets[0].open();
+    sockets[0].message({
+      type: "ready",
+      terminalSessionId: "s1",
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    });
+
+    const sentBefore = sockets[0].sent.length;
+    terminals[0].emit("echo 🚀\r");
+
+    const messages = sockets[0].sent.slice(sentBefore).map((m) => JSON.parse(m));
+    // Intact chunk sent containing the emoji without broken surrogates
+    expect(messages.some((m) => m.data === "echo 🚀")).toBe(true);
+    expect(messages.at(-1)).toEqual({ type: "input", data: "\r" });
   });
 });

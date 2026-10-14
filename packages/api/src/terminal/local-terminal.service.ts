@@ -72,7 +72,7 @@ export class LocalTerminalService {
     if (this.isDocker()) {
       const socketPath =
         process.env.LOCAL_PTY_SOCKET_PATH ||
-        "/var/run/vps-manager/host-pty.sock";
+        "/var/run/flexserver/host-pty.sock";
       return existsSync(socketPath);
     }
     try {
@@ -158,7 +158,7 @@ export class LocalTerminalService {
   }): Promise<ManagedTerminalShell> {
     const socketPath =
       process.env.LOCAL_PTY_SOCKET_PATH ||
-      "/var/run/vps-manager/host-pty.sock";
+      "/var/run/flexserver/host-pty.sock";
 
     if (!existsSync(socketPath)) {
       throw terminalError(

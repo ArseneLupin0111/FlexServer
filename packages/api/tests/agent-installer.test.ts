@@ -10,10 +10,9 @@ import { createJsonAgentRepository } from "../src/persistence/repositories/agent
 import { createJsonAuditRepository } from "../src/persistence/repositories/audit.repository.js";
 import { createJsonJobRepository } from "../src/persistence/repositories/job.repository.js";
 import { createJsonMetricRepository } from "../src/persistence/repositories/metric.repository.js";
-import { createKeyService } from "../src/ssh/keyService.js";
 import { createVpsStore } from "../src/persistence/store/vpsStore.js";
-import type { KeyService } from "../src/ssh/keyService.js";
-
+import { createKeyService, type KeyService } from "../src/ssh/keyService.js";
+import { createTestKeyring } from "../src/ssh/key-encryption.js";
 const localConfig: AppConfig = {
   mode: "local",
   enableWebTerminal: false,
@@ -46,7 +45,10 @@ let keys: KeyService;
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "vps-manager-installer-"));
   vpsRepo = createVpsStore(join(tempDir, "data", "vps.json"));
-  keys = createKeyService(join(tempDir, "private", "keys"));
+  keys = createKeyService({
+    baseDir: join(tempDir, "private", "keys"),
+    keyring: createTestKeyring("installer-test-kek"),
+  });
 });
 
 afterEach(async () => {

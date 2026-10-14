@@ -18,6 +18,7 @@ import type { HostKeyPinRepository } from "../src/ssh/host-key-pin.repository.js
 import type { KeyScanResult } from "../src/ssh/host-key-pin.models.js";
 import { createVpsStore } from "../src/persistence/store/vpsStore.js";
 import { createKeyService } from "../src/ssh/keyService.js";
+import { createTestKeyring } from "../src/ssh/key-encryption.js";
 import { createJsonAuditRepository } from "../src/persistence/repositories/audit.repository.js";
 import { createJsonAgentRepository } from "../src/persistence/repositories/agent.repository.js";
 import type { VpsRepository } from "../src/persistence/repositories/vps.repository.js";
@@ -261,7 +262,10 @@ describe("SSH host key provisioning — strict trust contract", () => {
     const { VpsService } = await import("../src/vps/vps.service.js");
     const vpsService = new VpsService(
       store,
-      createKeyService(join(tempDir, "private", "keys")),
+      createKeyService({
+        baseDir: join(tempDir, "private", "keys"),
+        keyring: createTestKeyring("test-host-key-kek"),
+      }),
       ssh as never,
       mockAudit() as never,
       strictLocalConfig,

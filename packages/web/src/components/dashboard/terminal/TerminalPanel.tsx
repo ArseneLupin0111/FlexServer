@@ -1,8 +1,9 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { AlertTriangle, CheckCircle2, ExternalLink, LogOut, RefreshCw, ShieldCheck, TerminalSquare } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ExternalLink, LogOut, RefreshCw, ShieldAlert, ShieldCheck, TerminalSquare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { scanTextForDanger, splitTerminalInputChunks, TerminalLineTracker } from "./commandGuard";
 import type { VpsRecord } from "../../../lib/api";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "../../ui/alert-dialog";
 import { Button } from "../../ui/button";
@@ -51,10 +52,12 @@ export function TerminalPanel({
   vps,
   enabled = true,
   isLocal: isLocalProp,
+  commandGuardEnabled = false,
 }: {
   vps: VpsRecord;
   enabled?: boolean;
   isLocal?: boolean;
+  commandGuardEnabled?: boolean;
 }) {
   const isLocal =
     isLocalProp ?? (vps.kind === "local" || vps.managedBy === "system");
@@ -69,6 +72,15 @@ export function TerminalPanel({
   const [confirmClose, setConfirmClose] = useState(false);
   const [confirmPaste, setConfirmPaste] = useState(false);
   const [confirmNavigation, setConfirmNavigation] = useState(false);
+  const [blockedCommandAlert, setBlockedCommandAlert] = useState<{
+    isOpen: boolean;
+    reason: string;
+    source: "keyboard" | "paste";
+  }>({
+    isOpen: false,
+    reason: "",
+    source: "keyboard",
+  });
   const [expiresAt, setExpiresAt] = useState<string>();
   const mountRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal>();
@@ -84,15 +96,40 @@ export function TerminalPanel({
   const pendingLink = useRef<HTMLAnchorElement>();
   const allowNextNavigation = useRef(false);
   const active = status === "connected" || status === "connecting" || status === "verifying" || status === "reconnecting";
-
+  const guardEnabledRef = useRef(commandGuardEnabled);
+  useEffect(() => {
+    guardEnabledRef.current = commandGuardEnabled;
+    // Reset line tracker state on toggle so stale buffered input cannot cause false blocks
+    lineTrackerRef.current.reset();
+  }, [commandGuardEnabled]);
+  const lineTrackerRef = useRef(new TerminalLineTracker());
   const queuePaste = useCallback((text: string) => {
     if (!text) return;
     if (socketRef.current?.readyState !== 1) { setNotice("Connect the terminal before pasting."); return; }
     if (new TextEncoder().encode(text).length > maxTerminalInputBytes) { setNotice("The clipboard content is too large to paste into the terminal at once."); return; }
+    if (guardEnabledRef.current) {
+      const activePrefix = lineTrackerRef.current.getBuffer();
+      const combined = activePrefix + text;
+      const combinedDanger = scanTextForDanger(combined);
+      const textDanger = scanTextForDanger(text);
+      const danger = combinedDanger.isDangerous ? combinedDanger : textDanger;
+      if (danger.isDangerous) {
+        pendingPaste.current = "";
+        setNotice("Paste blocked: dangerous command detected in clipboard content.");
+        setBlockedCommandAlert({
+          isOpen: true,
+          reason: danger.reason || "Dangerous command detected in clipboard paste.",
+          source: "paste",
+        });
+        return;
+      }
+    }
     if (/\r|\n/.test(text)) { pendingPaste.current = text; setConfirmPaste(true); return; }
+    if (guardEnabledRef.current) {
+      lineTrackerRef.current.feed(text);
+    }
     socketRef.current.send(JSON.stringify({ type: "input", data: text }));
   }, []);
-
   const disposeConnection = useCallback(() => {
     if (resizeTimer.current !== undefined) window.clearTimeout(resizeTimer.current);
     resizeTimer.current = undefined;
@@ -100,6 +137,7 @@ export function TerminalPanel({
     expiryTimer.current = undefined;
     observerRef.current?.disconnect(); observerRef.current = undefined;
     inputDisposable.current?.dispose(); inputDisposable.current = undefined;
+    lineTrackerRef.current.reset();
     pendingPaste.current = "";
     const socket = socketRef.current;
     socketRef.current = undefined;
@@ -118,6 +156,7 @@ export function TerminalPanel({
     if (!enabled || !mountRef.current || ["connecting", "connected", "verifying", "reconnecting"].includes(status)) return;
     disposeConnection();
     setNotice(""); setStatus(reconnect ? "reconnecting" : "verifying"); manualClose.current = false;
+    lineTrackerRef.current.reset();
     const term = new Terminal({ convertEol: true, cursorBlink: true, scrollback: 5000, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", theme: { background: "#0b0d0c", foreground: "#e4e9e2", cursor: "#c6f432", cursorAccent: "#0b0d0c", selectionBackground: "#c6f432", selectionForeground: "#0b0d0c", black: "#0b0d0c", red: "#ff5a4d", green: "#c6f432", yellow: "#ffb02e", blue: "#5ec8e5", magenta: "#e4e9e2", cyan: "#5ec8e5", white: "#e4e9e2", brightBlack: "#7d877f", brightRed: "#ff5a4d", brightGreen: "#c6f432", brightYellow: "#ffb02e", brightBlue: "#5ec8e5", brightMagenta: "#e4e9e2", brightCyan: "#5ec8e5", brightWhite: "#e4e9e2" } });
     const fit = new FitAddon(); term.loadAddon(fit); term.open(mountRef.current); fit.fit();
     terminalRef.current = term; fitRef.current = fit;
@@ -152,7 +191,35 @@ export function TerminalPanel({
     socket.onmessage = (event) => { if (!current()) return; try { const message = parseServerMessage(JSON.parse(event.data)); if (!message) { setNotice(invalidResponseNotice); setStatus("error"); manualClose.current = true; socket.close(); return; } if (message.type === "ready") { setStatus("connected"); setExpiresAt(message.expiresAt); if (message.expiresAt) { const remaining = Math.max(0, Date.parse(message.expiresAt) - Date.now()); if (expiryTimer.current !== undefined) window.clearTimeout(expiryTimer.current); expiryTimer.current = window.setTimeout(() => { if (!current()) return; manualClose.current = true; setStatus("expired"); setNotice("This SSH session expired. Scrollback is preserved; reconnect to start a new shell."); socket.close(); }, remaining); } term.focus(); } else if (message.type === "output") term.write(message.data); else if (message.type === "error") { setNotice(safeError(message.message || "Connection failed.")); setStatus("error"); manualClose.current = true; socket.close(); } else if (message.type === "closed") { if (message.reason === "session_expired") { manualClose.current = true; setStatus("expired"); setNotice("Your dashboard session ended, so the terminal closed. Scrollback is preserved. Sign in again to start a new terminal session."); } else { setStatus(manualClose.current ? "disconnected" : "error"); if (!manualClose.current) setNotice("The SSH session closed unexpectedly. Scrollback is preserved."); } } } catch { setNotice(invalidResponseNotice); setStatus("error"); manualClose.current = true; socket.close(); } };
     socket.onerror = () => { if (!current()) return; setNotice("The SSH connection failed. Check the VPS and try again."); setStatus("error"); manualClose.current = true; socket.close(); };
     socket.onclose = () => { if (!current()) return; if (!manualClose.current) { setStatus("error"); setNotice("The SSH session closed unexpectedly. Scrollback is preserved."); } };
-    inputDisposable.current = term.onData((data) => { if (current() && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "input", data })); });
+    inputDisposable.current = term.onData((data) => {
+      if (!current() || socket.readyState !== WebSocket.OPEN) return;
+      if (!guardEnabledRef.current) {
+        socket.send(JSON.stringify({ type: "input", data }));
+        return;
+      }
+      const chunks = splitTerminalInputChunks(data);
+      for (const chunk of chunks) {
+        if (chunk === "\r" || chunk === "\n" || chunk === "\r\n") {
+          const result = lineTrackerRef.current.feed(chunk);
+          if (result.isDangerous) {
+            // Whole-line cancellation: Ctrl+E (move to end of line), Ctrl+U (delete back to start), Ctrl+C (SIGINT)
+            socket.send(JSON.stringify({ type: "input", data: "\x05\x15\x03" }));
+            lineTrackerRef.current.reset();
+            setNotice("Execution blocked: dangerous command detected and cancelled.");
+            setBlockedCommandAlert({
+              isOpen: true,
+              reason: result.reason || "Dangerous command execution cancelled before running.",
+              source: "keyboard",
+            });
+            continue;
+          }
+          socket.send(JSON.stringify({ type: "input", data: chunk }));
+        } else {
+          lineTrackerRef.current.feed(chunk);
+          socket.send(JSON.stringify({ type: "input", data: chunk }));
+        }
+      }
+    });
     const pasteTarget = mountRef.current;
     const onPaste = (event: ClipboardEvent) => {
       ++pasteAttempt;
@@ -202,13 +269,42 @@ export function TerminalPanel({
   const sendPendingPaste = () => {
     const text = pendingPaste.current;
     pendingPaste.current = "";
-    if (text && socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify({ type: "input", data: text }));
+    if (!text || socketRef.current?.readyState !== WebSocket.OPEN) return;
+    if (guardEnabledRef.current) {
+      const activePrefix = lineTrackerRef.current.getBuffer();
+      const combined = activePrefix + text;
+      const combinedDanger = scanTextForDanger(combined);
+      const textDanger = scanTextForDanger(text);
+      const danger = combinedDanger.isDangerous ? combinedDanger : textDanger;
+      if (danger.isDangerous) {
+        setNotice("Paste blocked: dangerous command detected in clipboard content.");
+        setBlockedCommandAlert({
+          isOpen: true,
+          reason: danger.reason || "Dangerous command detected in clipboard paste.",
+          source: "paste",
+        });
+        return;
+      }
+      // If multiline paste does not terminate with a newline, the trailing tail
+      // sits in the shell's active prompt. Track it so subsequent keystrokes continue from it.
+      const lastNewline = Math.max(text.lastIndexOf("\n"), text.lastIndexOf("\r"));
+      if (lastNewline === -1) {
+        lineTrackerRef.current.feed(text);
+      } else {
+        const trailingTail = text.slice(lastNewline + 1);
+        lineTrackerRef.current.reset();
+        if (trailingTail) {
+          lineTrackerRef.current.feed(trailingTail);
+        }
+      }
+    }
+    socketRef.current.send(JSON.stringify({ type: "input", data: text }));
   };
 
   const action = status === "connected" ? disconnect : () => connect(status === "error" || status === "expired");
   return <div className="min-w-0 space-y-3">
     <div className="flex flex-wrap items-center justify-between gap-3 border border-line bg-panel p-3 sm:p-4">
-      <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><TerminalSquare size={18} className="text-dim" aria-hidden="true" /><h2 className="text-[14px] font-semibold text-text">{isLocal ? "Host terminal" : "SSH terminal"}</h2><StatusDot status={status} />{root && <span className="border border-warn/40 bg-warn/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-warn">ROOT</span>}</div><p className="tnum mt-1 truncate text-xs text-dim">{connectionLabel}</p></div>
+      <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><TerminalSquare size={18} className="text-dim" aria-hidden="true" /><h2 className="text-[14px] font-semibold text-text">{isLocal ? "Host terminal" : "SSH terminal"}</h2><StatusDot status={status} />{root && <span className="border border-warn/40 bg-warn/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-warn">ROOT</span>}{commandGuardEnabled ? (<span data-testid="terminal-guard-badge" className="border border-signal/40 bg-signal/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-signal" title="Command guard active">GUARD ACTIVE</span>) : (<span data-testid="terminal-guard-badge" className="border border-line bg-panel px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-dim" title="Command guard off">GUARD OFF</span>)}</div><p className="tnum mt-1 truncate text-xs text-dim">{connectionLabel}</p></div>
       <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setDetails(true)} aria-label="Connection details"><ExternalLink /> Details</Button>{status === "connected" && <Button size="sm" variant="outline" onClick={() => setConfirmClose(true)}><LogOut /> Disconnect</Button>}{status !== "connected" && status !== "disabled" && <Button size="sm" onClick={action} disabled={["connecting", "verifying", "reconnecting", "disconnecting"].includes(status)}>{status === "error" || status === "expired" ? <RefreshCw /> : <CheckCircle2 />} {status === "error" || status === "expired" ? "Reconnect" : "Connect"}</Button>}</div>
     </div>
     {root && <div role="alert" className="flex gap-3 border border-warn/40 bg-warn/10 p-3 text-[13px] text-warn"><AlertTriangle size={18} className="shrink-0" aria-hidden="true" /><span><strong>Root shell.</strong> Commands can change or delete data on this server. Review the host identity before connecting.</span></div>}
@@ -218,7 +314,8 @@ export function TerminalPanel({
     <AlertDialog open={confirmClose} onOpenChange={setConfirmClose}><AlertDialogContent className="border-line bg-panel text-text"><AlertDialogHeader><AlertDialogTitle>{isLocal ? "Close active host session?" : "Close active SSH session?"}</AlertDialogTitle><AlertDialogDescription className="text-dim">{isLocal ? "The host shell will disconnect. Running foreground commands may continue or be interrupted." : "The shell will disconnect. Running foreground commands may continue or be interrupted remotely."}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep session open</AlertDialogCancel><AlertDialogAction onClick={disconnect}>Disconnect and leave</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
     <AlertDialog open={confirmPaste} onOpenChange={(open) => { setConfirmPaste(open); if (!open) pendingPaste.current = ""; }}><AlertDialogContent className="border-line bg-panel text-text"><AlertDialogHeader><AlertDialogTitle>Paste multiple lines?</AlertDialogTitle><AlertDialogDescription className="text-dim">Multiple lines may run several commands at once. Review the clipboard content before continuing. It is not saved by this page.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel paste</AlertDialogCancel><AlertDialogAction onClick={sendPendingPaste}>Paste into terminal</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
     <AlertDialog open={confirmNavigation} onOpenChange={(open) => { setConfirmNavigation(open); if (!open) pendingLink.current = undefined; }}><AlertDialogContent className="border-line bg-panel text-text"><AlertDialogHeader><AlertDialogTitle>{isLocal ? "Leave this active host session?" : "Leave this active session?"}</AlertDialogTitle><AlertDialogDescription className="text-dim">{isLocal ? "Leaving this page disconnects the host terminal session. Finish your work or disconnect first." : "Leaving this page disconnects the SSH session. Finish your work or disconnect first."}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Stay here</AlertDialogCancel><AlertDialogAction onClick={() => { const link = pendingLink.current; pendingLink.current = undefined; allowNextNavigation.current = true; disconnect(); link?.click(); }}>Disconnect and leave</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
-    <Sheet open={details} onOpenChange={setDetails}><SheetContent className="border-line bg-panel text-text"><SheetHeader><SheetTitle>Connection details</SheetTitle></SheetHeader><div className="mt-6 space-y-4 text-sm"><Detail label="Host" value={connectionLabel} /><Detail label={isLocal ? "Session state" : "SSH state"} value={labels[status]} />{!isLocal && <Detail label="Identity" value={root ? "Root account" : vps.username} />}{isLocal ? (<p className="text-dim"><ShieldCheck className="mr-2 inline" size={16} />Direct host session connected to the local server environment.</p>) : (<p className="text-dim"><ShieldCheck className="mr-2 inline" size={16} />Host identity is verified by the terminal service before the shell opens.</p>)}</div></SheetContent></Sheet>
+    <Sheet open={details} onOpenChange={setDetails}><SheetContent className="border-line bg-panel text-text"><SheetHeader><SheetTitle>Connection details</SheetTitle></SheetHeader><div className="mt-6 space-y-4 text-sm"><Detail label="Host" value={connectionLabel} /><Detail label={isLocal ? "Session state" : "SSH state"} value={labels[status]} /><Detail label="Command guard" value={commandGuardEnabled ? "Active (client safety net)" : "Off (raw terminal input)"} />{!isLocal && <Detail label="Identity" value={root ? "Root account" : vps.username} />}{isLocal ? (<p className="text-dim"><ShieldCheck className="mr-2 inline" size={16} />Direct host session connected to the local server environment.</p>) : (<p className="text-dim"><ShieldCheck className="mr-2 inline" size={16} />Host identity is verified by the terminal service before the shell opens.</p>)}<p className="text-dim text-xs leading-5"><ShieldAlert className="mr-2 inline shrink-0" size={16} />The command guard checks typing and paste for accidental destructive commands. Root privileges remain unchanged. The guard cannot inspect shell history, aliases, scripts, or fullscreen apps.</p></div></SheetContent></Sheet>
+    <AlertDialog open={blockedCommandAlert.isOpen} onOpenChange={(open) => setBlockedCommandAlert((prev) => ({ ...prev, isOpen: open }))}><AlertDialogContent className="border-line bg-panel text-text"><AlertDialogHeader><div className="flex items-center gap-2 text-crit"><AlertTriangle size={20} className="shrink-0" aria-hidden="true" /><AlertDialogTitle>Dangerous Command Blocked</AlertDialogTitle></div><AlertDialogDescription asChild><div className="space-y-2 pt-2 text-dim"><p className="text-text font-medium">{blockedCommandAlert.source === "paste" ? "A clipboard paste containing a potentially destructive command was blocked." : "Execution of a potentially destructive command was cancelled before running."}</p><div className="border border-crit/40 bg-crit/10 p-2.5 font-mono text-xs text-crit">{blockedCommandAlert.reason}</div><p className="text-xs"><strong className="text-text">Accidental command guard:</strong> This client-side safety net cancelled the command line to prevent unintended system disruption. Root privileges remain unchanged on the host/VPS.</p></div></AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogAction onClick={() => setBlockedCommandAlert((prev) => ({ ...prev, isOpen: false }))}>Dismiss</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </div>;
 }
 function StatusDot({ status }: { status: Status }) {

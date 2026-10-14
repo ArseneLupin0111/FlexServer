@@ -1,3 +1,4 @@
+import "../test/setup";
 import type * as DashboardPanelsModule from "../components/dashboard/DashboardPanels";
 import { cleanup, render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
@@ -12,19 +13,23 @@ import type { DashboardOverview, VpsRecord } from "../lib/api";
 vi.mock("../components/dashboard/DashboardPanels", async (importOriginal) => {
   const actual = await importOriginal<typeof DashboardPanelsModule>();
   return {
+    ...actual,
     TerminalPanel: ({
       enabled,
       isLocal,
+      commandGuardEnabled,
       vps,
     }: {
       enabled?: boolean;
       isLocal?: boolean;
+      commandGuardEnabled?: boolean;
       vps: VpsRecord;
     }) => (
       <div
         data-testid="terminal-panel"
         data-enabled={String(enabled)}
         data-is-local={String(isLocal)}
+        data-guard-enabled={String(commandGuardEnabled)}
       >
         <span>{vps.displayName || vps.name}</span>
         <span>{enabled ? "Terminal Enabled" : "Terminal Disabled"}</span>
@@ -61,6 +66,7 @@ const baseOverview: DashboardOverview = {
   settings: {
     appMode: "local",
     webTerminalEnabled: false,
+    terminalCommandGuardEnabled: false,
     realSshEnabled: false,
     authRequiredInLocalMode: true,
   },
@@ -194,5 +200,27 @@ describe("VpsWorkspaceTerminalPage gating", () => {
     expect(panel).toHaveAttribute("data-enabled", "true");
     expect(panel).toHaveAttribute("data-is-local", "false");
     expect(screen.getByText("Terminal Enabled")).toBeInTheDocument();
+  });
+
+  it("passes terminalCommandGuardEnabled to TerminalPanel", () => {
+    const overviewWithGuard: DashboardOverview = {
+      ...baseOverview,
+      settings: {
+        ...baseOverview.settings,
+        webTerminalEnabled: true,
+        terminalCommandGuardEnabled: true,
+      },
+    };
+
+    render(
+      <VpsWorkspaceContext.Provider
+        value={{ vps: localVps, overview: overviewWithGuard }}
+      >
+        <VpsWorkspaceTerminalPage />
+      </VpsWorkspaceContext.Provider>,
+    );
+
+    const panel = screen.getByTestId("terminal-panel");
+    expect(panel).toHaveAttribute("data-guard-enabled", "true");
   });
 });

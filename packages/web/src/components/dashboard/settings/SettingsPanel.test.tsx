@@ -1,3 +1,4 @@
+import "../../../test/setup";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,16 +8,6 @@ import {
   type DashboardCtx,
 } from "../../../context/DashboardContext";
 import type { DashboardOverview } from "../../../lib/api";
-
-declare global {
-  interface PromiseConstructor {
-    withResolvers<T>(): {
-      promise: Promise<T>;
-      resolve: (value: T | PromiseLike<T>) => void;
-      reject: (reason?: unknown) => void;
-    };
-  }
-}
 
 const mockOverview: DashboardOverview = {
   mode: "local",
@@ -41,6 +32,7 @@ const mockOverview: DashboardOverview = {
   settings: {
     appMode: "local",
     webTerminalEnabled: false,
+    terminalCommandGuardEnabled: false,
     realSshEnabled: false,
     authRequiredInLocalMode: true,
   },
@@ -84,18 +76,28 @@ describe("SettingsPanel", () => {
     renderWithContext(mockOverview);
 
     expect(screen.getByText("App mode")).toBeInTheDocument();
-    expect(screen.getAllByText("disabled")).toHaveLength(2); // Web terminal and Real SSH facts
+    expect(screen.getByText("Command guard")).toBeInTheDocument();
+    expect(screen.getAllByText("disabled")).toHaveLength(3); // Web terminal, Command guard, and Real SSH facts
 
     const toggleButton = screen.getByTestId("web-terminal-toggle");
     expect(toggleButton).toHaveTextContent("Enable");
     expect(toggleButton).toHaveAttribute("aria-pressed", "false");
     expect(toggleButton).toHaveAttribute("aria-label", "Enable web terminal");
+
+    const guardToggle = screen.getByTestId("terminal-command-guard-toggle");
+    expect(guardToggle).toHaveTextContent("Enable");
+    expect(guardToggle).toHaveAttribute("aria-pressed", "false");
+    expect(guardToggle).toHaveAttribute(
+      "aria-label",
+      "Enable terminal command guard",
+    );
   });
 
   it("handles enabling web terminal with pending state and provider update", async () => {
-    const { promise, resolve } = Promise.withResolvers<{
-      webTerminalEnabled: boolean;
-    }>();
+    let resolve!: (value: { webTerminalEnabled: boolean }) => void;
+    const promise = new Promise<{ webTerminalEnabled: boolean }>((res) => {
+      resolve = res;
+    });
     const onUpdateSettings = vi.fn().mockReturnValue(promise);
 
     const { rerender } = renderWithContext(mockOverview, { onUpdateSettings });
@@ -200,6 +202,61 @@ describe("SettingsPanel", () => {
 
     expect(onUpdateSettings).toHaveBeenCalledWith({
       webTerminalEnabled: false,
+    });
+  });
+
+  it("handles enabling and disabling terminal command guard", async () => {
+    const onUpdateSettings = vi
+      .fn()
+      .mockResolvedValue({ terminalCommandGuardEnabled: true });
+
+    const { rerender } = renderWithContext(mockOverview, { onUpdateSettings });
+
+    const guardToggle = screen.getByTestId("terminal-command-guard-toggle");
+    fireEvent.click(guardToggle);
+    expect(onUpdateSettings).toHaveBeenCalledWith({
+      terminalCommandGuardEnabled: true,
+    });
+
+    await waitFor(() => {
+      expect(guardToggle).not.toBeDisabled();
+    });
+    const updatedOverview: DashboardOverview = {
+      ...mockOverview,
+      settings: {
+        ...mockOverview.settings,
+        terminalCommandGuardEnabled: true,
+      },
+    };
+
+    rerender(
+      <DashboardContext.Provider
+        value={{ overview: updatedOverview, onUpdateSettings, onRefresh: vi.fn() } as unknown as DashboardCtx}
+      >
+        <SettingsPanel overview={updatedOverview} />
+      </DashboardContext.Provider>,
+    );
+
+    expect(guardToggle).toHaveTextContent("Disable");
+    expect(guardToggle).toHaveAttribute("aria-pressed", "true");
+    expect(guardToggle).toHaveAttribute(
+      "aria-label",
+      "Disable terminal command guard",
+    );
+  });
+
+  it("surfaces error on command guard update failure", async () => {
+    const onUpdateSettings = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Database write failed"));
+
+    renderWithContext(mockOverview, { onUpdateSettings });
+
+    const guardToggle = screen.getByTestId("terminal-command-guard-toggle");
+    fireEvent.click(guardToggle);
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("Database write failed");
     });
   });
 });

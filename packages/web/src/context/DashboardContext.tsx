@@ -242,6 +242,7 @@ const emptyOverview: DashboardOverview = {
   settings: {
     appMode: "local",
     webTerminalEnabled: false,
+    terminalCommandGuardEnabled: false,
     realSshEnabled: false,
     authRequiredInLocalMode: true,
   },

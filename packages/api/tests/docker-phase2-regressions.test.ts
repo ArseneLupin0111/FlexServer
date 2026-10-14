@@ -568,6 +568,7 @@ function overviewFixture(dockerMetrics: DockerSnapshotStored[]) {
     settings: {
       appMode: "local",
       webTerminalEnabled: false,
+      terminalCommandGuardEnabled: false,
       realSshEnabled: true,
       authRequiredInLocalMode: true,
     },

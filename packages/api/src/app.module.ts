@@ -192,7 +192,11 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       {
         provide: KEY_SERVICE,
         useValue:
-          deps.keys ?? createKeyService(join(config.privateDir, "keys")),
+          deps.keys ??
+          createKeyService({
+            baseDir: join(config.privateDir, "keys"),
+            keyringFilePath: config.sshKeyEncryptionKeyFile,
+          }),
       },
       {
         provide: AUDIT_REPOSITORY,

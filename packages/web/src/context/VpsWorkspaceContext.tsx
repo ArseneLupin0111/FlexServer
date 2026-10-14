@@ -805,7 +805,14 @@ export function VpsWorkspaceTerminalPage() {
     overview.settings.webTerminalEnabled &&
     (isLocal || overview.settings.realSshEnabled);
 
-  return <TerminalPanel vps={vps} enabled={enabled} isLocal={isLocal} />;
+  return (
+    <TerminalPanel
+      vps={vps}
+      enabled={enabled}
+      isLocal={isLocal}
+      commandGuardEnabled={overview.settings.terminalCommandGuardEnabled}
+    />
+  );
 }
 
 export function VpsWorkspaceSettingsPage() {

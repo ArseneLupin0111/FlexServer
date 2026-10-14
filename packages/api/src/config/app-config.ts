@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-
+import { validateExternalSecretPath } from "../ssh/key-encryption.js";
 export type AppMode = "demo" | "local";
 export type StorageDriver = "json" | "postgres";
 
@@ -56,6 +56,7 @@ export type AppConfig = {
   sshHostKeyPins: Record<string, string | string[]>;
   sshHostKeyPolicy: "strict" | "permissive";
   terminal?: { global: number; perDashboard: number; perVps: number; openTimeoutMs: number; idleTimeoutMs: number; lifetimeMs: number; revocationPollMs: number; heartbeatMs: number; outputBufferBytes: number; inputBufferBytes: number; slowConsumerTimeoutMs: number; pendingLimit: number };
+  sshKeyEncryptionKeyFile?: string;
 };
 
 const booleanSchema = z
@@ -160,6 +161,10 @@ const envSchema = z.object({
     z.string().optional(),
   ),
   SSH_HOST_KEY_POLICY: z.enum(["strict", "permissive"]).default("strict"),
+  SSH_KEY_ENCRYPTION_KEY_FILE: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().trim().optional(),
+  ),
   TERMINAL_GLOBAL_LIMIT: z.coerce.number().int().min(1).max(100).default(10),
   TERMINAL_DASHBOARD_LIMIT: z.coerce.number().int().min(1).max(20).default(3),
   TERMINAL_VPS_LIMIT: z.coerce.number().int().min(1).max(20).default(2),
@@ -179,6 +184,18 @@ export function parseAppConfig(
 ): AppConfig {
   const parsed = envSchema.parse(env);
 
+  let sshKeyEncryptionKeyFile: string | undefined;
+  if (parsed.SSH_KEY_ENCRYPTION_KEY_FILE) {
+    const projectRoot =
+      findProjectRoot(process.cwd()) ??
+      findProjectRoot(dirname(fileURLToPath(import.meta.url)));
+    sshKeyEncryptionKeyFile = validateExternalSecretPath(
+      parsed.SSH_KEY_ENCRYPTION_KEY_FILE,
+      parsed.DATA_DIR,
+      parsed.PRIVATE_DIR,
+      projectRoot,
+    );
+  }
   if (parsed.APP_MODE === "local") {
     if (!parsed.DASHBOARD_SESSION_SECRET) {
       throw new Error(
@@ -297,14 +314,22 @@ export function parseAppConfig(
           return raw as Record<string, string | string[]>;
         })()
       : {},
-     sshHostKeyPolicy: parsed.SSH_HOST_KEY_POLICY,
-     terminal: {
-       global: parsed.TERMINAL_GLOBAL_LIMIT, perDashboard: parsed.TERMINAL_DASHBOARD_LIMIT, perVps: parsed.TERMINAL_VPS_LIMIT,
-       openTimeoutMs: parsed.TERMINAL_OPEN_TIMEOUT_MS, idleTimeoutMs: parsed.TERMINAL_IDLE_TIMEOUT_MS, lifetimeMs: parsed.TERMINAL_LIFETIME_MS,
-       revocationPollMs: parsed.TERMINAL_REVOCATION_POLL_MS, heartbeatMs: parsed.TERMINAL_HEARTBEAT_MS,
-       outputBufferBytes: parsed.TERMINAL_OUTPUT_BUFFER_BYTES, inputBufferBytes: parsed.TERMINAL_INPUT_BUFFER_BYTES,
-       slowConsumerTimeoutMs: parsed.TERMINAL_SLOW_CONSUMER_TIMEOUT_MS, pendingLimit: parsed.TERMINAL_PENDING_LIMIT,
-     },
+    sshHostKeyPolicy: parsed.SSH_HOST_KEY_POLICY,
+    sshKeyEncryptionKeyFile,
+    terminal: {
+      global: parsed.TERMINAL_GLOBAL_LIMIT,
+      perDashboard: parsed.TERMINAL_DASHBOARD_LIMIT,
+      perVps: parsed.TERMINAL_VPS_LIMIT,
+      openTimeoutMs: parsed.TERMINAL_OPEN_TIMEOUT_MS,
+      idleTimeoutMs: parsed.TERMINAL_IDLE_TIMEOUT_MS,
+      lifetimeMs: parsed.TERMINAL_LIFETIME_MS,
+      revocationPollMs: parsed.TERMINAL_REVOCATION_POLL_MS,
+      heartbeatMs: parsed.TERMINAL_HEARTBEAT_MS,
+      outputBufferBytes: parsed.TERMINAL_OUTPUT_BUFFER_BYTES,
+      inputBufferBytes: parsed.TERMINAL_INPUT_BUFFER_BYTES,
+      slowConsumerTimeoutMs: parsed.TERMINAL_SLOW_CONSUMER_TIMEOUT_MS,
+      pendingLimit: parsed.TERMINAL_PENDING_LIMIT,
+    },
    };
 }
 

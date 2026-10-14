@@ -214,6 +214,16 @@ export type DashboardOverview = {
   };
 };
 
+export type DashboardSettings = DashboardOverview["settings"];
+
+export type UpdateDashboardSettingsPayload = {
+  webTerminalEnabled: boolean;
+};
+
+export type DashboardSettingsResponse = {
+  webTerminalEnabled: boolean;
+};
+
 export type DashboardMetric = DashboardOverview["metrics"][number];
 export type MetricHistoryPoint = { t: string; value: number | null };
 export type MetricHistory = {
@@ -344,6 +354,15 @@ export function listVps() {
 
 export function getDashboardOverview() {
   return request<DashboardOverview>("/api/dashboard");
+}
+
+export function updateDashboardSettings(
+  payload: UpdateDashboardSettingsPayload,
+) {
+  return request<DashboardSettingsResponse>("/api/dashboard/settings", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function listJobs() {

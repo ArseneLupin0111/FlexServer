@@ -55,6 +55,11 @@ import {
   type LocalUpgradeRepository,
 } from "./local-upgrade.repository.js";
 import { createPostgresLocalUpgradeRepository } from "./local-upgrade.postgres.repository.js";
+import {
+  createJsonSettingsRepository,
+  type SettingsRepository,
+} from "./settings.repository.js";
+import { createPostgresSettingsRepository } from "./settings.postgres.repository.js";
 
 export type RepositorySet = {
   vps: VpsRepository;
@@ -68,6 +73,7 @@ export type RepositorySet = {
   dockerMonitoring: DockerMonitoringRepository;
   dockerManagement: DockerManagementRepository;
   localUpgrades: LocalUpgradeRepository;
+  settings: SettingsRepository;
   pool?: Pool;
 };
 
@@ -96,6 +102,7 @@ export function createRepositories(
       dockerMonitoring: createPostgresDockerMonitoringRepository(pool),
       dockerManagement: createPostgresDockerManagementRepository(pool),
       localUpgrades: createPostgresLocalUpgradeRepository(pool),
+      settings: createPostgresSettingsRepository(pool),
     };
   }
 
@@ -123,6 +130,9 @@ export function createRepositories(
     ),
     localUpgrades: createJsonLocalUpgradeRepository(
       join(config.dataDir, "local-upgrades.json"),
+    ),
+    settings: createJsonSettingsRepository(
+      join(config.dataDir, "settings.json"),
     ),
   };
 }

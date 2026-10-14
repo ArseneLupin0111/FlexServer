@@ -68,6 +68,7 @@ services:
       AGENT_RELEASE_PUBLIC_KEY: ${AGENT_RELEASE_PUBLIC_KEY:-}
       AGENT_RELEASE_MANIFEST_URL: ${AGENT_RELEASE_MANIFEST_URL:-}
       AGENT_RELEASE_TTL_SECONDS: ${AGENT_RELEASE_TTL_SECONDS:-300}
+      LOCAL_PTY_SOCKET_PATH: ${LOCAL_PTY_SOCKET_PATH:-/var/run/flexserver/host-pty.sock}
     depends_on:
       migrate:
         condition: service_completed_successfully

@@ -25,6 +25,9 @@ const agentDir = join(root, "packages", "agent");
 const outputDir = join(agentDir, "dist");
 const agentOutputPath = join(outputDir, "vps-agent-linux-amd64");
 const updaterOutputPath = join(outputDir, "vps-updater-linux-amd64");
+const hostPtyOutputPath = join(outputDir, "host-pty-linux-amd64");
+const nativeExt = process.platform === "win32" ? ".exe" : "";
+const hostPtyNativePath = join(outputDir, `host-pty${nativeExt}`);
 
 const GIT_SHA_RE = /^[0-9a-f]{40}$/;
 // The identity line printed by `-version` must stay inside the API upgrader's
@@ -90,6 +93,7 @@ try {
   for (const [pkg, out] of [
     ["./cmd/vps-agent", agentOutputPath],
     ["./cmd/vps-updater", updaterOutputPath],
+    ["./cmd/host-pty", hostPtyOutputPath],
   ]) {
     execSync('go build -ldflags "' + ldflags + '" -o "' + out + '" ' + pkg, {
       cwd: agentDir,
@@ -102,12 +106,29 @@ try {
   process.exit(1);
 }
 
-for (const out of [agentOutputPath, updaterOutputPath]) {
-  const stats = statSync(out);
-  const sizeKB = (stats.size / 1024).toFixed(1);
-  console.log(
-    `\n✓ Built: packages/agent/dist/${out === agentOutputPath ? "vps-agent-linux-amd64" : "vps-updater-linux-amd64"} (${sizeKB} KB)`,
-  );
+if (process.platform !== "linux" || process.arch !== "amd64") {
+  try {
+    execSync('go build -ldflags "' + ldflags + '" -o "' + hostPtyNativePath + '" ./cmd/host-pty', {
+      cwd: agentDir,
+      stdio: "inherit",
+      env: { ...process.env, CGO_ENABLED: "0" },
+    });
+  } catch (err) {
+    if (process.platform === "win32" || process.platform === "linux") {
+      console.error(`Native host-pty build failed on ${process.platform}:`, err.message);
+      process.exit(1);
+    }
+    console.warn("Native host-pty build skipped:", err.message);
+  }
+}
+
+for (const out of [agentOutputPath, updaterOutputPath, hostPtyOutputPath, hostPtyNativePath]) {
+  if (existsSync(out)) {
+    const stats = statSync(out);
+    const sizeKB = (stats.size / 1024).toFixed(1);
+    const name = out.split(/[/\\]/).pop();
+    console.log(`\n✓ Built: packages/agent/dist/${name} (${sizeKB} KB)`);
+  }
 }
 if (existsSync(agentOutputPath)) {
   const agentBuf = readFileSync(agentOutputPath);

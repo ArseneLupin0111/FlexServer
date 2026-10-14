@@ -13,6 +13,9 @@ import type { KeyService } from "../ssh/keyService.js";
 import { SshService } from "../ssh/ssh.service.js";
 import type { ManagedSshShell } from "../ssh/sshService.js";
 import { DashboardSessionService } from "../auth/dashboard-session.service.js";
+import type { ManagedTerminalShell } from "./local-terminal.service.js";
+import { LocalTerminalService } from "./local-terminal.service.js";
+import { DashboardSettingsService } from "../dashboard/dashboard-settings.service.js";
 import { TerminalSessionRegistry } from "./terminal-registry.js";
 import {
   encodeTerminalMessage,
@@ -58,13 +61,39 @@ export class TerminalSessionService implements OnApplicationShutdown {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(VPS_REPOSITORY) private readonly vps: VpsRepository,
     @Inject(KEY_SERVICE) private readonly keys: KeyService,
-    private readonly ssh: SshService,
+    @Inject(SshService) private readonly ssh: SshService,
+    @Inject(DashboardSessionService)
     private readonly sessions: DashboardSessionService,
-    @Optional() private readonly audit?: AuditService,
+    @Optional() @Inject(AuditService) private readonly audit?: AuditService,
+    @Optional()
+    @Inject(DashboardSettingsService)
+    private readonly settings?: DashboardSettingsService,
+    @Optional()
+    @Inject(LocalTerminalService)
+    private readonly localTerminal?: LocalTerminalService,
   ) {
     this.registry = new TerminalSessionRegistry(
       config.terminal ?? { global: 10, perDashboard: 3, perVps: 2 },
     );
+    if (this.settings && typeof this.settings.onDisabled === "function") {
+      this.settings.onDisabled(async () => {
+        await this.registry.closeAll("terminal_disabled");
+      });
+    }
+  }
+
+  async closeAll(reason = "server_shutdown"): Promise<void> {
+    await this.registry.closeAll(reason);
+  }
+
+  async isWebTerminalEnabled(): Promise<boolean> {
+    if (this.config.mode !== "local") {
+      return false;
+    }
+    if (this.settings) {
+      return this.settings.isWebTerminalEnabled();
+    }
+    return Boolean(this.config.enableWebTerminal);
   }
 
   async open(
@@ -75,7 +104,7 @@ export class TerminalSessionService implements OnApplicationShutdown {
     const cfg = this.config.terminal!;
     if (first.type !== "open") throw terminalError("PROTOCOL_ERROR");
     let state: State = "opening";
-    let shell: ManagedSshShell | undefined;
+    let shell: ManagedSshShell | ManagedTerminalShell | undefined;
     let registration: ReturnType<TerminalSessionRegistry["admit"]> | undefined;
     let shellDisposed = false;
     let outcomeDone = false;
@@ -159,7 +188,12 @@ export class TerminalSessionService implements OnApplicationShutdown {
       socket.offError?.(onSocketError);
       if (onPong) socket.offPong?.(onPong);
       state = "closed";
-      await audit(reason === "session_expired" ? "revoked" : "closed", reason);
+      await audit(
+        reason === "session_expired" || reason === "terminal_disabled"
+          ? "revoked"
+          : "closed",
+        reason,
+      );
     };
     const onSocketClose = () => {
       void cleanup("socket_closed");
@@ -205,7 +239,7 @@ export class TerminalSessionService implements OnApplicationShutdown {
     socket.onError?.(onSocketError);
     socket.onMessage(onSocketMessage);
     await audit("requested", "requested");
-    if (!this.config.enableWebTerminal || this.config.mode !== "local") {
+    if (!(await this.isWebTerminalEnabled())) {
       await audit("blocked", "disabled");
       throw terminalError("TERMINAL_DISABLED");
     }
@@ -238,22 +272,31 @@ export class TerminalSessionService implements OnApplicationShutdown {
     timers.add(openTimer);
     try {
       const target = await this.vps.get(first.vpsId);
-      if (!target || target.kind === "local" || target.managedBy === "system")
-        throw terminalError(target ? "VPS_NOT_ELIGIBLE" : "VPS_NOT_FOUND");
-      let key: string;
-      try {
-        key = await this.keys.readPrivateKey(target.id);
-      } catch {
-        await audit("failed", "key_unavailable");
-        throw terminalError("KEY_UNAVAILABLE");
+      if (!target) throw terminalError("VPS_NOT_FOUND");
+      if (target.kind === "local" || target.managedBy === "system") {
+        if (state !== "opening") return;
+        const localService =
+          this.localTerminal ?? new LocalTerminalService(this.config);
+        shell = await localService.openShell({
+          cols: first.cols,
+          rows: first.rows,
+        });
+      } else {
+        let key: string;
+        try {
+          key = await this.keys.readPrivateKey(target.id);
+        } catch {
+          await audit("failed", "key_unavailable");
+          throw terminalError("KEY_UNAVAILABLE");
+        }
+        if (state !== "opening") return;
+        const pending = this.ssh.openManagedShell(
+          target,
+          { privateKey: key },
+          { cols: first.cols, rows: first.rows },
+        );
+        shell = await pending;
       }
-      if (state !== "opening") return;
-      const pending = this.ssh.openManagedShell(
-        target,
-        { privateKey: key },
-        { cols: first.cols, rows: first.rows },
-      );
-      shell = await pending;
       if (state !== "opening") {
         try {
           shell.close();
@@ -302,13 +345,18 @@ export class TerminalSessionService implements OnApplicationShutdown {
         ),
       );
       const revokeTimer = setInterval(() => {
-        if (state === "ready")
-          void this.sessions
-            .authenticateById(dashboardId)
-            .then((active) => {
-              if (!active) return cleanup("session_expired");
+        if (state === "ready") {
+          void this.isWebTerminalEnabled()
+            .then((enabled) => {
+              if (!enabled) return cleanup("terminal_disabled");
+              return this.sessions
+                .authenticateById(dashboardId)
+                .then((active) => {
+                  if (!active) return cleanup("session_expired");
+                });
             })
             .catch(() => cleanup("session_check_error"));
+        }
       }, cfg.revocationPollMs);
       intervals.add(revokeTimer);
       const onClose = () => {

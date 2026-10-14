@@ -92,6 +92,7 @@ export function attachTerminalWebSocket(
   config: AppConfig,
   sessions: DashboardSessionService,
   terminal: TerminalSessionService,
+  settings?: { isWebTerminalEnabled(): Promise<boolean> },
 ) {
   const existing = (server as any).__terminalTransport;
   if (existing) return existing;
@@ -117,8 +118,12 @@ export function attachTerminalWebSocket(
         const url = new URL(req.url ?? "/", "http://localhost"),
           match = url.pathname.match(PATH);
         if (!match) return reject(socket, 404);
-        if (config.mode !== "local" || !config.enableWebTerminal)
-          return reject(socket, 503);
+        const isEnabled = settings
+          ? await settings.isWebTerminalEnabled()
+          : typeof terminal?.isWebTerminalEnabled === "function"
+            ? await terminal.isWebTerminalEnabled()
+            : config.mode === "local" && Boolean(config.enableWebTerminal);
+        if (!isEnabled) return reject(socket, 503);
         const origin =
           typeof req.headers.origin === "string"
             ? req.headers.origin

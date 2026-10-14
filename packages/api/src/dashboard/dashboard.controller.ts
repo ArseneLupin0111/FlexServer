@@ -1,4 +1,4 @@
-import { Controller, Get, Inject, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Inject, Patch, UseGuards } from "@nestjs/common";
 import { DashboardSessionGuard } from "../auth/dashboard-session.guard.js";
 import { OriginGuard } from "../auth/origin-guard.js";
 import { DashboardService } from "./dashboard.service.js";
@@ -13,5 +13,10 @@ export class DashboardController {
   @Get()
   async overview() {
     return { data: await this.dashboard.overview() };
+  }
+
+  @Patch("settings")
+  async updateSettings(@Body() body: unknown) {
+    return { data: await this.dashboard.updateSettings(body) };
   }
 }

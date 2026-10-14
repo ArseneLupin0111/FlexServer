@@ -154,6 +154,14 @@ CLI_SRC=""
 UPGRADE_UPDATER=false
 UPDATER_SRC=""
 UPDATER_CONFIG_SRC=""
+INSTALL_HOST_PTY=false
+HOST_PTY_SRC=""
+HOST_PTY_SERVICE_NAME="flexserver-host-pty"
+HOST_PTY_DEST="/usr/local/bin/flexserver-host-pty"
+HOST_PTY_SOCKET_PATH="/var/run/flexserver/host-pty.sock"
+HOST_PTY_SOCKET_UID=""
+HOST_PTY_SOCKET_GID=""
+HOST_PTY_UNIT_FILE="/etc/systemd/system/${HOST_PTY_SERVICE_NAME}.service"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary)
@@ -184,6 +192,16 @@ while [[ $# -gt 0 ]]; do
       CLI_SRC="$2"; shift 2 ;;
     --cli-dest)
       CLI_DEST="$2"; shift 2 ;;
+    --install-host-pty)
+      INSTALL_HOST_PTY=true; shift ;;
+    --host-pty-binary)
+      HOST_PTY_SRC="$2"; INSTALL_HOST_PTY=true; shift 2 ;;
+    --host-pty-socket-path)
+      HOST_PTY_SOCKET_PATH="$2"; shift 2 ;;
+    --api-uid-gid)
+      HOST_PTY_SOCKET_UID="${2%%:*}"
+      HOST_PTY_SOCKET_GID="${2##*:}"
+      shift 2 ;;
     --help)
       echo "Usage: sudo ./scripts/install/install-local-agent.sh --binary <path> --config <path> [options]"
       echo ""
@@ -258,6 +276,36 @@ if [[ "$UNINSTALL" == "true" ]]; then
       echo "  [DRY-RUN] Would remove: ${BINARY_DEST}"
     else
       rm -f "$BINARY_DEST"
+    fi
+  fi
+  if systemctl is-enabled "${HOST_PTY_SERVICE_NAME}" &>/dev/null; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would run: systemctl stop ${HOST_PTY_SERVICE_NAME}"
+      echo "  [DRY-RUN] Would run: systemctl disable ${HOST_PTY_SERVICE_NAME}"
+    else
+      systemctl stop "${HOST_PTY_SERVICE_NAME}" 2>/dev/null || true
+      systemctl disable "${HOST_PTY_SERVICE_NAME}" 2>/dev/null || true
+    fi
+  fi
+  if [[ -f "$HOST_PTY_UNIT_FILE" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would remove: ${HOST_PTY_UNIT_FILE}"
+    else
+      rm -f "$HOST_PTY_UNIT_FILE"
+    fi
+  fi
+  if [[ -f "$HOST_PTY_DEST" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would remove: ${HOST_PTY_DEST}"
+    else
+      rm -f "$HOST_PTY_DEST"
+    fi
+  fi
+  if [[ -S "$HOST_PTY_SOCKET_PATH" || -f "$HOST_PTY_SOCKET_PATH" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would remove: ${HOST_PTY_SOCKET_PATH}"
+    else
+      rm -f "$HOST_PTY_SOCKET_PATH"
     fi
   fi
 
@@ -554,6 +602,75 @@ if [[ "$INSTALL_CLI" == "true" && "$SKIP_CLI" == "false" ]]; then
   else
     # Source was fetched and validated before the install mutations.
     install_flexserverctl "$CLI_DEST" "${CLI_RESOLVED_SOURCE:-}"
+  fi
+fi
+
+if [[ -z "$HOST_PTY_SRC" ]]; then
+  cand_dir="$(dirname "$BINARY_SRC")"
+  for cand in "${cand_dir}/host-pty-linux-amd64" "${cand_dir}/host-pty" "/app/agent/host-pty-linux-amd64" "/opt/vps-manager/host-pty-linux-amd64"; do
+    if [[ -f "$cand" ]]; then
+      HOST_PTY_SRC="$cand"
+      break
+    fi
+  done
+fi
+
+if [[ "$INSTALL_HOST_PTY" == "true" || -n "$HOST_PTY_SRC" ]] && [[ -n "$HOST_PTY_SRC" && -f "$HOST_PTY_SRC" ]]; then
+  echo "[host-pty] Installing host PTY service..."
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "  [DRY-RUN] Would install host-pty binary: ${HOST_PTY_SRC} -> ${HOST_PTY_DEST} (root:root 0755)"
+  else
+    cp -f "$HOST_PTY_SRC" "$HOST_PTY_DEST"
+    chown root:root "$HOST_PTY_DEST"
+    chmod 0755 "$HOST_PTY_DEST"
+    mkdir -p "$(dirname "$HOST_PTY_SOCKET_PATH")"
+    chmod 0755 "$(dirname "$HOST_PTY_SOCKET_PATH")"
+  fi
+
+  HOST_PTY_EXTRA_ARGS=""
+  if [[ -n "$HOST_PTY_SOCKET_UID" ]]; then
+    HOST_PTY_EXTRA_ARGS="${HOST_PTY_EXTRA_ARGS} -socket-uid ${HOST_PTY_SOCKET_UID}"
+  fi
+  if [[ -n "$HOST_PTY_SOCKET_GID" ]]; then
+    HOST_PTY_EXTRA_ARGS="${HOST_PTY_EXTRA_ARGS} -socket-gid ${HOST_PTY_SOCKET_GID}"
+  fi
+
+  HOST_PTY_UNIT_CONTENT=$(cat <<PTYUNIT
+[Unit]
+Description=VPS Manager Host PTY Daemon
+Documentation=https://github.com/sondoan17/vps-manager-nodejs
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=${HOST_PTY_DEST} -socket ${HOST_PTY_SOCKET_PATH} -socket-mode 0660${HOST_PTY_EXTRA_ARGS}
+Restart=always
+RestartSec=5
+
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectClock=true
+
+[Install]
+WantedBy=multi-user.target
+PTYUNIT
+)
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "  [DRY-RUN] Would write systemd unit: ${HOST_PTY_UNIT_FILE}"
+    echo "---"
+    echo "$HOST_PTY_UNIT_CONTENT"
+    echo "---"
+    echo "  [DRY-RUN] Would run: systemctl daemon-reload && systemctl enable ${HOST_PTY_SERVICE_NAME} && systemctl restart ${HOST_PTY_SERVICE_NAME}"
+  else
+    echo "$HOST_PTY_UNIT_CONTENT" > "$HOST_PTY_UNIT_FILE"
+    chmod 0644 "$HOST_PTY_UNIT_FILE"
+    systemctl daemon-reload
+    systemctl enable "${HOST_PTY_SERVICE_NAME}"
+    systemctl restart "${HOST_PTY_SERVICE_NAME}"
+    echo "  Started ${HOST_PTY_SERVICE_NAME} (socket: ${HOST_PTY_SOCKET_PATH})"
   fi
 fi
 

@@ -150,6 +150,7 @@ random_hex() {
 }
 
 # ── Arg parsing ───────────────────────────────────────────────────────────
+ENABLE_LOCAL_TERMINAL=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -176,6 +177,7 @@ while [[ $# -gt 0 ]]; do
       echo "                            (SupplementaryGroups). Docker group access is"
       echo "                            root-equivalent; only needed if Docker metrics are"
       echo "                            enabled via the dashboard."
+      echo "  --enable-local-terminal   Enable local host web terminal daemon (host-pty) and compose mount."
       exit 0 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --app-dir) APP_DIR="$2"; shift 2 ;;
@@ -191,6 +193,7 @@ while [[ $# -gt 0 ]]; do
     --skip-agent) SKIP_AGENT=true; shift ;;
     --rotate-agent) ROTATE_AGENT=true; shift ;;
     --enable-docker-metrics-access) ENABLE_DOCKER_METRICS_ACCESS=true; shift ;;
+    --enable-local-terminal) ENABLE_LOCAL_TERMINAL=true; shift ;;
     *)
       echo "Error: Unknown argument: $1"
       echo "Usage: sudo $0 [options]"
@@ -412,6 +415,13 @@ fi
 
 # ── Compose file ──────────────────────────────────────────────────────────
 
+TERMINAL_VOLUME_LINE=""
+TERMINAL_ENV_LINE=""
+if [[ "$ENABLE_LOCAL_TERMINAL" == "true" ]]; then
+  TERMINAL_VOLUME_LINE="      - /var/run/flexserver:/var/run/flexserver"
+  TERMINAL_ENV_LINE="      LOCAL_PTY_SOCKET_PATH: /var/run/flexserver/host-pty.sock"
+fi
+
 COMPOSE_CONTENT=$(
   cat <<COMPOSE
 services:
@@ -422,7 +432,10 @@ services:
     volumes:
       - ./data:/app/data
       - ./private:/app/private
+${TERMINAL_VOLUME_LINE}
     env_file: .env
+    environment:
+${TERMINAL_ENV_LINE}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -629,6 +642,23 @@ else
       echo "  Extracted bundled updater binary."
     fi
   fi
+
+  # Extract bundled host-pty binary from API container
+  HOST_PTY_BIN_TMP=""
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "  [DRY-RUN] Would extract host-pty binary from API container..."
+  else
+    HOST_PTY_BIN_TMP="$(mktemp)"
+    INSTALLER_TMP_FILES+=("$HOST_PTY_BIN_TMP")
+    if ! docker cp "${API_CONTAINER}:/app/agent/host-pty-linux-amd64" "$HOST_PTY_BIN_TMP" &>/dev/null; then
+      echo "Warning: Failed to extract host-pty binary from API container (/app/agent/host-pty-linux-amd64)." >&2
+      rm -f "$HOST_PTY_BIN_TMP"
+      HOST_PTY_BIN_TMP=""
+    else
+      chmod 0755 "$HOST_PTY_BIN_TMP"
+      echo "  Extracted bundled host-pty binary."
+    fi
+  fi
   # Bootstrap agent credential and generate config using --config-only
   AGENT_CONFIG_TMP=""
   AGENT_CONFIG_CREATED=false
@@ -724,6 +754,16 @@ EOF
         fi
         if [[ -n "$UPDATER_CONFIG_TMP" ]]; then
           AGENT_INSTALL_ARGS+=(--updater-config "$UPDATER_CONFIG_TMP")
+        fi
+      fi
+      if [[ -n "$HOST_PTY_BIN_TMP" ]] || [[ "$ENABLE_LOCAL_TERMINAL" == "true" ]]; then
+        if [[ -n "$HOST_PTY_BIN_TMP" ]]; then
+          AGENT_INSTALL_ARGS+=(--host-pty-binary "$HOST_PTY_BIN_TMP")
+        else
+          AGENT_INSTALL_ARGS+=(--install-host-pty)
+        fi
+        if [[ -n "${API_UID_GID:-}" ]]; then
+          AGENT_INSTALL_ARGS+=(--api-uid-gid "$API_UID_GID")
         fi
       fi
       if [[ "$DRY_RUN" == "true" ]]; then

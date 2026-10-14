@@ -36,9 +36,12 @@ import {
   trustSshHostKey,
   uninstallAgent,
   upgradeAgent,
+  updateDashboardSettings,
   updateVps,
   verifyKey,
   type DashboardOverview,
+  type DashboardSettingsResponse,
+  type UpdateDashboardSettingsPayload,
   type UpdateVpsPayload,
   type VpsRecord,
 } from "../lib/api";
@@ -91,7 +94,10 @@ export type DashboardCtx = {
   mode: "demo" | "local";
   loaded: boolean;
   onLogout: (() => void) | undefined;
-  onRefresh: () => void;
+  onRefresh: () => Promise<void>;
+  onUpdateSettings: (
+    payload: UpdateDashboardSettingsPayload,
+  ) => Promise<DashboardSettingsResponse>;
   onSearchChange: (value: string) => void;
   onStatusFilterChange: (value: string) => void;
   onCreateFormChange: (value: typeof initialCreateForm) => void;
@@ -870,6 +876,25 @@ export function DashboardProvider({
     }
   }
 
+  async function handleUpdateSettings(
+    payload: UpdateDashboardSettingsPayload,
+  ): Promise<DashboardSettingsResponse> {
+    const result = await updateDashboardSettings(payload);
+    setOverview((current) => ({
+      ...current,
+      settings: {
+        ...current.settings,
+        ...result,
+      },
+    }));
+    try {
+      await loadVps("Dashboard state synced.");
+    } catch {
+      // Background re-fetch failed, local overview is already updated
+    }
+    return result;
+  }
+
   async function handleDelete(vps: VpsRecord) {
     const label = vpsDisplayName(vps);
     await runAction(`Deleting ${label}...`, async () => {
@@ -938,7 +963,8 @@ export function DashboardProvider({
     mode,
     loaded: initialLoadDone,
     onLogout: authRequired ? handleLogout : undefined,
-    onRefresh: () => void handleRefresh(),
+    onRefresh: handleRefresh,
+    onUpdateSettings: handleUpdateSettings,
     onSearchChange: setServerSearch,
     onStatusFilterChange: setStatusFilter,
     onCreateFormChange: setCreateForm,

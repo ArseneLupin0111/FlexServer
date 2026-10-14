@@ -1,4 +1,5 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
+import { DashboardSettingsService } from "./dashboard-settings.service.js";
 import type { AppConfig } from "../config/app-config.js";
 import {
   DEMO_BANNER,
@@ -103,6 +104,9 @@ export class DashboardService {
     @Inject(JOB_REPOSITORY) private readonly jobRepository: JobRepository,
     @Inject(DOCKER_MONITORING_REPOSITORY)
     private readonly dockerMonitoringRepository: DockerMonitoringRepository,
+    @Optional()
+    @Inject(DashboardSettingsService)
+    private readonly settingsService?: DashboardSettingsService,
   ) {}
 
   async overview(): Promise<DashboardOverview> {
@@ -195,13 +199,22 @@ export class DashboardService {
       },
       settings: {
         appMode: "local",
-        webTerminalEnabled: this.config.enableWebTerminal,
+        webTerminalEnabled: this.settingsService
+          ? await this.settingsService.isWebTerminalEnabled()
+          : Boolean(this.config.enableWebTerminal),
         realSshEnabled: true,
         authRequiredInLocalMode: true,
       },
       systemInfo,
       dockerMetrics,
     };
+  }
+
+  async updateSettings(input: unknown) {
+    if (!this.settingsService) {
+      throw new Error("Settings service not configured");
+    }
+    return this.settingsService.updateSettings(input);
   }
 
   /**

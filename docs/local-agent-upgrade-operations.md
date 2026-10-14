@@ -8,6 +8,14 @@ Remote user-managed installs use `~/.vps-manager-agent/vps-agent.pid`. Ownership
 
 An agent installed with the Docker state arguments could previously fail an upgrade with `Managed agent process ownership is missing or ambiguous` despite running normally. Deploy the updated API to use the corrected inspection and restart commands; the running agent does not need to be stopped manually. A genuinely absent process is permitted during upgrade and rollback. Invalid, mismatched or ambiguous ownership still refuses mutation: inspect the PID file and process identity rather than deleting the PID file or killing processes indiscriminately.
 
+Remote upgrade confirmation parses `<version>+<40-hex Git build ID>` from the candidate's `-version` output. Heartbeats carry `version` and `buildId` separately: both must match the candidate, and `lastSeenAt` must be strictly newer than the post-preflight/post-stop baseline. A staged preflight heartbeat is not proof of the newly started loop. Legacy/dev binaries without a build ID are verified by version and freshness; rollback also checks the prior build ID when recorded.
+
+If a running candidate reports metrics but the job times out and rolls back, inspect the job and version/build fields before diagnosing network failure. The former composite-version comparison caused this exact symptom. Deploy the corrected API before retrying the upgrade; do not disable heartbeat verification or manually delete delivery state.
+
+Container logs can remain `Waiting for agent` while metrics are healthy when the installed binary predates the logs claim worker. Check actual `/api/agent/logs/claim` traffic and the running build, not metrics acknowledgments alone. After upgrading, verify an authenticated container logs SSE subscription transitions from `waiting` to `live` and delivers container log frames.
+
+Azure recovery verified on 2026-10-14: the obsolete `dev` agent was replaced with the deployed bundled build `8a55c84a90d528f5f34bce2885ebfb1deb643a18`; a fresh backend heartbeat matched version `0.1.0` and that build ID. A `freshrss` logs subscription transitioned `waiting` → `live` in approximately 600 ms and delivered 100 lines. Existing config, runtime keys and Docker identity were preserved; the previous binary remains as `vps-agent.backup-recov20261014`. This agent-only recovery does not deploy the separate API heartbeat identity fix.
+
 
 ## Bundled agent source and updater architecture
 

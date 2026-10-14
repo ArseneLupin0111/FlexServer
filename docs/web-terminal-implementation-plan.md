@@ -31,10 +31,10 @@ Provide an explicit, full interactive SSH shell at `/api/vps/:vpsId/terminal` us
 ```text
 Browser + @xterm/xterm
   -> same-origin WSS /api/vps/:vpsId/terminal
-    -> upgrade authentication and origin policy
+    -> upgrade authentication and origin policy (checks persisted webTerminalEnabled setting)
       -> TerminalSessionService / TerminalSessionRegistry
-        -> VPS repository + managed KeyService
-          -> shared secure SSH connection + ssh2 PTY
+        -> Local VPS (local-agent): Host PTY transport (host-pty binary / supervisor)
+        -> Remote VPS: VPS repository + managed KeyService -> ssh2 PTY with host-key pin
 ```
 
 One WebSocket owns one shell. Reconnect always creates a new shell.

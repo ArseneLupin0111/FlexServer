@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { AlertCircle, Loader2, TerminalSquare } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -5,7 +7,9 @@ import {
   CardHeader,
   CardTitle,
 } from "../../ui/card";
+import { Button } from "../../ui/button";
 import type { DashboardOverview } from "../../../lib/api";
+import { useDashboard } from "../../../context/DashboardContext";
 
 function RuntimeFact({
   label,
@@ -33,6 +37,32 @@ function RuntimeFact({
 }
 
 export function SettingsPanel({ overview }: { overview: DashboardOverview }) {
+  const dashboard = useDashboard();
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const enabled = overview.settings.webTerminalEnabled;
+
+  const handleToggle = async () => {
+    if (pending) return;
+    const next = !enabled;
+    setPending(true);
+    setError(null);
+    try {
+      await dashboard.onUpdateSettings({
+        webTerminalEnabled: next,
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Failed to update web terminal setting.";
+      setError(message);
+    } finally {
+      setPending(false);
+    }
+  };
+
   return (
     <div className="grid max-w-3xl gap-4">
       <Card className="min-w-0 overflow-hidden">
@@ -51,10 +81,8 @@ export function SettingsPanel({ overview }: { overview: DashboardOverview }) {
             <RuntimeFact label="App mode" value={overview.settings.appMode} />
             <RuntimeFact
               label="Web terminal"
-              value={
-                overview.settings.webTerminalEnabled ? "enabled" : "disabled"
-              }
-              tone={overview.settings.webTerminalEnabled ? "ok" : "warn"}
+              value={enabled ? "enabled" : "disabled"}
+              tone={enabled ? "ok" : "warn"}
             />
             <RuntimeFact
               label="Real SSH"
@@ -71,6 +99,74 @@ export function SettingsPanel({ overview }: { overview: DashboardOverview }) {
               }
             />
           </dl>
+        </CardContent>
+      </Card>
+
+      <Card className="min-w-0 overflow-hidden">
+        <CardHeader className="border-b border-line p-4 pb-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <TerminalSquare
+                  size={16}
+                  className="shrink-0 text-dim"
+                  aria-hidden="true"
+                />
+                <CardTitle>Web terminal</CardTitle>
+              </div>
+              <CardDescription className="mt-0.5 max-w-2xl leading-5">
+                Interactive browser terminal access for system-managed local host
+                and remote VPS targets.
+              </CardDescription>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              variant={enabled ? "secondary" : "outline"}
+              className="h-8 rounded-none px-3 text-xs"
+              disabled={pending}
+              aria-pressed={enabled}
+              aria-label={
+                enabled ? "Disable web terminal" : "Enable web terminal"
+              }
+              data-testid="web-terminal-toggle"
+              onClick={handleToggle}
+            >
+              {pending ? (
+                <span className="flex items-center gap-1.5">
+                  <Loader2
+                    className="h-3.5 w-3.5 animate-spin"
+                    aria-hidden="true"
+                  />
+                  <span>Updating…</span>
+                </span>
+              ) : enabled ? (
+                "Disable"
+              ) : (
+                "Enable"
+              )}
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3 p-4">
+          {error ? (
+            <div
+              role="alert"
+              className="flex items-start gap-2 border border-crit/40 bg-crit/10 p-3 text-[13px] text-crit"
+            >
+              <AlertCircle
+                size={16}
+                className="mt-0.5 shrink-0"
+                aria-hidden="true"
+              />
+              <span>{error}</span>
+            </div>
+          ) : null}
+          <p className="text-[13px] leading-6 text-dim">
+            When enabled, authorized users can open terminal sessions from the
+            Terminal tab. Remote servers require real SSH keys, while the
+            system-managed local server connects directly to the hosting host.
+          </p>
         </CardContent>
       </Card>
 

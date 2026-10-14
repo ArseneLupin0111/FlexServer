@@ -54,7 +54,7 @@ export type VpsWorkspaceCtx = {
   overview: DashboardOverview;
 };
 
-const VpsWorkspaceContext = createContext<VpsWorkspaceCtx | null>(null);
+export const VpsWorkspaceContext = createContext<VpsWorkspaceCtx | null>(null);
 
 export function useVpsWorkspace(): VpsWorkspaceCtx {
   const ctx = useContext(VpsWorkspaceContext);
@@ -800,14 +800,12 @@ export function VpsWorkspaceAuditPage() {
 
 export function VpsWorkspaceTerminalPage() {
   const { vps, overview } = useVpsWorkspace();
-  return (
-    <TerminalPanel
-      vps={vps}
-      enabled={
-        overview.settings.webTerminalEnabled && overview.settings.realSshEnabled
-      }
-    />
-  );
+  const isLocal = vps.kind === "local" || vps.managedBy === "system";
+  const enabled =
+    overview.settings.webTerminalEnabled &&
+    (isLocal || overview.settings.realSshEnabled);
+
+  return <TerminalPanel vps={vps} enabled={enabled} isLocal={isLocal} />;
 }
 
 export function VpsWorkspaceSettingsPage() {

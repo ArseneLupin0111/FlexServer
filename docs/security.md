@@ -57,3 +57,24 @@ Managed local installs retain a root-owned `docker-identity.json` (`0600`) and s
 ### Session cookie hardening
 
 `DASHBOARD_SESSION_SECRET` must be at least 32 characters in `APP_MODE=local`. `SameSite=None` requires `Secure=true`. An HTTPS dashboard origin in local mode forces `Secure=true`.
+
+### Web Terminal Security
+
+- **Runtime Setting & State**: The web terminal state is persisted via `PATCH /api/dashboard/settings` (`{ webTerminalEnabled: boolean }`) into the database (`dashboard_settings` table). The environment variable `ENABLE_WEB_TERMINAL` serves as the initial boot default if no database setting has been persisted yet.
+- **Prerequisites for Enabling**: Enabling the web terminal at runtime strictly requires `APP_MODE=local` and a configured canonical `DASHBOARD_PUBLIC_ORIGIN`. If origin validation fails (e.g., origin unset or pointing to placeholder), enabling fails closed with an actionable error.
+- **Origin & Session Gating**: WebSocket upgrades at `/api/vps/:vpsId/terminal` verify the HttpOnly dashboard session cookie, validate `Origin` against `DASHBOARD_PUBLIC_ORIGIN`, and verify that the effective runtime `webTerminalEnabled` setting is active.
+- **Local vs Remote Execution**:
+  - **Local VPS**: Uses dedicated host-level PTY execution (`host-pty` binary or daemon socket transport). Even when the API runs inside a Docker container, it attaches to the host environment via the `/var/run/flexserver/host-pty.sock` Unix domain socket rather than executing within the API container.
+  - **Host PTY Socket Security**: In containerized deployments, only the dedicated PTY socket (`/var/run/flexserver/host-pty.sock`) is mounted into the API container via `docker-compose.terminal.yml`. The Docker engine socket (`/var/run/docker.sock`) is NEVER mounted or exposed to any container or installer. Socket files are restricted (mode `0660`) and granted to the container runtime UID/GID (`app`).
+  - **Host Daemon & Compose Deployment**:
+    ```bash
+    # Install local agent and host-pty daemon on host:
+    sudo ./scripts/install/install-local-agent.sh --binary packages/agent/dist/vps-agent-linux-amd64 --config /etc/vps-manager-agent/config.json --install-host-pty
+    # Launch Docker Compose with the opt-in host PTY socket mount:
+    docker compose -f docker-compose.yml -f docker-compose.terminal.yml up -d
+    ```
+  - **Process Lifecycle and Descendant Cleanup**:
+    - On Linux: Host PTY processes are allocated in their own session/process group (`setpgid`). Closing the session issues `SIGTERM` to the entire negative PID group (`syscall.Kill(-pid, syscall.SIGTERM)`).
+    - On Windows: Terminal processes are bound to an OS JobObject configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. When the session handle closes, the Windows kernel guarantees atomic termination of the shell and all descendant child processes.
+  - **Remote VPS**: Connects via `ssh2` with strict host-key verification against stored pinned host keys and managed SSH keys.
+- **Audit & Resource Quotas**: Both local and remote terminal sessions enforce global and per-session capacity limits, activity heartbeats, idle timeouts, and record lifecycle audit events (`terminal.opened`, `terminal.closed`) without logging sensitive shell input or output.

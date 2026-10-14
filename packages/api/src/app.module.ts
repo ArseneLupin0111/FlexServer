@@ -65,6 +65,9 @@ import { DockerActivityService } from "./docker/docker-activity.service.js";
 import type { DockerMonitoringRepository } from "./persistence/repositories/docker-monitoring.repository.js";
 import type { DockerManagementRepository } from "./persistence/repositories/docker-management.repository.js";
 import type { LocalUpgradeRepository } from "./persistence/repositories/local-upgrade.repository.js";
+import { DashboardSettingsService } from "./dashboard/dashboard-settings.service.js";
+import { LocalTerminalService } from "./terminal/local-terminal.service.js";
+import type { SettingsRepository } from "./persistence/repositories/settings.repository.js";
 import {
   ADMIN_CREDENTIAL_REPOSITORY,
   AGENT_REPOSITORY,
@@ -80,6 +83,7 @@ import {
   METRIC_REPOSITORY,
   SESSION_REPOSITORY,
   VPS_REPOSITORY,
+  SETTINGS_REPOSITORY,
 } from "./tokens.js";
 
 export {
@@ -97,6 +101,7 @@ export {
   METRIC_REPOSITORY,
   SESSION_REPOSITORY,
   VPS_REPOSITORY,
+  SETTINGS_REPOSITORY,
 };
 
 const DATABASE_POOL_OWNS = Symbol("DATABASE_POOL_OWNS");
@@ -115,6 +120,7 @@ export type AppDependencies = {
   dockerMonitoring?: DockerMonitoringRepository;
   dockerManagement?: DockerManagementRepository;
   localUpgrades?: LocalUpgradeRepository;
+  settings?: SettingsRepository;
   /** Optional pre-created DB pool. Caller owns lifecycle unless ownsPool=true. */
   pool?: Pool;
   ownsPool?: boolean;
@@ -209,8 +215,46 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
         provide: ADMIN_CREDENTIAL_REPOSITORY,
         useValue: deps.adminCredential ?? repositories!.adminCredential,
       },
+      {
+        provide: SETTINGS_REPOSITORY,
+        useValue: deps.settings ?? repositories!.settings,
+      },
+      DashboardSettingsService,
+      LocalTerminalService,
       DashboardSessionService,
-      TerminalSessionService,
+      {
+        provide: TerminalSessionService,
+        inject: [
+          APP_CONFIG,
+          VPS_REPOSITORY,
+          KEY_SERVICE,
+          SshService,
+          DashboardSessionService,
+          AuditService,
+          DashboardSettingsService,
+          LocalTerminalService,
+        ],
+        useFactory: (
+          config: AppConfig,
+          vps: VpsRepository,
+          keys: KeyService,
+          ssh: SshService,
+          sessions: DashboardSessionService,
+          audit: AuditService,
+          settings: DashboardSettingsService,
+          localTerminal: LocalTerminalService,
+        ) =>
+          new TerminalSessionService(
+            config,
+            vps,
+            keys,
+            ssh,
+            sessions,
+            audit,
+            settings,
+            localTerminal,
+          ),
+      },
       DashboardSessionGuard,
       OriginGuard,
       AgentLifecycleCoordinator,
@@ -242,7 +286,36 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
          ) => new AgentService(agentRepo, metricRepo, vpsRepo, appConfig, lifecycle, dockerMonitoringService),
       },
       AuditService,
-      DashboardService,
+      {
+        provide: DashboardService,
+        inject: [
+          APP_CONFIG,
+          VPS_REPOSITORY,
+          METRIC_REPOSITORY,
+          AGENT_REPOSITORY,
+          JOB_REPOSITORY,
+          DOCKER_MONITORING_REPOSITORY,
+          DashboardSettingsService,
+        ],
+        useFactory: (
+          config: AppConfig,
+          vps: VpsRepository,
+          metrics: MetricRepository,
+          agent: AgentRepository,
+          jobs: JobRepository,
+          dockerMonitoring: DockerMonitoringRepository,
+          settings: DashboardSettingsService,
+        ) =>
+          new DashboardService(
+            config,
+            vps,
+            metrics,
+            agent,
+            jobs,
+            dockerMonitoring,
+            settings,
+          ),
+      },
       JobRunnerService,
       JobService,
       MetricService,

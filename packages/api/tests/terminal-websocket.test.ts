@@ -8,12 +8,20 @@ const origin = "https://dashboard.example.test";
 const config = (extra = {}) => ({ mode: "local", enableWebTerminal: true, dashboardPublicOrigin: origin, terminal: { openTimeoutMs: 40 }, ...extra } as any);
 const session = { id: "dash_1", expiresAt: new Date(Date.now() + 60_000).toISOString() };
 let servers: Server[] = [];
-async function setup(extra: any = {}, terminal: any = {}) {
+async function setup(extra: any = {}, terminal: any = {}, settingsService?: any) {
   const server = createServer();
   const calls: any[] = [];
   const sessions = { findByRequest: async (req: any) => req.headers.cookie === "dashboard_session=valid" ? session : undefined } as any;
-  const service = { open: async (_socket: any, _id: string, message: any) => { calls.push(message); if (terminal.error) throw terminal.error; }, registry: { closeAll: async (reason: string) => { terminal.closed = reason; } } } as any;
-  const transport = attachTerminalWebSocket(server, config(extra), sessions, service);
+  const service = {
+    open: async (socket: any, id: string, message: any) => {
+      calls.push(message);
+      terminal.onOpen?.(socket, id, message);
+      if (terminal.error) throw terminal.error;
+    },
+    registry: { closeAll: async (reason: string) => { terminal.closed = reason; } },
+    isWebTerminalEnabled: async () => config(extra).mode === "local" && Boolean(config(extra).enableWebTerminal),
+  } as any;
+  const transport = attachTerminalWebSocket(server, config(extra), sessions, service, settingsService);
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", () => resolve()));
   servers.push(server);
   return { server, port: (server.address() as any).port, calls, service, transport };
@@ -48,4 +56,74 @@ describe("terminal websocket integration", () => {
     const second = client(x.port, "/api/vps/v1/terminal", { Origin: origin, Cookie: "dashboard_session=valid" }); await new Promise<void>(r => second.once("open", r)); const secondClosed = closed(second); await x.transport.close(); expect((await secondClosed).code).toBe(1001); expect(x.service.registry.closeAll).toBeDefined();
   });
   it("is idempotent on close and detaches upgrade listener", async () => { const x = await setup(); await x.transport.close(); await x.transport.close(); expect(x.server.listenerCount("upgrade")).toBe(0); });
+  it("uses runtime settingsService to gate terminal access overriding env config", async () => {
+    const settingsService = { isWebTerminalEnabled: async () => false };
+    const x = await setup({ enableWebTerminal: true }, {}, settingsService);
+    const disabled = client(x.port, "/api/vps/v1/terminal", { Origin: origin, Cookie: "dashboard_session=valid" });
+    const { promise: disabledStatusPromise, resolve: resolveDisabledStatus } = Promise.withResolvers<number>();
+    disabled.on("unexpected-response", (_q, res) => resolveDisabledStatus(res.statusCode ?? 0));
+    expect(await disabledStatusPromise).toBe(503);
+
+    settingsService.isWebTerminalEnabled = async () => true;
+    const { promise: openCalledPromise, resolve: resolveOpenCalled } = Promise.withResolvers<void>();
+    const origOpen = x.service.open;
+    x.service.open = async (...args: any[]) => {
+      await origOpen(...args);
+      resolveOpenCalled();
+    };
+    const enabled = client(x.port, "/api/vps/v1/terminal", { Origin: origin, Cookie: "dashboard_session=valid" });
+    const { promise: enabledOpenedPromise, resolve: resolveEnabledOpened } = Promise.withResolvers<void>();
+    enabled.once("open", () => resolveEnabledOpened());
+    await enabledOpenedPromise;
+    enabled.send(JSON.stringify({ type: "open", version: 1, vpsId: "v1", cols: 80, rows: 24 }));
+    await openCalledPromise;
+    expect(x.calls).toHaveLength(1);
+    enabled.close();
+  });
+
+  it("revokes active session when terminal is disabled at runtime", async () => {
+    let webTerminalEnabled = true;
+    const listeners: Array<() => Promise<void>> = [];
+    const settingsService = {
+      isWebTerminalEnabled: async () => webTerminalEnabled,
+      onDisabled: (cb: () => Promise<void>) => {
+        listeners.push(cb);
+        return () => {
+          const idx = listeners.indexOf(cb);
+          if (idx !== -1) listeners.splice(idx, 1);
+        };
+      },
+      disable: async () => {
+        webTerminalEnabled = false;
+        await Promise.all(listeners.map((l) => l()));
+      },
+    };
+    let activeWs: any = null;
+    const terminalMock = {
+      onOpen: (socket: any) => {
+        activeWs = socket;
+      },
+      closed: "",
+    };
+    settingsService.onDisabled(async () => {
+      if (activeWs) {
+        activeWs.send(JSON.stringify({ type: "closed", reason: "terminal_disabled" }));
+        activeWs.close(1000, "terminal_disabled");
+      }
+    });
+
+    const x = await setup({}, terminalMock, settingsService);
+    const ws = client(x.port, "/api/vps/v1/terminal", { Origin: origin, Cookie: "dashboard_session=valid" });
+    const { promise: openPromise, resolve: resolveOpen } = Promise.withResolvers<void>();
+    ws.once("open", () => resolveOpen());
+    await openPromise;
+    ws.send(JSON.stringify({ type: "open", version: 1, vpsId: "v1", cols: 80, rows: 24 }));
+    await new Promise((r) => setTimeout(r, 20));
+
+    const closedPromise = closed(ws);
+    await settingsService.disable();
+    const result = await closedPromise;
+    expect(result.code).toBe(1000);
+    expect(result.reason).toBe("terminal_disabled");
+  });
 });

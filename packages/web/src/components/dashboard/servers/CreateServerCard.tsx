@@ -18,9 +18,9 @@ export function CreateServerCard({
   onCreateFormChange,
 }: ServersPanelProps) {
   return (
-    <Card className="h-fit min-w-0 overflow-hidden border-0 bg-raised/60 shadow-none  xl:sticky xl:top-5">
-      <CardHeader className="min-w-0 border-b border-line bg-raised pb-4 text-text">
-        <p className="truncate text-[11px] font-normal uppercase tracking-[0.2em] text-dim">
+    <Card className="h-fit min-w-0 overflow-hidden border border-line bg-panel shadow-none xl:sticky xl:top-5">
+      <CardHeader className="min-w-0 border-b border-line bg-panel pb-4 text-text">
+        <p className="truncate text-[11px] font-semibold uppercase tracking-[0.2em] text-dim">
           Add server
         </p>
         <CardTitle className="truncate text-text">New VPS</CardTitle>

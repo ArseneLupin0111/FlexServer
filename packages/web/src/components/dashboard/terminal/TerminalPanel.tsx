@@ -208,5 +208,29 @@ export function TerminalPanel({ vps, enabled = true }: { vps: VpsRecord; enabled
     <Sheet open={details} onOpenChange={setDetails}><SheetContent className="border-line bg-panel text-text"><SheetHeader><SheetTitle>Connection details</SheetTitle></SheetHeader><div className="mt-6 space-y-4 text-sm"><Detail label="Host" value={host} /><Detail label="SSH state" value={labels[status]} /><Detail label="Identity" value={root ? "Root account" : vps.username} /><p className="text-dim"><ShieldCheck className="mr-2 inline" size={16} />Host identity is verified by the terminal service before the shell opens.</p></div></SheetContent></Sheet>
   </div>;
 }
-function StatusDot({ status }: { status: Status }) { return <span className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-[0.08em] text-dim"><span className={`h-1.5 w-1.5 rounded-full ${status === "connected" ? "bg-signal" : ["error", "expired"].includes(status) ? "bg-crit" : "bg-warn"}`} aria-hidden="true" />{labels[status]}</span>; }
-function Detail({ label, value }: { label: string; value: string }) { return <div className="border border-line bg-raised p-3"><div className="text-[11px] uppercase tracking-[0.14em] text-dim">{label}</div><div className="mt-1 break-all font-mono text-text">{value}</div></div>; }
+function StatusDot({ status }: { status: Status }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-dim">
+      <span
+        className={`h-1.5 w-1.5 rounded-full ${
+          status === "connected"
+            ? "bg-signal"
+            : ["error", "expired"].includes(status)
+              ? "bg-crit"
+              : "bg-warn"
+        }`}
+        aria-hidden="true"
+      />
+      {labels[status]}
+    </span>
+  );
+}
+
+function Detail({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="border border-line bg-panel p-3 transition-colors duration-160 ease-out hover:bg-raised/40">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-dim">{label}</div>
+      <div className="tnum mt-1 break-all font-mono text-text">{value}</div>
+    </div>
+  );
+}

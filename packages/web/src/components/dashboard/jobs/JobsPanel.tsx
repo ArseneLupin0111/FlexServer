@@ -223,7 +223,7 @@ function CompactJobRow({ job }: { job: DashboardOverview["jobs"][number] }) {
   const isRunning = job.status === "running";
   const meta = [job.workerId, job.status === "failed" ? `Failed at ${progress}%` : isRunning ? `${progress}% progress` : job.status === "queued" ? "Waiting for a worker" : job.status === "cancelled" ? `Cancelled at ${progress}%` : "Completed"].filter(Boolean).join(" · ");
   return (
-    <article className="grid min-w-0 gap-2 px-4 py-3 transition-colors hover:bg-raised">
+    <article className="grid min-w-0 gap-2 px-4 py-3 transition-colors duration-160 ease-out hover:bg-raised/40">
       <div className="flex min-w-0 items-start justify-between gap-3">
         <div className="min-w-0">
           <strong
@@ -292,7 +292,7 @@ function JobCompactListRow({
     .filter(Boolean)
     .join(" \u00b7 ");
   return (
-    <article className="grid min-w-0 gap-2 px-4 py-3 transition-colors hover:bg-raised md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+    <article className="grid min-w-0 gap-2 px-4 py-3 transition-colors duration-160 ease-out hover:bg-raised/40 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <strong
@@ -399,7 +399,7 @@ function JobCard({ job }: { job: DashboardOverview["jobs"][number] }) {
     ...timeBits,
   ].filter(Boolean).join(" \u00b7 ");
   return (
-    <article className="grid min-w-0 gap-3 px-4 py-4 transition-colors hover:bg-raised">
+    <article className="grid min-w-0 gap-3 px-4 py-4 transition-colors duration-160 ease-out hover:bg-raised/40">
       <div className="grid min-w-0 gap-3 xl:grid-cols-[minmax(0,1fr)_auto]">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -512,8 +512,7 @@ function JobStatusBadge({
 }) {
   if (status === "running")
     return (
-      <span className="inline-flex items-center gap-1.5 border border-info/40 bg-info/10 px-2 py-1 font-mono text-[10px] font-medium uppercase leading-none tracking-[0.06em] text-info">
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+      <span className="inline-flex items-center border border-info/40 bg-info/10 px-2 py-1 font-mono text-[10px] font-medium uppercase leading-none tracking-[0.06em] text-info">
         Running
       </span>
     );

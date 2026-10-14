@@ -65,15 +65,16 @@ function StatCard({
 }) {
   const accent =
     tone === "red" ? "before:bg-crit" : tone === "amber" ? "before:bg-warn" : "before:bg-signal";
-  const valueTone = tone === "red" ? "text-crit" : tone === "amber" ? "text-warn" : "text-text";
-  const className = `relative min-w-0 border border-line bg-panel p-4 pl-5 text-left transition-colors before:absolute before:inset-y-0 before:left-0 before:w-0.5 ${accent}`;
+  const valueTone =
+    tone === "red" ? "text-crit" : tone === "amber" ? "text-warn" : "text-text";
+  const className = `relative min-w-0 border border-line bg-panel p-4 pl-5 text-left transition-colors duration-160 ease-out before:absolute before:inset-y-0 before:left-0 before:w-0.5 ${accent}`;
   const clickable = `hover:bg-raised focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal`;
   const content: ReactNode = (
     <>
-      <span className="block truncate text-[11px] uppercase tracking-[0.14em] text-dim">
+      <span className="block truncate text-[11px] font-semibold uppercase tracking-[0.14em] text-dim">
         {label}
       </span>
-      <span className={`mt-1.5 block truncate text-[15px] font-medium ${valueTone}`}>
+      <span className={`tnum mt-1.5 block truncate text-[15px] font-bold ${valueTone}`}>
         {value}
       </span>
       <span className="block truncate text-[12px] text-dim" title={sub}>

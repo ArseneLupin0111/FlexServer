@@ -169,3 +169,107 @@ Base modular spacing scale: `8px`, `16px`, `24px`, `32px`, `48px`, `80px`.
 - ❌ **No scroll traps or pinned hijacking:** Native document scroll is strictly preserved across all devices.
 - ❌ **No fabricated live data:** Illustrative previews must always carry an explicit sample indicator tag.
 - ❌ **No dashboard bypass or public demo link:** The public landing provides no unauthorized dashboard shortcut (`/vps`).
+
+---
+
+## 6. Authenticated Dashboard Workspace Specification
+
+> **CANONICAL CONTRACT:** This section defines the design system, layout architecture, and interaction requirements for the authenticated FlexServer operator console (`/vps/*`). Public landing pages and backend APIs remain strictly unchanged.
+
+### 6.1 Validated Visual Thesis (Dashboard Workspace)
+
+> **Thesis Statement:** *A high-density, flat-hairline operational console for Linux fleet operators and sysadmins.*
+
+- **Palette Continuity:** Preserves existing charcoal-lime tokens (`--ink: #0b0d0c`, `--panel: #111412`, `--raised: #181c19`, `--line: #232824`, `--signal: #c6f432`, `--info: #5ec8e5`, `--warn: #ffb02e`, `--crit: #ff5a4d`, `--text: #e4e9e2`, `--dim: #aab1ab`).
+- **Typography:**
+  - **Display, Headings & Labels:** `Instrument Sans` with compact line heights and tight tracking (`-0.02em` on titles).
+  - **Operational Telemetry & Tabular Data:** `Geist Mono` (`.tnum`) for all metrics, percentages, IP addresses, ports, durations, timestamps, and terminal commands.
+- **Surfaces & Radii:** Strict flat square panels (`0px` panel radius) with hairline 1px borders (`#232824`). Controls use crisp `0px` or `4px` radius. Zero drop shadows, zero decorative blur-glass overlays, zero neon glows.
+- **Spacing Rhythm:** Compact 8px base rhythm (`8px`, `16px`, `24px`, `32px`) maximizing data density and viewport visibility.
+- **Status Communication:** Status colors (lime, amber, red, cyan) are always paired with visible textual state labels, never color alone.
+
+### 6.2 Validated Interaction Thesis (Dashboard Workspace)
+
+> **Thesis Statement:** *Instantaneous operational feedback, deterministic panel switching, and zero sensory distraction.*
+
+- **Interactive Hover & Focus:** `160ms` transition (`transition: background-color 160ms ease-out, border-color 160ms ease-out, color 160ms ease-out`).
+- **Panel & Tab Transitions:** `240ms` opacity transitions (`opacity: 0 -> 1`, ease-out) via `AnimatePresence mode="wait"`.
+- **Scroll Behavior:** Pure native document scroll. Strictly no scroll-jacking, no parallax, no viewport reveals, and no telemetry data scaling.
+- **Busy States:** Spinners only while actually executing an asynchronous operation or loading live data; never perpetual looping animations.
+- **Reduced Motion:** When `prefers-reduced-motion: reduce` is active:
+  - All transforms and motion transitions degrade immediately (`opacity: 1`, `duration: 0s`).
+  - Background and border color hover states remain intact for interactive state clarity.
+- **5-State Rule:** All interactive elements support default, hover, focus-visible (2px lime outline with 2px offset), active (pressed feedback), and disabled (`opacity: 0.5`, `cursor: not-allowed`).
+
+### 6.3 Layout Architecture (Workspace-First)
+
+The console employs a responsive, two-tier operational layout:
+
+1. **Fleet Navigation Rail:**
+   - **Desktop (`lg+`):** Fixed left rail (`width: 17rem`, flat panel background, hairline right border). Displays brand lockup, live fleet summary (`X/Y HOSTS ONLINE` in Geist Mono), host search/filter input, server host items with status indicators and live CPU/RAM telemetry, and a prominent "+ Add new VPS" action.
+   - **Mobile (`< lg`):** Accessible mobile fleet drawer triggered via the top header hamburger button, providing identical host navigation, filtering, and VPS creation capabilities.
+
+2. **Console Header & Breadcrumb Bar:**
+   - Sticky top bar (`height: 3.5rem`, flat ink background, hairline bottom border).
+   - Breadcrumb navigation: `Servers` -> Host Display Name -> Active Workspace Tab.
+   - Telemetry connection indicator pill: `Live` (lime dot), `Connecting` (amber dot), `Reconnecting` (red dot), `Connection stale` with timestamp tooltip.
+   - Environment mode indicator (`Demo environment` or `Local environment`).
+   - Manual dashboard refresh button (animates spin only when refreshing).
+   - Local administrator account dropdown menu.
+
+3. **Persistent Host Identity Banner (`/vps/:vpsId/*`):**
+   - Visible across all workspace tabs.
+   - Top row: Back to Server list link, Host display name, Host status badge (Healthy / Warning / Down / Key ready) with status indicator dot and textual state.
+   - Metadata strip: `user@host:port` in Geist Mono, Provider & Location badges, Agent version & status, Last seen timestamp.
+   - Compact Resource Strip: Real-time gauges for CPU %, Memory %, Disk %, Load Average, and Network RX/TX throughput.
+   - Quick action shortcuts: Web Terminal launcher, SSH verification, Edit VPS dialog.
+
+4. **Horizontal Workspace Tab Bar:**
+   - Seven primary operational sections: `Overview`, `Metrics`, `Docker`, `Jobs`, `Audit`, `Terminal`, `Settings`.
+   - Horizontal scrollable on narrow viewports without clipping.
+   - Active indicator: Lime bottom border with matching text color.
+   - Smooth `240ms` ease-out panel transitions on tab switch.
+
+### 6.4 Screen-by-Screen Specifications
+
+- **Fleet Overview (`/vps`):**
+  - Fleet operational summary strip: Attention required, Resource pressure peak, Containers health, Agent gaps.
+  - Search and status filter bar + Card vs Table view toggle.
+  - Server cards / table rows with specs (OS, CPU cores, RAM, Disk), live gauges, agent lifecycle status, and action dropdown.
+- **New VPS (`/vps/new`):**
+  - High-density inline creation form: Display name, Host, Port, SSH username, Tags, Notes, optional provision password.
+  - Clear technical guidance on OpenSSH key isolation (mode 0600 on disk, zero stored passwords).
+- **Workspace Overview (`/vps/:vpsId`):**
+  - High-density KPI cards: Host health, Containers running/total, Recent jobs.
+  - CPU, Memory, Disk resource gauges with segmented meter bars.
+  - Historical utilization area charts (CPU & Memory, Network I/O throughput) with custom tooltips.
+  - Operational split: Recent Audit Events + Recent Jobs.
+  - System Facts technical table (OS, Kernel, CPU model, Cores, Memory, Disk, Provider, Location, Last check).
+- **Workspace Metrics (`/vps/:vpsId/metrics`):**
+  - Host-scoped metrics filter and category tabs.
+  - Resource pressure indicators and historical telemetry series.
+  - Alert conditions and thresholds list.
+- **Workspace Docker (`/vps/:vpsId/docker`):**
+  - Docker snapshot summary (containers running, paused, stopped).
+  - Storage overview (images, containers, volumes, build cache).
+  - Event timeline, operational alerts panel, and selectable container history chart.
+- **Container Detail (`/vps/:vpsId/docker/containers/:agentInstanceId/:containerKey`):**
+  - Addressable single container view.
+  - Read-only realtime streaming container logs.
+  - Confirmed lifecycle controls (Start, Stop, Restart) with safety confirmation modals.
+- **Workspace Jobs (`/vps/:vpsId/jobs`):**
+  - Filterable jobs queue (All, Queued, Running, Completed, Failed).
+  - Execution cards with command strings in Geist Mono, duration, and expandable log output.
+- **Workspace Audit (`/vps/:vpsId/audit`):**
+  - Chronological security and audit event stream with event type badges, actor, resource ID, IP address, and timestamps.
+- **Workspace Terminal (`/vps/:vpsId/terminal`):**
+  - Full-screen loopback Web terminal using `@xterm/xterm`.
+  - Connection status pill, disconnect/reconnect actions, keyboard shortcut hints.
+- **Workspace Settings (`/vps/:vpsId/settings`):**
+  - Scoped and global runtime settings toggles.
+  - Local agent supervisor status card with heartbeat timeline and rollback-safe updater.
+
+### 6.5 Allowed Patterns & Boundaries
+
+- **Allowed:** Mono telemetry (`.tnum`), hairline borders (`#232824`), status colors strictly accompanied by textual labels, spinners only while actively executing an operation.
+- **Forbidden:** Looping ambient animations, blurred glass panels, neon glows, drop shadows, scroll-jacking, fabricated or unverified live telemetry.

@@ -301,11 +301,11 @@ function MetricStat({
   tone?: Tone;
 }) {
   return (
-    <div className="border border-line bg-panel p-4">
-      <div className="text-[11px] uppercase tracking-[0.14em] text-dim">
+    <div className="border border-line bg-panel p-4 transition-colors duration-160 ease-out hover:bg-raised/40">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-dim">
         {label}
       </div>
-      <div className={`tnum mt-1.5 text-2xl font-medium ${tone ? toneText[tone] : ""}`}>
+      <div className={`tnum mt-1.5 text-2xl font-bold tracking-tight ${tone ? toneText[tone] : ""}`}>
         {value}
       </div>
       <div className="mt-0.5 truncate text-[12px] text-dim" title={sub}>

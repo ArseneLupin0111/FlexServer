@@ -23,11 +23,11 @@ function RuntimeFact({
         ? "text-warn"
         : "text-text";
   return (
-    <div className="bg-panel p-4">
-      <dt className="text-[11px] uppercase tracking-[0.14em] text-dim">
+    <div className="bg-panel p-4 transition-colors duration-160 ease-out hover:bg-raised/40">
+      <dt className="text-[11px] font-semibold uppercase tracking-[0.14em] text-dim">
         {label}
       </dt>
-      <dd className={`tnum mt-1 text-[13px] ${toneClass}`}>{value}</dd>
+      <dd className={`tnum mt-1 font-mono text-[13px] font-medium ${toneClass}`}>{value}</dd>
     </div>
   );
 }

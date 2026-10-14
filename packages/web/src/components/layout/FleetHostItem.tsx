@@ -56,10 +56,10 @@ export function FleetHostItem({
       aria-current={selected ? "page" : undefined}
       aria-label={`Host ${name}`}
       className={cn(
-        "block min-w-[13rem] shrink-0 border-b border-l-2 border-b-[hsl(var(--telemetry-border))] px-4 py-3 text-left transition-colors focus-visible:outline-2 focus-visible:outline-signal lg:min-w-0 lg:w-full lg:shrink",
+        "block min-w-[13rem] shrink-0 border-b border-l-2 border-b-line px-4 py-3 text-left transition-colors duration-160 ease-out focus-visible:outline-2 focus-visible:outline-signal lg:min-w-0 lg:w-full lg:shrink",
         selected
-          ? "border-l-signal bg-raised"
-          : "border-l-transparent hover:bg-raised/60",
+          ? "border-l-signal bg-raised text-text"
+          : "border-l-transparent text-dim hover:bg-raised/70 hover:text-text",
       )}
     >
       <span className="flex items-center gap-2">
@@ -68,7 +68,6 @@ export function FleetHostItem({
           className={cn(
             "h-1.5 w-1.5 shrink-0 rounded-full",
             statusDotClass(status),
-            needsAttention && "pulse",
           )}
         />
         <span className="tnum min-w-0 flex-1 truncate font-medium text-text">

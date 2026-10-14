@@ -38,7 +38,7 @@ export function DockerCapabilityNotice({
         role="status"
       >
         <p className="flex items-center gap-2 text-[13px] text-text">
-          <span className="pulse h-2 w-2 rounded-full bg-info" />
+          <span className="h-2 w-2 rounded-full bg-info" />
           Waiting for Docker-capable agent.
         </p>
         <p className="mt-1 pl-4 text-[12px] text-dim">

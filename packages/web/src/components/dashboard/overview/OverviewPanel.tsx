@@ -45,18 +45,29 @@ function Kpi({
         : tone === "idle"
           ? "text-dim"
           : "text-text";
+  const dotClass =
+    tone === "crit"
+      ? "bg-crit"
+      : tone === "warn"
+        ? "bg-warn"
+        : tone === "idle"
+          ? "bg-line"
+          : "bg-signal";
   return (
-    <div className="min-w-0 border border-line bg-panel px-4 py-3">
-      <p className="text-[12px] uppercase tracking-wider text-dim">
-        {label}
-      </p>
+    <div className="min-w-0 border border-line bg-panel px-4 py-3 transition-colors duration-160 ease-out hover:bg-raised/40">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-dim">
+          {label}
+        </p>
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotClass}`} aria-hidden="true" />
+      </div>
       <p
-        className={`tnum mt-1 truncate text-xl font-medium ${valueTone}`}
+        className={`tnum mt-1 truncate text-xl font-bold tracking-tight ${valueTone}`}
         title={value}
       >
         {value}
       </p>
-      <p className="mt-1 text-[12px] leading-5 text-dim">
+      <p className="mt-1 truncate text-[12px] leading-5 text-dim" title={sub}>
         {sub}
       </p>
     </div>

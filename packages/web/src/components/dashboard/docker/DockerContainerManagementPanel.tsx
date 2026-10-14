@@ -744,7 +744,7 @@ export function DockerContainerManagementPanel({
                 const next = parsePairValue(event.target.value);
                 setTargetPair(next);
               }}
-              className="h-8 w-full border border-line bg-ink px-2 text-[12px] text-text focus:border-signal focus:outline-none"
+              className="h-8 w-full border border-line bg-ink px-2 text-[12px] text-text transition-colors duration-160 ease-out focus:border-signal focus:outline-none"
             >
               {targetPair === null ? (
                 <option value="">No container reported…</option>
@@ -814,7 +814,7 @@ export function DockerContainerManagementPanel({
 
         <div
           aria-live="polite"
-          className="mt-3 border border-line bg-raised px-3 py-2"
+          className="mt-3 border border-line bg-panel p-3 transition-colors duration-160 ease-out hover:bg-raised/40"
         >
           <p className="text-[11px] font-medium text-text">
             Operation status:{" "}
@@ -977,7 +977,7 @@ export function DockerContainerManagementPanel({
                 <pre
                   ref={preRef}
                   data-testid="docker-log-body"
-                  className="tnum mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words border border-line bg-ink p-4 text-[12px] leading-5 text-dim"
+                  className="tnum mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words border border-line bg-ink p-4 font-mono text-[12px] leading-5 text-text"
                   onScroll={(event) => {
                     const element = event.currentTarget;
                     // Auto-scroll only holds while the reader stayed at the

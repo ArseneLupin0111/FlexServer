@@ -58,6 +58,9 @@
     --telemetry-memory: var(--info);
     --telemetry-rx: var(--warn);
     --telemetry-tx: var(--crit);
+    --dur-hover: 160ms;
+    --dur-panel: 240ms;
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   * {
@@ -103,6 +106,12 @@
   .pulse {
     animation: pulse-dot 1.8s ease-in-out infinite;
   }
+
+  .transition-hover {
+    transition: background-color var(--dur-hover) var(--ease-out),
+      border-color var(--dur-hover) var(--ease-out),
+      color var(--dur-hover) var(--ease-out);
+  }
 }
 
 @keyframes pulse-dot {
@@ -110,6 +119,21 @@
   50% { opacity: 0.35; }
 }
 
+/* Dashboard flat menus: strictly no glass overlays */
+.dashboard-root [data-radix-popper-content-wrapper] > *,
+.dashboard-root [role="menu"] {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* Reduced motion strictly scoped to dashboard without overriding public landing or color transitions */
 @media (prefers-reduced-motion: reduce) {
-  .pulse { animation: none; }
+  .dashboard-root,
+  .dashboard-root *,
+  .dashboard-root *::before,
+  .dashboard-root *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
 }

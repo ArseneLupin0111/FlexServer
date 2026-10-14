@@ -1,5 +1,7 @@
+import { useState } from "react";
 import {
   LogOut,
+  Menu,
   RefreshCw,
   Settings,
   ShieldCheck,
@@ -19,9 +21,9 @@ import {
 } from "../ui/dropdown-menu";
 import { cn } from "../../lib/utils";
 import { FleetSidebar } from "./FleetSidebar";
+import { FleetDrawer } from "./FleetDrawer";
 import type { DashboardOverview, VpsRecord } from "../../lib/api";
 import { BrandMark } from "../Brand";
-
 export type LiveConnectionState =
   | { status: "connecting" }
   | { status: "live"; latestEventAt: string }
@@ -51,6 +53,7 @@ export function DashboardShell({
   metrics,
   children,
 }: Props) {
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const { pathname } = useLocation();
   const isVpsList = pathname === "/vps";
   const isVpsNew = pathname === "/vps/new";
@@ -65,7 +68,7 @@ export function DashboardShell({
         : "Dashboard";
 
   return (
-    <main className="min-h-screen w-full bg-ink text-text lg:flex">
+    <main className="dashboard-root min-h-screen w-full bg-ink text-text lg:flex">
       <FleetSidebar hosts={hosts} metrics={metrics} selectedHostId={isWorkspace ? pathname.split("/")[2] : undefined} />
       <div className="min-w-0 flex-1">
       <header className="flex h-14 items-center justify-between gap-3 border-b border-line bg-ink px-4 sm:px-6">
@@ -73,6 +76,15 @@ export function DashboardShell({
           aria-label="Dashboard context"
           className="flex min-w-0 flex-1 items-center gap-2 text-[13px] sm:gap-3"
         >
+          <button
+            type="button"
+            onClick={() => setDrawerOpen(true)}
+            aria-label="Open fleet navigation"
+            className="inline-flex h-8 w-8 items-center justify-center border border-line bg-panel text-dim transition-colors duration-160 ease-out hover:bg-raised hover:text-text focus-visible:outline-2 focus-visible:outline-signal lg:hidden"
+          >
+            <Menu size={15} aria-hidden="true" />
+          </button>
+
           <Link
             to="/vps"
             aria-label="FlexServer — go to servers"
@@ -132,6 +144,13 @@ export function DashboardShell({
         {children}
       </div>
       </div>
+      <FleetDrawer
+        open={drawerOpen}
+        onOpenChange={setDrawerOpen}
+        hosts={hosts}
+        metrics={metrics}
+        selectedHostId={isWorkspace ? pathname.split("/")[2] : undefined}
+      />
     </main>
   );
 }
@@ -173,7 +192,7 @@ function LiveStatus({ state }: { state: LiveConnectionState }) {
         className={cn(
           "h-1.5 w-1.5 rounded-full",
           state.status === "live"
-            ? "pulse bg-signal"
+            ? "bg-signal"
             : state.status === "connecting"
               ? "bg-warn"
               : "bg-crit",

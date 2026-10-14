@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — authenticated dashboard workspace redesign
+
+- Redesign the authenticated FlexServer operator console (`/vps/*`) following the approved visual and interaction theses without altering public landing pages, backend logic, or external APIs.
+- Implement a workspace-first layout featuring a desktop fleet navigation sidebar with live search filtering, status indicators, and Geist Mono telemetry, accompanied by a mobile fleet navigation drawer triggered from the console header.
+- Add a persistent host identity banner across all server workspace tabs displaying host status with textual labels, agent state, `user@host:port` metadata in Geist Mono, provider/location badges, last seen timestamps, and quick action shortcuts.
+- Add a compact resource telemetry strip displaying live CPU, RAM, Disk, Load Average, and RX/TX throughput gauges with threshold-based color progression.
+- Add horizontally scrollable workspace navigation tabs with active lime indicators and smooth 240ms ease-out panel transitions via `motion/react`.
+- Standardize interaction transitions to 160ms ease-out for hover, focus, and state feedback across all dashboard cards, tables, meters, job rows, and audit events.
+- Update `MASTER.md` design system master specification with Section 6 covering the authenticated dashboard console contracts.
+- Display `n/a` for missing network telemetry instead of implying measured zero traffic; hide the desktop fleet rail below `lg` so mobile navigation uses only the drawer.
+- Verified frontend typecheck and production build, desktop/mobile browser rendering, fleet table/search, drawer open/close and Escape, and all host workspace routes. Runtime exposed Docker monitoring-off and terminal-disabled states; live container controls, SSH sessions, and populated telemetry were not exercised. The production bundle still triggers Vite's >500 kB chunk warning.
+
 ## Unreleased — parallel CI verification
 
 - Run Node, installer, updater and Go checks independently of Docker image build/security verification after change detection. Keep identity checks, SBOMs and digest-based deployment mandatory.

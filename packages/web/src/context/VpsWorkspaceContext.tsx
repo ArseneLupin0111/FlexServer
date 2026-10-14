@@ -1,6 +1,9 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Server } from "lucide-react";
-import { Link, NavLink, Outlet, useParams } from "react-router-dom";
+import { ArrowLeft, Server, TerminalSquare, Settings as SettingsIcon } from "lucide-react";
+import { Link, NavLink, Outlet, useLocation, useParams } from "react-router-dom";
+import { motion, AnimatePresence } from "motion/react";
+import { cn } from "../lib/utils";
+import { formatThroughput } from "../components/dashboard/metrics/historySeries";
 import {
   AuditPanel,
   JobsPanel,
@@ -34,7 +37,7 @@ import {
 } from "../lib/api";
 import { subscribeMonitoring } from "../lib/live-api";
 import { useDashboard } from "./DashboardContext";
-import { serverStatusLabel, vpsDisplayName } from "../lib/dashboard-formatters";
+import { freshnessLabel, serverStatusLabel, vpsDisplayName } from "../lib/dashboard-formatters";
 import { DockerMetricsPanel } from "../components/dashboard/servers/DockerMetricsPanel";
 import { DockerCapabilityNotice } from "../components/dashboard/docker/DockerCapabilityNotice";
 import { DockerHistoryChart } from "../components/dashboard/docker/DockerHistoryChart";
@@ -90,8 +93,8 @@ const workspaceSubPages = [
 
 export function VpsWorkspaceLayout() {
   const { vpsId } = useParams<{ vpsId: string }>();
+  const location = useLocation();
   const ctx = useDashboard();
-
   // ── Scoped REST bootstrap state ────────────────────────────────────
   const [scopedBootstrap, setScopedBootstrap] = useState<
     Record<
@@ -221,33 +224,194 @@ export function VpsWorkspaceLayout() {
   };
 
   const workspaceValue: VpsWorkspaceCtx = { vps, overview };
+  const latestMetric = metrics[0];
+  const cpuVal = latestMetric?.cpu;
+  const memVal = latestMetric?.memory;
+  const diskVal = latestMetric?.disk;
+  const loadVal = latestMetric?.loadAverage;
+  const netRx = latestMetric?.networkRx;
+  const netTx = latestMetric?.networkTx;
 
   return (
     <VpsWorkspaceContext.Provider value={workspaceValue}>
       <div className="min-w-0">
-        <Link
-          to="/vps"
-          className="inline-flex min-h-8 items-center gap-1.5 text-[13px] text-dim transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-signal"
-        >
-          <ArrowLeft size={14} aria-hidden="true" />
-          Server list
-        </Link>
+        <div className="mb-2">
+          <Link
+            to="/vps"
+            className="inline-flex min-h-8 items-center gap-1.5 text-xs text-dim transition-colors duration-160 ease-out hover:text-text focus-visible:outline-2 focus-visible:outline-signal"
+          >
+            <ArrowLeft size={13} aria-hidden="true" />
+            Server list
+          </Link>
+        </div>
 
-        <div className="mt-2 flex min-w-0 items-center gap-4">
-          <div className="min-w-0">
-            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-              <h1 className="min-w-0 truncate text-2xl font-semibold tracking-tight text-text">
-                {displayName}
-              </h1>
-              <WorkspaceStatusBadge status={vps.status} />
+        {/* Persistent Host Identity Banner & Compact Resource Strip */}
+        <div className="mb-4 border border-line bg-panel p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <h1 className="truncate text-xl font-bold tracking-tight text-text sm:text-2xl">
+                  {displayName}
+                </h1>
+                <WorkspaceStatusBadge status={vps.status} />
+                {vps.agentStatus ? (
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1 border px-2 py-0.5 text-[11px] font-medium",
+                      vps.agentStatus === "online"
+                        ? "border-signal/40 bg-signal/10 text-signal"
+                        : "border-line bg-raised text-dim",
+                    )}
+                  >
+                    Agent {vps.agentStatus}
+                  </span>
+                ) : null}
+              </div>
+              <div className="tnum mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-dim">
+                <span className="font-mono">{vps.username}@{vps.host}:{vps.port}</span>
+                {vps.provider ? <span>· {vps.provider}</span> : null}
+                {vps.city || vps.country ? (
+                  <span>· {[vps.city, vps.country].filter(Boolean).join(", ")}</span>
+                ) : null}
+                {latestMetric?.collectedAt ? (
+                  <span>· Last seen {freshnessLabel(latestMetric.collectedAt)}</span>
+                ) : null}
+              </div>
             </div>
-            <div className="tnum truncate text-[13px] text-dim">
-              {vps.username}@{vps.host}:{vps.port}
+
+            {/* Quick action shortcuts */}
+            <div className="flex flex-wrap items-center gap-2">
+              <Link
+                to="terminal"
+                className="inline-flex h-8 items-center gap-1.5 border border-line bg-ink px-2.5 text-xs font-medium text-text transition-colors duration-160 ease-out hover:border-signal hover:text-signal focus-visible:outline-2 focus-visible:outline-signal"
+              >
+                <TerminalSquare size={13} aria-hidden="true" />
+                Terminal
+              </Link>
+              <Link
+                to="settings"
+                className="inline-flex h-8 items-center gap-1.5 border border-line bg-ink px-2.5 text-xs font-medium text-text transition-colors duration-160 ease-out hover:border-signal hover:text-signal focus-visible:outline-2 focus-visible:outline-signal"
+              >
+                <SettingsIcon size={13} aria-hidden="true" />
+                Settings
+              </Link>
+            </div>
+          </div>
+
+          {/* Compact Resource Strip */}
+          <div className="mt-3.5 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-line/60 pt-3 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] uppercase tracking-wider text-dim">CPU</span>
+              <span
+                className={cn(
+                  "tnum font-medium",
+                  cpuVal != null && cpuVal >= 85
+                    ? "text-crit"
+                    : cpuVal != null && cpuVal >= 70
+                      ? "text-warn"
+                      : "text-text",
+                )}
+              >
+                {cpuVal != null ? `${cpuVal.toFixed(1)}%` : "n/a"}
+              </span>
+              {cpuVal != null ? (
+                <div className="h-1.5 w-12 overflow-hidden bg-line">
+                  <div
+                    className={cn(
+                      "h-full",
+                      cpuVal >= 85 ? "bg-crit" : cpuVal >= 70 ? "bg-warn" : "bg-signal",
+                    )}
+                    style={{ width: `${Math.min(100, Math.max(0, cpuVal))}%` }}
+                  />
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] uppercase tracking-wider text-dim">RAM</span>
+              <span
+                className={cn(
+                  "tnum font-medium",
+                  memVal != null && memVal >= 85
+                    ? "text-crit"
+                    : memVal != null && memVal >= 70
+                      ? "text-warn"
+                      : "text-text",
+                )}
+              >
+                {memVal != null ? `${memVal.toFixed(1)}%` : "n/a"}
+              </span>
+              {memVal != null ? (
+                <div className="h-1.5 w-12 overflow-hidden bg-line">
+                  <div
+                    className={cn(
+                      "h-full",
+                      memVal >= 85 ? "bg-crit" : memVal >= 70 ? "bg-warn" : "bg-info",
+                    )}
+                    style={{ width: `${Math.min(100, Math.max(0, memVal))}%` }}
+                  />
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] uppercase tracking-wider text-dim">Disk</span>
+              <span
+                className={cn(
+                  "tnum font-medium",
+                  diskVal != null && diskVal >= 85
+                    ? "text-crit"
+                    : diskVal != null && diskVal >= 70
+                      ? "text-warn"
+                      : "text-text",
+                )}
+              >
+                {diskVal != null ? `${diskVal.toFixed(1)}%` : "n/a"}
+              </span>
+              {diskVal != null ? (
+                <div className="h-1.5 w-12 overflow-hidden bg-line">
+                  <div
+                    className={cn(
+                      "h-full",
+                      diskVal >= 85 ? "bg-crit" : diskVal >= 70 ? "bg-warn" : "bg-signal",
+                    )}
+                    style={{ width: `${Math.min(100, Math.max(0, diskVal))}%` }}
+                  />
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] uppercase tracking-wider text-dim">Load</span>
+              <span className="tnum font-medium text-text">
+                {loadVal != null ? loadVal.toFixed(2) : "n/a"}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] uppercase tracking-wider text-dim">Net I/O</span>
+              <span className="tnum text-dim">
+                {netRx != null || netTx != null ? (
+                  <>
+                    <span className="font-medium text-text">
+                      {netRx != null ? formatThroughput(netRx) : "n/a"}
+                    </span>{" "}
+                    RX /{" "}
+                    <span className="font-medium text-text">
+                      {netTx != null ? formatThroughput(netTx) : "n/a"}
+                    </span>{" "}
+                    TX
+                  </>
+                ) : (
+                  <span className="font-medium text-text">n/a</span>
+                )}
+              </span>
             </div>
           </div>
         </div>
 
-        <div className="mt-4 overflow-x-auto border-b border-line [scrollbar-width:thin]">
+        {/* Workspace Horizontal Navigation Tabs */}
+        <div className="overflow-x-auto border-b border-line [scrollbar-width:thin]">
           <nav
             aria-label={`${displayName} workspace sections`}
             className="flex w-max min-w-full items-center"
@@ -259,10 +423,10 @@ export function VpsWorkspaceLayout() {
                 to={page.to || ""}
                 className={({ isActive }) =>
                   [
-                    "-mb-px inline-flex min-h-11 shrink-0 items-center whitespace-nowrap border-b-2 px-4 py-3 text-[13px] font-medium transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal",
+                    "-mb-px inline-flex min-h-11 shrink-0 items-center whitespace-nowrap border-b-2 px-4 py-3 text-[13px] font-medium transition-colors duration-160 ease-out focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal",
                     isActive
-                      ? "border-signal text-signal"
-                      : "border-transparent text-dim hover:text-text",
+                      ? "border-signal bg-raised/20 text-signal"
+                      : "border-transparent text-dim hover:bg-raised/30 hover:text-text",
                   ].join(" ")
                 }
               >
@@ -272,9 +436,19 @@ export function VpsWorkspaceLayout() {
           </nav>
         </div>
 
-        <div className="mt-5 min-w-0">
-          <Outlet />
-        </div>
+        {/* Smooth 240ms Animated Content Transition */}
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={location.pathname}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+            className="mt-5 min-w-0"
+          >
+            <Outlet />
+          </motion.div>
+        </AnimatePresence>
       </div>
     </VpsWorkspaceContext.Provider>
   );
@@ -296,9 +470,7 @@ function WorkspaceStatusBadge({ status }: { status?: VpsRecord["status"] }) {
     >
       <i
         aria-hidden="true"
-        className={`h-1.5 w-1.5 rounded-full bg-current ${
-          status === "healthy" ? "pulse" : ""
-        }`}
+        className="h-1.5 w-1.5 rounded-full bg-current"
       />
       Host {label.toLowerCase()}
     </span>

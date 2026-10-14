@@ -46,7 +46,7 @@ function ContainerRow({ container, name, stale, roomy = false, linkTo }: { conta
   const rowTone = running ? "" : isUnhealthy(container) ? "bg-crit/[0.04]" : "bg-warn/[0.04]";
   return (
     <li
-      className={`${rowBase} hover:bg-raised ${roomy ? "py-2.5 text-[13px] sm:grid-cols-[minmax(0,1fr)_6rem_4.5rem_5.5rem_3.5rem] sm:px-4" : "py-2 text-[11px]"} ${rowTone}`}
+      className={`${rowBase} transition-colors duration-160 ease-out hover:bg-raised/40 ${roomy ? "py-2.5 text-[13px] sm:grid-cols-[minmax(0,1fr)_6rem_4.5rem_5.5rem_3.5rem] sm:px-4" : "py-2 text-[11px]"} ${rowTone}`}
       title={`${container.name} · ${container.image} · ${container.status ?? container.state}`}
     >
       <span className="flex min-w-0 items-center gap-2">
@@ -135,7 +135,7 @@ export function DockerMetricsPanel({ vps, dockerMetrics, busy, onToggle, present
 
   let body: ReactNode;
   if (!enabled) body = <div className="border border-line bg-raised p-3"><p className="text-[13px] font-medium text-text">Docker monitoring is off.</p><p className="mt-1 text-[11px] text-dim">Enable it to see container health and resource usage.</p></div>;
-  else if (!dockerMetrics) body = <div className="space-y-1" role="status"><div className="flex items-center gap-2 text-[12px] text-dim"><span className="pulse h-2 w-2 rounded-full bg-info" aria-hidden="true" />Waiting for Docker-capable agent.</div><p className="pl-4 text-[11px] text-dim">The first snapshot will appear here automatically.</p></div>;
+  else if (!dockerMetrics) body = <div className="space-y-1" role="status"><div className="flex items-center gap-2 text-[12px] text-dim"><span className="h-2 w-2 rounded-full bg-info" aria-hidden="true" />Waiting for Docker-capable agent.</div><p className="pl-4 text-[11px] text-dim">The first snapshot will appear here automatically.</p></div>;
   else if (!dockerMetrics.available) body = <div className="border border-crit/30 bg-crit/5 p-3" role="status"><p className="text-[13px] font-medium text-crit">Docker unavailable</p><p className="mt-1 text-[11px] leading-relaxed text-dim">{formatDockerError(dockerMetrics.errorCode)}</p>{updatedAt ? <p className="mt-2 text-[11px] text-dim">Last checked {freshnessLabel(updatedAt)}</p> : null}</div>;
   else if (!detail) body = <div className="space-y-2.5">
     <HealthSummary runningCount={runningCount} stoppedCount={stoppedCount} unhealthyCount={unhealthyCount} />
@@ -162,7 +162,7 @@ export function DockerMetricsPanel({ vps, dockerMetrics, busy, onToggle, present
   const snapshotStrip = detail && enabled && dockerMetrics?.available ? (
     <div className={`flex flex-wrap items-center gap-x-6 gap-y-2 border px-4 py-3 text-[13px] ${notLive ? "border-warn/30 bg-warn/5" : "border-signal/30 bg-signal/5"}`} role="status">
       <span className={`flex items-center gap-2 font-medium ${notLive ? "text-warn" : "text-signal"}`}>
-        {snapshotState === "live" ? <i className="pulse h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" /> : null}
+        {snapshotState === "live" ? <i className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" /> : null}
         {snapshotState === "live" ? "Live snapshot" : snapshotState === "stale" ? "Saved snapshot · not live" : "Saved snapshot · freshness unknown · not live"}
       </span>
       <span className="text-dim">{updatedAt ? `Updated ${freshnessLabel(updatedAt)}` : "Update time unavailable"}{dockerMetrics.ageSeconds != null ? ` · ${dockerMetrics.ageSeconds}s old` : ""}</span>

@@ -141,7 +141,7 @@ export function AuditPanel({
                   return (
                     <article
                       key={event.id}
-                      className="grid min-w-0 gap-2 px-4 py-3 text-[13px] leading-6 text-dim transition-colors hover:bg-raised sm:grid-cols-[minmax(0,11rem)_minmax(0,1fr)_auto_auto] sm:items-center"
+                      className="grid min-w-0 gap-2 px-4 py-3 text-[13px] leading-6 text-dim transition-colors duration-160 ease-out hover:bg-raised/40 sm:grid-cols-[minmax(0,11rem)_minmax(0,1fr)_auto_auto] sm:items-center"
                     >
                       <span className="tnum text-dim sm:whitespace-nowrap">
                         {formatDate(event.timestamp)}

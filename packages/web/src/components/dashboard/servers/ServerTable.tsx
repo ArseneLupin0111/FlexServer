@@ -127,7 +127,7 @@ export function ServerTable({
                 <tr
                   key={vps.id}
                   aria-label={`Server ${displayName}`}
-                  className="border-b border-line transition-colors hover:bg-raised"
+                  className="border-b border-line transition-colors duration-160 ease-out hover:bg-raised/40"
                 >
                   <td className="px-4 py-3">
                     <Link

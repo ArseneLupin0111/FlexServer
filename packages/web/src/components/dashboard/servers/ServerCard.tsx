@@ -133,7 +133,7 @@ export function ServerCard({
   return (
     <article
       aria-label={`Server ${displayName}`}
-      className={`min-w-0 overflow-hidden border bg-panel transition-colors ${isDown ? "border-crit/30" : "border-line hover:border-dim/60"}`}
+      className={`min-w-0 overflow-hidden border bg-panel transition-colors duration-160 ease-out hover:bg-raised/10 ${isDown ? "border-crit/40" : "border-line hover:border-dim/60"}`}
     >
       <div className="grid min-w-0 gap-5 p-5">
         {/* Compact identity; full metadata lives in the VPS overview. */}
@@ -432,7 +432,7 @@ function ServerHealthStatus({ status }: { status?: VpsRecord["status"] }) {
       aria-label={`Host status: ${label}`}
       title={`Host status: ${label}`}
     >
-      <span className={`h-1.5 w-1.5 rounded-full bg-current ${status === "healthy" ? "pulse" : ""}`} aria-hidden="true" />
+      <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
       <span aria-hidden="true">{label}</span>
     </span>
   );

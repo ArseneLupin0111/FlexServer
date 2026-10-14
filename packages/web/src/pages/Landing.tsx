@@ -434,6 +434,397 @@ function SecurityPreview() {
   );
 }
 
+/* ── Fleet Workspace Sample Data & Component ── */
+
+interface SampleHost {
+  id: string;
+  name: string;
+  ip: string;
+  region: string;
+  os: string;
+  uptime: string;
+  load: string;
+  vcpus: number;
+  cpuModel: string;
+  cpuPercent: number;
+  memoryUsedGb: string;
+  memoryTotalGb: string;
+  memoryCacheGb: string;
+  memoryPercent: number;
+  diskUsedGb: string;
+  diskTotalGb: string;
+  diskType: string;
+  diskPercent: number;
+  containers: Array<{
+    name: string;
+    image: string;
+    cpu: string;
+    memory: string;
+    port: string;
+    healthy?: boolean;
+  }>;
+  recentJob: {
+    id: string;
+    name: string;
+    status: string;
+    duration: string;
+    keyType: string;
+  };
+}
+
+const SAMPLE_FLEET: SampleHost[] = [
+  {
+    id: "vps-prod-01",
+    name: "vps-prod-01",
+    ip: "198.51.100.24",
+    region: "US-East (N. Virginia)",
+    os: "Ubuntu 24.04 LTS (x86_64)",
+    uptime: "42d 8h",
+    load: "0.34, 0.41, 0.38",
+    vcpus: 4,
+    cpuModel: "EPYC 7763",
+    cpuPercent: 18.4,
+    memoryUsedGb: "3.38",
+    memoryTotalGb: "8.00",
+    memoryCacheGb: "1.15",
+    memoryPercent: 42.2,
+    diskUsedGb: "31.8",
+    diskTotalGb: "79.3",
+    diskType: "NVMe",
+    diskPercent: 40.1,
+    containers: [
+      { name: "caddy-edge", image: "2.8-alpine", cpu: "0.4%", memory: "28 MB", port: "80/443" },
+      { name: "postgres-16", image: "16.3-alpine", cpu: "1.2%", memory: "184 MB", port: "5432", healthy: true },
+      { name: "redis-cache", image: "7.2-alpine", cpu: "0.1%", memory: "14 MB", port: "6379" },
+      { name: "node-api", image: "v20.14-distroless", cpu: "0.8%", memory: "92 MB", port: "3001" },
+    ],
+    recentJob: {
+      id: "8841",
+      name: "cron-backup-check",
+      status: "Exit 0",
+      duration: "1.4s",
+      keyType: "Ed25519 · mode 0600",
+    },
+  },
+  {
+    id: "vps-db-02",
+    name: "vps-db-02",
+    ip: "198.51.100.32",
+    region: "EU-West (Frankfurt)",
+    os: "Debian 12 Bookworm (x86_64)",
+    uptime: "128d 4h",
+    load: "1.12, 0.98, 0.84",
+    vcpus: 8,
+    cpuModel: "Xeon Gold 6338",
+    cpuPercent: 34.8,
+    memoryUsedGb: "10.96",
+    memoryTotalGb: "16.00",
+    memoryCacheGb: "3.40",
+    memoryPercent: 68.5,
+    diskUsedGb: "148.8",
+    diskTotalGb: "240.0",
+    diskType: "NVMe RAID1",
+    diskPercent: 62.0,
+    containers: [
+      { name: "postgres-primary", image: "16.3-alpine", cpu: "2.8%", memory: "4.2 GB", port: "5432", healthy: true },
+      { name: "timescale-ext", image: "pg16-ts2.14", cpu: "1.6%", memory: "2.1 GB", port: "5433" },
+      { name: "wal-g-backup", image: "v3.0.1", cpu: "0.0%", memory: "48 MB", port: "cron" },
+    ],
+    recentJob: {
+      id: "8839",
+      name: "pg-wal-archive-verify",
+      status: "Exit 0",
+      duration: "3.2s",
+      keyType: "Ed25519 · mode 0600",
+    },
+  },
+  {
+    id: "vps-edge-03",
+    name: "vps-edge-03",
+    ip: "198.51.100.45",
+    region: "AP-South (Singapore)",
+    os: "Alpine Linux 3.20 (x86_64)",
+    uptime: "15d 19h",
+    load: "0.12, 0.15, 0.09",
+    vcpus: 2,
+    cpuModel: "EPYC 7443P",
+    cpuPercent: 8.2,
+    memoryUsedGb: "0.96",
+    memoryTotalGb: "4.00",
+    memoryCacheGb: "0.41",
+    memoryPercent: 24.1,
+    diskUsedGb: "9.7",
+    diskTotalGb: "50.0",
+    diskType: "SSD",
+    diskPercent: 19.4,
+    containers: [
+      { name: "traefik-proxy", image: "v3.0", cpu: "0.6%", memory: "42 MB", port: "80/443" },
+      { name: "prom-node-agent", image: "v1.8.1", cpu: "0.2%", memory: "18 MB", port: "9100" },
+    ],
+    recentJob: {
+      id: "8835",
+      name: "reload-tls-certificates",
+      status: "Exit 0",
+      duration: "0.8s",
+      keyType: "Ed25519 · mode 0600",
+    },
+  },
+];
+
+function FleetWorkspacePreview({
+  shouldReduceMotion,
+}: {
+  shouldReduceMotion: boolean | null;
+}) {
+  const [selectedHostIndex, setSelectedHostIndex] = useState(0);
+  const hostTabRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  const handleHostKeyDown = (e: KeyboardEvent<HTMLElement>) => {
+    const count = SAMPLE_FLEET.length;
+    let targetIndex = -1;
+    if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+      e.preventDefault();
+      targetIndex = (selectedHostIndex + 1) % count;
+    } else if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      targetIndex = (selectedHostIndex - 1 + count) % count;
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      targetIndex = 0;
+    } else if (e.key === "End") {
+      e.preventDefault();
+      targetIndex = count - 1;
+    }
+
+    if (targetIndex >= 0) {
+      setSelectedHostIndex(targetIndex);
+      hostTabRefs.current[targetIndex]?.focus();
+    }
+  };
+
+  const host = SAMPLE_FLEET[selectedHostIndex];
+
+  return (
+    <div className="workspace-showcase-card" aria-label="Illustrative Fleet Workspace Console">
+      {/* Top Chrome Bar */}
+      <div className="workspace-chrome-bar">
+        <div className="workspace-chrome-left">
+          <div className="chrome-dots" aria-hidden="true">
+            <span className="chrome-dot" />
+            <span className="chrome-dot" />
+            <span className="chrome-dot" />
+          </div>
+          <div className="workspace-chrome-title">
+            <Server size={14} className="landing-inline-icon" aria-hidden="true" />
+            <span>OPERATOR CONSOLE</span>
+          </div>
+          <span className="workspace-mode-pill">Local Mode</span>
+          <span className="chrome-pill">
+            <span className="pulse-dot" />
+            3 Hosts Connected
+          </span>
+        </div>
+
+        <div className="workspace-chrome-right">
+          <span className="preview-sample-badge">[Illustrative Preview · Static Sample Telemetry]</span>
+        </div>
+      </div>
+
+      {/* Main Workspace Interior */}
+      <div className="workspace-interior">
+        {/* Left Host Rail */}
+        <aside className="workspace-host-rail" aria-label="Sample Fleet Rail">
+          <div className="workspace-rail-head">
+            <span>FLEET INVENTORY</span>
+            <span className="tnum">3 Nodes</span>
+          </div>
+
+          <div
+            className="workspace-rail-list"
+            role="tablist"
+            aria-label="Sample Fleet Hosts"
+            onKeyDown={handleHostKeyDown}
+          >
+            {SAMPLE_FLEET.map((item, idx) => {
+              const isSelected = selectedHostIndex === idx;
+              return (
+                <button
+                  key={item.id}
+                  ref={(el) => {
+                    hostTabRefs.current[idx] = el;
+                  }}
+                  id={`workspace-tab-${item.id}`}
+                  type="button"
+                  role="tab"
+                  tabIndex={isSelected ? 0 : -1}
+                  aria-selected={isSelected}
+                  aria-controls={`workspace-panel-${item.id}`}
+                  className={`workspace-host-btn ${isSelected ? "is-active" : ""}`}
+                  onClick={() => setSelectedHostIndex(idx)}
+                >
+                  <div className="workspace-host-btn-top">
+                    <div className="workspace-host-name-row">
+                      <span className={`status-indicator-dot ${isSelected ? "is-pulse" : ""}`} />
+                      <span className="workspace-host-name">{item.name}</span>
+                    </div>
+                    <span className="workspace-host-status">Healthy</span>
+                  </div>
+                  <div className="workspace-host-btn-meta">
+                    <span className="tnum">{item.ip}</span>
+                    <span>{item.region}</span>
+                  </div>
+                  <div className="workspace-host-btn-metrics">
+                    <span className="tnum">CPU {item.cpuPercent}%</span>
+                    <span className="metric-sep">·</span>
+                    <span className="tnum">RAM {item.memoryPercent}%</span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="workspace-rail-footer">
+            <span className="workspace-rail-note">Select host to inspect state</span>
+          </div>
+        </aside>
+
+        {/* Right Selected Host Detail Stage */}
+        <section
+          className="workspace-host-detail"
+          id={`workspace-panel-${host.id}`}
+          role="tabpanel"
+          tabIndex={0}
+          aria-labelledby={`workspace-tab-${host.id}`}
+        >
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={host.id}
+              initial={shouldReduceMotion ? { opacity: 1 } : { opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={shouldReduceMotion ? { opacity: 1 } : { opacity: 0 }}
+              transition={{ duration: shouldReduceMotion ? 0 : 0.2, ease: [0.22, 1, 0.36, 1] }}
+              className="workspace-panel-inner"
+            >
+              {/* Host Metadata Header */}
+              <div className="workspace-host-header">
+                <div className="workspace-host-header-left">
+                  <div className="workspace-host-title-line">
+                    <Server size={15} className="landing-inline-icon" aria-hidden="true" />
+                    <strong className="workspace-host-title">{host.name}</strong>
+                    <span className="workspace-host-os-tag">{host.os}</span>
+                  </div>
+                  <div className="workspace-host-substrip">
+                    <span className="tnum">{host.ip}</span>
+                    <span>Region: {host.region}</span>
+                    <span className="tnum">Uptime: {host.uptime}</span>
+                    <span>Polled 2s ago via Go host agent</span>
+                  </div>
+                </div>
+                <div className="workspace-host-header-right">
+                  <span className="chrome-pill">
+                    <span className="pulse-dot" />
+                    Healthy ({host.uptime})
+                  </span>
+                </div>
+              </div>
+
+              {/* 3-Column Telemetry Gauges */}
+              <div className="preview-metric-grid">
+                <div className="metric-gauge-box">
+                  <div className="gauge-top">
+                    <span>CPU Usage</span>
+                    <span className="gauge-val tnum">{host.cpuPercent}%</span>
+                  </div>
+                  <div className="gauge-meter-track">
+                    <div className="gauge-meter-fill" style={{ width: `${host.cpuPercent}%` }} />
+                  </div>
+                  <span className="gauge-subtext">
+                    {host.vcpus} vCPUs ({host.cpuModel}) · Load {host.load}
+                  </span>
+                </div>
+
+                <div className="metric-gauge-box">
+                  <div className="gauge-top">
+                    <span>Memory</span>
+                    <span className="gauge-val tnum">{host.memoryPercent}%</span>
+                  </div>
+                  <div className="gauge-meter-track">
+                    <div className="gauge-meter-fill is-mem" style={{ width: `${host.memoryPercent}%` }} />
+                  </div>
+                  <span className="gauge-subtext tnum">
+                    {host.memoryUsedGb} / {host.memoryTotalGb} GB · {host.memoryCacheGb} GB cache
+                  </span>
+                </div>
+
+                <div className="metric-gauge-box">
+                  <div className="gauge-top">
+                    <span>Disk (/)</span>
+                    <span className="gauge-val tnum">{host.diskPercent}%</span>
+                  </div>
+                  <div className="gauge-meter-track">
+                    <div className="gauge-meter-fill is-disk" style={{ width: `${host.diskPercent}%` }} />
+                  </div>
+                  <span className="gauge-subtext tnum">
+                    {host.diskUsedGb} / {host.diskTotalGb} GB · {host.diskType}
+                  </span>
+                </div>
+              </div>
+
+              {/* Decoupled Docker Daemon Panel */}
+              <div className="docker-decoupled-panel">
+                <div className="decoupled-head">
+                  <div className="decoupled-title-row">
+                    <Container size={14} className="landing-inline-icon" aria-hidden="true" />
+                    <span>Decoupled Docker Daemon</span>
+                  </div>
+                  <span className="decoupled-tag">
+                    {host.containers.length} Containers · Decoupled Socket Inspection
+                  </span>
+                </div>
+                <div className="container-list">
+                  {host.containers.map((c) => (
+                    <div key={c.name} className="container-row">
+                      <div className="container-name-box">
+                        <span className="dot-running" />
+                        <strong>{c.name}</strong>
+                        <code className="tnum">{c.image}</code>
+                      </div>
+                      <div className="chrome-left">
+                        <span className="tnum">{c.cpu} CPU</span>
+                        <span className="tnum">{c.memory}</span>
+                        <span className="tnum">{c.port}</span>
+                        {c.healthy && <span className="chrome-pill">Healthy</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Isolated SSH Execution Audit Strip */}
+              <div className="ssh-audit-strip">
+                <div className="chrome-left">
+                  <TerminalSquare size={13} aria-hidden="true" />
+                  <span>Recent SSH Dispatch: Job #{host.recentJob.id} ({host.recentJob.name})</span>
+                </div>
+                <div className="chrome-left">
+                  <span className="ssh-status-ok">{host.recentJob.status} ({host.recentJob.duration})</span>
+                  <span className="tnum">{host.recentJob.keyType}</span>
+                </div>
+              </div>
+
+              {/* Bottom Watermark Row */}
+              <div className="preview-watermark-row">
+                <span>Storage driver: STORAGE_DRIVER=postgres · Single administrator · Zero cloud intermediary</span>
+                <span className="preview-sample-badge">Illustrative preview · static sample telemetry</span>
+              </div>
+            </motion.div>
+          </AnimatePresence>
+        </section>
+      </div>
+    </div>
+  );
+}
+
 /* ── Main Landing Page Component ── */
 
 export function LandingPage() {
@@ -630,25 +1021,22 @@ export function LandingPage() {
       </header>
 
       <main id="main-content" tabIndex={-1}>
-        {/* ── 1. Split Hero Section ── */}
+        {/* ── 1. Workspace-As-Proof Hero Opening ── */}
         <section className="landing-home-hero" id="hero" aria-labelledby="hero-title">
           <div className="landing-wrap">
-            <div className="hero-split-grid">
-              {/* Left Editorial Column */}
+            {/* Top Generous Message Row */}
+            <div className="hero-message-row">
               <div className="hero-editorial-col">
-                <div className="hero-eyebrow-badge">
-                  <span className="pulse-dot" />
-                  <span>Self-Hosted Fleet Console</span>
-                </div>
-
                 <h1 className="hero-display-title" id="hero-title">
                   Infrastructure, under control.
                 </h1>
 
                 <p className="hero-lead-text">
-                  Self-hosted Linux VPS manager with a NestJS control plane and React operator console. Real host metrics, decoupled container visibility, and remote SSH dispatch without cloud middleware or subscription keys.
+                  Self-hosted Linux VPS manager with a NestJS control plane and React operator console. Inspect real host metrics, decoupled container runtimes, and isolated SSH execution directly on your own infrastructure.
                 </p>
+              </div>
 
+              <div className="hero-action-col">
                 <div className="hero-cta-row">
                   <a
                     href={DEPLOY_URL}
@@ -678,127 +1066,10 @@ export function LandingPage() {
                   <span className="hero-trust-item">Decoupled container health</span>
                 </div>
               </div>
-
-              {/* Right Illustrative Fleet Console */}
-              <div className="hero-console-col">
-                <div className="console-watermark-tag">[Illustrative Sample UI · Static Data]</div>
-                <div className="fleet-console-card">
-                  <div className="console-chrome-bar">
-                    <div className="chrome-left">
-                      <div className="chrome-dots">
-                        <span className="chrome-dot" />
-                        <span className="chrome-dot" />
-                        <span className="chrome-dot" />
-                      </div>
-                      <div className="chrome-host-name">
-                        <Server size={14} aria-hidden="true" />
-                        <span>vps-prod-01</span>
-                      </div>
-                    </div>
-                    <span className="chrome-pill">
-                      <span className="pulse-dot" />
-                      Healthy (42d 8h)
-                    </span>
-                  </div>
-
-                  <div className="console-body">
-                    <div className="console-meta-strip">
-                      <span>Ubuntu 24.04 LTS (x86_64)</span>
-                      <span className="tnum">198.51.100.24</span>
-                      <span>Last poll: 2s ago</span>
-                    </div>
-
-                    <div className="metrics-3col">
-                      <div className="metric-gauge-box">
-                        <div className="gauge-top">
-                          <span>CPU Usage</span>
-                          <span className="gauge-val tnum">18.4%</span>
-                        </div>
-                        <div className="gauge-meter-track">
-                          <div className="gauge-meter-fill" style={{ width: "18.4%" }} />
-                        </div>
-                        <span className="gauge-subtext">4 vCPUs · Load 0.34</span>
-                      </div>
-
-                      <div className="metric-gauge-box">
-                        <div className="gauge-top">
-                          <span>Memory</span>
-                          <span className="gauge-val tnum">42.2%</span>
-                        </div>
-                        <div className="gauge-meter-track">
-                          <div className="gauge-meter-fill is-mem" style={{ width: "42.2%" }} />
-                        </div>
-                        <span className="gauge-subtext tnum">3.38 / 8.00 GB</span>
-                      </div>
-
-                      <div className="metric-gauge-box">
-                        <div className="gauge-top">
-                          <span>Disk (/)</span>
-                          <span className="gauge-val tnum">40.1%</span>
-                        </div>
-                        <div className="gauge-meter-track">
-                          <div className="gauge-meter-fill is-disk" style={{ width: "40.1%" }} />
-                        </div>
-                        <span className="gauge-subtext tnum">31.8 / 79.3 GB</span>
-                      </div>
-                    </div>
-
-                    <div className="docker-decoupled-panel">
-                      <div className="decoupled-head">
-                        <span>Decoupled Docker Daemon</span>
-                        <span className="decoupled-tag">4 Configured · 3 Active</span>
-                      </div>
-                      <div className="container-list">
-                        <div className="container-row">
-                          <div className="container-name-box">
-                            <span className="dot-running" />
-                            <span>caddy-edge</span>
-                          </div>
-                          <div className="chrome-left">
-                            <span className="tnum">0.4% CPU</span>
-                            <span className="tnum">28 MB</span>
-                            <span className="tnum">443/80</span>
-                          </div>
-                        </div>
-                        <div className="container-row">
-                          <div className="container-name-box">
-                            <span className="dot-running" />
-                            <span>postgres-16</span>
-                          </div>
-                          <div className="chrome-left">
-                            <span className="tnum">1.2% CPU</span>
-                            <span className="tnum">184 MB</span>
-                            <span className="chrome-pill">Healthy</span>
-                          </div>
-                        </div>
-                        <div className="container-row">
-                          <div className="container-name-box">
-                            <span className="dot-running" />
-                            <span>redis-cache</span>
-                          </div>
-                          <div className="chrome-left">
-                            <span className="tnum">0.1% CPU</span>
-                            <span className="tnum">14 MB</span>
-                            <span className="tnum">6379/tcp</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="ssh-audit-strip">
-                      <div className="chrome-left">
-                        <TerminalSquare size={13} aria-hidden="true" />
-                        <span>Job #8841 (cron-backup-check)</span>
-                      </div>
-                      <div className="chrome-left">
-                        <span className="ssh-status-ok">Exit 0 (1.4s)</span>
-                        <span className="tnum">Ed25519</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
             </div>
+
+            {/* Dominant Full-Width Fleet Workspace Preview */}
+            <FleetWorkspacePreview shouldReduceMotion={shouldReduceMotion} />
           </div>
         </section>
 
@@ -810,7 +1081,6 @@ export function LandingPage() {
         >
           <div className="landing-wrap">
             <div className="landing-section-head">
-              <span className="landing-section-eyebrow">Engineered Capabilities</span>
               <h2 className="landing-section-title" id="capabilities-title">
                 Core tools for VPS operations.
               </h2>
@@ -888,7 +1158,6 @@ export function LandingPage() {
         <section className="landing-section" id="architecture" aria-labelledby="arch-title">
           <div className="landing-wrap">
             <div className="landing-section-head">
-              <span className="landing-section-eyebrow">System Architecture</span>
               <h2 className="landing-section-title" id="arch-title">
                 Direct control plane. Zero middlemen.
               </h2>
@@ -948,9 +1217,8 @@ export function LandingPage() {
         <section className="landing-section landing-section-alt" id="deploy" aria-labelledby="deploy-title">
           <div className="landing-wrap">
             <div className="landing-section-head">
-              <span className="landing-section-eyebrow">Startup & Deployment</span>
               <h2 className="landing-section-title" id="deploy-title">
-                Deploy in under 60 seconds with Docker Compose.
+                Run it on your infrastructure.
               </h2>
               <p className="landing-section-sub">
                 Two distinct deployment paths: explore simulated infrastructure in Demo mode, or configure Local mode for real production servers.
@@ -1037,9 +1305,9 @@ export function LandingPage() {
 
         {/* ── 5. Clear Scope & Boundaries Section ── */}
         <section className="landing-section" id="boundaries" aria-labelledby="boundaries-title">
+          <span id="audience" className="landing-anchor-target" aria-hidden="true" />
           <div className="landing-wrap">
             <div className="landing-section-head">
-              <span className="landing-section-eyebrow">Clear Scope & Boundaries</span>
               <h2 className="landing-section-title" id="boundaries-title">
                 Truthful positioning. No marketing hyperbole.
               </h2>
@@ -1106,7 +1374,6 @@ export function LandingPage() {
         <section className="landing-section landing-section-alt" id="faq" aria-labelledby="faq-title">
           <div className="landing-wrap landing-faq-wrap">
             <div className="landing-section-head">
-              <span className="landing-section-eyebrow">Technical FAQ</span>
               <h2 className="landing-section-title" id="faq-title">
                 Answers to operational questions.
               </h2>
@@ -1162,7 +1429,7 @@ export function LandingPage() {
                   <ChevronDown size={18} aria-hidden="true" />
                 </summary>
                 <div className="landing-faq-answer">
-                  No. In accordance with strict security architecture, the public landing page provides no unauthorized dashboard shortcut. You can spin up the full application locally in Demo mode with Docker Compose in under one minute using the instructions in the GitHub repository.
+                  No. In accordance with strict security architecture, the public landing page provides no unauthorized dashboard shortcut. You can spin up the full application locally in Demo mode with Docker Compose using the instructions in the GitHub repository.
                 </div>
               </details>
             </div>
@@ -1173,7 +1440,6 @@ export function LandingPage() {
         <section className="final-cta-section" id="get-started" aria-labelledby="cta-title">
           <div className="landing-wrap">
             <div className="final-cta-inner">
-              <span className="landing-section-eyebrow">Get Started</span>
               <h2 className="final-title" id="cta-title">
                 Infrastructure, under control.
               </h2>

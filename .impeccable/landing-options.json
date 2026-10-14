@@ -1,0 +1,11 @@
+{
+  "title": "Chọn bố cục landing FlexServer",
+  "question": "Giữ nhận diện tối/lime, nội dung tiếng Anh và mục tiêu tự triển khai. Chọn cách trình bày phù hợp nhất; cả ba đều giữ nguyên giới hạn sản phẩm.",
+  "options": [
+    {"id":"assigned","label":"Từ triển khai đến vận hành","kicker":"THE ROLL","thesis":"Đặt hành trình tự host làm trục: hiểu công cụ, xem triển khai, rồi khám phá workspace.","viewport":"Tiêu đề và hành động đọc hướng dẫn ở trái; khối Quick Start thật ở phải; dải preview workspace trải ngang phía dưới.","risk":"Ít phô diễn dashboard ngay đầu hơn hai phương án còn lại.","html":".impeccable/mocks/decision/deploy.html"},
+    {"id":"workflow","label":"Một vòng điều tra VPS","thesis":"Dẫn khách qua một quy trình: chọn host, đọc metrics, kiểm tra Docker, xem SSH job — dữ liệu minh họa được gắn nhãn rõ.","viewport":"Tiêu đề cô đọng phía trên; workspace mẫu rộng với host rail bên trái và nội dung điều tra bên phải; CTA tài liệu luôn dễ thấy.","risk":"Cần tránh làm khách hiểu nhầm preview là dashboard đang hoạt động.","html":".impeccable/mocks/decision/workflow.html"},
+    {"id":"workspace","label":"Workspace làm bằng chứng","thesis":"Cho thấy sản phẩm trước: console lớn dẫn dắt, thông điệp ngắn, năng lực và ranh giới nối tiếp bên dưới.","viewport":"Tiêu đề lớn và hai hành động nằm cùng hàng; preview fleet chiếm phần lớn màn hình mở đầu, tách rõ dữ liệu mẫu.","risk":"Preview dày thông tin hơn trên màn hình nhỏ; cần chọn lọc nội dung.","html":".impeccable/mocks/decision/workspace.html"}
+  ],
+  "steer": true,
+  "reroll": {"registers":["safer","bolder"]}
+}

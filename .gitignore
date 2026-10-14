@@ -11,3 +11,5 @@ dashboard-*.png
 .slim/deepwork/
 .opencode
 prompt-images/
+.omp
+.impeccable/review/

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowUpRight,
   Check,
@@ -174,19 +174,31 @@ const SCALE_MAILTO = `mailto:${CONTACT_EMAIL}?subject=FlexServer%20plans%20for%2
 
 export function PricingPage() {
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setMenuOpen(false);
+      if (event.key === "Escape" && menuOpen) {
+        setMenuOpen(false);
+        menuButtonRef.current?.focus();
+      }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [menuOpen]);
 
   useEffect(() => {
-    document.body.style.overflow = menuOpen ? "hidden" : "";
+    if (!menuOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const desktop = window.matchMedia("(min-width: 55rem)");
+    function onViewportChange(event: MediaQueryListEvent) {
+      if (event.matches) setMenuOpen(false);
+    }
+    desktop.addEventListener("change", onViewportChange);
     return () => {
-      document.body.style.overflow = "";
+      document.body.style.overflow = previousOverflow;
+      desktop.removeEventListener("change", onViewportChange);
     };
   }, [menuOpen]);
 
@@ -225,28 +237,40 @@ export function PricingPage() {
 
           <div className="landing-header-actions">
             <a
-              className="landing-btn landing-btn-primary landing-btn-small"
+              href={REPO_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="landing-btn landing-btn-secondary landing-btn-small"
+            >
+              GitHub
+              <ArrowUpRight size={14} aria-hidden="true" />
+            </a>
+
+            <a
               href={DEPLOY_URL}
               target="_blank"
               rel="noreferrer"
+              className="landing-btn landing-btn-primary landing-btn-small"
             >
-              Deployment docs
-              <ArrowUpRight size={15} aria-hidden="true" />
+              Deploy Guide
+              <ArrowUpRight size={14} aria-hidden="true" />
             </a>
+
             <button
+              ref={menuButtonRef}
               type="button"
               className="landing-menu-button"
               aria-expanded={menuOpen}
               aria-controls="pricing-mobile-menu"
               aria-label={
-                menuOpen ? "Close navigation menu" : "Open navigation menu"
+                menuOpen ? "Close menu" : "Open menu"
               }
               onClick={() => setMenuOpen((open) => !open)}
             >
               {menuOpen ? (
-                <X size={20} aria-hidden="true" />
+                <X size={18} aria-hidden="true" />
               ) : (
-                <Menu size={20} aria-hidden="true" />
+                <Menu size={18} aria-hidden="true" />
               )}
             </button>
           </div>
@@ -278,8 +302,8 @@ export function PricingPage() {
                 rel="noreferrer"
                 onClick={() => setMenuOpen(false)}
               >
-                Deployment docs
-                <ArrowUpRight size={16} aria-hidden="true" />
+                Deploy Guide
+                <ArrowUpRight size={14} aria-hidden="true" />
               </a>
               <a
                 className="landing-btn landing-btn-secondary landing-btn-block"
@@ -288,8 +312,8 @@ export function PricingPage() {
                 rel="noreferrer"
                 onClick={() => setMenuOpen(false)}
               >
-                GitHub repository
-                <ArrowUpRight size={16} aria-hidden="true" />
+                GitHub Repository
+                <ArrowUpRight size={14} aria-hidden="true" />
               </a>
             </div>
           </div>

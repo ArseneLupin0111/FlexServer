@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — public navigation layout stability & geometry alignment
+
+- Audit and eliminate horizontal layout shifts across all public routes (`/`, `/pricing`, `/security`, `/enterprise`).
+- Root cause: Header container used `justify-between` spacing with uneven right-hand action items (Landing featured both "GitHub" and "Deploy Guide" action buttons while inner pages only featured a single "Deployment docs" action button), causing an asymmetric ~38px middle navigation position shift on route transitions.
+- Standardize header action buttons across Landing, Pricing, Security, and Enterprise pages with canonical "GitHub" (secondary) and "Deploy Guide" (primary) buttons, consistent icon sizes (14px), and identical order.
+- Stabilize header element geometry with `flex: none` on `.landing-brand`, `.landing-nav`, and `.landing-header-actions` within `.landing-header-inner`.
+- Add `scrollbar-gutter: stable` to `html` and `.landing-page` to eliminate layout shift caused by vertical scrollbar appearance and differences in page content heights across routes.
+- Align active navigation link styles (`aria-current="page"`) to consistently display brand accent color (`--l-accent`), removing conflicting rules in `security.css` and `enterprise.css` that reset active link color to white.
+- Standardize mobile navigation drawer CTAs, ARIA attributes (`aria-controls`, `aria-label`, `aria-current`), menu toggle button icon size (18px), Escape key focus restoration, body overflow management, and 55rem viewport media query listener across all public pages.
+
+## Unreleased — robust public skip link accessibility
+
+- Fix initial load visibility of `.landing-skip` across public pages (Landing, Pricing, Enterprise, Security).
+- Replace fixed `-5rem` transform offset with element-height relative translation (`calc(-100% - 2rem)`), `opacity: 0`, and `pointer-events: none` when unfocused, preventing accidental exposure from multi-line text wrapping, user font scaling, or browser zoom.
+- Add explicit `prefers-reduced-motion: reduce` overrides for `.landing-skip` to prevent global `.landing-page * { transform: none !important; }` reset from exposing the unfocused skip link on page load.
+- Preserve full keyboard accessibility, revealing `.landing-skip` with high-contrast focus outline on `:focus` and `:focus-visible` before dispatching to `<main id="main-content" tabIndex={-1}>`.
+
 ## Unreleased — authenticated dashboard workspace redesign
 
 - Redesign the authenticated FlexServer operator console (`/vps/*`) following the approved visual and interaction theses without altering public landing pages, backend logic, or external APIs.

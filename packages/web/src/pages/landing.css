@@ -10,7 +10,7 @@
   --landing-max: 76rem;
   --landing-pad: clamp(1.25rem, 4vw, 2rem);
   --landing-header-h: 4.5rem;
-
+  scrollbar-gutter: stable;
   /* Surfaces: alias dashboard primitives from index.css (HSL channels) */
   --l-bg: var(--ink);
   --l-bg-alt: var(--panel);
@@ -59,20 +59,27 @@
   position: absolute;
   left: 1rem;
   top: 1rem;
-  transform: translateY(-5rem);
+  transform: translateY(calc(-100% - 2rem));
+  opacity: 0;
+  pointer-events: none;
   z-index: 100;
   padding: 0.75rem 1rem;
   background: hsl(var(--l-accent));
   color: hsl(var(--l-bg));
   font-weight: 600;
   font-size: 0.875rem;
+  line-height: 1.25;
+  white-space: nowrap;
   border-radius: 4px;
   text-decoration: none;
-  transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease;
 }
 
+.landing-skip:focus,
 .landing-skip:focus-visible {
   transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
   outline: 2px solid hsl(var(--l-text));
   outline-offset: 2px;
 }
@@ -141,6 +148,7 @@
   gap: 0.625rem;
   text-decoration: none;
   color: hsl(var(--l-text));
+  flex: none;
 }
 
 .landing-brand-text {
@@ -160,6 +168,12 @@
   color: hsl(var(--l-dim));
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+
+.landing-nav {
+  display: flex;
+  align-items: center;
+  flex: none;
 }
 
 .landing-nav-links {
@@ -194,10 +208,15 @@
   color: hsl(var(--l-accent));
 }
 
+.landing-nav-link:active {
+  background: hsl(var(--l-raised));
+}
+
 .landing-header-actions {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  flex: none;
 }
 
 .landing-menu-button {
@@ -248,6 +267,10 @@
 
 .landing-mobile-link:hover {
   background: hsl(var(--l-raised));
+}
+
+.landing-mobile-link[aria-current="page"] {
+  color: hsl(var(--l-accent));
 }
 
 .landing-mobile-cta {
@@ -1596,5 +1619,19 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
     transform: none !important;
+  }
+
+  /* Skip link must stay hidden when unfocused, even under reduced-motion transform resets */
+  .landing-skip:not(:focus):not(:focus-visible) {
+    transform: translateY(calc(-100% - 2rem)) !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+  }
+
+  .landing-skip:focus,
+  .landing-skip:focus-visible {
+    transform: translateY(0) !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
   }
 }

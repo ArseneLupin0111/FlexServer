@@ -69,7 +69,7 @@ export function SecurityPage() {
     if (!menuOpen) return;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    const desktop = window.matchMedia("(min-width: 80rem)");
+    const desktop = window.matchMedia("(min-width: 55rem)");
     function onViewportChange(event: MediaQueryListEvent) { if (event.matches) setMenuOpen(false); }
     desktop.addEventListener("change", onViewportChange);
     return () => { document.body.style.overflow = previousOverflow; desktop.removeEventListener("change", onViewportChange); };
@@ -80,8 +80,12 @@ export function SecurityPage() {
     <header className="landing-header"><div className="landing-wrap landing-header-inner">
       <a className="landing-brand" href="/" aria-label="FlexServer — home" onClick={() => setMenuOpen(false)}><Brand /></a>
       <nav className="landing-nav" aria-label="Primary"><ul className="landing-nav-links">{NAV_LINKS.map((link) => <li key={link.href}><a className="landing-nav-link" href={link.href} aria-current={link.current ? "page" : undefined}>{link.label}</a></li>)}</ul></nav>
-      <div className="landing-header-actions"><a className="landing-btn landing-btn-primary landing-btn-small" href={DEPLOY_URL} target="_blank" rel="noreferrer">Deployment docs<ArrowUpRight size={15} aria-hidden="true" /></a><button ref={menuButton} type="button" className="landing-menu-button" aria-expanded={menuOpen} aria-controls="security-mobile-menu" aria-label={menuOpen ? "Close navigation menu" : "Open navigation menu"} onClick={() => setMenuOpen((open) => !open)}>{menuOpen ? <X size={20} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}</button></div>
-    </div>{menuOpen ? <div className="landing-mobile-panel" id="security-mobile-menu"><nav aria-label="Mobile"><ul className="landing-mobile-links">{NAV_LINKS.map((link) => <li key={link.href}><a className="landing-mobile-link" href={link.href} aria-current={link.current ? "page" : undefined} onClick={() => setMenuOpen(false)}>{link.label}</a></li>)}</ul></nav><div className="landing-mobile-cta"><a className="landing-btn landing-btn-primary landing-btn-block" href={DEPLOY_URL} target="_blank" rel="noreferrer" onClick={() => setMenuOpen(false)}>Deployment docs<ArrowUpRight size={16} aria-hidden="true" /></a></div></div> : null}</header>
+      <div className="landing-header-actions">
+        <a href={REPO_URL} target="_blank" rel="noreferrer" className="landing-btn landing-btn-secondary landing-btn-small">GitHub<ArrowUpRight size={14} aria-hidden="true" /></a>
+        <a href={DEPLOY_URL} target="_blank" rel="noreferrer" className="landing-btn landing-btn-primary landing-btn-small">Deploy Guide<ArrowUpRight size={14} aria-hidden="true" /></a>
+        <button ref={menuButton} type="button" className="landing-menu-button" aria-expanded={menuOpen} aria-controls="security-mobile-menu" aria-label={menuOpen ? "Close menu" : "Open menu"} onClick={() => setMenuOpen((open) => !open)}>{menuOpen ? <X size={18} aria-hidden="true" /> : <Menu size={18} aria-hidden="true" />}</button>
+      </div>
+    </div>{menuOpen ? <div className="landing-mobile-panel" id="security-mobile-menu"><nav aria-label="Mobile"><ul className="landing-mobile-links">{NAV_LINKS.map((link) => <li key={link.href}><a className="landing-mobile-link" href={link.href} aria-current={link.current ? "page" : undefined} onClick={() => setMenuOpen(false)}>{link.label}</a></li>)}</ul></nav><div className="landing-mobile-cta"><a className="landing-btn landing-btn-primary landing-btn-block" href={DEPLOY_URL} target="_blank" rel="noreferrer" onClick={() => setMenuOpen(false)}>Deploy Guide<ArrowUpRight size={14} aria-hidden="true" /></a><a className="landing-btn landing-btn-secondary landing-btn-block" href={REPO_URL} target="_blank" rel="noreferrer" onClick={() => setMenuOpen(false)}>GitHub Repository<ArrowUpRight size={14} aria-hidden="true" /></a></div></div> : null}</header>
 
     <main id="main-content" tabIndex={-1}>
       <section className="security-hero" aria-labelledby="security-title"><div className="landing-wrap">

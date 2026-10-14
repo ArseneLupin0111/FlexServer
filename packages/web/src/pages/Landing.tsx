@@ -456,6 +456,21 @@ export function LandingPage() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [menuOpen]);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const desktop = window.matchMedia("(min-width: 55rem)");
+    function onViewportChange(event: MediaQueryListEvent) {
+      if (event.matches) setMenuOpen(false);
+    }
+    desktop.addEventListener("change", onViewportChange);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      desktop.removeEventListener("change", onViewportChange);
+    };
+  }, [menuOpen]);
+
 
   const handleCopyCommands = async () => {
     try {
@@ -509,7 +524,7 @@ export function LandingPage() {
       {/* ── Sticky Operational Header ── */}
       <header className="landing-header">
         <div className="landing-wrap landing-header-inner">
-          <a href="#top" className="landing-brand" aria-label="FlexServer - home">
+          <a href="#top" className="landing-brand" aria-label="FlexServer — home">
             <Brand />
           </a>
 
@@ -571,22 +586,24 @@ export function LandingPage() {
               exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, height: 0 }}
               transition={{ duration: shouldReduceMotion ? 0 : 0.2, ease: [0.22, 1, 0.36, 1] }}
             >
-              <ul className="landing-mobile-links">
-                {NAV_LINKS.map((link) => (
-                  <li key={link.href}>
-                    <a
-                      href={link.href}
-                      className="landing-mobile-link"
-                      onClick={() => {
-                        setMenuOpen(false);
-                        menuButtonRef.current?.focus();
-                      }}
-                    >
-                      {link.label}
-                    </a>
-                  </li>
-                ))}
-              </ul>
+              <nav aria-label="Mobile">
+                <ul className="landing-mobile-links">
+                  {NAV_LINKS.map((link) => (
+                    <li key={link.href}>
+                      <a
+                        href={link.href}
+                        className="landing-mobile-link"
+                        onClick={() => {
+                          setMenuOpen(false);
+                          menuButtonRef.current?.focus();
+                        }}
+                      >
+                        {link.label}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </nav>
               <div className="landing-mobile-cta">
                 <a
                   href={DEPLOY_URL}

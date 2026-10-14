@@ -79,7 +79,6 @@
 .enterprise-page .enterprise-contact-section .landing-contact-panel { margin-inline: auto; max-width: 64rem; text-align: center; }
 .enterprise-page .enterprise-contact-section .landing-contact-sub { margin-inline: auto; }
 .enterprise-page .enterprise-contact-section .landing-contact-actions { justify-content: center; }
-.enterprise-page [aria-current="page"] { color: hsl(var(--l-text)); }
 @media (max-width: 63.99rem) {
   .enterprise-page .enterprise-feature { gap: 2rem; }
   .enterprise-page .enterprise-security-grid article { padding: 1.5rem; }

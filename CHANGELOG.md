@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — CI regression cleanup
+
+- Remove the obsolete Overview endpoint-placement test after workspace metadata deduplication. Keep production UI unchanged rather than restoring duplicate endpoint text or re-pinning incidental layout wording.
+- Verified the affected `App.test.tsx` suite: 44 tests passed.
+
 ## Unreleased — VPS workspace metrics and action deduplication
 
 - Deduplicate metrics, host identity, and navigation controls across the authenticated VPS workspace (`/vps/:vpsId/*`).

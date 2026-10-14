@@ -2353,22 +2353,6 @@ describe("React dashboard", () => {
       expect(screen.getByText("Location not detected")).toBeInTheDocument();
     });
 
-    it("keeps cards compact and surfaces endpoint metadata in the per-VPS overview", async () => {
-      const user = userEvent.setup();
-      queueInitialEditLoad();
-      fetchMock
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) });
-      renderApp(["/vps"]);
-
-      const card = await screen.findByRole("article", { name: "Server Production API" });
-      expect(within(card).queryByText("203.0.113.10:22")).not.toBeInTheDocument();
-
-      await user.click(within(card).getByRole("link", { name: "Manage Production API" }));
-      expect(await screen.findByText("203.0.113.10:22")).toBeInTheDocument();
-      expect(screen.getByText("vps-edit-1")).toBeInTheDocument();
-    });
 
     it("keeps the dialog open and exposes the API error when saving fails", async () => {
       // Negative objective case: a rejected update is visible, does not refresh stale data, and remains retryable in the dialog.

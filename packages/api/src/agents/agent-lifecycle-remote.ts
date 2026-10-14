@@ -37,7 +37,45 @@ export function buildLifecycleLockReleaseCommand(lockPath: string): string {
 /** Shell helper that prints /proc PID starttime (field 22, robust to spaces in comm). */
 export const REMOTE_ST_HELPER = `st(){ sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; };`;
 
-const EXACT_ARGV = `test "$(tr '\\0' '\\n' < /proc/$_pid/cmdline 2>/dev/null | awk -v b="$_bin" -v c="$_cfg" 'NR==1{ok=($0==b)} NR==2{ok=ok&&($0=="-config")} NR==3{ok=ok&&($0==c)} NR>3{ok=0} END{print ok&&NR==3?1:0}')" = 1`;
+export interface ManagedProcessOptions {
+  statePath?: string;
+  dockerIdentityPath?: string;
+  dockerRuntimeKeysPath?: string;
+  dockerRuntimeOwnerUid?: string | number;
+}
+
+export const EXACT_ARGV = `test "$(tr '\\0' '\\n' < /proc/$_pid/cmdline 2>/dev/null | awk -v b="$_bin" -v b_base="./\${_bin##*/}" -v cwd="$_cwd" -v bdir="$_bdir" -v c="$_cfg" -v st="$_st_path" -v id="$_id_path" -v rk="$_rk_path" -v uid="$_uid_val" 'BEGIN{ok=1;has_c=has_st=has_id=has_rk=has_uid=0} NR==1{if(!($0==b||(($0==b_base||$0=="./vps-agent")&&cwd==bdir&&bdir!="")))ok=0;next} NR%2==0{flag=$0;next} NR%2==1{val=$0;if(flag=="-config"&&val==c)has_c++;else if(flag=="-state"&&val==st)has_st++;else if(flag=="-docker-identity-path"&&val==id)has_id++;else if(flag=="-docker-runtime-keys-path"&&val==rk)has_rk++;else if(flag=="-docker-runtime-owner-uid"&&val==uid)has_uid++;else ok=0} END{is_3=(NR==3&&has_c==1&&(has_st+has_id+has_rk+has_uid==0));is_11=(NR==11&&has_c==1&&has_st==1&&has_id==1&&has_rk==1&&has_uid==1);print (ok&&(is_3||is_11))?1:0}')" = 1`;
+
+function formatProcessContext(
+  binary: string,
+  config: string,
+  options?: ManagedProcessOptions,
+): {
+  vars: string;
+  hasDockerOptions: boolean;
+} {
+  const b = shellQuote(binary);
+  const c = shellQuote(config);
+  const st = options?.statePath
+    ? shellQuote(options.statePath)
+    : '"$_dir/state.json"';
+  const id = options?.dockerIdentityPath
+    ? shellQuote(options.dockerIdentityPath)
+    : '"$_dir/docker-identity.json"';
+  const rk = options?.dockerRuntimeKeysPath
+    ? shellQuote(options.dockerRuntimeKeysPath)
+    : '"$_dir/runtime-keys.json"';
+  const uid =
+    options?.dockerRuntimeOwnerUid != null
+      ? shellQuote(String(options.dockerRuntimeOwnerUid))
+      : '"$(test -f "$_rk_path" && stat -c %u "$_rk_path" 2>/dev/null || id -u)"';
+
+  const vars = `_bin=${b}; _cfg=${c}; _dir=$(dirname "$_cfg"); _bdir=$(dirname "$_bin"); _st_path=${st}; _id_path=${id}; _rk_path=${rk}; _uid_val=${uid};`;
+  const hasDockerOptions = Boolean(
+    options?.dockerIdentityPath || options?.dockerRuntimeKeysPath,
+  );
+  return { vars, hasDockerOptions };
+}
 
 /**
  * Pure mirror of the tail classification in {@link buildManagedProcessInspectCommand}.
@@ -63,13 +101,13 @@ export function buildManagedProcessInspectCommand(
   binary: string,
   config: string,
   pidFile: string,
+  options?: ManagedProcessOptions,
 ): string {
-  const b = shellQuote(binary),
-    c = shellQuote(config),
-    p = shellQuote(pidFile);
+  const p = shellQuote(pidFile);
+  const { vars } = formatProcessContext(binary, config, options);
   return [
-    `_pf=${p}; _bin=${b}; _cfg=${c}; _matches=0; _owned=''; _ost=''; ${REMOTE_ST_HELPER}`,
-    `for _d in /proc/[0-9]*; do _pid=\${_d##*/}; test "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = "$_bin" || continue; ${EXACT_ARGV} || continue; _st=$(st "$_pid"); test -n "$_st" || continue; _matches=$((_matches+1)); _owned=$_pid; _ost=$_st; done;`,
+    `_pf=${p}; ${vars} _matches=0; _owned=''; _ost=''; ${REMOTE_ST_HELPER}`,
+    `for _d in /proc/[0-9]*; do _pid=\${_d##*/}; test "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = "$_bin" || continue; _cwd=$(readlink -f "/proc/$_pid/cwd" 2>/dev/null || true); ${EXACT_ARGV} || continue; _st_time=$(st "$_pid"); test -n "$_st_time" || continue; _matches=$((_matches+1)); _owned=$_pid; _ost=$_st_time; done;`,
     `test "$_matches" -le 1 || { echo ambiguous; exit 0; }; test -f "$_pf" || { test "$_matches" = 0 && echo none || echo ambiguous; exit 0; }; _pid=$(cat "$_pf" 2>/dev/null); case "$_pid" in (''|*[!0-9]*) echo invalid; exit 0;; esac; if test "$_matches" = 0; then test -d "/proc/$_pid" && echo mismatch || echo none; exit 0; fi; test "$_pid" = "$_owned" || { echo mismatch; exit 0; }; printf 'owned:%s:%s\n' "$_pid" "$_ost"`,
   ].join(" ");
 }
@@ -80,14 +118,14 @@ export function buildManagedProcessStopCommand(
   config: string,
   pid: string,
   starttime: string,
+  options?: ManagedProcessOptions,
 ): string {
-  const b = shellQuote(binary),
-    c = shellQuote(config),
-    p = shellQuote(pid),
+  const p = shellQuote(pid),
     s = shellQuote(starttime);
-  const owns = `owns(){ test "$(st "$_pid")" = "$_start" && test "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = "$_bin" && ${EXACT_ARGV}; };`;
+  const { vars } = formatProcessContext(binary, config, options);
+  const owns = `owns(){ test "$(st "$_pid")" = "$_start" && test "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = "$_bin" && _cwd=$(readlink -f "/proc/$_pid/cwd" 2>/dev/null || true) && ${EXACT_ARGV}; };`;
   return [
-    `_pid=${p}; _start=${s}; _bin=${b}; _cfg=${c}; ${REMOTE_ST_HELPER} ${owns}`,
+    `_pid=${p}; _start=${s}; ${vars} ${REMOTE_ST_HELPER} ${owns}`,
     `owns || exit 1; owns && kill -TERM "$_pid";`,
     `_i=0; while owns && [ $_i -lt 50 ]; do sleep .1; _i=$((_i+1)); done;`,
     `if owns; then owns && kill -KILL "$_pid"; fi;`,
@@ -174,17 +212,25 @@ export function buildTransactionalStartCommand(
   binary: string,
   config: string,
   pidFile: string,
+  options?: ManagedProcessOptions,
 ): string {
-  const b = shellQuote(binary);
-  const c = shellQuote(config);
   const p = shellQuote(pidFile);
+  const { vars, hasDockerOptions } = formatProcessContext(
+    binary,
+    config,
+    options,
+  );
+  const startSpawn = hasDockerOptions
+    ? `nohup "$_bin" -config "$_cfg" -state "$_st_path" -docker-identity-path "$_id_path" -docker-runtime-keys-path "$_rk_path" -docker-runtime-owner-uid "$_uid_val" >/dev/null 2>&1 & _pid=$!;`
+    : `if [ -f "$_id_path" ] && [ -f "$_rk_path" ]; then nohup "$_bin" -config "$_cfg" -state "$_st_path" -docker-identity-path "$_id_path" -docker-runtime-keys-path "$_rk_path" -docker-runtime-owner-uid "$_uid_val" >/dev/null 2>&1 & _pid=$!; else nohup "$_bin" -config "$_cfg" >/dev/null 2>&1 & _pid=$!; fi;`;
+
   return [
-    `umask 077; _pf=${p}; _bin=${b}; _cfg=${c}; _pid=''; _start=''; _tmp=''; _published=0; ${REMOTE_ST_HELPER}`,
+    `umask 077; _pf=${p}; ${vars} _pid=''; _start=''; _tmp=''; _published=0; ${REMOTE_ST_HELPER}`,
     `same_spawn(){ test -n "$_pid" && test -n "$_start" && test "$(st "$_pid")" = "$_start"; };`,
-    `owns_new(){ test -n "$_start" && test "$(st "$_pid")" = "$_start" && test "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = "$_bin" && ${EXACT_ARGV}; };`,
+    `owns_new(){ test -n "$_start" && test "$(st "$_pid")" = "$_start" && test "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = "$_bin" && _cwd=$(readlink -f "/proc/$_pid/cwd" 2>/dev/null || true) && ${EXACT_ARGV}; };`,
     `cleanup(){ _rc=$?; trap - EXIT HUP INT TERM; if same_spawn; then kill -TERM "$_pid" 2>/dev/null || true; _i=0; while same_spawn && [ $_i -lt 20 ]; do sleep .1; _i=$((_i+1)); done; if same_spawn; then kill -KILL "$_pid" 2>/dev/null || true; fi; _i=0; while same_spawn && [ $_i -lt 20 ]; do sleep .1; _i=$((_i+1)); done; fi; test -n "$_tmp" && rm -f -- "$_tmp"; if [ "$_published" = 1 ] && test -n "$_pid" && [ "$(cat "$_pf" 2>/dev/null)" = "$_pid" ]; then rm -f -- "$_pf"; fi; exit "$_rc"; };`,
     `trap 'cleanup' EXIT; trap 'exit 1' HUP INT TERM;`,
-    `nohup "$_bin" -config "$_cfg" >/dev/null 2>&1 & _pid=$!;`,
+    startSpawn,
     `case "$_pid" in (''|*[!0-9]*) exit 1;; esac; _start=$(st "$_pid"); test -n "$_start" || exit 1;`,
     `_tmp="$_pf.tmp.$_pid.$_start"; test ! -e "$_tmp" || exit 1;`,
     `printf '%s\\n' "$_pid" > "$_tmp" || exit 1;`,

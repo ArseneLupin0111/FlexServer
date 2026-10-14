@@ -2,6 +2,13 @@
 
 The dashboard's local-agent update status compares a fresh agent heartbeat/build ID with the deployed API image's bundled agent binary (`/app/agent/vps-agent-linux-amd64`). Local agent upgrades use this bundled API artifact directly and require no manual signing keys or external release catalogs. Deploying an API image updates the available bundled binary, but does **not** automatically replace the host systemd agent on disk. Local host agent upgrades are performed pull-only by a separately installed host updater daemon using scoped bearer credentials and a constrained root helper, verified by fresh agent heartbeats. The API container must not receive a Docker socket, systemd socket, root filesystem mount, or host root credentials. Remote SSH agent upgrades remain a separate workflow.
 
+### Remote SSH process ownership
+
+Remote user-managed installs use `~/.vps-manager-agent/vps-agent.pid`. Ownership checks accept the canonical absolute executable invocation and the installer’s `./vps-agent` invocation only when its working directory matches the managed binary directory. Supported loops use `-config` alone or the complete managed Docker state arguments (`-state`, `-docker-identity-path`, `-docker-runtime-keys-path`, `-docker-runtime-owner-uid`). Config/state paths and runtime owner must match; arbitrary extra flags and one-shot processes are not accepted.
+
+An agent installed with the Docker state arguments could previously fail an upgrade with `Managed agent process ownership is missing or ambiguous` despite running normally. Deploy the updated API to use the corrected inspection and restart commands; the running agent does not need to be stopped manually. A genuinely absent process is permitted during upgrade and rollback. Invalid, mismatched or ambiguous ownership still refuses mutation: inspect the PID file and process identity rather than deleting the PID file or killing processes indiscriminately.
+
+
 ## Bundled agent source and updater architecture
 
 The API container packages verified Linux amd64/arm64 agent and updater binaries (`/app/agent/vps-agent-linux-amd64` and `/app/agent/vps-updater-linux-amd64`, or repository `packages/agent/dist/`, configurable via `AGENT_BINARY_PATH`).

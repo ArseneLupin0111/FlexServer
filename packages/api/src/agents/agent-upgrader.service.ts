@@ -246,12 +246,14 @@ export class AgentUpgraderService {
         await this.ssh.execCommand(vps, inspect, auth, 10_000)
       ).stdout.trim();
       const owned = /^owned:([1-9][0-9]*):([1-9][0-9]*)$/.exec(ownership);
-      if (!owned)
+      if (owned) {
+        await ctx.update("stopping", 50);
+        await this.stopPid(vps, auth, binary, config, owned[1], owned[2]);
+      } else if (ownership !== "none") {
         throw new Error(
           "Managed agent process ownership is missing or ambiguous",
         );
-      await ctx.update("stopping", 50);
-      await this.stopPid(vps, auth, binary, config, owned[1], owned[2]);
+      }
       const postStopBaseline =
         (await this.agents.getState(vps.id))?.lastSeenAt ?? prior.lastSeenAt;
       await ctx.update("swapping", 60);
@@ -323,11 +325,15 @@ export class AgentUpgraderService {
       auth,
       10_000,
     );
-    const owned = /^owned:([1-9][0-9]*):([1-9][0-9]*)$/.exec(
-      result.stdout.trim(),
-    );
-    if (!owned) throw new Error("Managed agent PID file is invalid");
-    await this.stopPid(vps, auth, binary, config, owned[1], owned[2]);
+    const inspect = result.stdout.trim();
+    const owned = /^owned:([1-9][0-9]*):([1-9][0-9]*)$/.exec(inspect);
+    if (owned) {
+      await this.stopPid(vps, auth, binary, config, owned[1], owned[2]);
+    } else if (inspect !== "none") {
+      throw new Error(
+        "Managed agent process ownership is missing or ambiguous",
+      );
+    }
   }
   private async stopPid(
     vps: VpsRecord,

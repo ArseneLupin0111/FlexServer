@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — remote agent ownership during upgrades
+
+- Recognize installer-managed `./vps-agent` loops with explicit Docker state arguments, verifying executable, working directory, config/state paths, runtime owner, PID and start time before signaling. Unknown arguments and foreign state paths remain rejected.
+- Preserve Docker state arguments when restarting after install or upgrade. Permit an absent managed process during upgrade and rollback without attempting to stop an unrelated process.
+- Verified 25 API lifecycle tests, API typecheck, isolated Linux ownership/start/stop smoke on Azure, and read-only ownership classification of the existing Azure agent. No production binary upgrade was performed.
+
 ## Unreleased — public navigation layout stability & geometry alignment
 
 - Audit and eliminate horizontal layout shifts across all public routes (`/`, `/pricing`, `/security`, `/enterprise`).

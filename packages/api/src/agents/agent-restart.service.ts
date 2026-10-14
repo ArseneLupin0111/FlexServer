@@ -25,6 +25,7 @@ import {
   buildManagedProcessInspectCommand,
   buildManagedProcessStopCommand,
   buildTransactionalStartCommand,
+  type ManagedProcessOptions,
 } from "./agent-lifecycle-remote.js";
 import {
   APP_CONFIG,
@@ -42,15 +43,18 @@ export function buildRestartStopCommand(
   config: string,
   pidOrPidFile: string,
   starttime = "required-starttime",
+  options?: ManagedProcessOptions,
 ) {
   return buildManagedProcessStopCommand(
     binary,
     config,
     pidOrPidFile,
     starttime,
+    options,
   );
 }
 export const buildRestartStartCommand = buildTransactionalStartCommand;
+export type { ManagedProcessOptions };
 
 export function validAgentHome(home: string) {
   return (

@@ -17,7 +17,10 @@ import { AuditService } from "../audit/audit.service.js";
 import { JobRunnerService } from "../jobs/job-runner.service.js";
 import { JobService } from "../jobs/job.service.js";
 import { AgentLifecycleCoordinator } from "./agent-lifecycle-coordinator.js";
-import { buildDockerStateProvisionCommand } from "./agent-lifecycle-remote.js";
+import {
+  buildDockerStateProvisionCommand,
+  buildTransactionalStartCommand,
+} from "./agent-lifecycle-remote.js";
 import { resolveAgentBackendUrl } from "./agent-backend-url.js";
 import { sanitiseError } from "../jobs/job-runner.service.js";
 import {
@@ -238,10 +241,14 @@ export class AgentInstallerService {
           // 45s timeout for the -once run
           await this.ssh.execCommand(vps, onceCmd, sshAuth, 45_000);
 
-          // Start background loop via nohup
+          // Start background loop via transactional start
           await ctx.update("starting-background", 85);
           const pidFile = `${remoteDir}/vps-agent.pid`;
-          const loopCmd = `umask 077; nohup ${shellQuote(remoteBinary)} -config ${shellQuote(remoteConfig)} > /dev/null 2>&1 & _pid=$!; printf '%s\\n' "$_pid" > ${shellQuote(`${pidFile}.tmp`)} && mv -f ${shellQuote(`${pidFile}.tmp`)} ${shellQuote(pidFile)}`;
+          const loopCmd = buildTransactionalStartCommand(
+            remoteBinary,
+            remoteConfig,
+            pidFile,
+          );
           await this.ssh.execCommand(vps, loopCmd, sshAuth, 10_000);
 
           // Mark success

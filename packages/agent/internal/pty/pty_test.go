@@ -10,10 +10,12 @@ import (
 
 func TestPtyExecutionAndResize(t *testing.T) {
 	var cmd *exec.Cmd
+	expectedMarker := "PTY_ALIVE"
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("cmd.exe", "/c", "echo PTY_ALIVE")
 	} else if runtime.GOOS == "linux" {
 		cmd = exec.Command("/bin/sh", "-c", "echo PTY_ALIVE && [ -t 1 ] && echo IS_A_TTY")
+		expectedMarker = "IS_A_TTY"
 	} else {
 		t.Skip("Unsupported OS for PTY test")
 	}
@@ -35,7 +37,7 @@ func TestPtyExecutionAndResize(t *testing.T) {
 			n, err := session.Pty.Read(buf)
 			if n > 0 {
 				output += string(buf[:n])
-				if strings.Contains(output, "PTY_ALIVE") {
+				if strings.Contains(output, expectedMarker) {
 					return
 				}
 			}

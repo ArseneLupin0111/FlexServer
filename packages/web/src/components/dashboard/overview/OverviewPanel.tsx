@@ -6,12 +6,10 @@ import { formatDate, vpsHostId } from "../../../lib/dashboard-formatters";
 import { formatUptime } from "../shared/formatUptime";
 import { AuditPanel } from "../audit/AuditPanel";
 import { JobsPanel } from "../jobs/JobsPanel";
-import { ResourceGauge } from "../shared/ResourceGauge";
 import { SystemFacts } from "../shared/SystemFacts";
 import { ChartPanel } from "../metrics/MetricsPanel";
 import {
   cpuMemorySeries,
-  formatNetworkValue,
   networkSeries,
 } from "../metrics/historySeries";
 
@@ -80,28 +78,6 @@ export function OverviewPanel({ overview }: { overview: DashboardOverview }) {
   const sysInfo = overview.systemInfo[0];
   const docker = overview.dockerMetrics[0];
 
-  const statusValue = server
-    ? server.status === "healthy"
-      ? "Healthy"
-      : server.status === "warning"
-        ? "Warning"
-        : server.status === "unreachable"
-          ? "Unreachable"
-          : "Unknown"
-    : "Unknown";
-  const statusTone: KpiTone = server
-    ? server.status === "healthy"
-      ? "ok"
-      : server.status === "warning"
-        ? "warn"
-        : server.status === "unreachable"
-          ? "crit"
-          : "idle"
-    : "idle";
-
-  const cpuPct = metric?.cpu;
-  const ramPct = metric?.memory;
-  const diskPct = metric?.disk;
   // `overview.metrics` is already scoped to this VPS by the workspace
   // context; the charts render this same host's own `history` window.
   const cpuMemory = cpuMemorySeries(metric);
@@ -133,19 +109,7 @@ export function OverviewPanel({ overview }: { overview: DashboardOverview }) {
           .filter(Boolean)
           .join(" ") || "n/a",
     },
-    {
-      label: "Provider",
-      value: server?.provider || "Not reported",
-    },
-    {
-      label: "Location",
-      value:
-        [server?.city, server?.country].filter(Boolean).join(", ") ||
-        "Location not detected",
-    },
     ...(server ? [
-      { label: "SSH address", value: `${server.host}:${server.port}` },
-      { label: "SSH user", value: server.username },
       { label: "Server ID", value: server.id },
       { label: "Host ID", value: vpsHostId(server) || "Not reported" },
       { label: "CPU cores", value: sysInfo?.cpu?.cores ? String(sysInfo.cpu.cores) : "Not reported" },
@@ -154,7 +118,6 @@ export function OverviewPanel({ overview }: { overview: DashboardOverview }) {
       { label: "Disk capacity", value: sysInfo?.rootDisk?.totalBytes ? formatBytes(sysInfo.rootDisk.totalBytes) : "Not reported" },
       { label: "Tags", value: server.tags?.join(", ") || "None" },
       { label: "Notes", value: server.notes || "None" },
-      { label: "Last seen", value: formatDate(server.lastSeenAt) },
       { label: "Agent version", value: sysInfo?.agentVersion || "Not reported" },
       { label: "Uptime", value: metric ? formatUptime(metric.uptime) : "Not reported" },
       { label: "Last check", value: formatDate(metric?.collectedAt) },
@@ -170,24 +133,23 @@ export function OverviewPanel({ overview }: { overview: DashboardOverview }) {
           <Link to="jobs?status=failed" className="font-medium underline underline-offset-4">Review failed jobs</Link>
         </Alert>
       ) : null}
-      <section className="grid gap-3 sm:grid-cols-3" aria-label="Server status">
-        <Kpi label="Host health" value={statusValue} sub="Host status only · excludes jobs and containers" tone={statusTone} />
-        <div className="min-w-0">
-          <Kpi label="Containers" value={containersValue} sub={docker?.available ? `Running / total${docker.freshness === "stale" ? " · stale snapshot" : ""}` : "Docker data unavailable"} tone={containersTone} />
+      <section aria-label="Workload status">
+        <div className="w-full sm:max-w-xs">
+          <Kpi
+            label="Containers"
+            value={containersValue}
+            sub={
+              docker?.available
+                ? `${notRunning} stopped · ${docker.freshness === "stale" ? "stale snapshot" : "active snapshot"}`
+                : "Docker data unavailable"
+            }
+            tone={containersTone}
+          />
         </div>
-        <Kpi label="Recent jobs" value={failedJobs ? `${failedJobs} failed` : `${runningJobs} running`} sub={failedJobs ? `${runningJobs} running · Review errors below` : "Background tasks · separate from host health"} tone={failedJobs ? "crit" : "ok"} />
-      </section>
-      <section className="grid min-w-0 gap-px border border-line bg-line md:grid-cols-3" aria-label="Server overview">
-        <ResourceGauge label="CPU" value={cpuPct} detail={sysInfo?.cpu?.model || "Awaiting snapshot"} />
-        <ResourceGauge label="Memory" value={ramPct} detail={sysInfo?.memory?.totalBytes ? `${formatBytes(sysInfo.memory.totalBytes)} total` : "Awaiting snapshot"} />
-        <ResourceGauge label="Disk /" value={diskPct} detail={sysInfo?.rootDisk?.totalBytes ? `${formatBytes(sysInfo.rootDisk.totalBytes)} total` : "Awaiting snapshot"} />
       </section>
       <div className="grid min-w-0 gap-4 xl:grid-cols-2">
         <ChartPanel title="CPU & Memory" hint="Utilization history · percent" series={cpuMemory} />
-        <ChartPanel title="Network I/O" hint="Receive / transmit throughput · bytes per second" series={netSeries} readouts={[
-          { label: "RX", value: formatNetworkValue(metric, "networkRx") },
-          { label: "TX", value: formatNetworkValue(metric, "networkTx") },
-        ]} />
+        <ChartPanel title="Network I/O" hint="Receive / transmit throughput · bytes per second" series={netSeries} />
       </div>
 
       {/* Audit / jobs split */}

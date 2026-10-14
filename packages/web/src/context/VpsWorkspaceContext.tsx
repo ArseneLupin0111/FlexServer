@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Server, TerminalSquare, Settings as SettingsIcon } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { Link, NavLink, Outlet, useLocation, useParams } from "react-router-dom";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "../lib/utils";
@@ -279,23 +279,6 @@ export function VpsWorkspaceLayout() {
               </div>
             </div>
 
-            {/* Quick action shortcuts */}
-            <div className="flex flex-wrap items-center gap-2">
-              <Link
-                to="terminal"
-                className="inline-flex h-8 items-center gap-1.5 border border-line bg-ink px-2.5 text-xs font-medium text-text transition-colors duration-160 ease-out hover:border-signal hover:text-signal focus-visible:outline-2 focus-visible:outline-signal"
-              >
-                <TerminalSquare size={13} aria-hidden="true" />
-                Terminal
-              </Link>
-              <Link
-                to="settings"
-                className="inline-flex h-8 items-center gap-1.5 border border-line bg-ink px-2.5 text-xs font-medium text-text transition-colors duration-160 ease-out hover:border-signal hover:text-signal focus-visible:outline-2 focus-visible:outline-signal"
-              >
-                <SettingsIcon size={13} aria-hidden="true" />
-                Settings
-              </Link>
-            </div>
           </div>
 
           {/* Compact Resource Strip */}
@@ -691,7 +674,6 @@ export function VpsWorkspaceDockerPage() {
         confirmed controls.
       </p>
       <div className="mt-4 space-y-4">
-        <DockerCapabilityNotice enabled={monitoringEnabled} waiting={monitoringEnabled && !snapshot} />
         {monitoringEnabled ? (
           <>
             <DockerHistoryChart samples={history} rollups={rollups} retained={historyTotal} loading={loading} error={resourceErrors.history} />{resourcePages.history?.hasMore ? <button type="button" onClick={() => loadMore("history")} disabled={loadingMore === "history"} className="text-xs text-signal underline">{loadingMore === "history" ? "Loading…" : "Load more history"}</button> : null}{resourcePages.rollups?.hasMore ? <button type="button" onClick={() => loadMore("rollups")} disabled={loadingMore === "rollups"} className="text-xs text-signal underline">{loadingMore === "rollups" ? "Loading…" : "Load more rollups"}</button> : null}
@@ -786,6 +768,7 @@ export function VpsWorkspaceMetricsPage() {
       <MetricsPanel
         metrics={overview.metrics}
         dockerMetrics={overview.dockerMetrics}
+        scopedVpsId={vps.id}
       />
     </div>
   );

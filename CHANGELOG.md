@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — VPS workspace metrics and action deduplication
+
+- Deduplicate metrics, host identity, and navigation controls across the authenticated VPS workspace (`/vps/:vpsId/*`).
+- Header persistent banner establishes single authoritative presentation for host identity (display name, user@host:port, provider, location, status badge, agent status, last seen) and instantaneous resource telemetry (CPU, RAM, Disk, Load, Network RX/TX).
+- Remove redundant top-right Terminal and Settings action links from the workspace header, routing all sub-page transitions authoritatively through the horizontal tab bar (`Overview`, `Docker`, `Metrics`, `Jobs`, `Audit`, `Terminal`, `Settings`).
+- Streamline Overview tab: remove duplicate CPU/RAM/Disk gauge cards, redundant RX/TX readouts, redundant "Host health" KPI, and redundant "Recent jobs" summary counter, retaining a standalone compact Containers status card. System Facts table retains host hardware and configuration fields (OS, Kernel, CPU model, Cores, Memory, Disk, Server ID, Host ID, Tags, Notes, Agent version, Uptime) while omitting duplicate provider/location/SSH metadata already owned by the header.
+- Scoped Metrics tab: lock and hide the redundant "All servers" selector in scoped view, hide fleet-wide peak CPU/RAM/Disk/Load summary cards and redundant MetricServerCard instances, and consolidate the duplicate by-server and top-containers Docker views into a single canonical `CanonicalDockerWorkloads` panel containing summary metrics and container inventory table.
+- Remove redundant duplicate `DockerCapabilityNotice` banner on the Docker tab, keeping `DockerMetricsPanel` as the authoritative capability and toggle controller.
+- Preserve all unique actions, route reachability, historical charts, and live data telemetry.
+
 ## Unreleased — remote agent ownership during upgrades
 
 - Recognize installer-managed `./vps-agent` loops with explicit Docker state arguments, verifying executable, working directory, config/state paths, runtime owner, PID and start time before signaling. Unknown arguments and foreign state paths remain rejected.

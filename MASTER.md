@@ -218,19 +218,19 @@ The console employs a responsive, two-tier operational layout:
    - Local administrator account dropdown menu.
 
 3. **Persistent Host Identity Banner (`/vps/:vpsId/*`):**
-   - Visible across all workspace tabs.
-   - Top row: Back to Server list link, Host display name, Host status badge (Healthy / Warning / Down / Key ready) with status indicator dot and textual state.
-   - Metadata strip: `user@host:port` in Geist Mono, Provider & Location badges, Agent version & status, Last seen timestamp.
-   - Compact Resource Strip: Real-time gauges for CPU %, Memory %, Disk %, Load Average, and Network RX/TX throughput.
-   - Quick action shortcuts: Web Terminal launcher, SSH verification, Edit VPS dialog.
+   - Authoritative home for host identity across all workspace tabs.
+   - Top row: Back to Server list link, Host display name, Host status badge (Healthy / Warning / Down / Key ready) with textual state, Agent status pill.
+   - Metadata strip: `user@host:port` in Geist Mono, Provider & Location labels, Last seen timestamp.
+   - Compact Resource Strip: Canonical single presentation for instantaneous CPU %, Memory %, Disk %, Load Average, and Network RX/TX throughput.
+   - Single-responsibility navigation: Tab bar handles all sub-page switches; duplicate top-right action links are removed.
 
 4. **Horizontal Workspace Tab Bar:**
-   - Seven primary operational sections: `Overview`, `Metrics`, `Docker`, `Jobs`, `Audit`, `Terminal`, `Settings`.
+   - Canonical navigation controller: `Overview`, `Docker`, `Metrics`, `Jobs`, `Audit`, `Terminal`, `Settings`.
    - Horizontal scrollable on narrow viewports without clipping.
    - Active indicator: Lime bottom border with matching text color.
    - Smooth `240ms` ease-out panel transitions on tab switch.
 
-### 6.4 Screen-by-Screen Specifications
+### 6.4 Screen-by-Screen Specifications & Ownership
 
 - **Fleet Overview (`/vps`):**
   - Fleet operational summary strip: Attention required, Resource pressure peak, Containers health, Agent gaps.
@@ -240,17 +240,17 @@ The console employs a responsive, two-tier operational layout:
   - High-density inline creation form: Display name, Host, Port, SSH username, Tags, Notes, optional provision password.
   - Clear technical guidance on OpenSSH key isolation (mode 0600 on disk, zero stored passwords).
 - **Workspace Overview (`/vps/:vpsId`):**
-  - High-density KPI cards: Host health, Containers running/total, Recent jobs.
-  - CPU, Memory, Disk resource gauges with segmented meter bars.
-  - Historical utilization area charts (CPU & Memory, Network I/O throughput) with custom tooltips.
-  - Operational split: Recent Audit Events + Recent Jobs.
-  - System Facts technical table (OS, Kernel, CPU model, Cores, Memory, Disk, Provider, Location, Last check).
+  - Operational status: Standalone compact Containers running/total card (docker availability, stopped count, snapshot status).
+  - Historical telemetry: Utilization area charts (CPU & Memory percentage history, Network I/O throughput history) with custom tooltips. Instantaneous gauge duplication and repeated RX/TX values are removed (owned by header resource strip).
+  - Operational split: Recent Audit Events + Recent Jobs with running/failed badges (duplicate KPI counters removed).
+  - System Facts technical table: Hardware and runtime specs (OS, Kernel, CPU model, Cores, Memory total, Disk total, Server ID, Host ID, Tags, Notes, Agent version, Uptime), deduplicating provider/location/SSH metadata owned by the header.
 - **Workspace Metrics (`/vps/:vpsId/metrics`):**
-  - Host-scoped metrics filter and category tabs.
-  - Resource pressure indicators and historical telemetry series.
-  - Alert conditions and thresholds list.
+  - Scoped to active VPS: Server selector and fleet-wide peak cards are omitted; single metric type filter (CPU, Memory, Disk, Load, Network) is retained.
+  - Retains scoped CPU & Memory utilization history chart and Network in/out throughput history chart.
+  - Canonical Docker workloads section: Consolidates duplicate by-server and top-container views into a single authoritative panel with summary metrics (containers, PIDs, container CPU, RAM, Network) and container process table.
+  - Alert conditions and thresholds list scoped to host events.
 - **Workspace Docker (`/vps/:vpsId/docker`):**
-  - Docker snapshot summary (containers running, paused, stopped).
+  - Authoritative Docker metrics panel with capability toggle, snapshot status, and container inventory. Duplicate outer capability notice removed.
   - Storage overview (images, containers, volumes, build cache).
   - Event timeline, operational alerts panel, and selectable container history chart.
 - **Container Detail (`/vps/:vpsId/docker/containers/:agentInstanceId/:containerKey`):**
@@ -268,7 +268,6 @@ The console employs a responsive, two-tier operational layout:
 - **Workspace Settings (`/vps/:vpsId/settings`):**
   - Scoped and global runtime settings toggles.
   - Local agent supervisor status card with heartbeat timeline and rollback-safe updater.
-
 ### 6.5 Allowed Patterns & Boundaries
 
 - **Allowed:** Mono telemetry (`.tnum`), hairline borders (`#232824`), status colors strictly accompanied by textual labels, spinners only while actively executing an operation.

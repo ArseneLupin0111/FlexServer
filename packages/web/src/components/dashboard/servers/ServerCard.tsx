@@ -42,7 +42,6 @@ import {
 } from "../../../lib/dashboard-formatters";
 import type { DashboardOverview, VpsRecord } from "../../../lib/api";
 import { AgentLifecycleStatus, agentJobFor } from "./AgentLifecycleStatus";
-import { LocalAgentUpdate } from "./LocalAgentUpdate";
 
 // ── ServerCard ───────────────────────────────────────────────────────
 
@@ -58,7 +57,6 @@ export function ServerCard({
   onVerify,
   onInstallAgent,
   onUninstallAgent,
-  onUpgradeAgent,
   onRestartAgent,
   onRotateAgent,
   onDelete,
@@ -76,7 +74,6 @@ export function ServerCard({
   onVerify: (vps: VpsRecord) => void;
   onInstallAgent: (vps: VpsRecord) => void;
   onUninstallAgent: (vps: VpsRecord) => void;
-  onUpgradeAgent: (vps: VpsRecord) => void;
   onRestartAgent: (vps: VpsRecord) => void;
   onRotateAgent: (vps: VpsRecord) => void;
   onDelete: (vps: VpsRecord) => void;
@@ -91,7 +88,6 @@ export function ServerCard({
   const [passwordError, setPasswordError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<VpsRecord | null>(null);
   const [uninstallTarget, setUninstallTarget] = useState<VpsRecord | null>(null);
-  const [upgradeTarget, setUpgradeTarget] = useState<VpsRecord | null>(null);
   const [restartTarget, setRestartTarget] = useState<VpsRecord | null>(null);
   const [rotateAgentTarget, setRotateAgentTarget] = useState<VpsRecord | null>(null);
   const displayName = vpsDisplayName(vps);
@@ -111,8 +107,6 @@ export function ServerCard({
     !agentActionRunning &&
     vps.agentStatus !== "online" &&
     vps.agentStatus !== "offline";
-  const canUpgrade = mode !== "demo" && !isLocalHost && !agentActionRunning &&
-    (vps.agentStatus === "online" || vps.agentStatus === "offline" || vps.agentStatus === "failed");
   const canRestart = mode !== "demo" && !isLocalHost && isReady && !agentActionRunning &&
     (vps.agentStatus === "offline" || vps.agentStatus === "failed");
   const canRotateAgent = mode !== "demo" && isLocalHost && !agentActionRunning;
@@ -240,12 +234,8 @@ export function ServerCard({
             busy={busy}
             isLocalHost={isLocalHost}
             onRotate={() => setShowPassword(true)}
-            canUpgrade={canUpgrade}
             canRestart={canRestart}
             canRotateAgent={canRotateAgent}
-            onRequestUpgrade={() => {
-              window.setTimeout(() => setUpgradeTarget(vps), 0);
-            }}
             onRequestRestart={() => window.setTimeout(() => setRestartTarget(vps), 0)}
             onRequestRotateAgent={() => window.setTimeout(() => setRotateAgentTarget(vps), 0)}
             onRequestUninstall={() => {
@@ -264,7 +254,6 @@ export function ServerCard({
               <span aria-hidden="true" className="text-dim">·</span>
               <span className={isReady ? "text-signal" : "text-warn"}>{isLocalHost ? "Local" : isReady ? "Key ready" : "Needs password"}</span>
             </div>
-            {isLocalHost ? <LocalAgentUpdate vps={vps} variant="card" /> : null}
           </div>
         </div>
       </div>
@@ -309,16 +298,6 @@ export function ServerCard({
       </AlertDialog>
       <AlertDialog open={rotateAgentTarget?.id === vps.id} onOpenChange={(open) => { if (!open) setRotateAgentTarget(null); }}>
         <AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Rotate agent credential on {displayName}?</AlertDialogTitle><AlertDialogDescription>The agent credential is replaced without exposing the token. The agent reconnects automatically.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction disabled={busy} onClick={() => { if (!busy) onRotateAgent(vps); setRotateAgentTarget(null); }}>Rotate credential</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
-      </AlertDialog>
-      {/* Uninstall confirmation – outside DropdownMenu so focus is restored cleanly */}
-      <AlertDialog open={upgradeTarget?.id === vps.id} onOpenChange={(open) => { if (!open) setUpgradeTarget(null); }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Upgrade agent on {displayName}?</AlertDialogTitle>
-            <AlertDialogDescription>Monitoring will pause briefly while the agent is upgraded. If the upgrade cannot complete, the previous version is restored automatically. Existing credentials are preserved and are not changed or stored again.</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => { onUpgradeAgent(vps); setUpgradeTarget(null); }}>Upgrade agent</AlertDialogAction></AlertDialogFooter>
-        </AlertDialogContent>
       </AlertDialog>
       <AlertDialog
         open={uninstallTarget?.id === vps.id}
@@ -491,10 +470,8 @@ function ServerOverflow({
   busy,
   isLocalHost,
   onRotate,
-  canUpgrade,
   canRestart,
   canRotateAgent,
-  onRequestUpgrade,
   onRequestRestart,
   onRequestRotateAgent,
   onRequestUninstall,
@@ -506,10 +483,8 @@ function ServerOverflow({
   busy: boolean;
   isLocalHost: boolean;
   onRotate: () => void;
-  canUpgrade: boolean;
   canRestart: boolean;
   canRotateAgent: boolean;
-  onRequestUpgrade: () => void;
   onRequestRestart: () => void;
   onRequestRotateAgent: () => void;
   onRequestUninstall: () => void;
@@ -531,12 +506,6 @@ function ServerOverflow({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-48 rounded-none">
-        {isLocalHost ? null : (
-          <DropdownMenuItem disabled={busy || !canUpgrade} onClick={onRequestUpgrade}>
-            <RotateCw size={15} />
-            Upgrade agent
-          </DropdownMenuItem>
-        )}
         {canRestart ? <DropdownMenuItem disabled={busy} onClick={onRequestRestart}><RotateCw size={15} />Restart agent</DropdownMenuItem> : null}
         {isLocalHost ? <DropdownMenuItem disabled={busy || !canRotateAgent} onClick={onRequestRotateAgent}><KeyRound size={15} />Rotate agent credential</DropdownMenuItem> : null}
         <DropdownMenuItem onClick={onRotate} disabled={busy || isLocalHost}>

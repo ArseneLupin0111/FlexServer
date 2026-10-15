@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useId, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, LoaderCircle, RefreshCw } from "lucide-react";
 import {
   AlertDialog,
@@ -19,28 +19,32 @@ import {
   getLocalAgentUpgrade,
   getVpsAgentUpdate,
   isTerminalLocalUpgrade,
+  upgradeAgent,
   type AgentUpdateCompatibility,
   type AgentUpdateState,
   type AgentUpdateStatus,
   type LocalAgentUpgradeJob,
   type LocalAgentUpgradeState,
+  type DashboardOverview,
   type VpsRecord,
 } from "../../../lib/api";
 import { formatDate, freshnessLabel, vpsDisplayName } from "../../../lib/dashboard-formatters";
 import { subscribeMonitoring } from "../../../lib/live-api";
+import { DashboardContext } from "../../../context/DashboardContext";
+import { agentJobFor } from "./AgentLifecycleStatus";
 
 /**
- * Local-agent upgrade control.
+ * Agent update controls in VPS Settings.
  *
- * Single source of truth for the local upgrade action: card footer, table cell
- * and workspace settings all render this component (no duplicated action
- * logic). Local upgrade jobs live in a durable store outside the dashboard
- * jobs feed, so progress is read back from the persisted job endpoint: while
- * a job is live the existing monitoring SSE stream (subscribeMonitoring)
- * nudges an immediate debounced re-read, with a ~5s poll as fallback whenever
- * the stream is quiet or unavailable; agent-update refreshes on mount and
- * every ~30s. The browser only ever sends { releaseId } — never a URL,
- * command, path or token. Remote SSH upgrades never touch this control.
+ * Single source of truth for agent update actions:
+ * - Local system hosts (kind="local" or managedBy="system") use the bundled
+ *   binary deployment workflow with pull-based daemon updater and heartbeat verification.
+ * - Remote SSH hosts use SSH-based agent upgrades with confirmation, progress tracking,
+ *   and capability gating.
+ *
+ * Local upgrade jobs live in a durable store outside the dashboard jobs feed,
+ * so progress is read back from the persisted job endpoint. Remote agent upgrades
+ * trigger background jobs tracked through DashboardContext or the upgrade-agent API.
  */
 
 const JOB_POLL_MS = 5_000;
@@ -73,6 +77,17 @@ const STATE_CHIPS: Record<
   incompatible: { label: "Update blocked", variant: "destructive" },
   release_unavailable: { label: "Bundled agent unavailable", variant: "pending" },
   updater_unavailable: { label: "Updater not installed", variant: "pending" },
+};
+
+const REMOTE_STATUS_CHIPS: Record<
+  NonNullable<VpsRecord["agentStatus"]>,
+  { label: string; variant: "ready" | "pending" | "destructive" | "outline" }
+> = {
+  online: { label: "Agent online", variant: "ready" },
+  installing: { label: "Agent installing", variant: "pending" },
+  offline: { label: "Agent offline", variant: "pending" },
+  failed: { label: "Agent failed", variant: "destructive" },
+  not_installed: { label: "Agent not installed", variant: "outline" },
 };
 
 const INCOMPATIBLE_REASONS: Record<AgentUpdateCompatibility["reason"], string> = {
@@ -113,14 +128,38 @@ function apiErrorCode(error: unknown): { code?: string; jobId?: string } {
   };
 }
 
+function agentStatusLabel(status?: VpsRecord["agentStatus"]): string {
+  switch (status) {
+    case "not_installed":
+      return "Agent not installed";
+    case "installing":
+      return "Agent installing";
+    case "online":
+      return "Agent online";
+    case "offline":
+      return "Agent offline";
+    case "failed":
+      return "Agent failed";
+    default:
+      return "Unknown";
+  }
+}
 
 export type LocalAgentUpdateProps = {
   vps: VpsRecord;
-  variant: "card" | "table" | "workspace";
+  variant?: "card" | "table" | "workspace";
+  jobs?: DashboardOverview["jobs"];
 };
 
-export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
+export function LocalAgentUpdate({ vps, jobs }: LocalAgentUpdateProps) {
   const isLocal = vps.kind === "local" || vps.managedBy === "system";
+  if (isLocal) {
+    return <LocalHostAgentUpdate vps={vps} />;
+  }
+  return <RemoteAgentUpdate vps={vps} jobs={jobs} />;
+}
+
+function LocalHostAgentUpdate({ vps }: { vps: VpsRecord }) {
   const displayName = vpsDisplayName(vps);
 
   const [status, setStatus] = useState<AgentUpdateStatus | null>(null);
@@ -158,7 +197,6 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
   // Agent-update: load once on mount, then refresh every 30s (freshness,
   // bundled build pointer, jobs started elsewhere).
   useEffect(() => {
-    if (!isLocal) return;
     let cancelled = false;
     const controller = new AbortController();
     const load = async () => {
@@ -176,7 +214,7 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [vps.id, isLocal, applyStatus]);
+  }, [vps.id, applyStatus]);
 
   const jobId = job?.id ?? null;
   const jobActive = Boolean(job && !isTerminalLocalUpgrade(job.state));
@@ -199,14 +237,14 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
   // Persisted job: poll while non-terminal (reload-safe) as the fallback that
   // works even when the SSE stream is quiet or disconnected.
   useEffect(() => {
-    if (!isLocal || !jobId || !jobActive) return;
+    if (!jobId || !jobActive) return;
     const controller = new AbortController();
     const timer = window.setInterval(() => void refreshJob(controller.signal), JOB_POLL_MS);
     return () => {
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [jobId, jobActive, isLocal, refreshJob]);
+  }, [jobId, jobActive, refreshJob]);
 
   // Timely refresh through the existing SSE mechanism (subscribeMonitoring —
   // never a second EventSource implementation): while a job is live, stream
@@ -215,7 +253,7 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
   // host (metrics for this vps) or a full snapshot resync nudges; heartbeat
   // and jobs.updated belong to the dashboard-wide feed and stay poll-driven.
   useEffect(() => {
-    if (!isLocal || !jobId || !jobActive) return;
+    if (!jobId || !jobActive) return;
     if (typeof EventSource === "undefined") return; // environment without SSE: poll-only fallback
     const controller = new AbortController();
     let nudgeTimer: number | null = null;
@@ -237,7 +275,7 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
       if (nudgeTimer !== null) window.clearTimeout(nudgeTimer);
       unsubscribe();
     };
-  }, [isLocal, jobId, jobActive, vps.id, refreshJob]);
+  }, [jobId, jobActive, vps.id, refreshJob]);
 
   // When a job we watched crosses into a terminal state, refresh the status
   // once so the installed build/availability reflect the confirmed heartbeat.
@@ -298,15 +336,12 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
     }
   }
 
-  if (!isLocal) return null;
-
   const installed = status?.installed ?? null;
   const updater = status?.updater ?? null;
   const available = status?.available ?? null;
   const activeJob = job && !isTerminalLocalUpgrade(job.state) ? job : null;
   const resultJob = job && isTerminalLocalUpgrade(job.state) ? job : null;
   const chip = status ? STATE_CHIPS[status.state] : null;
-  const dense = variant !== "workspace";
 
   const showUpgrade = Boolean(
     status &&
@@ -332,17 +367,6 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
     }
   }
 
-  // Dense (card/table) keeps a single badge: when the Upgrade button is
-  // hidden (available === null) the specific incompatible/unavailable reason
-  // lives on the badge title only — no inline duplicate paragraph.
-  const denseBadgeTitle =
-    dense && !upgradeReason && status
-      ? status.state === "incompatible"
-        ? INCOMPATIBLE_REASONS[status.compatibility.reason]
-        : status.state === "release_unavailable"
-          ? STATE_DISABLED_REASONS.release_unavailable
-          : null
-      : null;
   const displayedReason = upgradeReason;
 
   const dialogInstalledText = installed
@@ -355,20 +379,8 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
       ? `heartbeat ${freshnessLabel(installed.lastSeenAt ?? undefined)}`
       : `heartbeat stale (${freshnessLabel(installed.lastSeenAt ?? undefined)})`
     : null;
-  const installedText = dense
-    ? installed?.version
-      ? `v${installed.version}`
-      : null
-    : dialogInstalledText;
-  // Dense fleet rows omit the heartbeat line entirely (freshness lives in
-  // the Agent online/offline signal); workspace keeps the full detail.
-  const heartbeatText = dense
-    ? null
-    : installed
-      ? installed.fresh
-        ? `heartbeat ${freshnessLabel(installed.lastSeenAt ?? undefined)}`
-        : `heartbeat stale (${freshnessLabel(installed.lastSeenAt ?? undefined)})`
-      : null;
+  const installedText = dialogInstalledText;
+  const heartbeatText = dialogHeartbeatText;
 
   let liveContent: React.ReactNode = null;
   if (activeJob) {
@@ -406,12 +418,7 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
   } else if (resultJob) {
     const completedAt = resultJob.completedAt ?? undefined;
     const finishedAt = completedAt ? `completed ${freshnessLabel(completedAt)}` : "";
-    // Dense fleet rows never replay an old success: the installed version +
-    // state badge already carry that signal. Workspace keeps the full
-    // confirmation; dense keeps failed/rollback warnings visible.
-    if (dense && resultJob.state === "succeeded") {
-      liveContent = null;
-    } else if (resultJob.state === "succeeded") {
+    if (resultJob.state === "succeeded") {
       const confirmedBuild =
         resultJob.result?.heartbeatBuildId ??
         resultJob.result?.reportedBuildId ??
@@ -505,7 +512,6 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
       type="button"
       size="sm"
       variant="default"
-      className={dense ? "text-[11px]" : undefined}
       disabled={!upgradeEnabled}
       aria-describedby={upgradeReason ? reasonId : undefined}
       onClick={() => {
@@ -529,8 +535,8 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
 
   const details = status ? (
     <>
-      <div className={dense ? "flex flex-wrap items-center gap-x-2 gap-y-1" : "flex flex-wrap items-center gap-x-3 gap-y-1 text-xs"}>
-        {installedText ? <span className="text-text" title={dense ? dialogInstalledText ?? undefined : undefined}>{installedText}</span> : null}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        {installedText ? <span className="text-text">{installedText}</span> : null}
         {heartbeatText ? (
           <span className={`text-[11px] ${installed?.fresh ? "text-dim" : "text-warn/80"}`} title={formatDate(installed?.lastSeenAt ?? undefined)}>
             {heartbeatText}
@@ -540,51 +546,46 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
           <Badge
             variant={chip.variant}
             className="text-[10px] uppercase tracking-wide"
-            title={denseBadgeTitle ?? undefined}
           >
             {chip.label}
           </Badge>
         ) : null}
       </div>
-      {!dense ? (
-        <div className="mt-2 space-y-1 text-xs">
-          <DetailRow label="Installed build" value={installed?.buildId ?? "Not reported"} mono />
-          <DetailRow label="Last heartbeat" value={installed ? formatDate(installed.lastSeenAt ?? undefined) : "Not reported"} />
+      <div className="mt-2 space-y-1 text-xs">
+        <DetailRow label="Installed build" value={installed?.buildId ?? "Not reported"} mono />
+        <DetailRow label="Last heartbeat" value={installed ? formatDate(installed.lastSeenAt ?? undefined) : "Not reported"} />
+        <DetailRow
+          label="Updater"
+          value={
+            updater?.installed
+              ? `Installed · ${updater.healthy ? "healthy" : "unhealthy"} · last seen ${freshnessLabel(updater.lastSeenAt ?? undefined)}`
+              : "Not installed on this host"
+          }
+        />
+        {available ? (
+          <>
+            <DetailRow label="Bundled build" value={`${available.version} (${shortBuild(available.buildId)})`} />
+            <DetailRow label="Build ID" value={available.buildId} mono />
+            <DetailRow label="Source" value="Deployed API image" />
+          </>
+        ) : (
           <DetailRow
-            label="Updater"
-            value={
-              updater?.installed
-                ? `Installed · ${updater.healthy ? "healthy" : "unhealthy"} · last seen ${freshnessLabel(updater.lastSeenAt ?? undefined)}`
-                : "Not installed on this host"
-            }
+            label="Bundled build"
+            value={status.state === "release_unavailable" ? "Bundled binary unavailable" : "Already running bundled build"}
           />
-          {available ? (
-            <>
-              <DetailRow label="Bundled build" value={`${available.version} (${shortBuild(available.buildId)})`} />
-              <DetailRow label="Build ID" value={available.buildId} mono />
-              <DetailRow label="Source" value="Deployed API image" />
-            </>
-          ) : (
-            <DetailRow
-              label="Bundled build"
-              value={status.state === "release_unavailable" ? "Bundled binary unavailable" : "Already running bundled build"}
-            />
-          )}
-          {status.compatibility.reason !== "ok" ? (
-            <DetailRow label="Compatibility" value={INCOMPATIBLE_REASONS[status.compatibility.reason]} />
-          ) : null}
-        </div>
-      ) : null}
+        )}
+        {status.compatibility.reason !== "ok" ? (
+          <DetailRow label="Compatibility" value={INCOMPATIBLE_REASONS[status.compatibility.reason]} />
+        ) : null}
+      </div>
       {/* Persistent empty live region: job start/results are only reliably
           announced when the container already exists before the content is
           inserted, so it stays mounted whenever the status details render. */}
       <div role="status" aria-live="polite">
-        {liveContent ? (
-          <div className={dense ? "mt-1" : "mt-2"}>{liveContent}</div>
-        ) : null}
+        {liveContent ? <div className="mt-2">{liveContent}</div> : null}
       </div>
       {showUpgrade ? (
-        <div className={dense ? "mt-1 flex flex-wrap items-center gap-2" : "mt-2 flex flex-wrap items-center gap-2"}>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
           {actions}
         </div>
       ) : null}
@@ -602,111 +603,342 @@ export function LocalAgentUpdate({ vps, variant }: LocalAgentUpdateProps) {
     retryRow
   );
 
-  if (variant === "workspace") {
-    if (!status && !loadError) return null;
-    return (
-      <>
-        <Card>
-          <CardHeader>
-            <CardTitle>Agent updates</CardTitle>
-            <CardDescription>
-              Upgrade {displayName} using the bundled agent binary in this deployment. Progress is confirmed by a fresh agent
-              heartbeat, not by the service status.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-2">{details}</CardContent>
-        </Card>
-        {renderDialogs()}
-      </>
-    );
-  }
-
   if (!status && !loadError) return null;
   return (
     <>
-      <div className={variant === "card" ? "col-span-2 min-w-0 xl:col-span-1" : "min-w-0"}>
-        {details}
-      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>Agent updates</CardTitle>
+          <CardDescription>
+            Upgrade {displayName} using the bundled agent binary in this deployment. Progress is confirmed by a fresh agent
+            heartbeat, not by the service status.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">{details}</CardContent>
+      </Card>
       {renderDialogs()}
     </>
   );
 
   function renderDialogs() {
     return (
-      <>
-        <AlertDialog
-          open={confirmOpen}
-          onOpenChange={(open) => {
-            if (!open) setConfirmOpen(false);
-          }}
-        >
-          <AlertDialogContent onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            upgradeTriggerRef.current?.focus();
-          }}>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Upgrade agent on {displayName}?</AlertDialogTitle>
-              <AlertDialogDescription>
-                Monitoring pauses for one agent restart. The upgrade counts as complete only when the new
-                build sends a fresh heartbeat from this server.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <div className="space-y-2 text-xs text-text">
-              <div className="flex justify-between gap-4">
-                <span className="text-dim">Current</span>
-                <span className="text-right">
-                  {dialogInstalledText ?? "Unknown"}
-                  {dialogHeartbeatText ? ` · ${dialogHeartbeatText}` : ""}
-                </span>
-              </div>
-              <div className="flex justify-between gap-4">
-                <span className="text-dim">Target</span>
-                <span className="text-right">
-                  {available ? `${available.version} (${shortBuild(available.buildId)})` : ""}
-                </span>
-              </div>
-              <div className="flex justify-between gap-4">
-                <span className="text-dim">Release ID</span>
-                <span className="break-all text-right font-mono">{available?.releaseId ?? ""}</span>
-              </div>
-              <div className="flex justify-between gap-4">
-                <span className="text-dim">Source</span>
-                <span className="text-right">Deployed API image</span>
-              </div>
-              <div className="flex justify-between gap-4">
-                <span className="text-dim">Downtime</span>
-                <span className="text-right">
-                  Monitoring pauses for a few seconds while the agent restarts.
-                </span>
-              </div>
-              <p className="text-dim">
-                If the upgrade cannot complete, the updater restores the previous binary and verifies its
-                heartbeat; an unverified rollback is flagged for manual intervention. Existing credentials
-                are preserved.
-              </p>
-              {actionError ? (
-                <p role="alert" className="text-crit">
-                  {actionError}
-                </p>
-              ) : null}
+      <AlertDialog
+        open={confirmOpen}
+        onOpenChange={(open) => {
+          if (!open) setConfirmOpen(false);
+        }}
+      >
+        <AlertDialogContent onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          upgradeTriggerRef.current?.focus();
+        }}>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Upgrade agent on {displayName}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Monitoring pauses for one agent restart. The upgrade counts as complete only when the new
+              build sends a fresh heartbeat from this server.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2 text-xs text-text">
+            <div className="flex justify-between gap-4">
+              <span className="text-dim">Current</span>
+              <span className="text-right">
+                {dialogInstalledText ?? "Unknown"}
+                {dialogHeartbeatText ? ` · ${dialogHeartbeatText}` : ""}
+              </span>
             </div>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction
-                disabled={submitting}
-                onClick={(event) => {
-                  event.preventDefault();
-                  void confirmUpgrade();
-                }}
-              >
-                {submitting ? "Starting…" : "Upgrade agent"}
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-      </>
+            <div className="flex justify-between gap-4">
+              <span className="text-dim">Target</span>
+              <span className="text-right">
+                {available ? `${available.version} (${shortBuild(available.buildId)})` : ""}
+              </span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className="text-dim">Release ID</span>
+              <span className="break-all text-right font-mono">{available?.releaseId ?? ""}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className="text-dim">Source</span>
+              <span className="text-right">Deployed API image</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className="text-dim">Downtime</span>
+              <span className="text-right">
+                Monitoring pauses for a few seconds while the agent restarts.
+              </span>
+            </div>
+            <p className="text-dim">
+              If the upgrade cannot complete, the updater restores the previous binary and verifies its
+              heartbeat; an unverified rollback is flagged for manual intervention. Existing credentials
+              are preserved.
+            </p>
+            {actionError ? (
+              <p role="alert" className="text-crit">
+                {actionError}
+              </p>
+            ) : null}
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={submitting}
+              onClick={(event) => {
+                event.preventDefault();
+                void confirmUpgrade();
+              }}
+            >
+              {submitting ? "Starting…" : "Upgrade agent"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     );
   }
+}
+
+function RemoteAgentUpdate({
+  vps,
+  jobs: propJobs,
+}: {
+  vps: VpsRecord;
+  jobs?: DashboardOverview["jobs"];
+}) {
+  const dashboard = useContext(DashboardContext);
+  const mode = dashboard?.mode ?? "local";
+  const isBusy = dashboard?.busy ?? false;
+  const displayName = vpsDisplayName(vps);
+
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [localAgentStatus, setLocalAgentStatus] = useState<VpsRecord["agentStatus"] | null>(null);
+  const [lastJobId, setLastJobId] = useState<string | null>(null);
+  const reasonId = useId();
+  const upgradeTriggerRef = useRef<HTMLButtonElement>(null);
+
+  const availableJobs = propJobs ?? dashboard?.jobs;
+  const activeJob = availableJobs
+    ? availableJobs.find(
+        (job) =>
+          job.vpsId === vps.id &&
+          (job.status === "queued" || job.status === "running") &&
+          (job.type === "install-agent" ||
+            job.type === "uninstall-agent" ||
+            job.type === "upgrade-agent" ||
+            job.type === "restart-agent" ||
+            job.type === "rotate-agent"),
+      ) ?? agentJobFor(vps, availableJobs)
+    : null;
+  const activeJobRunning = Boolean(
+    activeJob && (activeJob.status === "queued" || activeJob.status === "running"),
+  );
+  const agentStatus = localAgentStatus ?? vps.agentStatus;
+  const agentActionRunning = agentStatus === "installing" || activeJobRunning;
+  const canUpgrade =
+    mode !== "demo" &&
+    !agentActionRunning &&
+    (agentStatus === "online" || agentStatus === "offline" || agentStatus === "failed");
+
+  let disabledReason: string | null = null;
+  if (mode === "demo") {
+    disabledReason = "Agent upgrades are unavailable in demo mode.";
+  } else if (agentActionRunning) {
+    disabledReason =
+      activeJob?.type === "restart-agent"
+        ? "An agent restart is currently in progress."
+        : activeJob?.type === "rotate-agent"
+          ? "An agent credential rotation is currently in progress."
+          : activeJob?.type === "uninstall-agent"
+            ? "An agent removal is currently in progress."
+            : "An agent installation or upgrade is currently in progress.";
+  } else if (agentStatus === "not_installed") {
+    disabledReason = "Agent is not installed on this server.";
+  } else if (!agentStatus) {
+    disabledReason = "Agent status is unavailable.";
+  }
+
+  const chip = agentStatus ? REMOTE_STATUS_CHIPS[agentStatus] : null;
+
+  async function handleUpgrade() {
+    if (submitting) return;
+    setSubmitting(true);
+    setActionError(null);
+    try {
+      if (dashboard?.onUpgradeAgent) {
+        const result = await dashboard.onUpgradeAgent(vps);
+        if (
+          result &&
+          typeof result === "object" &&
+          "jobId" in result &&
+          typeof result.jobId === "string"
+        ) {
+          setLastJobId(result.jobId);
+          setLocalAgentStatus("installing");
+        }
+      } else {
+        const result = await upgradeAgent(vps.id);
+        if (result?.jobId) {
+          setLastJobId(result.jobId);
+        }
+        setLocalAgentStatus("installing");
+      }
+      setConfirmOpen(false);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "The upgrade request failed. Try again.",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <>
+      <Card>
+        <CardHeader>
+          <CardTitle>Agent updates</CardTitle>
+          <CardDescription>
+            Upgrade the agent on {displayName} via SSH. The server will download and install the
+            latest compatible agent release.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+            <span className="text-text">{agentStatusLabel(agentStatus)}</span>
+            {vps.lastSeenAt ? (
+              <span
+                className="text-[11px] text-dim"
+                title={formatDate(vps.lastSeenAt)}
+              >
+                heartbeat {freshnessLabel(vps.lastSeenAt)}
+              </span>
+            ) : null}
+            {chip ? (
+              <Badge
+                variant={chip.variant}
+                className="text-[10px] uppercase tracking-wide"
+              >
+                {chip.label}
+              </Badge>
+            ) : null}
+          </div>
+
+          <div className="mt-2 space-y-1 text-xs">
+            <DetailRow label="Host type" value="Remote SSH" />
+            <DetailRow label="Connection" value={`${vps.username}@${vps.host}:${vps.port}`} mono />
+            <DetailRow
+              label="Last heartbeat"
+              value={vps.lastSeenAt ? formatDate(vps.lastSeenAt) : "Not reported"}
+            />
+            {lastJobId || vps.lastAgentInstallJobId ? (
+              <DetailRow
+                label="Last install/upgrade job"
+                value={lastJobId || vps.lastAgentInstallJobId || ""}
+                mono
+              />
+            ) : null}
+            {vps.agentLastError ? (
+              <DetailRow label="Last error" value={vps.agentLastError} />
+            ) : null}
+          </div>
+
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button
+              ref={upgradeTriggerRef}
+              type="button"
+              size="sm"
+              variant="default"
+              disabled={!canUpgrade || submitting || isBusy}
+              aria-describedby={disabledReason ? reasonId : undefined}
+              onClick={() => {
+                setActionError(null);
+                setConfirmOpen(true);
+              }}
+            >
+              {submitting ? (
+                <>
+                  <LoaderCircle size={14} className="animate-spin" />
+                  Starting…
+                </>
+              ) : (
+                "Upgrade agent"
+              )}
+            </Button>
+          </div>
+
+          {disabledReason ? (
+            <p id={reasonId} className="mt-1 text-[11px] text-dim">
+              {disabledReason}
+            </p>
+          ) : null}
+
+          {actionError ? (
+            <p role="alert" className="mt-1 text-[11px] text-crit">
+              {actionError}
+            </p>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <AlertDialog
+        open={confirmOpen}
+        onOpenChange={(open) => {
+          if (!open) setConfirmOpen(false);
+        }}
+      >
+        <AlertDialogContent
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            upgradeTriggerRef.current?.focus();
+          }}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>Upgrade agent on {displayName}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Monitoring will pause briefly while the agent is upgraded. If the upgrade cannot
+              complete, the previous version is restored automatically. Existing credentials are
+              preserved and are not changed or stored again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2 text-xs text-text">
+            <div className="flex justify-between gap-4">
+              <span className="text-dim">Current status</span>
+              <span className="text-right">{agentStatusLabel(agentStatus)}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className="text-dim">Host</span>
+              <span className="text-right font-mono">
+                {vps.username}@{vps.host}:{vps.port}
+              </span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className="text-dim">Downtime</span>
+              <span className="text-right">
+                Monitoring pauses briefly while the agent service restarts.
+              </span>
+            </div>
+            {actionError ? (
+              <p role="alert" className="text-crit">
+                {actionError}
+              </p>
+            ) : null}
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={submitting}
+              onClick={(event) => {
+                event.preventDefault();
+                void handleUpgrade();
+              }}
+            >
+              {submitting ? "Starting…" : "Upgrade agent"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
 }
 
 function DetailRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {

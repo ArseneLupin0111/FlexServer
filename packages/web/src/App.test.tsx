@@ -1363,14 +1363,13 @@ describe("React dashboard", () => {
 
       await user.click(screen.getByRole("button", { name: "More actions for web-01" }));
       expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual([
-        "Upgrade agent",
         "Reinstall SSH key",
         "Edit server",
         "Remove server",
       ]);
     });
 
-    it("confirms and queues an upgrade for an eligible remote installed agent", async () => {
+    it("does not offer agent upgrade in overflow menu for an eligible remote installed agent", async () => {
       const onlineRecords = [{ ...twoServerRecords[0], agentStatus: "online" as const }];
       fetchMock
         .mockResolvedValueOnce(authOk())
@@ -1378,21 +1377,12 @@ describe("React dashboard", () => {
         .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: onlineRecords }) })
         .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
         .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: { jobId: "upgrade-1", state: { status: "installing" } } }) });
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) });
 
       const user = userEvent.setup();
       renderApp(["/vps"]);
       await user.click(await screen.findByRole("button", { name: "More actions for web-01" }));
-      await user.click(screen.getByRole("menuitem", { name: "Upgrade agent" }));
-      expect(screen.getByText(/Monitoring will pause briefly/)).toBeInTheDocument();
-      expect(screen.getByText(/previous version is restored automatically/)).toBeInTheDocument();
-      expect(screen.getByText(/Existing credentials are preserved/)).toBeInTheDocument();
-      await user.click(screen.getByRole("button", { name: "Upgrade agent" }));
-
-      await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/vps/vps-1/upgrade-agent", expect.objectContaining({ method: "POST" })));
-      expect(await screen.findByText("Upgrading agent")).toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "Upgrade agent" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("menuitem", { name: "Upgrade agent" })).not.toBeInTheDocument();
     });
 
     it("shows login gate after logout when auth is required", async () => {
@@ -1722,6 +1712,214 @@ describe("React dashboard", () => {
       expect(screen.queryByRole("heading", { name: "Docker monitoring" })).not.toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Docker" })).toHaveAttribute("href", "/vps/vps-1/docker");
     });
+    it("renders workspace settings page and executes remote agent upgrade", async () => {
+      const onlineServers = [{ ...twoServers[0], agentStatus: "online" as const }, twoServers[1]];
+      fetchMock
+        .mockResolvedValueOnce(authOk())
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: dashboardData }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: onlineServers }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        // Scoped bootstrap calls
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        // POST upgradeAgent
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: { jobId: "job-upgrade-1", state: { status: "queued" } } }),
+        });
+
+      const user = userEvent.setup();
+      renderApp(["/vps/vps-1/settings"]);
+
+      expect(await screen.findByRole("heading", { name: "Settings for web-01" })).toBeInTheDocument();
+      expect(screen.getByText("Agent updates")).toBeInTheDocument();
+      expect(screen.getByText("Remote SSH")).toBeInTheDocument();
+
+      const upgradeButton = screen.getByRole("button", { name: "Upgrade agent" });
+      expect(upgradeButton).toBeEnabled();
+      await user.click(upgradeButton);
+
+      const dialog = await screen.findByRole("alertdialog");
+      expect(within(dialog).getByText(/Upgrade agent on web-01\?/)).toBeInTheDocument();
+      await user.click(within(dialog).getByRole("button", { name: "Upgrade agent" }));
+
+      await waitFor(() => {
+        const upgradeCall = fetchMock.mock.calls.find(
+          ([url, init]) => String(url).includes("/api/vps/vps-1/upgrade-agent") && (init as RequestInit | undefined)?.method === "POST",
+        );
+        expect(upgradeCall).toBeDefined();
+      });
+    });
+
+    it("retains confirmation dialog and displays error when remote agent upgrade fails in Settings", async () => {
+      const onlineServers = [{ ...twoServers[0], agentStatus: "online" as const }, twoServers[1]];
+      fetchMock
+        .mockResolvedValueOnce(authOk())
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: dashboardData }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: onlineServers }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        // Scoped bootstrap calls
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        // POST upgradeAgent failure
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 500,
+          json: async () => ({ error: { code: "UPGRADE_FAILED", message: "SSH connection timed out" } }),
+        });
+
+      const user = userEvent.setup();
+      renderApp(["/vps/vps-1/settings"]);
+
+      expect(await screen.findByRole("heading", { name: "Settings for web-01" })).toBeInTheDocument();
+      const upgradeButton = screen.getByRole("button", { name: "Upgrade agent" });
+      await user.click(upgradeButton);
+
+      const dialog = await screen.findByRole("alertdialog");
+      expect(within(dialog).getByText(/Upgrade agent on web-01\?/)).toBeInTheDocument();
+      await user.click(within(dialog).getByRole("button", { name: "Upgrade agent" }));
+
+      expect(await within(dialog).findByRole("alert")).toHaveTextContent("SSH connection timed out");
+      expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    });
+
+    it("disables remote agent upgrade in Settings when a lifecycle job is active", async () => {
+      const activeRestartJob = {
+        id: "job-restart-1",
+        vpsId: "vps-1",
+        type: "restart-agent",
+        status: "running",
+        step: "running",
+        progress: 40,
+      };
+      const dashboardWithRunningJob = {
+        ...dashboardData,
+        jobs: [activeRestartJob],
+      };
+      const offlineServers = [{ ...twoServers[0], agentStatus: "offline" as const }, twoServers[1]];
+      fetchMock
+        .mockResolvedValueOnce(authOk())
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: dashboardWithRunningJob }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: offlineServers }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [activeRestartJob] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        // Scoped bootstrap calls
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [activeRestartJob] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] }),
+        });
+
+      renderApp(["/vps/vps-1/settings"]);
+
+      expect(await screen.findByRole("heading", { name: "Settings for web-01" })).toBeInTheDocument();
+      const upgradeButton = screen.getByRole("button", { name: "Upgrade agent" });
+      expect(upgradeButton).toBeDisabled();
+      expect(screen.getByText("An agent restart is currently in progress.")).toBeInTheDocument();
+    });
+
 
     it("shows 404 for unknown workspace sub-route /vps/:id/unknown", async () => {
       mockDashboardAndScoped();

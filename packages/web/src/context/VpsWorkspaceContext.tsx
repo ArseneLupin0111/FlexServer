@@ -853,7 +853,7 @@ export function VpsWorkspaceSettingsPage() {
         Settings for {vpsDisplayName(vps)}
       </h2>
       <SettingsPanel overview={overview}>
-        <LocalAgentUpdate vps={vps} variant="workspace" />
+        <LocalAgentUpdate vps={vps} variant="workspace" jobs={overview.jobs} />
       </SettingsPanel>
     </div>
   );

@@ -462,13 +462,13 @@ export function uninstallAgent(id: string) {
     state: { status: string; lastInstallJobId?: string };
   }>(`${vpsPath(id)}/uninstall-agent`, { method: "POST" });
 }
-
 export function upgradeAgent(id: string) {
   return request<{
     jobId: string;
     state: { status: string; lastInstallJobId?: string };
   }>(`${vpsPath(id)}/upgrade-agent`, { method: "POST" });
 }
+
 
 export function restartAgent(id: string) {
   return request<{

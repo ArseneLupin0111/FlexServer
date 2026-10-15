@@ -68,7 +68,6 @@ export function VpsListPage() {
         onVerify={ctx.onVerify}
         onInstallAgent={ctx.onInstallAgent}
         onUninstallAgent={ctx.onUninstallAgent}
-        onUpgradeAgent={ctx.onUpgradeAgent}
         onRestartAgent={ctx.onRestartAgent}
         onRotateAgent={ctx.onRotateAgent}
         onEdit={ctx.onEdit}

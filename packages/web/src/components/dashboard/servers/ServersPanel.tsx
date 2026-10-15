@@ -133,7 +133,6 @@ export function ServersPanel(props: ServersPanelProps) {
           onVerify={props.onVerify}
           onInstallAgent={props.onInstallAgent}
           onUninstallAgent={props.onUninstallAgent}
-          onUpgradeAgent={props.onUpgradeAgent}
           onRestartAgent={props.onRestartAgent}
           onRotateAgent={props.onRotateAgent}
           jobs={props.jobs}
@@ -157,7 +156,6 @@ export function ServersPanel(props: ServersPanelProps) {
               onVerify={props.onVerify}
               onInstallAgent={props.onInstallAgent}
               onUninstallAgent={props.onUninstallAgent}
-              onUpgradeAgent={props.onUpgradeAgent}
               onRestartAgent={props.onRestartAgent}
               onRotateAgent={props.onRotateAgent}
               onDelete={props.onDelete}

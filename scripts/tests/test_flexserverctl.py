@@ -613,9 +613,10 @@ class TestGoFlagArgv(LinuxGuard):
             ["/bin/x", "-version"],
             ["/bin/x", "--version", "daemon", "-config", "/a/b.json"],
             ["/bin/x", "-provision-docker-state", "-config", "/a/b.json"],
+            ["/bin/x", "-validate-config", "-config", "/a/b.json"],
+            ["/bin/x", "--validate-config", "-config", "/a/b.json"],
         ):
             self.assertFalse(flexserverctl.is_loop_argv(argv), argv)
-
     def test_missing_config_value_is_not_a_loop(self):
         self.assertFalse(flexserverctl.is_loop_argv(["/bin/x", "-config"]))
         self.assertFalse(flexserverctl.is_loop_argv(["/bin/x", "-config="]))
@@ -875,9 +876,19 @@ class TestSystemdCutover(LinuxGuard):
 
     def _install_stubs(self):
         self.calls = []
+        unit_states = {}
 
         def fake_systemctl(unit, action, rc=0, out="active"):
             self.calls.append(f"systemctl {action} {unit}")
+            if action == "stop":
+                unit_states[unit] = "inactive"
+                return (0, "")
+            elif action in ("start", "restart"):
+                unit_states[unit] = "active"
+                return (0, "")
+            elif action == "is-active":
+                state = unit_states.get(unit, "active")
+                return (0, "active\n") if state == "active" else (3, "inactive\n")
             return rc, out
 
         def fake_status(bin_, cfg, timeout=30):
@@ -887,7 +898,7 @@ class TestSystemdCutover(LinuxGuard):
         self.sys_patcher = unittest.mock.patch.object(
             flexserverctl, "run_systemctl",
             lambda args, timeout=30: (
-                fake_systemctl(args[1], args[0]) if len(args) > 1 else (0, "")
+                fake_systemctl(args[-1], args[0]) if len(args) > 1 else (0, "")
             ),
         )
         self.sys_patcher.start()
@@ -896,15 +907,30 @@ class TestSystemdCutover(LinuxGuard):
     def _patch_ctl(self, actions=None):
         """actions: {('vps-updater.service','restart'): (rc,out), ...}"""
         actions = actions or {}
+        unit_states = {}
 
         def fake(args, timeout=30):
-            key = (args[1], args[0])
-            self.calls.append(f"systemctl {args[0]} {args[1]}")
-            return actions.get(key, (0, "active\n"))
+            action = args[0]
+            unit = args[-1] if len(args) > 1 else ""
+            key = (unit, action)
+            self.calls.append(f"systemctl {action} {unit}")
+            if key in actions:
+                return actions[key]
+            if action == "stop":
+                unit_states[unit] = "inactive"
+                return (0, "")
+            elif action in ("start", "restart"):
+                unit_states[unit] = "active"
+                return (0, "")
+            elif action == "is-active":
+                state = unit_states.get(unit, "active")
+                return (0, "active\n") if state == "active" else (3, "inactive\n")
+            return (0, "active\n")
 
         p = unittest.mock.patch.object(flexserverctl, "run_systemctl", fake)
         p.start()
         self.addCleanup(p.stop)
+
 
     def test_ordering_stop_before_preflight_restart_after(self):
         self._patch_ctl({})

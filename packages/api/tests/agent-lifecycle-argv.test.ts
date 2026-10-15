@@ -1,75 +1,192 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildLifecycleLockAcquireCommand,
+  buildLifecycleLockReleaseCommand,
   buildManagedProcessInspectCommand,
   buildManagedProcessStopCommand,
   buildTransactionalStartCommand,
-  EXACT_ARGV,
+  buildServiceUninstallCommand,
+  buildSystemdUnitContent,
+  classifyManagedProcessInspection,
+  systemdEscapeExecArg,
+  systemdEscapeValue,
+  getAgentServiceName,
+  getAgentServiceUnitPath,
+  getAgentLockPath,
+  getAgentTmpfilesPath,
   type ManagedProcessOptions,
 } from "../src/agents/agent-lifecycle-remote.js";
 
-describe("agent-lifecycle-argv remote command generation", () => {
+describe("agent-lifecycle-argv behavioral tests", () => {
   const binary = "/home/deploy/.vps-manager-agent/vps-agent";
   const config = "/home/deploy/.vps-manager-agent/config.json";
   const pidFile = "/home/deploy/.vps-manager-agent/vps-agent.pid";
 
-  it("builds inspect command supporting canonical and Docker-state loops", () => {
-    const cmd = buildManagedProcessInspectCommand(binary, config, pidFile);
-    expect(cmd).toContain("_st_path=");
-    expect(cmd).toContain("_id_path=");
-    expect(cmd).toContain("_rk_path=");
-    expect(cmd).toContain("_uid_val=");
-    expect(cmd).toContain("_bdir=$(dirname \"$_bin\")");
-    expect(cmd).toContain("_cwd=$(readlink -f \"/proc/$_pid/cwd\" 2>/dev/null || true)");
-    expect(cmd).toContain("-docker-identity-path");
-    expect(cmd).toContain("-docker-runtime-keys-path");
-    expect(cmd).toContain("-docker-runtime-owner-uid");
-    expect(cmd).toContain("echo ambiguous");
-    expect(cmd).toContain("echo mismatch");
-    expect(cmd).toContain("echo invalid");
-    expect(cmd).toContain("echo none");
+  it("derives deterministic unit names and system paths per VPS ID", () => {
+    const vpsId = "vps-test-42";
+    const serviceName = getAgentServiceName(vpsId);
+    expect(serviceName).toMatch(/^vps-agent-[a-f0-9]{64}\.service$/);
+    expect(getAgentServiceUnitPath(vpsId)).toBe(`/etc/systemd/system/${serviceName}`);
+    expect(getAgentLockPath(vpsId)).toMatch(/^\/run\/vps-manager-agent\/vps-agent-[a-f0-9]{64}\.lock$/);
+    expect(getAgentTmpfilesPath(vpsId)).toMatch(/^\/etc\/tmpfiles\.d\/vps-agent-[a-f0-9]{64}\.conf$/);
   });
 
-  it("builds stop command revalidating identity before signaling", () => {
-    const cmd = buildManagedProcessStopCommand(binary, config, "1234", "5678");
-    expect(cmd).toContain("_pid='1234'");
-    expect(cmd).toContain("_start='5678'");
-    expect(cmd).toContain("kill -TERM");
-    expect(cmd).toContain("kill -KILL");
-    expect(cmd).toContain("_cwd=$(readlink -f \"/proc/$_pid/cwd\" 2>/dev/null || true)");
-    expect(cmd).toContain("-docker-identity-path");
+  it("classifies managed process inspection states accurately", () => {
+    expect(classifyManagedProcessInspection(2, null, { exists: true, content: "123" }, () => true)).toBe("ambiguous");
+    expect(classifyManagedProcessInspection(0, null, { exists: false }, () => false)).toBe("none");
+    expect(classifyManagedProcessInspection(1, { pid: "123", starttime: "456" }, { exists: false }, () => true)).toBe("ambiguous");
+    expect(classifyManagedProcessInspection(0, null, { exists: true, content: "not-a-number" }, () => false)).toBe("invalid");
+    expect(classifyManagedProcessInspection(0, null, { exists: true, content: "123" }, () => true)).toBe("mismatch");
+    expect(classifyManagedProcessInspection(0, null, { exists: true, content: "123" }, () => false)).toBe("none");
+    expect(classifyManagedProcessInspection(1, { pid: "123", starttime: "456" }, { exists: true, content: "123" }, () => true)).toBe("owned:123:456");
+    expect(classifyManagedProcessInspection(1, { pid: "999", starttime: "456" }, { exists: true, content: "123" }, () => true)).toBe("mismatch");
   });
 
-  it("builds transactional start command checking Docker runtime files", () => {
-    const cmd = buildTransactionalStartCommand(binary, config, pidFile);
-    // When no explicit options are passed, checks file existence dynamically
-    expect(cmd).toContain('if [ -f "$_id_path" ] && [ -f "$_rk_path" ]; then nohup "$_bin" -config "$_cfg" -state "$_st_path" -docker-identity-path "$_id_path" -docker-runtime-keys-path "$_rk_path" -docker-runtime-owner-uid "$_uid_val"');
-    expect(cmd).toContain('else nohup "$_bin" -config "$_cfg"');
-    expect(cmd).toContain("trap 'cleanup' EXIT");
-    expect(cmd).toContain("mv -- \"$_tmp\" \"$_pf\"");
+  it("enforces complete required context on buildTransactionalStartCommand", () => {
+    expect(() =>
+      buildTransactionalStartCommand(binary, config, pidFile, {
+        vpsId: "vps-test-42",
+        user: "",
+        homeDir: "/home/deploy",
+      }),
+    ).toThrow("buildTransactionalStartCommand requires complete context");
+
+    expect(() =>
+      buildTransactionalStartCommand(binary, config, pidFile, {
+        vpsId: "vps-test-42",
+        user: "deploy",
+        homeDir: "",
+      }),
+    ).toThrow("buildTransactionalStartCommand requires complete context");
+
+    expect(() =>
+      buildTransactionalStartCommand(binary, config, pidFile, undefined),
+    ).toThrow("buildTransactionalStartCommand requires complete context");
   });
 
-  it("builds transactional start command with explicit Docker options", () => {
-    const options: ManagedProcessOptions = {
-      statePath: "/custom/state.json",
-      dockerIdentityPath: "/custom/docker-identity.json",
-      dockerRuntimeKeysPath: "/custom/runtime-keys.json",
-      dockerRuntimeOwnerUid: 1000,
-    };
-    const cmd = buildTransactionalStartCommand(binary, config, pidFile, options);
-    expect(cmd).toContain("_st_path='/custom/state.json'");
-    expect(cmd).toContain("_id_path='/custom/docker-identity.json'");
-    expect(cmd).toContain("_rk_path='/custom/runtime-keys.json'");
-    expect(cmd).toContain("_uid_val='1000'");
-    expect(cmd).toContain('nohup "$_bin" -config "$_cfg" -state "$_st_path" -docker-identity-path "$_id_path" -docker-runtime-keys-path "$_rk_path" -docker-runtime-owner-uid "$_uid_val" >/dev/null 2>&1 & _pid=$!;');
-    expect(cmd).not.toContain('else nohup "$_bin" -config "$_cfg"');
+  it("enforces complete required context on buildSystemdUnitContent", () => {
+    expect(() =>
+      buildSystemdUnitContent({
+        vpsId: "",
+        user: "deploy",
+        homeDir: "/home/deploy",
+        binary,
+        config,
+      }),
+    ).toThrow("buildSystemdUnitContent requires complete context");
+
+    expect(() =>
+      buildSystemdUnitContent({
+        vpsId: "vps-test-42",
+        user: "",
+        homeDir: "/home/deploy",
+        binary,
+        config,
+      }),
+    ).toThrow("buildSystemdUnitContent requires complete context");
+
+    expect(() =>
+      buildSystemdUnitContent({
+        vpsId: "vps-test-42",
+        user: "deploy",
+        homeDir: "",
+        binary,
+        config,
+      }),
+    ).toThrow("buildSystemdUnitContent requires complete context");
   });
 
-  it("safely quotes paths containing spaces and single quotes", () => {
-    const funnyBinary = "/home/user with spaces/it's cool/vps-agent";
-    const funnyConfig = "/home/user with spaces/it's cool/config.json";
-    const funnyPid = "/home/user with spaces/it's cool/vps-agent.pid";
-    const cmd = buildManagedProcessInspectCommand(funnyBinary, funnyConfig, funnyPid);
-    expect(cmd).toContain("'" + "/home/user with spaces/it'\"'\"'s cool/vps-agent" + "'");
-    expect(cmd).toContain("'" + "/home/user with spaces/it'\"'\"'s cool/config.json" + "'");
+  it("escapes $ and % in systemdExecArg and systemdValue without quiet newline corruption", () => {
+    expect(systemdEscapeValue("my%val")).toBe("my%%val");
+    expect(() => systemdEscapeValue("bad\nval")).toThrow("must not contain newline characters");
+    expect(() => systemdEscapeValue("bad\rval")).toThrow("must not contain newline characters");
+
+    expect(systemdEscapeExecArg("/bin/app$var")).toBe("/bin/app$$var");
+    expect(systemdEscapeExecArg("/bin/app%u")).toBe("/bin/app%%u");
+    expect(systemdEscapeExecArg("/bin/app$foo%bar")).toBe("/bin/app$$foo%%bar");
+    expect(systemdEscapeExecArg("/bin/app with spaces$dir%foo")).toBe('"/bin/app with spaces$$dir%%foo"');
+    expect(systemdEscapeExecArg('/bin/app"quote\\slash')).toBe('"/bin/app\\"quote\\\\slash"');
+    expect(() => systemdEscapeExecArg("/bin/app\nnewline")).toThrow("must not contain newline characters");
+    expect(() => systemdEscapeExecArg("/bin/app\rnewline")).toThrow("must not contain newline characters");
+  });
+
+  it("builds valid systemd unit content escaping $, % and preserving paths", () => {
+    const unitContent = buildSystemdUnitContent({
+      vpsId: "vps-test$42%spec",
+      user: "deploy",
+      homeDir: "/home/deploy",
+      binary: "/opt/app$special%var/vps-agent",
+      config: "/opt/app/my%conf$dir/config.json",
+    });
+    expect(unitContent).toContain("Description=VPS Manager Agent (vps-test$42%%spec)");
+    expect(unitContent).toContain("User=deploy");
+    expect(unitContent).toContain("WorkingDirectory=/home/deploy");
+    expect(unitContent).toContain(
+      "ExecStart=/opt/app$$special%%var/vps-agent -config /opt/app/my%%conf$$dir/config.json -state /opt/app/my%%conf$$dir/state.json",
+    );
+    expect(unitContent).toContain("Restart=always");
+  });
+
+  it("rejects newline injection in systemd unit fields", () => {
+    expect(() =>
+      buildSystemdUnitContent({
+        vpsId: "vps-test",
+        user: "deploy\nExecStartPre=/bin/sh -c 'evil'",
+        homeDir: "/home/deploy",
+        binary: "/usr/local/bin/vps-agent",
+        config: "/home/deploy/config.json",
+      }),
+    ).toThrow("user must not contain newline characters");
+
+    expect(() =>
+      buildSystemdUnitContent({
+        vpsId: "vps-test",
+        user: "deploy",
+        group: "deploy\nPermissionsStartOnly=true",
+        homeDir: "/home/deploy",
+        binary: "/usr/local/bin/vps-agent",
+        config: "/home/deploy/config.json",
+      }),
+    ).toThrow("group must not contain newline characters");
+
+    expect(() =>
+      buildSystemdUnitContent({
+        vpsId: "vps-test\nAfter=evil.target",
+        user: "deploy",
+        homeDir: "/home/deploy",
+        binary: "/usr/local/bin/vps-agent",
+        config: "/home/deploy/config.json",
+      }),
+    ).toThrow("vpsId must not contain newline characters");
+  });
+
+  it("rejects newlines in command builders", () => {
+    expect(() =>
+      buildTransactionalStartCommand(binary, "config\n.json", pidFile, {
+        vpsId: "vps-test-42",
+        user: "deploy",
+        homeDir: "/home/deploy",
+      }),
+    ).toThrow("config must not contain newline characters");
+
+    expect(() =>
+      buildManagedProcessInspectCommand(binary, "config\n.json", pidFile),
+    ).toThrow("config must not contain newline characters");
+
+    expect(() =>
+      buildManagedProcessStopCommand(binary, "config\n.json"),
+    ).toThrow("config must not contain newline characters");
+
+    expect(() =>
+      buildServiceUninstallCommand("remote\ndir", "vps-test-42"),
+    ).toThrow("remoteDir must not contain newline characters");
+  });
+
+  it("generates atomic lifecycle lock acquire and release commands", () => {
+    const lock = "/home/deploy/.vps-manager-agent/lifecycle.lock";
+    expect(buildLifecycleLockAcquireCommand(lock)).toBe(
+      `if mkdir -- '${lock}' 2>/dev/null; then echo acquired; else echo conflict; fi`,
+    );
+    expect(buildLifecycleLockReleaseCommand(lock)).toBe(`rmdir -- '${lock}'`);
   });
 });

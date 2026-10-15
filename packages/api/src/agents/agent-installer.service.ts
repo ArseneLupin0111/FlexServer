@@ -235,11 +235,11 @@ export class AgentInstallerService {
             30_000,
           );
 
-          // Run -once validation
-          await ctx.update("running-once", 70);
-          const onceCmd = `${shellQuote(remoteBinary)} -config ${shellQuote(remoteConfig)} -once`;
-          // 45s timeout for the -once run
-          await this.ssh.execCommand(vps, onceCmd, sshAuth, 45_000);
+          // Run -validate-config offline validation
+          await ctx.update("validating", 70);
+          const validateCmd = `${shellQuote(remoteBinary)} -config ${shellQuote(remoteConfig)} -validate-config`;
+          // 45s timeout for the preflight validation
+          await this.ssh.execCommand(vps, validateCmd, sshAuth, 45_000);
 
           // Start background loop via transactional start
           await ctx.update("starting-background", 85);
@@ -248,9 +248,9 @@ export class AgentInstallerService {
             remoteBinary,
             remoteConfig,
             pidFile,
+            { vpsId, user: vps.username || undefined, homeDir },
           );
           await this.ssh.execCommand(vps, loopCmd, sshAuth, 10_000);
-
           // Mark success
           await this.agentRepository.upsertState({
             vpsId,

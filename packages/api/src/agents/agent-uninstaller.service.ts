@@ -19,6 +19,7 @@ import {
 } from "../jobs/job-runner.service.js";
 import { JobService } from "../jobs/job.service.js";
 import { AgentLifecycleCoordinator } from "./agent-lifecycle-coordinator.js";
+import { buildServiceUninstallCommand } from "./agent-lifecycle-remote.js";
 import { sanitiseError } from "../jobs/job-runner.service.js";
 import {
   APP_CONFIG,
@@ -50,15 +51,8 @@ const AGENT_BINARY = "vps-agent";
  *     binary path of the managed agent, never a bare process name.
  *  3. Always exit 0 — "no agent running" is a perfectly fine state.
  */
-function buildStopAgentCommand(remoteDir: string): string {
-  const qBinary = shellQuote(`${remoteDir}/${AGENT_BINARY}`);
-  const qPidFile = shellQuote(`${remoteDir}/vps-agent.pid`);
-  const expected = shellQuote(`${remoteDir}/${AGENT_BINARY}`);
-  return [
-    `if [ -f ${qPidFile} ]; then _pid=$(cat ${qPidFile} 2>/dev/null || true);`,
-    `case "$_pid" in (''|*[!0-9]*) ;; (*)`,
-    `if [ -e /proc/$_pid/exe ] && [ "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = ${expected} ]; then kill "$_pid" 2>/dev/null || true; fi;; esac; fi; true`,
-  ].join(" ");
+export function buildStopAgentCommand(remoteDir: string, vpsId?: string): string {
+  return buildServiceUninstallCommand(remoteDir, vpsId);
 }
 
 // ── Service ──────────────────────────────────────────────────────────────
@@ -304,11 +298,11 @@ export class AgentUninstallerService {
     const remoteDir = `${homeDir}/${AGENT_DIR}`;
     const qDir = shellQuote(remoteDir);
 
-    // Stop the exact managed process (pid-file assisted, targeted path match).
+    // Stop and remove the managed service, ensuring process is stopped
     await ctx.update("stopping", 30);
     await this.ssh.execCommand(
       vps,
-      buildStopAgentCommand(remoteDir),
+      buildStopAgentCommand(remoteDir, vps.id),
       auth,
       20_000,
     );

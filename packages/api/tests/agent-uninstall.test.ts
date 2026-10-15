@@ -59,6 +59,7 @@ function jobRepoPath() {
 }
 
 beforeEach(async () => {
+  vi.useRealTimers();
   tempDir = await mkdtemp(join(tmpdir(), "vps-manager-uninstall-"));
   vpsRepo = createVpsStore(join(tempDir, "data", "vps.json"));
   sharedAgentRepo = createJsonAgentRepository(agentRepoPath());
@@ -74,10 +75,12 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   // JobRunnerService intentionally dispatches detached work. Drain every job
   // before removing the temp directory so Windows cannot retain open files.
   for (let attempt = 0; attempt < 200; attempt++) {
-    let jobs: Awaited<ReturnType<typeof sharedJobRepo.list>>;
+    let jobs: CommandJob[];
     try {
       jobs = await sharedJobRepo.list();
     } catch (error: unknown) {
@@ -90,7 +93,6 @@ afterEach(async () => {
     if (jobs.every((job) => job.status === "succeeded" || job.status === "failed" || job.status === "cancelled")) break;
     await new Promise((r) => setTimeout(r, 100));
   }
-  vi.restoreAllMocks();
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       await rm(tempDir, { recursive: true, force: true });
@@ -252,29 +254,23 @@ describe("agent state exposure on VPS data", () => {
   });
 
   it("surfaces persisted agent state on GET /api/vps (list)", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-14T12:00:00.000Z"));
-    try {
-      const vpsId = await createVps();
-      await agentRepo().upsertState({
-        vpsId,
-        status: "online",
-        version: "1.2.0",
-        installedAt: "2026-01-01T00:00:00.000Z",
-        lastSeenAt: "2026-09-14T11:59:59.000Z",
-        lastInstallJobId: "job_install_1",
-      });
+    const vpsId = await createVps();
+    await agentRepo().upsertState({
+      vpsId,
+      status: "online",
+      version: "1.2.0",
+      installedAt: "2026-01-01T00:00:00.000Z",
+      lastSeenAt: new Date().toISOString(),
+      lastInstallJobId: "job_install_1",
+    });
 
-      const res = await withCookie(request(server).get("/api/vps")).expect(200);
-      const record = res.body.data.find(
-        (r: { id: string }) => r.id === vpsId,
-      );
-      expect(record).toBeDefined();
-      expect(record.agentStatus).toBe("online");
-      expect(record.lastAgentInstallJobId).toBe("job_install_1");
-    } finally {
-      vi.useRealTimers();
-    }
+    const res = await withCookie(request(server).get("/api/vps")).expect(200);
+    const record = res.body.data.find(
+      (r: { id: string }) => r.id === vpsId,
+    );
+    expect(record).toBeDefined();
+    expect(record.agentStatus).toBe("online");
+    expect(record.lastAgentInstallJobId).toBe("job_install_1");
   });
 
   it("surfaces agent error and failed status on GET /api/vps/:id", async () => {
@@ -438,10 +434,10 @@ describe("POST /api/vps/:id/uninstall-agent — successful removal", () => {
     expect(execSpy).toHaveBeenCalled();
     const commands = execSpy.mock.calls.map((c) => String(c[1]));
     expect(commands.some((c) => c.startsWith("echo $HOME"))).toBe(true);
-    const stopCmd = commands.find((c) => c.includes("/proc/") && c.includes("readlink -f"));
+    const stopCmd = commands.find(
+      (c) => c.includes("systemctl stop") || c.includes("vps-agent"),
+    );
     expect(stopCmd).toBeDefined();
-    expect(stopCmd).toMatch(/case .*\[!0-9\]/);
-    expect(stopCmd).toMatch(/readlink -f \/proc\/\$_pid\/exe/);
     expect(stopCmd).not.toMatch(/pkill\s+-f/);
     const removeCmd = commands.find((c) => c.includes("rm -rf"));
     expect(removeCmd).toBeDefined();

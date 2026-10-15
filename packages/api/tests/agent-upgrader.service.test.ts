@@ -35,7 +35,7 @@ async function fixture(options: { lock?: string; ownership?: string | string[]; 
       if (command.includes("$HOME")) return { stdout: "/home/deploy\n", stderr: "" };
       if (command.includes("mkdir --") && command.includes("lifecycle.lock")) return { stdout: options.lock ?? "acquired", stderr: "" };
       if (command.endsWith(" -version")) return { stdout: options.versionOut ?? "2.0.0\n", stderr: "" };
-      if (command.includes("_matches=0")) {
+      if (command.includes("_owned=''") || command.includes("printf 'owned:%s:%s")) {
         const out = ownerships ? (ownerships.shift() ?? "owned:42:9001\n") : (options.ownership ?? "owned:42:9001\n");
         return { stdout: out, stderr: "" };
       }
@@ -72,13 +72,13 @@ describe("AgentUpgraderService", () => {
     const f = await fixture({ observations: [fState("1.0.0", 0), preflight, preflight, success] });
     await f.task();
     expect(f.ctx.succeed).toHaveBeenCalledWith("complete");
-    const once = f.commands.findIndex((c) => c.includes(" -once"));
-    expect(f.commands[once]).toContain(" -host-only");
+    const preflightCmd = f.commands.findIndex((c) => c.includes(" -validate-config"));
+    expect(preflightCmd).toBeGreaterThan(-1);
     const identify = f.commands.findIndex((c) => c.includes("_matches=0"));
     const stop = f.commands.findIndex((c) => c.includes("kill -TERM") && c.includes("owns()"));
     const swap = f.commands.findIndex((c) => c.includes("vps-agent.backup-"));
-    const start = f.commands.findIndex((c) => c.includes("nohup"));
-    expect([once, identify, stop, swap, start]).toEqual([...([once, identify, stop, swap, start])].sort((a, b) => a - b));
+    const start = f.commands.findIndex((c) => c.includes("systemctl start"));
+    expect([preflightCmd, identify, stop, swap, start]).toEqual([...([preflightCmd, identify, stop, swap, start])].sort((a, b) => a - b));
     expect(f.agents.createCredential).not.toHaveBeenCalled();
     expect(f.agents.updateCredential).not.toHaveBeenCalled();
     expect(f.agents.revokeCredential).not.toHaveBeenCalled();
@@ -167,13 +167,13 @@ describe("AgentUpgraderService", () => {
     const f = await fixture({ observations: [fState("1.0.0", 0), fState("2.0.0", 1), fState("2.0.0", 2), fState("2.0.0", 3)] });
     await f.task();
     const provision = f.commands.findIndex((c) => c.includes("-provision-docker-state"));
-    const once = f.commands.findIndex((c) => c.includes(" -once"));
+    const preflightCmd = f.commands.findIndex((c) => c.includes(" -validate-config"));
     const stop = f.commands.findIndex((c) => c.includes("kill -TERM") && c.includes("owns()"));
     const swap = f.commands.findIndex((c) => c.includes("vps-agent.backup-"));
-    const start = f.commands.findIndex((c) => c.includes("nohup"));
+    const start = f.commands.findIndex((c) => c.includes("systemctl start"));
     expect(provision).toBeGreaterThanOrEqual(0);
     // Provisioning gates everything: preflight, stop, swap, and start.
-    expect([provision, once, stop, swap, start]).toEqual([...([provision, once, stop, swap, start])].sort((a, b) => a - b));
+    expect([provision, preflightCmd, stop, swap, start]).toEqual([...([provision, preflightCmd, stop, swap, start])].sort((a, b) => a - b));
     const provisionCmd = f.commands[provision];
     // Uses the staged binary and the shared agent state directory.
     expect(provisionCmd).toContain("vps-agent.stage-");

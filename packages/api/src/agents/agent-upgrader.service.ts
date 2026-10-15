@@ -258,11 +258,10 @@ export class AgentUpgraderService {
       );
       await this.ssh.execCommand(
         vps,
-        `${q(staged)} -config ${q(config)} -once -host-only`,
+        `${q(staged)} -config ${q(config)} -validate-config`,
         auth,
-        45_000,
+        30_000,
       );
-      // The staged -once uses the live credential/config and can itself ingest.
       // Snapshot only after it finishes so that observation cannot prove the
       // subsequently started background process is healthy.
       await ctx.update("identifying-process", 40);
@@ -278,7 +277,10 @@ export class AgentUpgraderService {
       if (owned) {
         await ctx.update("stopping", 50);
         await this.stopPid(vps, auth, binary, config, owned[1], owned[2]);
-      } else if (ownership !== "none") {
+      } else if (ownership === "none") {
+        // Ensure any systemd service in activating/auto-restarting state is stopped
+        await this.stopService(vps, auth, binary, config);
+      } else {
         throw new Error(
           "Managed agent process ownership is missing or ambiguous",
         );
@@ -293,7 +295,7 @@ export class AgentUpgraderService {
         10_000,
       );
       swapped = true;
-      await this.start(vps, auth, binary, config, pidFile);
+      await this.start(vps, auth, binary, config, pidFile, dir);
       await ctx.update("verifying-ingest", 80);
       await this.waitForObservation(vps.id, postStopBaseline, candidateIdentity);
       await this.ssh.execCommand(vps, `rm -f -- ${q(backup)}`, auth, 10_000);
@@ -307,7 +309,7 @@ export class AgentUpgraderService {
       }
       try {
         await ctx.update("rolling-back", 90);
-        await this.stopOwned(vps, auth, binary, config, pidFile);
+        await this.stopOwned(vps, auth, binary, config, pidFile, dir);
         await this.ssh.execCommand(
           vps,
           `test -f ${q(backup)} && mv -f -- ${q(backup)} ${q(binary)}`,
@@ -315,7 +317,7 @@ export class AgentUpgraderService {
           10_000,
         );
         const beforeRollback = (await this.agents.getState(vps.id))?.lastSeenAt;
-        await this.start(vps, auth, binary, config, pidFile);
+        await this.start(vps, auth, binary, config, pidFile, dir);
         await this.waitForObservation(vps.id, beforeRollback, {
           version: prior.version!,
           buildId: prior.buildId,
@@ -340,8 +342,14 @@ export class AgentUpgraderService {
     binary: string,
     config: string,
     pidFile: string,
+    dir: string,
   ) {
-    const cmd = buildTransactionalStartCommand(binary, config, pidFile);
+    const homeDir = dir.replace(/\/.vps-manager-agent$/, "");
+    const cmd = buildTransactionalStartCommand(binary, config, pidFile, {
+      vpsId: vps.id,
+      user: vps.username || "root",
+      homeDir,
+    });
     await this.ssh.execCommand(vps, cmd, auth, 10_000);
   }
   private async stopOwned(
@@ -350,6 +358,7 @@ export class AgentUpgraderService {
     binary: string,
     config: string,
     pidFile: string,
+    dir?: string,
   ) {
     const result = await this.ssh.execCommand(
       vps,
@@ -361,7 +370,9 @@ export class AgentUpgraderService {
     const owned = /^owned:([1-9][0-9]*):([1-9][0-9]*)$/.exec(inspect);
     if (owned) {
       await this.stopPid(vps, auth, binary, config, owned[1], owned[2]);
-    } else if (inspect !== "none") {
+    } else if (inspect === "none") {
+      await this.stopService(vps, auth, binary, config);
+    } else {
       throw new Error(
         "Managed agent process ownership is missing or ambiguous",
       );
@@ -377,7 +388,24 @@ export class AgentUpgraderService {
   ) {
     await this.ssh.execCommand(
       vps,
-      buildManagedProcessStopCommand(binary, config, pid, starttime),
+      buildManagedProcessStopCommand(binary, config, pid, starttime, {
+        vpsId: vps.id,
+      }),
+      auth,
+      10_000,
+    );
+  }
+  private async stopService(
+    vps: VpsRecord,
+    auth: { privateKey: string },
+    binary: string,
+    config: string,
+  ) {
+    await this.ssh.execCommand(
+      vps,
+      buildManagedProcessStopCommand(binary, config, undefined, undefined, {
+        vpsId: vps.id,
+      }),
       auth,
       10_000,
     );

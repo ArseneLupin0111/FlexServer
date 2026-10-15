@@ -818,16 +818,13 @@ export function VpsWorkspaceTerminalPage() {
 export function VpsWorkspaceSettingsPage() {
   const { vps, overview } = useVpsWorkspace();
   return (
-    <div className="space-y-2">
+    <div className="space-y-4">
       <h2 className="text-lg font-semibold tracking-tight text-text">
         Settings for {vpsDisplayName(vps)}
       </h2>
-      <p className="text-sm text-dim">
-        Runtime settings are still global until scoped settings/actions are
-        separated.
-      </p>
-      <SettingsPanel overview={overview} />
-      <LocalAgentUpdate vps={vps} variant="workspace" />
+      <SettingsPanel overview={overview}>
+        <LocalAgentUpdate vps={vps} variant="workspace" />
+      </SettingsPanel>
     </div>
   );
 }

@@ -1,5 +1,14 @@
-import { useState } from "react";
-import { AlertCircle, Loader2, ShieldAlert, TerminalSquare } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import {
+  AlertCircle,
+  AlertTriangle,
+  ChevronDown,
+  Info,
+  Loader2,
+  Lock,
+  ShieldAlert,
+  TerminalSquare,
+} from "lucide-react";
 import {
   Card,
   CardContent,
@@ -36,7 +45,13 @@ function RuntimeFact({
   );
 }
 
-export function SettingsPanel({ overview }: { overview: DashboardOverview }) {
+export function SettingsPanel({
+  overview,
+  children,
+}: {
+  overview: DashboardOverview;
+  children?: ReactNode;
+}) {
   const dashboard = useDashboard();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -86,222 +101,275 @@ export function SettingsPanel({ overview }: { overview: DashboardOverview }) {
     }
   };
   return (
-    <div className="grid max-w-3xl gap-4">
-      <Card className="min-w-0 overflow-hidden">
-        <CardHeader className="border-b border-line p-4 pb-3">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <CardTitle>Settings</CardTitle>
-              <CardDescription className="mt-0.5">
-                Runtime safety posture.
-              </CardDescription>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="p-0">
-          <dl className="grid grid-cols-1 gap-px bg-line sm:grid-cols-2 xl:grid-cols-5">
-            <RuntimeFact label="App mode" value={overview.settings.appMode} />
-            <RuntimeFact
-              label="Web terminal"
-              value={enabled ? "enabled" : "disabled"}
-              tone={enabled ? "ok" : "warn"}
-            />
-            <RuntimeFact
-              label="Command guard"
-              value={guardEnabled ? "enabled" : "disabled"}
-              tone={guardEnabled ? "ok" : "warn"}
-            />
-            <RuntimeFact
-              label="Real SSH"
-              value={overview.settings.realSshEnabled ? "enabled" : "disabled"}
-              tone={overview.settings.realSshEnabled ? "ok" : "warn"}
-            />
-            <RuntimeFact
-              label="Local auth"
-              value={
-                overview.settings.authRequiredInLocalMode ? "required" : "off"
-              }
-              tone={
-                overview.settings.authRequiredInLocalMode ? "ok" : "warn"
-              }
-            />
-          </dl>
-        </CardContent>
-      </Card>
-
-      <Card className="min-w-0 overflow-hidden">
-        <CardHeader className="border-b border-line p-4 pb-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0 flex-1">
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-12 xl:gap-6 xl:items-start">
+      {/* Main column: Terminal & safety panel + Agent updates slot */}
+      <div className="space-y-4 xl:col-span-8">
+        <Card className="min-w-0 overflow-hidden">
+          <CardHeader className="border-b border-line p-4 pb-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <TerminalSquare
-                  size={16}
-                  className="shrink-0 text-dim"
-                  aria-hidden="true"
-                />
-                <CardTitle>Web terminal</CardTitle>
+                <CardTitle>Terminal &amp; safety</CardTitle>
+                <span className="border border-line bg-raised px-1.5 py-0.5 font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-dim">
+                  Global
+                </span>
               </div>
-              <CardDescription className="mt-0.5 max-w-2xl leading-5">
-                Interactive browser terminal access for system-managed local host
-                and remote VPS targets.
-              </CardDescription>
             </div>
-            <Button
-              type="button"
-              size="sm"
-              variant={enabled ? "secondary" : "outline"}
-              className="h-8 rounded-none px-3 text-xs"
-              disabled={pending}
-              aria-pressed={enabled}
-              aria-label={
-                enabled ? "Disable web terminal" : "Enable web terminal"
-              }
-              data-testid="web-terminal-toggle"
-              onClick={handleToggle}
-            >
-              {pending ? (
-                <span className="flex items-center gap-1.5">
-                  <Loader2
-                    className="h-3.5 w-3.5 animate-spin"
+            <CardDescription className="mt-0.5">
+              Runtime console access and client-side accidental execution guard.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="divide-y divide-line p-0">
+            {/* Web terminal row */}
+            <div className="p-4 space-y-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <TerminalSquare
+                      size={16}
+                      className="shrink-0 text-dim"
+                      aria-hidden="true"
+                    />
+                    <h3 className="text-sm font-semibold text-text">Web terminal</h3>
+                  </div>
+                  <p className="mt-1 text-xs text-dim">
+                    Interactive browser terminal access for system-managed local host and remote VPS targets.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={enabled ? "secondary" : "outline"}
+                  className="h-8 rounded-none px-3 text-xs"
+                  disabled={pending}
+                  aria-pressed={enabled}
+                  aria-label={
+                    enabled ? "Disable web terminal" : "Enable web terminal"
+                  }
+                  data-testid="web-terminal-toggle"
+                  onClick={handleToggle}
+                >
+                  {pending ? (
+                    <span className="flex items-center gap-1.5">
+                      <Loader2
+                        className="h-3.5 w-3.5 animate-spin"
+                        aria-hidden="true"
+                      />
+                      <span>Updating…</span>
+                    </span>
+                  ) : enabled ? (
+                    "Disable"
+                  ) : (
+                    "Enable"
+                  )}
+                </Button>
+              </div>
+              {error ? (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 border border-crit/40 bg-crit/10 p-3 text-[13px] text-crit"
+                >
+                  <AlertCircle
+                    size={16}
+                    className="mt-0.5 shrink-0"
                     aria-hidden="true"
                   />
-                  <span>Updating…</span>
-                </span>
-              ) : enabled ? (
-                "Disable"
-              ) : (
-                "Enable"
-              )}
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3 p-4">
-          {error ? (
-            <div
-              role="alert"
-              className="flex items-start gap-2 border border-crit/40 bg-crit/10 p-3 text-[13px] text-crit"
-            >
-              <AlertCircle
-                size={16}
-                className="mt-0.5 shrink-0"
-                aria-hidden="true"
-              />
-              <span>{error}</span>
+                  <span>{error}</span>
+                </div>
+              ) : null}
             </div>
-          ) : null}
-          <p className="text-[13px] leading-6 text-dim">
-            When enabled, authorized users can open terminal sessions from the
-            Terminal tab. Remote servers require real SSH keys, while the
-            system-managed local server connects directly to the hosting host.
-          </p>
-        </CardContent>
-      </Card>
 
-      <Card className="min-w-0 overflow-hidden">
-        <CardHeader className="border-b border-line p-4 pb-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <ShieldAlert
-                  size={16}
-                  className="shrink-0 text-dim"
-                  aria-hidden="true"
-                />
-                <CardTitle>Dangerous command guard</CardTitle>
+            {/* Dangerous command guard row */}
+            <div className="p-4 space-y-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <ShieldAlert
+                      size={16}
+                      className="shrink-0 text-dim"
+                      aria-hidden="true"
+                    />
+                    <h3 className="text-sm font-semibold text-text">
+                      Dangerous command guard
+                    </h3>
+                  </div>
+                  <p className="mt-1 text-xs text-dim">
+                    Client-side typing safety net intercepting high-impact accidental commands.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={guardEnabled ? "secondary" : "outline"}
+                  className="h-8 rounded-none px-3 text-xs"
+                  disabled={guardPending}
+                  aria-pressed={guardEnabled}
+                  aria-label={
+                    guardEnabled
+                      ? "Disable terminal command guard"
+                      : "Enable terminal command guard"
+                  }
+                  data-testid="terminal-command-guard-toggle"
+                  onClick={handleGuardToggle}
+                >
+                  {guardPending ? (
+                    <span className="flex items-center gap-1.5">
+                      <Loader2
+                        className="h-3.5 w-3.5 animate-spin"
+                        aria-hidden="true"
+                      />
+                      <span>Updating…</span>
+                    </span>
+                  ) : guardEnabled ? (
+                    "Disable"
+                  ) : (
+                    "Enable"
+                  )}
+                </Button>
               </div>
-              <CardDescription className="mt-0.5 max-w-2xl leading-5">
-                Client-side accidental command guard for web terminal sessions.
-              </CardDescription>
-            </div>
-            <Button
-              type="button"
-              size="sm"
-              variant={guardEnabled ? "secondary" : "outline"}
-              className="h-8 rounded-none px-3 text-xs"
-              disabled={guardPending}
-              aria-pressed={guardEnabled}
-              aria-label={
-                guardEnabled
-                  ? "Disable terminal command guard"
-                  : "Enable terminal command guard"
-              }
-              data-testid="terminal-command-guard-toggle"
-              onClick={handleGuardToggle}
-            >
-              {guardPending ? (
-                <span className="flex items-center gap-1.5">
-                  <Loader2
-                    className="h-3.5 w-3.5 animate-spin"
+              {guardError ? (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 border border-crit/40 bg-crit/10 p-3 text-[13px] text-crit"
+                >
+                  <AlertCircle
+                    size={16}
+                    className="mt-0.5 shrink-0"
                     aria-hidden="true"
                   />
-                  <span>Updating…</span>
-                </span>
-              ) : guardEnabled ? (
-                "Disable"
-              ) : (
-                "Enable"
-              )}
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3 p-4">
-          {guardError ? (
-            <div
-              role="alert"
-              className="flex items-start gap-2 border border-crit/40 bg-crit/10 p-3 text-[13px] text-crit"
-            >
-              <AlertCircle
+                  <span>{guardError}</span>
+                </div>
+              ) : null}
+            </div>
+
+            {/* Always-visible warning: root sessions & guard boundary */}
+            <div className="p-4 bg-raised/20">
+              <div className="flex items-start gap-2.5 border border-warn/30 bg-warn/5 p-3 text-xs leading-5 text-dim">
+                <AlertTriangle
+                  size={15}
+                  className="mt-0.5 shrink-0 text-warn"
+                  aria-hidden="true"
+                />
+                <div>
+                  <strong className="font-semibold text-text">
+                    Root session notice:
+                  </strong>{" "}
+                  Terminal sessions run as root on the host or remote VPS. This guard is an
+                  accidental typing safety net, not a security boundary or privilege-dropping sandbox.
+                </div>
+              </div>
+            </div>
+
+            {/* Native details/summary: How it works & limitations */}
+            <div className="p-4 pt-3">
+              <details className="group border border-line bg-raised/20 text-xs">
+                <summary className="flex cursor-pointer select-none items-center justify-between p-3 font-medium text-text transition-colors duration-160 hover:bg-raised/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal list-none [&::-webkit-details-marker]:hidden">
+                  <span className="flex items-center gap-2">
+                    <Info
+                      size={14}
+                      className="text-dim group-open:text-signal"
+                      aria-hidden="true"
+                    />
+                    <span>How it works &amp; limitations</span>
+                  </span>
+                  <ChevronDown
+                    size={14}
+                    className="text-dim transition-transform duration-160 group-open:rotate-180"
+                    aria-hidden="true"
+                  />
+                </summary>
+                <div className="space-y-3 border-t border-line p-3 text-dim leading-relaxed">
+                  <div>
+                    <h4 className="font-semibold text-text">Connection behavior</h4>
+                    <p className="mt-0.5">
+                      When enabled, authorized users can open terminal sessions from the Terminal tab. Remote servers require real SSH keys, while the system-managed local server connects directly to the hosting host.
+                    </p>
+                  </div>
+                  <div>
+                    <h4 className="font-semibold text-text">Accidental command checks</h4>
+                    <p className="mt-0.5">
+                      When enabled, the terminal checks interactive keyboard input and clipboard paste for high-impact accidental commands (such as recursive deletion of root/system directories like <code className="font-mono text-text">rm -rf /</code>, filesystem formatting with <code className="font-mono text-text">mkfs</code>, raw device writes with <code className="font-mono text-text">dd</code>, system shutdown/reboot, and recursive permission destruction). Detected commands are cancelled before execution.
+                    </p>
+                  </div>
+                  <div>
+                    <h4 className="font-semibold text-text">Input caveats &amp; uninspected inputs</h4>
+                    <p className="mt-0.5">
+                      The guard cannot inspect commands recalled from shell history (arrow keys), custom aliases, scripts, or fullscreen terminal applications (such as <code className="font-mono text-text">vim</code> or <code className="font-mono text-text">htop</code>).
+                    </p>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Agent updates (host-specific separate panel below main) */}
+        {children ? <div className="space-y-4">{children}</div> : null}
+      </div>
+
+      {/* Side column: Runtime facts + Dashboard access */}
+      <div className="space-y-4 xl:col-span-4">
+        {/* Runtime key-value facts */}
+        <Card className="min-w-0 overflow-hidden">
+          <CardHeader className="border-b border-line p-4 pb-3">
+            <CardTitle>Runtime posture</CardTitle>
+            <CardDescription className="mt-0.5">
+              Host environment and platform capabilities.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="p-0">
+            <dl className="grid grid-cols-1 divide-y divide-line sm:grid-cols-3 xl:grid-cols-1">
+              <RuntimeFact label="App mode" value={overview.settings.appMode} />
+              <RuntimeFact
+                label="Real SSH"
+                value={overview.settings.realSshEnabled ? "enabled" : "disabled"}
+                tone={overview.settings.realSshEnabled ? "ok" : "warn"}
+              />
+              <RuntimeFact
+                label="Local auth"
+                value={
+                  overview.settings.authRequiredInLocalMode ? "required" : "off"
+                }
+                tone={
+                  overview.settings.authRequiredInLocalMode ? "ok" : "warn"
+                }
+              />
+            </dl>
+          </CardContent>
+        </Card>
+
+        {/* Dashboard access collapsed informational section */}
+        <Card className="min-w-0 overflow-hidden">
+          <details className="group">
+            <summary className="flex cursor-pointer select-none items-center justify-between p-4 font-semibold text-text transition-colors duration-160 hover:bg-raised/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal list-none [&::-webkit-details-marker]:hidden">
+              <div className="min-w-0 pr-2">
+                <div className="flex items-center gap-2">
+                  <Lock size={15} className="shrink-0 text-dim" aria-hidden="true" />
+                  <span className="text-sm">Dashboard access</span>
+                </div>
+                <p className="mt-0.5 text-xs font-normal text-dim truncate">
+                  Session credentials &amp; authentication
+                </p>
+              </div>
+              <ChevronDown
                 size={16}
-                className="mt-0.5 shrink-0"
+                className="shrink-0 text-dim transition-transform duration-160 group-open:rotate-180"
                 aria-hidden="true"
               />
-              <span>{guardError}</span>
+            </summary>
+            <div className="border-t border-line bg-raised/10 p-4 text-xs leading-relaxed text-dim space-y-2">
+              <p>
+                Local mode uses a secure HttpOnly cookie session. Dashboard
+                passwords are verified server-side against stored credentials
+                and are never saved in browser storage.
+              </p>
+              <p>
+                Use the account menu in the top bar to log out and revoke the
+                current session.
+              </p>
             </div>
-          ) : null}
-          <p className="text-[13px] leading-6 text-dim">
-            When enabled, the terminal checks interactive keyboard input and
-            clipboard paste for high-impact accidental commands (such as recursive
-            deletion of root/system directories like{" "}
-            <code className="font-mono text-text">rm -rf /</code>, filesystem
-            formatting with <code className="font-mono text-text">mkfs</code>, raw
-            device writes with <code className="font-mono text-text">dd</code>,
-            system shutdown/reboot, and recursive permission destruction).
-            Detected commands are cancelled before execution.
-          </p>
-          <div className="border border-line bg-panel p-3 text-[12px] leading-5 text-dim space-y-1">
-            <p>
-              <strong className="text-text">Root privileges remain unchanged:</strong> This
-              guard is an accidental typing safety net, not a security boundary or
-              privilege-dropping sandbox. Terminal sessions continue to run as root on the
-              host or remote VPS.
-            </p>
-            <p>
-              <strong className="text-text">Input caveats:</strong> The guard cannot inspect
-              commands recalled from shell history (arrow keys), custom aliases, scripts,
-              or fullscreen terminal applications (such as{" "}
-              <code className="font-mono text-text">vim</code> or{" "}
-              <code className="font-mono text-text">htop</code>).
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card className="min-w-0 overflow-hidden">
-        <CardHeader className="border-b border-line p-4 pb-3">
-          <CardTitle>Dashboard access</CardTitle>
-          <CardDescription className="mt-0.5 max-w-2xl leading-5">
-            Local mode uses a secure HttpOnly cookie session. Dashboard
-            passwords are verified server-side against the stored credential
-            and are never saved in browser storage.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="p-4">
-          <p className="text-[13px] leading-6 text-dim">
-            Use the account menu in the top bar to log out and revoke the
-            current session.
-          </p>
-        </CardContent>
-      </Card>
+          </details>
+        </Card>
+      </div>
     </div>
   );
 }

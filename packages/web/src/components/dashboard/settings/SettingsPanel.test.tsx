@@ -76,8 +76,8 @@ describe("SettingsPanel", () => {
     renderWithContext(mockOverview);
 
     expect(screen.getByText("App mode")).toBeInTheDocument();
-    expect(screen.getByText("Command guard")).toBeInTheDocument();
-    expect(screen.getAllByText("disabled")).toHaveLength(3); // Web terminal, Command guard, and Real SSH facts
+    expect(screen.getByText("Real SSH")).toBeInTheDocument();
+    expect(screen.getByText("Local auth")).toBeInTheDocument();
 
     const toggleButton = screen.getByTestId("web-terminal-toggle");
     expect(toggleButton).toHaveTextContent("Enable");

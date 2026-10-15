@@ -3,7 +3,7 @@
 /**
  * Manual agent installer for an existing VPS.
  * Reads VPS SSH credentials from .env.vps and installs the agent binary
- * plus config, runs -once validation, and starts the background loop.
+ * plus config, runs -validate-config validation, and starts the systemd service.
  *
  * Usage:
  *   npx tsx scripts/agent/install-agent-from-env.ts --vps-id <vps_id> [--help]
@@ -18,7 +18,10 @@ import { Client, type SFTPWrapper } from "ssh2";
 import { loadAppConfig } from "../../packages/api/src/config/app-config.js";
 import { resolveAgentBackendUrl } from "../../packages/api/src/agents/agent-backend-url.js";
 import { createRepositories } from "../../packages/api/src/persistence/repositories/create-repositories.js";
-import { buildDockerStateProvisionCommand } from "../../packages/api/src/agents/agent-lifecycle-remote.js";
+import {
+  buildDockerStateProvisionCommand,
+  buildTransactionalStartCommand,
+} from "../../packages/api/src/agents/agent-lifecycle-remote.js";
 
 const REMOTE_DIR = "/tmp/vps-manager-agent";
 const REMOTE_BINARY = `${REMOTE_DIR}/vps-agent`;
@@ -225,17 +228,29 @@ async function main() {
     await chmod(sftp, REMOTE_CONFIG, 0o600);
     // Provision Docker identity/runtime state before any agent run.
     // exec() rejects on non-zero exit, so a provisioning failure aborts here
-    // and the -once validation never runs.
+    // and the preflight validation never runs.
     await exec(
       client,
       buildDockerStateProvisionCommand(REMOTE_BINARY, REMOTE_DIR),
       30_000,
     );
-    const result = await exec(
+    const preflightResult = await exec(
       client,
-      `${REMOTE_BINARY} -config ${REMOTE_CONFIG} -once`,
-      45_000,
+      `${REMOTE_BINARY} -config ${REMOTE_CONFIG} -validate-config`,
+      15_000,
     );
+    const pidFile = `${REMOTE_DIR}/vps-agent.pid`;
+    const startCmd = buildTransactionalStartCommand(
+      REMOTE_BINARY,
+      REMOTE_CONFIG,
+      pidFile,
+      {
+        user: username,
+        vpsId,
+        homeDir: REMOTE_DIR.replace(/\/\.vps-manager-agent$/, "") || "/root",
+      },
+    );
+    const startResult = await exec(client, startCmd, 30_000);
     console.log(
       JSON.stringify(
         {
@@ -244,7 +259,10 @@ async function main() {
           credentialId,
           remoteDir: REMOTE_DIR,
           backendUrl,
-          agentOutput: result.stdout.trim() || "completed",
+          agentOutput:
+            preflightResult.stdout.trim() ||
+            startResult.stdout.trim() ||
+            "completed",
         },
         null,
         2,

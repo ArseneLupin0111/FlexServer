@@ -64,8 +64,8 @@ function fixture(options: {
     commands.push(command);
     if (command.includes("$HOME")) return { stdout: "/home/deploy\n", stderr: "" };
     if (command.includes("mkdir --") && command.includes("lifecycle.lock")) return { stdout: "acquired", stderr: "" };
-    if (command.includes("_matches=0")) return { stdout: options.inspect ?? "owned:42:9001\n", stderr: "" };
-    if (options.startError && command.includes("nohup")) throw options.startError;
+    if (command.includes("_owned=''") || command.includes("printf 'owned:%s:%s")) return { stdout: options.inspect ?? "owned:42:9001\n", stderr: "" };
+    if (options.startError && (command.includes("systemctl start") || command.includes("vps-agent-"))) throw options.startError;
     return { stdout: "", stderr: "" };
   });
   const ssh = { execCommandStrict };
@@ -86,41 +86,19 @@ function fixture(options: {
 }
 
 describe("AgentRestartService", () => {
-  it("builds fixed, quoted ownership commands for the managed paths", () => {
-    const binary = "/home/o'hare/.vps-manager-agent/vps-agent";
-    const config = "/home/o'hare/.vps-manager-agent/config.json";
-    const pid = "/home/o'hare/.vps-manager-agent/vps-agent.pid";
-    for (const command of [buildRestartInspectCommand(binary, config, pid), buildRestartStopCommand(binary, config, pid), buildRestartStartCommand(binary, config, pid)]) {
-      expect(command).toContain(`'"'"'`);
-      expect(command).not.toContain("pkill");
-    }
-  });
 
-  it("builds a transactional launcher whose trap covers publication and cleans only its artifacts", () => {
-    const command = buildRestartStartCommand("/opt/agent", "/opt/config.json", "/run/agent.pid");
-    const spawn = command.indexOf("nohup");
-    const trap = command.indexOf("trap 'cleanup' EXIT");
-    const initialVerification = command.indexOf("sleep .2");
-    const publication = command.indexOf('mv -- "$_tmp" "$_pf"');
-    const finalVerification = command.lastIndexOf('kill -0 "$_pid"');
-    const disarm = command.lastIndexOf("trap - EXIT HUP INT TERM");
-    expect(spawn).toBeGreaterThan(-1);
-    expect(trap).toBeLessThan(spawn);
-    expect(initialVerification).toBeGreaterThan(spawn);
-    expect(publication).toBeGreaterThan(initialVerification);
-    expect(finalVerification).toBeGreaterThan(publication);
-    expect(disarm).toBeGreaterThan(finalVerification);
-    expect(command).toContain('test "$(st "$_pid")" = "$_start"');
-    const cleanup = command.slice(command.indexOf("cleanup(){"), spawn);
-    expect(cleanup).toContain("if same_spawn");
-    expect(cleanup).toContain("while same_spawn");
-    expect(cleanup).not.toContain("if owns_new");
-    expect(command.slice(initialVerification, publication)).toContain("owns_new");
-    expect(command.slice(publication, disarm)).toContain("owns_new");
-    expect(command).toContain('$_pf.tmp.$_pid.$_start');
-    expect(command).toContain('[ "$(cat "$_pf" 2>/dev/null)" = "$_pid" ]');
-    expect(command).not.toContain('rm -f -- "$_pf"; exit');
-    expect(command).not.toContain("mv -f");
+  it("builds a transactional launcher that configures systemd service, lock, and starts unit", () => {
+    const command = buildRestartStartCommand("/opt/agent", "/opt/config.json", "/run/agent.pid", {
+      vpsId: "vps-1",
+      user: "root",
+      homeDir: "/root",
+    });
+    expect(command).toContain("systemctl start");
+    expect(command).toContain("systemctl is-active");
+    expect(command).toContain("/run/vps-manager-agent");
+    expect(command).toContain("vps-agent-");
+    expect(command).not.toContain("nohup");
+    expect(command).not.toContain("pkill");
   });
 
   it("rejects missing key and not-installed state and releases lifecycle", async () => {
@@ -163,14 +141,14 @@ describe("AgentRestartService", () => {
     await f.service.restart("vps-1");
     await expect(f.run()).rejects.toThrow(/ownership/i);
     expect(f.commands.some((command) => command.includes("kill -TERM"))).toBe(false);
-    expect(f.commands.some((command) => command.includes("nohup"))).toBe(false);
+    expect(f.commands.some((command) => command.includes("systemctl start"))).toBe(false);
   });
 
   it("accepts a missing PID and times out without mutating agent state", async () => {
     const f = fixture({ inspect: "none" });
     await f.service.restart("vps-1");
     await expect(f.run()).rejects.toThrow(/Timed out/i);
-    expect(f.commands.some((command) => command.includes("nohup"))).toBe(true);
+    expect(f.commands.some((command) => command.includes("systemctl start"))).toBe(true);
     expect(f.agents.upsertState).not.toHaveBeenCalled();
     const failure = f.audit.record.mock.calls.find(([event]) => event.action === "agent.restart.failure")?.[0];
     expect(failure?.metadata).toEqual({ jobId: "job-1", error: "Timed out waiting for restarted agent observation" });
@@ -235,7 +213,11 @@ describe("AgentRestartService", () => {
       buildLifecycleLockReleaseCommand(`${binary}.lock`),
       buildRestartInspectCommand(binary, config, pidFile),
       buildRestartStopCommand(binary, config, "42", "9001"),
-      buildRestartStartCommand(binary, config, pidFile),
+      buildRestartStartCommand(binary, config, pidFile, {
+        vpsId: "vps-1",
+        user: "deploy",
+        homeDir: "/home/deploy",
+      }),
     ];
     for (const command of commands) assertBashSyntax(command);
     // Exact regression shape: the st() helper must terminate with `};`

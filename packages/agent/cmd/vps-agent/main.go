@@ -14,6 +14,7 @@ import (
 	"github.com/vps-manager/agent/internal/commands"
 	"github.com/vps-manager/agent/internal/config"
 	"github.com/vps-manager/agent/internal/geo"
+	"github.com/vps-manager/agent/internal/lock"
 	"github.com/vps-manager/agent/internal/logs"
 	"github.com/vps-manager/agent/internal/metrics"
 	"github.com/vps-manager/agent/internal/push"
@@ -28,6 +29,7 @@ func main() {
 	stateFlag := flag.String("state", "", "path to persisted state file")
 	once := flag.Bool("once", false, "collect and push metrics once then exit")
 	hostOnly := flag.Bool("host-only", false, "with -once, push host metrics without Docker durable state")
+	validateConfig := flag.Bool("validate-config", false, "validate config file and exit without network or state side effects")
 	showVersion := flag.Bool("version", false, "print agent version and exit")
 	provision := flag.Bool("provision-docker-state", false, "provision Docker identity and runtime keys, then exit")
 	identityPath := flag.String("docker-identity-path", "", "Docker identity output path")
@@ -62,7 +64,7 @@ func main() {
 	}
 
 	if *configPath == "" {
-		fmt.Fprintf(os.Stderr, "Usage: vps-agent -config <path> [-once]\n")
+		fmt.Fprintf(os.Stderr, "Usage: vps-agent -config <path> [-once] [-validate-config]\n")
 		os.Exit(1)
 	}
 
@@ -72,6 +74,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("config error: %v", err)
 	}
+
+	if *validateConfig {
+		return
+	}
+
+	instanceLock, err := lock.Acquire(cfg.VpsId)
+	if err != nil {
+		log.Fatalf("instance lock error: %v", err)
+	}
+	defer func() {
+		if err := instanceLock.Release(); err != nil {
+			log.Printf("error releasing instance lock: %v", err)
+		}
+	}()
 
 	log.Printf("starting agent: %s", cfg)
 	if *hostOnly && !*once {

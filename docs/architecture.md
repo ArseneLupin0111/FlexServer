@@ -50,7 +50,7 @@ Docker ingest digest v2 excludes server receipt timestamps from mapped container
 
 ## Local Agent Upgrades (Bundled Binary Architecture)
 
-Local systemd agent updates use the bundled binary packaged inside the deployed API container (`/app/agent/vps-agent-linux-amd64`), eliminating external signed release catalogs and manual key distributions. Deploying an API image updates the available target binary; host binary upgrades are performed pull-only by a separately installed updater daemon with operator confirmation in the dashboard. Remote SSH agent upgrades remain a separate workflow.
+Local systemd agent updates use the bundled binary packaged inside the deployed API container (`/app/agent/vps-agent-linux-amd64`), eliminating external signed release catalogs and manual key distributions. Deploying an API image updates the available target binary; host binary upgrades are performed pull-only by a separately installed updater daemon with operator confirmation in the dashboard. Remote SSH agent upgrades use a push-driven orchestration pipeline managing dedicated systemd services on remote Linux hosts.
 
 ### Component boundaries and trust model
 
@@ -62,3 +62,24 @@ Local systemd agent updates use the bundled binary packaged inside the deployed 
 6. **Safe rollback:** If the restarted agent fails to start or the heartbeat deadline expires, the root helper restores the previous binary from the backup, restarts the service, and verifies the previous build ID via a fresh heartbeat. An unverified state (`rollback_unverified`) halts further jobs and preserves backups and journals for manual operator resolution (`vps-updater ack`).
 7. **Host migration:** Existing protocol 1 updaters are upgraded in place via `install-updater.sh --upgrade --binary <path> --config /etc/vps-updater/config.json`, preserving existing configurations, scoped credentials, state directories (`/var/lib/vps-updater`), and journals. Deployment automates this extraction and upgrade on deploy.
 8. **No host access from API container:** The API container has no root filesystem mounts, no Docker socket, and no systemd socket access. All mutations remain host-owned and pull-driven. Local testing was performed using simulated updater and heartbeat processes; production rollout requires verification on a real Linux staging host.
+
+## Remote SSH Agent Management and Upgrades
+
+Remote agent installations on systemd-capable Linux nodes operate as managed system-level systemd services rather than unmanaged background loops, establishing consistent lifecycle supervision across both local and remote infrastructure.
+
+### Systemd service architecture
+
+1. **Deterministic service naming:** Remote agents are managed under unit name `/etc/systemd/system/vps-agent-${sha256(vpsId).toLowerCase()}.service`. In contrast, local host agent installations retain the canonical `vps-manager-agent.service` unit to preserve local updater daemon (`vps-updater`) supervision and atomic swaps.
+2. **Execution identity:** The service unit runs with target login privileges (`User=<user>`, `Group=<group>`), rooted at `WorkingDirectory=<homeDir>`, with `Restart=always`, `RestartSec=10`, `TimeoutStopSec=15`, and `KillMode=control-group` ensuring bounded shutdown and descendant process cleanup. `KillMode=control-group` is process lifecycle cleanup, not a security sandbox or container boundary.
+3. **Privilege requirement:** Service configuration, unit installation, and lifecycle operations require `sudo` permissions; unmanaged background `nohup` execution is superseded. Docker state flags (`-state`, `-docker-identity-path`, `-docker-runtime-keys-path`, `-docker-runtime-owner-uid`) are strictly preserved alongside `-config`.
+4. **Legacy migration:** Legacy PID tracking (`~/.vps-manager-agent/vps-agent.pid`) with exact executable, working directory, and argv inspection is retained solely to support safe migration from prior nohup loops to systemd. Unknown processes or PID mismatches are never terminated.
+
+### Per-VPS singleton process lock
+
+To prevent duplicate concurrent instances from contending on metrics ingest or creating conflicting Docker collectors:
+1. **Namespace:** Locked via `/run/vps-manager-agent/vps-agent-${sha256(vpsId).toLowerCase()}.lock`.
+2. **Ownership and security:** The directory `/run/vps-manager-agent` is root-owned mode `0755` (`perm & 0022 == 0`). The lock file is a root-owned regular file with mode `0666`. Opened with `O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK`. On Linux, there is no fallback directory and no environment override.
+3. **Kernel flock semantics:** The lock is acquired via non-blocking exclusive flock (`syscall.Flock(fd, LOCK_EX|LOCK_NB)`). The inode is held open for process lifetime. On crash or termination, the kernel automatically releases the lock; the lock file is never unlinked or truncated so contending processes always share the same inode.
+4. **Provisioning (No RuntimeDirectory):** Provisioned via `/etc/tmpfiles.d/vps-manager-agent.conf` and `systemd-tmpfiles --create`. Systemd's `RuntimeDirectory=` directive is strictly prohibited in agent units because systemd would automatically chown `/run/vps-manager-agent` to the unprivileged service `User=`, breaking the trusted root-ownership invariant (`0755` root:root). Local installers also provision this tmpfiles configuration so `/run/vps-manager-agent` and the regular lock file persist across reboots.
+5. **Offline preflight (`-validate-config`):** Because `-once` mode contends for the singleton lock and will fail if the daemon is active, staged upgrade preflights use `<binary> -config <path> -validate-config` for offline validation of configuration syntax and required fields without lock contention, network calls, or state mutation.
+6. **Operational limits:** Production verification of systemd service management and singleton process locking has been confirmed on single host Azure VPS `vps_kUq9jDFzAtxY` running managed unit `vps-agent-e3d0757876c6e2baf8d0044daa30b1218070930aa38f83de4112794e7eceeb5a.service` (build `867941df81e769e07db86edcf9e4314101889735`), with verified lock contention rejection, stable lock inode retention across restarts, and offline `-validate-config`. Fleet-wide rollout across remaining remote nodes remains unverified pending individual staged upgrades.

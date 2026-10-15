@@ -1,5 +1,15 @@
 # Changelog
 
+
+## Unreleased — agent singleton process lock and systemd service management
+
+- Enforce per-VPS singleton OS process lock on Linux (`/run/vps-manager-agent/vps-agent-<sha256(vpsId)>.lock`) across both continuous daemon and `-once` modes. Directory `/run/vps-manager-agent` is root-owned (`0755`) and the lock file is a root-owned regular file (`0666`). Opened with `O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK` and acquired via non-blocking exclusive `flock`; released automatically by the kernel on termination or crash without unlinking the file, preventing multiple agent instances from competing for the same VPS.
+- Add offline `-validate-config` flag to `vps-agent` to validate configuration syntax and required fields without acquiring the singleton lock, opening network connections, or mutating state. Staged upgrade preflight verifies candidate binaries using `-validate-config` while the running daemon maintains its singleton lock.
+- Manage remote Linux agents as system-level systemd services (`/etc/systemd/system/vps-agent-<hash>.service`) executing under login credentials (`User=<user>`, `Group=<group>`) with `Restart=always`, `RestartSec=10`, `TimeoutStopSec=15`, and `KillMode=control-group` for process cleanup (not a security sandbox). Local host agent installations retain the canonical `vps-manager-agent.service` unit to preserve local updater daemon (`vps-updater`) supervision. Sudo is required for remote service operations; unmanaged nohup loops are superseded while Docker state arguments are preserved.
+- Provision runtime lock directory and lock file via `/etc/tmpfiles.d/vps-manager-agent.conf` and `systemd-tmpfiles --create` rather than systemd `RuntimeDirectory=` (which would transfer root ownership to the unprivileged service user). Supported in both local and remote installers to guarantee persistent root ownership across reboots.
+- Retain legacy PID tracking (`~/.vps-manager-agent/vps-agent.pid`) and exact argv matching strictly for safe migration of existing background loops to systemd without terminating unknown processes.
+- Document production verification of singleton process locking and systemd service management on single Azure host `vps_kUq9jDFzAtxY` (`vps-agent-e3d0757876c6e2baf8d0044daa30b1218070930aa38f83de4112794e7eceeb5a.service`, `User=doanphamthanhson`, build `867941df81e769e07db86edcf9e4314101889735`), confirming duplicate `-once` contention rejection (exit 1), offline `-validate-config` leaving live PID unchanged, stable lock inode across `systemctl restart`, fresh post-restart heartbeat in PostgreSQL `metric_latest`, and passing unprivileged lifecycle helper smoke tests. Broader fleet rollout remains unverified.
+- Document audit of two diagnostic stubs under `/tmp` verified via SHA-256 and disassembly as tiny 4624/4680-byte pause syscall loops (not real agents and not causes of job timeouts), terminated via pidfd; no incident cause asserted.
 ## Unreleased — agent updates relocated to host Settings
 
 - Relocate remote SSH agent upgrade action from VPS fleet list cards/tables to the per-host Settings tab (`/vps/:vpsId/settings`).

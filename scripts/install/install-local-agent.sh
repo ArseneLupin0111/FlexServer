@@ -107,7 +107,12 @@ elif [[ "$DRY_RUN" == "true" ]]; then
   echo "[DRY-RUN] Would fetch installer-lib.sh from the pinned repository."
   echo "[DRY-RUN] Would fetch flexserverctl.py, syntax-check it, then install it to /usr/local/bin/flexserverctl."
   echo "[DRY-RUN] Zero writes and zero network changes would be made."
-  exit 0
+  FLEXSERVERCTL_COMMAND_NAME="flexserverctl"
+  FLEXSERVERCTL_DEST_DEFAULT="/usr/local/bin/flexserverctl"
+  INSTALLER_TMP_FILES=()
+  prepare_flexserverctl_source() { return 0; }
+  resolve_flexserverctl_source() { echo "/usr/local/bin/flexserverctl"; }
+  install_flexserverctl() { return 0; }
 else
   if ! command -v curl &>/dev/null; then
     echo "Error: installer-lib.sh not found and curl is unavailable to fetch it." >&2
@@ -149,7 +154,7 @@ UNINSTALL=false
 ENABLE_DOCKER_ACCESS=false
 INSTALL_CLI=true
 SKIP_CLI=false
-CLI_DEST="${FLEXSERVERCTL_DEST_DEFAULT}"
+CLI_DEST="${FLEXSERVERCTL_DEST_DEFAULT:-/usr/local/bin/flexserverctl}"
 CLI_SRC=""
 UPGRADE_UPDATER=false
 UPDATER_SRC=""

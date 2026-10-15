@@ -17,16 +17,127 @@
  * operations conflict until manual cleanup. There is no TTL or fencing
  * token in phase one.
  */
+import { createHash } from "node:crypto";
+import * as path from "node:path";
 
 export const AGENT_LIFECYCLE_LOCK = "lifecycle.lock";
+
+export function getAgentServiceName(vpsId: string): string {
+  const hash = createHash("sha256").update(vpsId).digest("hex").toLowerCase();
+  return `vps-agent-${hash}.service`;
+}
+
+export function getAgentServiceUnitPath(vpsId: string): string {
+  return `/etc/systemd/system/${getAgentServiceName(vpsId)}`;
+}
+
+export function getAgentLockPath(vpsId: string): string {
+  const hash = createHash("sha256").update(vpsId).digest("hex").toLowerCase();
+  return `/run/vps-manager-agent/vps-agent-${hash}.lock`;
+}
+
+export function getAgentTmpfilesPath(vpsId: string): string {
+  const hash = createHash("sha256").update(vpsId).digest("hex").toLowerCase();
+  return `/etc/tmpfiles.d/vps-agent-${hash}.conf`;
+}
+
+function assertNoNewlines(value: string, fieldName = "value"): void {
+  if (/[\r\n]/.test(value)) {
+    throw new Error(`${fieldName} must not contain newline characters`);
+  }
+}
+
+export function systemdEscapeValue(value: string, fieldName = "value"): string {
+  assertNoNewlines(value, fieldName);
+  return value.replace(/%/g, () => "%%");
+}
+
+export function systemdEscapeExecArg(arg: string, fieldName = "argument"): string {
+  assertNoNewlines(arg, fieldName);
+  const escaped = arg.replace(/%/g, () => "%%").replace(/\$/g, () => "$$");
+  if (escaped === "" || /[\s"'\\]/.test(escaped)) {
+    return `"${escaped.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  }
+  return escaped;
+}
+
+export interface SystemdUnitOptions {
+  vpsId: string;
+  user: string;
+  group?: string;
+  homeDir: string;
+  binary: string;
+  config: string;
+  statePath?: string;
+  dockerIdentityPath?: string;
+  dockerRuntimeKeysPath?: string;
+  dockerRuntimeOwnerUid?: string | number;
+}
+
+export function buildSystemdUnitContent(options: SystemdUnitOptions): string {
+  if (!options?.vpsId || !options?.user || !options?.homeDir) {
+    throw new Error(
+      "buildSystemdUnitContent requires complete context: vpsId, user, and homeDir",
+    );
+  }
+  assertNoNewlines(options.user, "user");
+  if (options.group) {
+    assertNoNewlines(options.group, "group");
+  }
+  const vpsIdEscaped = systemdEscapeValue(options.vpsId, "vpsId");
+  const user = options.user;
+  const groupLine = options.group ? `Group=${options.group}\n` : "";
+  const workingDir = systemdEscapeValue(options.homeDir, "homeDir");
+  const configDir = path.posix.dirname(options.config);
+  const statePath = options.statePath ?? `${configDir}/state.json`;
+
+  assertNoNewlines(options.binary, "binary");
+  assertNoNewlines(options.config, "config");
+  assertNoNewlines(statePath, "statePath");
+
+  const args = [options.binary, "-config", options.config, "-state", statePath];
+  if (options.dockerIdentityPath && options.dockerRuntimeKeysPath) {
+    assertNoNewlines(options.dockerIdentityPath, "dockerIdentityPath");
+    assertNoNewlines(options.dockerRuntimeKeysPath, "dockerRuntimeKeysPath");
+    args.push("-docker-identity-path", options.dockerIdentityPath);
+    args.push("-docker-runtime-keys-path", options.dockerRuntimeKeysPath);
+    if (options.dockerRuntimeOwnerUid != null) {
+      const uidStr = String(options.dockerRuntimeOwnerUid);
+      assertNoNewlines(uidStr, "dockerRuntimeOwnerUid");
+      args.push("-docker-runtime-owner-uid", uidStr);
+    }
+  }
+
+  const execStart = args.map((arg, idx) => systemdEscapeExecArg(arg, `args[${idx}]`)).join(" ");
+  return [
+    "[Unit]",
+    `Description=VPS Manager Agent (${vpsIdEscaped})`,
+    "After=network-online.target",
+    "Wants=network-online.target",
+    "",
+    "[Service]",
+    "Type=simple",
+    `User=${user}`,
+    ...(groupLine ? [groupLine.trim()] : []),
+    `WorkingDirectory=${workingDir}`,
+    `ExecStart=${execStart}`,
+    "Restart=always",
+    "RestartSec=10",
+    "TimeoutStopSec=15",
+    "KillMode=control-group",
+    "",
+    "[Install]",
+    "WantedBy=multi-user.target",
+    "",
+  ].join("\n");
+}
 
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
-
 export function buildLifecycleLockAcquireCommand(lockPath: string): string {
   const l = shellQuote(lockPath);
-  return `umask 077; mkdir -- ${l} 2>/dev/null && printf acquired || printf conflict`;
+  return `if mkdir -- ${l} 2>/dev/null; then echo acquired; else echo conflict; fi`;
 }
 
 export function buildLifecycleLockReleaseCommand(lockPath: string): string {
@@ -38,13 +149,17 @@ export function buildLifecycleLockReleaseCommand(lockPath: string): string {
 export const REMOTE_ST_HELPER = `st(){ sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; };`;
 
 export interface ManagedProcessOptions {
+  vpsId?: string;
+  user?: string;
+  homeDir?: string;
+  group?: string;
   statePath?: string;
   dockerIdentityPath?: string;
   dockerRuntimeKeysPath?: string;
   dockerRuntimeOwnerUid?: string | number;
 }
 
-export const EXACT_ARGV = `test "$(tr '\\0' '\\n' < /proc/$_pid/cmdline 2>/dev/null | awk -v b="$_bin" -v b_base="./\${_bin##*/}" -v cwd="$_cwd" -v bdir="$_bdir" -v c="$_cfg" -v st="$_st_path" -v id="$_id_path" -v rk="$_rk_path" -v uid="$_uid_val" 'BEGIN{ok=1;has_c=has_st=has_id=has_rk=has_uid=0} NR==1{if(!($0==b||(($0==b_base||$0=="./vps-agent")&&cwd==bdir&&bdir!="")))ok=0;next} NR%2==0{flag=$0;next} NR%2==1{val=$0;if(flag=="-config"&&val==c)has_c++;else if(flag=="-state"&&val==st)has_st++;else if(flag=="-docker-identity-path"&&val==id)has_id++;else if(flag=="-docker-runtime-keys-path"&&val==rk)has_rk++;else if(flag=="-docker-runtime-owner-uid"&&val==uid)has_uid++;else ok=0} END{is_3=(NR==3&&has_c==1&&(has_st+has_id+has_rk+has_uid==0));is_11=(NR==11&&has_c==1&&has_st==1&&has_id==1&&has_rk==1&&has_uid==1);print (ok&&(is_3||is_11))?1:0}')" = 1`;
+export const EXACT_ARGV = `test "$(tr '\\0' '\\n' < /proc/$_pid/cmdline 2>/dev/null | awk -v b="$_bin" -v b_base="./\${_bin##*/}" -v cwd="$_cwd" -v bdir="$_bdir" -v c="$_cfg" -v st="$_st_path" -v id="$_id_path" -v rk="$_rk_path" -v uid="$_uid_val" 'BEGIN{ok=1;has_c=has_st=has_id=has_rk=has_uid=0} NR==1{if(!($0==b||(($0==b_base||$0=="./vps-agent")&&cwd==bdir&&bdir!="")))ok=0;next} NR%2==0{flag=$0;next} NR%2==1{val=$0;if(flag=="-config"&&val==c)has_c++;else if(flag=="-state"&&val==st)has_st++;else if(flag=="-docker-identity-path"&&val==id)has_id++;else if(flag=="-docker-runtime-keys-path"&&val==rk)has_rk++;else if(flag=="-docker-runtime-owner-uid"&&val==uid)has_uid++;else ok=0} END{is_3=(NR==3&&has_c==1&&(has_st+has_id+has_rk+has_uid==0));is_5=(NR==5&&has_c==1&&has_st==1&&(has_id+has_rk+has_uid==0));is_11=(NR==11&&has_c==1&&has_st==1&&has_id==1&&has_rk==1&&has_uid==1);print (ok&&(is_3||is_5||is_11))?1:0}')" = 1`;
 
 function formatProcessContext(
   binary: string,
@@ -103,12 +218,16 @@ export function buildManagedProcessInspectCommand(
   pidFile: string,
   options?: ManagedProcessOptions,
 ): string {
+  assertNoNewlines(binary, "binary");
+  assertNoNewlines(config, "config");
+  assertNoNewlines(pidFile, "pidFile");
+  if (options?.vpsId) assertNoNewlines(options.vpsId, "vpsId");
   const p = shellQuote(pidFile);
   const { vars } = formatProcessContext(binary, config, options);
   return [
     `_pf=${p}; ${vars} _matches=0; _owned=''; _ost=''; ${REMOTE_ST_HELPER}`,
     `for _d in /proc/[0-9]*; do _pid=\${_d##*/}; test "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = "$_bin" || continue; _cwd=$(readlink -f "/proc/$_pid/cwd" 2>/dev/null || true); ${EXACT_ARGV} || continue; _st_time=$(st "$_pid"); test -n "$_st_time" || continue; _matches=$((_matches+1)); _owned=$_pid; _ost=$_st_time; done;`,
-    `test "$_matches" -le 1 || { echo ambiguous; exit 0; }; test -f "$_pf" || { test "$_matches" = 0 && echo none || echo ambiguous; exit 0; }; _pid=$(cat "$_pf" 2>/dev/null); case "$_pid" in (''|*[!0-9]*) echo invalid; exit 0;; esac; if test "$_matches" = 0; then test -d "/proc/$_pid" && echo mismatch || echo none; exit 0; fi; test "$_pid" = "$_owned" || { echo mismatch; exit 0; }; printf 'owned:%s:%s\n' "$_pid" "$_ost"`,
+    `test "$_matches" -le 1 || { echo ambiguous; exit 0; }; test -f "$_pf" || { test "$_matches" = 0 && echo none || echo ambiguous; exit 0; }; _pid=$(cat "$_pf" 2>/dev/null); case "$_pid" in (''|*[!0-9]*) echo invalid; exit 0;; esac; if test "$_matches" = 0; then test -d "/proc/$_pid" && echo mismatch || echo none; exit 0; fi; test "$_pid" = "$_owned" || { echo mismatch; exit 0; }; printf 'owned:%s:%s\\n' "$_pid" "$_ost"`,
   ].join(" ");
 }
 
@@ -116,20 +235,122 @@ export function buildManagedProcessInspectCommand(
 export function buildManagedProcessStopCommand(
   binary: string,
   config: string,
-  pid: string,
-  starttime: string,
+  pid?: string | null,
+  starttime?: string | null,
   options?: ManagedProcessOptions,
 ): string {
-  const p = shellQuote(pid),
-    s = shellQuote(starttime);
+  assertNoNewlines(binary, "binary");
+  assertNoNewlines(config, "config");
+  if (options?.vpsId) assertNoNewlines(options.vpsId, "vpsId");
+  const p = pid ? shellQuote(pid) : "''";
+  const s = starttime ? shellQuote(starttime) : "''";
   const { vars } = formatProcessContext(binary, config, options);
+  const vpsIdArg = options?.vpsId
+    ? shellQuote(options.vpsId)
+    : `$(sed -n 's/.*"vpsId"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' "$_cfg" 2>/dev/null)`;
   const owns = `owns(){ test "$(st "$_pid")" = "$_start" && test "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = "$_bin" && _cwd=$(readlink -f "/proc/$_pid/cwd" 2>/dev/null || true) && ${EXACT_ARGV}; };`;
   return [
     `_pid=${p}; _start=${s}; ${vars} ${REMOTE_ST_HELPER} ${owns}`,
-    `owns || exit 1; owns && kill -TERM "$_pid";`,
-    `_i=0; while owns && [ $_i -lt 50 ]; do sleep .1; _i=$((_i+1)); done;`,
-    `if owns; then owns && kill -KILL "$_pid"; fi;`,
-    `_i=0; while owns && [ $_i -lt 20 ]; do sleep .1; _i=$((_i+1)); done; ! owns`,
+    `if [ "$(id -u)" -eq 0 ]; then _s=''; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then _s='sudo -n'; else _s='_nosudo'; fi;`,
+    `_vps_id=${vpsIdArg};`,
+    `if [ -n "$_vps_id" ]; then`,
+    `  _hash=$(printf '%s' "$_vps_id" | sha256sum | awk '{print $1}');`,
+    `  _unit="vps-agent-\${_hash}.service";`,
+    `  _unit_path="/etc/systemd/system/$_unit";`,
+    `  _load=$(systemctl show -p LoadState --value "$_unit" 2>/dev/null || true);`,
+    `  if [ "$_load" = 'loaded' ] || [ -f "$_unit_path" ]; then`,
+    `    if [ "$_s" = '_nosudo' ]; then echo "Cannot stop systemd service $_unit: sudo required" >&2; exit 1; fi;`,
+    `    $_s systemctl stop "$_unit" || exit 1;`,
+    `    _i=0; while [ $_i -lt 50 ]; do`,
+    `      _act=$(systemctl show -p ActiveState --value "$_unit" 2>/dev/null || true);`,
+    `      _mpid=$(systemctl show -p MainPID --value "$_unit" 2>/dev/null || true);`,
+    `      if [ "$_act" != 'activating' ] && [ "$_act" != 'deactivating' ] && ! systemctl is-active --quiet "$_unit" 2>/dev/null && { [ "$_mpid" = '0' ] || [ -z "$_mpid" ]; }; then break; fi;`,
+    `      sleep .1; _i=$((_i+1));`,
+    `    done;`,
+    `    _act=$(systemctl show -p ActiveState --value "$_unit" 2>/dev/null || true);`,
+    `    _mpid=$(systemctl show -p MainPID --value "$_unit" 2>/dev/null || true);`,
+    `    if [ "$_act" = 'activating' ] || [ "$_act" = 'deactivating' ] || systemctl is-active --quiet "$_unit" 2>/dev/null || { [ "$_mpid" != '0' ] && [ -n "$_mpid" ]; }; then`,
+    `      echo "Service $_unit failed to stop (ActiveState=$_act, MainPID=$_mpid)" >&2; exit 1;`,
+    `    fi;`,
+    `  fi;`,
+    `fi;`,
+    ...(pid && starttime
+      ? [
+          `if [ -n "$_pid" ] && [ "$_pid" != '0' ] && [ -n "$_start" ]; then`,
+          `  if owns; then owns && kill -TERM "$_pid" 2>/dev/null || true; fi;`,
+          `  _i=0; while owns && [ $_i -lt 50 ]; do sleep .1; _i=$((_i+1)); done;`,
+          `  if owns; then owns && kill -KILL "$_pid" 2>/dev/null || true; fi;`,
+          `  _i=0; while owns && [ $_i -lt 20 ]; do sleep .1; _i=$((_i+1)); done;`,
+          `  ! owns || { echo "Legacy process $_pid failed to stop" >&2; exit 1; };`,
+          `fi;`,
+        ]
+      : []),
+    `exit 0`,
+  ].join(" ");
+}
+
+export function buildServiceUninstallCommand(
+  remoteDir: string,
+  vpsId?: string,
+): string {
+  assertNoNewlines(remoteDir, "remoteDir");
+  if (vpsId) assertNoNewlines(vpsId, "vpsId");
+  const qBinary = shellQuote(`${remoteDir}/vps-agent`);
+  const qPidFile = shellQuote(`${remoteDir}/vps-agent.pid`);
+  const qConfig = shellQuote(`${remoteDir}/config.json`);
+  const vpsIdArg = vpsId
+    ? shellQuote(vpsId)
+    : `$(test -f "${remoteDir}/config.json" && sed -n 's/.*"vpsId"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' "${remoteDir}/config.json" 2>/dev/null || true)`;
+
+  return [
+    `if [ "$(id -u)" -eq 0 ]; then _s=''; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then _s='sudo -n'; else _s='_nosudo'; fi;`,
+    `_vps_id=${vpsIdArg};`,
+    `if [ -n "$_vps_id" ]; then`,
+    `  _hash=$(printf '%s' "$_vps_id" | sha256sum | awk '{print $1}');`,
+    `  _unit="vps-agent-\${_hash}.service";`,
+    `  _unit_path="/etc/systemd/system/$_unit";`,
+    `  _tmpfiles_path="/etc/tmpfiles.d/vps-agent-\${_hash}.conf";`,
+    `  _load=$(systemctl show -p LoadState --value "$_unit" 2>/dev/null || true);`,
+    `  if [ "$_load" = 'loaded' ] || [ -f "$_unit_path" ] || [ -f "$_tmpfiles_path" ]; then`,
+    `    if [ "$_s" = '_nosudo' ]; then echo "Uninstalling systemd service $_unit requires sudo; privilege unavailable" >&2; exit 1; fi;`,
+    `    $_s systemctl stop "$_unit" || exit 1;`,
+    `    _i=0; while [ $_i -lt 50 ]; do`,
+    `      _act=$(systemctl show -p ActiveState --value "$_unit" 2>/dev/null || true);`,
+    `      _mpid=$(systemctl show -p MainPID --value "$_unit" 2>/dev/null || true);`,
+    `      if [ "$_act" != 'activating' ] && [ "$_act" != 'deactivating' ] && ! systemctl is-active --quiet "$_unit" 2>/dev/null && { [ "$_mpid" = '0' ] || [ -z "$_mpid" ]; }; then break; fi;`,
+    `      sleep .1; _i=$((_i+1));`,
+    `    done;`,
+    `    _act=$(systemctl show -p ActiveState --value "$_unit" 2>/dev/null || true);`,
+    `    _mpid=$(systemctl show -p MainPID --value "$_unit" 2>/dev/null || true);`,
+    `    if [ "$_act" = 'activating' ] || [ "$_act" = 'deactivating' ] || systemctl is-active --quiet "$_unit" 2>/dev/null || { [ "$_mpid" != '0' ] && [ -n "$_mpid" ]; }; then`,
+    `      echo "Service $_unit failed to stop (ActiveState=$_act, MainPID=$_mpid)" >&2; exit 1;`,
+    `    fi;`,
+    `    if systemctl is-enabled --quiet "$_unit" 2>/dev/null; then $_s systemctl disable "$_unit" || exit 1; fi;`,
+    `    if [ -e "$_unit_path" ]; then $_s rm -f -- "$_unit_path" || exit 1; fi;`,
+    `    if [ -e "$_tmpfiles_path" ]; then $_s rm -f -- "$_tmpfiles_path" || exit 1; fi;`,
+    `    $_s systemctl daemon-reload || exit 1;`,
+    `    $_s systemctl reset-failed "$_unit" 2>/dev/null || true;`,
+    `  fi;`,
+    `fi;`,
+    `_bin=${qBinary}; _cfg=${qConfig}; _dir=$(dirname "$_cfg"); _bdir=$(dirname "$_bin"); _st_path="$_dir/state.json"; _id_path="$_dir/docker-identity.json"; _rk_path="$_dir/runtime-keys.json"; _uid_val="$(test -f "$_rk_path" && stat -c %u "$_rk_path" 2>/dev/null || id -u)"; ${REMOTE_ST_HELPER}`,
+    `if [ -f ${qPidFile} ]; then`,
+    `  _pid=$(cat ${qPidFile} 2>/dev/null || true);`,
+    `  case "$_pid" in`,
+    `    (''|*[!0-9]*) ;;`,
+    `    (*)`,
+    `      _st=$(st "$_pid");`,
+    `      if [ -n "$_st" ]; then`,
+    `        _un_owns(){ test "$(st "$_pid")" = "$_st" && test "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = "$_bin" && _cwd=$(readlink -f "/proc/$_pid/cwd" 2>/dev/null || true) && ${EXACT_ARGV}; };`,
+    `        if _un_owns; then _un_owns && kill -TERM "$_pid" 2>/dev/null || true; fi;`,
+    `        _i=0; while _un_owns && [ $_i -lt 50 ]; do sleep .1; _i=$((_i+1)); done;`,
+    `        if _un_owns; then _un_owns && kill -KILL "$_pid" 2>/dev/null || true; fi;`,
+    `        _i=0; while _un_owns && [ $_i -lt 20 ]; do sleep .1; _i=$((_i+1)); done;`,
+    `        ! _un_owns || { echo "Legacy process $_pid failed to stop" >&2; exit 1; };`,
+    `      fi;`,
+    `      rm -f -- ${qPidFile} 2>/dev/null || true;`,
+    `      ;;`,
+    `  esac;`,
+    `fi; exit 0`,
   ].join(" ");
 }
 
@@ -200,13 +421,9 @@ export function buildDockerStateProvisionCommand(
 }
 
 /**
- * Transactional launch: the canonical pid file is published with `mv`
- * ONLY after the newly spawned process passes exact ownership checks (PID,
- * starttime, executable, and exact argv). The cleanup trap is armed before
- * spawn. Once PID and starttime are captured, cleanup can terminate that exact
- * process even while it is still pre-exec; normal verification remains stricter.
- *
- * Temporary and canonical files are removed only when owned by this invocation.
+ * Transactional launch: deploys/updates the system-level systemd service running
+ * as the unprivileged login user, provisions the root /run lock and tmpfiles.d
+ * configuration, starts the unit, verifies active status, and records the MainPID.
  */
 export function buildTransactionalStartCommand(
   binary: string,
@@ -214,29 +431,102 @@ export function buildTransactionalStartCommand(
   pidFile: string,
   options?: ManagedProcessOptions,
 ): string {
+  if (!options?.vpsId || !options?.user || !options?.homeDir) {
+    throw new Error(
+      "buildTransactionalStartCommand requires complete context: vpsId, user, and homeDir",
+    );
+  }
+  assertNoNewlines(binary, "binary");
+  assertNoNewlines(config, "config");
+  assertNoNewlines(pidFile, "pidFile");
+  assertNoNewlines(options.vpsId, "vpsId");
+  assertNoNewlines(options.user, "user");
+  if (options.group) assertNoNewlines(options.group, "group");
+  assertNoNewlines(options.homeDir, "homeDir");
+  const user = options.user;
+  const homeDir = options.homeDir;
+  const serviceName = getAgentServiceName(options.vpsId);
+  const unitPath = getAgentServiceUnitPath(options.vpsId);
+  const lockPath = getAgentLockPath(options.vpsId);
+  const lockDir = "/run/vps-manager-agent";
+  const tmpfilesPath = getAgentTmpfilesPath(options.vpsId);
   const p = shellQuote(pidFile);
-  const { vars, hasDockerOptions } = formatProcessContext(
+  const { vars } = formatProcessContext(binary, config, options);
+  const unitContent = buildSystemdUnitContent({
+    vpsId: options.vpsId,
+    user,
+    group: options.group,
+    homeDir,
     binary,
     config,
-    options,
-  );
-  const startSpawn = hasDockerOptions
-    ? `nohup "$_bin" -config "$_cfg" -state "$_st_path" -docker-identity-path "$_id_path" -docker-runtime-keys-path "$_rk_path" -docker-runtime-owner-uid "$_uid_val" >/dev/null 2>&1 & _pid=$!;`
-    : `if [ -f "$_id_path" ] && [ -f "$_rk_path" ]; then nohup "$_bin" -config "$_cfg" -state "$_st_path" -docker-identity-path "$_id_path" -docker-runtime-keys-path "$_rk_path" -docker-runtime-owner-uid "$_uid_val" >/dev/null 2>&1 & _pid=$!; else nohup "$_bin" -config "$_cfg" >/dev/null 2>&1 & _pid=$!; fi;`;
+    statePath: options.statePath,
+    dockerIdentityPath: options.dockerIdentityPath,
+    dockerRuntimeKeysPath: options.dockerRuntimeKeysPath,
+    dockerRuntimeOwnerUid: options.dockerRuntimeOwnerUid,
+  });
 
   return [
-    `umask 077; _pf=${p}; ${vars} _pid=''; _start=''; _tmp=''; _published=0; ${REMOTE_ST_HELPER}`,
-    `same_spawn(){ test -n "$_pid" && test -n "$_start" && test "$(st "$_pid")" = "$_start"; };`,
-    `owns_new(){ test -n "$_start" && test "$(st "$_pid")" = "$_start" && test "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = "$_bin" && _cwd=$(readlink -f "/proc/$_pid/cwd" 2>/dev/null || true) && ${EXACT_ARGV}; };`,
-    `cleanup(){ _rc=$?; trap - EXIT HUP INT TERM; if same_spawn; then kill -TERM "$_pid" 2>/dev/null || true; _i=0; while same_spawn && [ $_i -lt 20 ]; do sleep .1; _i=$((_i+1)); done; if same_spawn; then kill -KILL "$_pid" 2>/dev/null || true; fi; _i=0; while same_spawn && [ $_i -lt 20 ]; do sleep .1; _i=$((_i+1)); done; fi; test -n "$_tmp" && rm -f -- "$_tmp"; if [ "$_published" = 1 ] && test -n "$_pid" && [ "$(cat "$_pf" 2>/dev/null)" = "$_pid" ]; then rm -f -- "$_pf"; fi; exit "$_rc"; };`,
-    `trap 'cleanup' EXIT; trap 'exit 1' HUP INT TERM;`,
-    startSpawn,
-    `case "$_pid" in (''|*[!0-9]*) exit 1;; esac; _start=$(st "$_pid"); test -n "$_start" || exit 1;`,
-    `_tmp="$_pf.tmp.$_pid.$_start"; test ! -e "$_tmp" || exit 1;`,
-    `printf '%s\\n' "$_pid" > "$_tmp" || exit 1;`,
-    `sleep .2; kill -0 "$_pid" 2>/dev/null && owns_new || exit 1;`,
-    `mv -- "$_tmp" "$_pf" || exit 1; _tmp=''; _published=1;`,
-    `kill -0 "$_pid" 2>/dev/null && owns_new || exit 1;`,
-    `_published=0; trap - EXIT HUP INT TERM; exit 0`,
+    `_pf=${p}; ${vars} ${REMOTE_ST_HELPER}`,
+    `if [ "$(id -u)" -eq 0 ]; then _s=''; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then _s='sudo -n'; else _s='_nosudo'; fi;`,
+    `_unit=${shellQuote(serviceName)}; _unit_path=${shellQuote(unitPath)};`,
+    `_lock_dir=${shellQuote(lockDir)}; _lock_path=${shellQuote(lockPath)}; _tmpfiles_path=${shellQuote(tmpfilesPath)};`,
+    `if [ "$_s" = '_nosudo' ]; then`,
+    `  if ! test -f "$_unit_path" || ! test -f "$_lock_path"; then`,
+    `    echo "Agent system service requires passwordless sudo (sudo -n); privilege unavailable" >&2; exit 1;`,
+    `  fi;`,
+    `fi;`,
+    `if [ "$_s" != '_nosudo' ]; then`,
+    `  if [ -e "$_lock_dir" ] || [ -L "$_lock_dir" ]; then`,
+    `    test -d "$_lock_dir" && test ! -L "$_lock_dir" && [ "$(stat -c %u "$_lock_dir" 2>/dev/null)" -eq 0 ] || { echo "Unsafe lock directory $_lock_dir" >&2; exit 1; };`,
+    `  else`,
+    `    $_s mkdir -p "$_lock_dir" || exit 1;`,
+    `  fi;`,
+    `  $_s chown root:root "$_lock_dir" && $_s chmod 0755 "$_lock_dir" || exit 1;`,
+    `  if [ -e "$_lock_path" ] || [ -L "$_lock_path" ]; then`,
+    `    test -f "$_lock_path" && test ! -L "$_lock_path" && [ "$(stat -c %u "$_lock_path" 2>/dev/null)" -eq 0 ] || { echo "Unsafe lock file $_lock_path" >&2; exit 1; };`,
+    `  else`,
+    `    $_s touch "$_lock_path" || exit 1;`,
+    `  fi;`,
+    `  $_s chown root:root "$_lock_path" && $_s chmod 0666 "$_lock_path" || exit 1;`,
+    `  printf 'd %s 0755 root root -\\nf %s 0666 root root -\\n' "$_lock_dir" "$_lock_path" | $_s tee "$_tmpfiles_path" >/dev/null || exit 1;`,
+    `  $_s chmod 0644 "$_tmpfiles_path" || exit 1;`,
+    `  if command -v systemd-tmpfiles >/dev/null 2>&1; then $_s systemd-tmpfiles --create "$_tmpfiles_path" 2>/dev/null || true; fi;`,
+    `  printf '%s\\n' ${shellQuote(unitContent)} | $_s tee "$_unit_path" >/dev/null || exit 1;`,
+    `  $_s chmod 0644 "$_unit_path" || exit 1;`,
+    `  $_s systemctl daemon-reload || exit 1;`,
+    `  $_s systemctl enable "$_unit" || exit 1;`,
+    `fi;`,
+    `_svc_pid=''; if systemctl is-active --quiet "$_unit" 2>/dev/null; then _svc_pid=$(systemctl show -p MainPID --value "$_unit" 2>/dev/null || true); fi;`,
+    `_leg_pid=''; _leg_st=''; _leg_matches=0; _unknown=0;`,
+    `for _d in /proc/[0-9]*; do`,
+    `  _pid=\${_d##*/};`,
+    `  test "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = "$_bin" || continue;`,
+    `  if [ -n "$_svc_pid" ] && [ "$_pid" = "$_svc_pid" ]; then continue; fi;`,
+    `  _cwd=$(readlink -f "/proc/$_pid/cwd" 2>/dev/null || true);`,
+    `  if ${EXACT_ARGV}; then`,
+    `    _st_time=$(st "$_pid");`,
+    `    if [ -n "$_st_time" ]; then _leg_matches=$((_leg_matches+1)); _leg_pid=$_pid; _leg_st=$_st_time; else _unknown=$((_unknown+1)); fi;`,
+    `  else`,
+    `    _unknown=$((_unknown+1));`,
+    `  fi;`,
+    `done;`,
+    `if [ "$_unknown" -gt 0 ]; then echo "Conflicting unknown process running agent binary; refusing to start service" >&2; exit 1; fi;`,
+    `if [ "$_leg_matches" -gt 1 ]; then echo "Multiple conflicting processes running agent binary; refusing to start service" >&2; exit 1; fi;`,
+    `if [ "$_leg_matches" -eq 1 ]; then`,
+    `  test -f "$_pf" && [ "$(cat "$_pf" 2>/dev/null || true)" = "$_leg_pid" ] || { echo "Conflicting unowned or ambiguous legacy process $_leg_pid running; refusing to start service" >&2; exit 1; };`,
+    `  _leg_owns(){ test "$(st "$_leg_pid")" = "$_leg_st" && test "$(readlink -f /proc/$_leg_pid/exe 2>/dev/null)" = "$_bin" && _cwd=$(readlink -f "/proc/$_leg_pid/cwd" 2>/dev/null || true) && _pid="$_leg_pid" && ${EXACT_ARGV}; };`,
+    `  if _leg_owns; then _leg_owns && kill -TERM "$_leg_pid" 2>/dev/null || true; fi;`,
+    `  _i=0; while _leg_owns && [ $_i -lt 50 ]; do sleep .1; _i=$((_i+1)); done;`,
+    `  if _leg_owns; then _leg_owns && kill -KILL "$_leg_pid" 2>/dev/null || true; fi;`,
+    `  _i=0; while _leg_owns && [ $_i -lt 20 ]; do sleep .1; _i=$((_i+1)); done;`,
+    `  ! _leg_owns || { echo "Failed to stop legacy process $_leg_pid" >&2; exit 1; };`,
+    `fi;`,
+    `if [ "$_s" != '_nosudo' ]; then $_s systemctl start "$_unit"; else systemctl start "$_unit"; fi;`,
+    `_i=0; while ! systemctl is-active --quiet "$_unit" && [ $_i -lt 50 ]; do sleep .1; _i=$((_i+1)); done;`,
+    `systemctl is-active --quiet "$_unit" || { echo "Systemd service $_unit failed to start" >&2; exit 1; };`,
+    `_pid=$(systemctl show -p MainPID --value "$_unit" 2>/dev/null || true);`,
+    `test -n "$_pid" && [ "$_pid" -gt 0 ] 2>/dev/null || { echo "Systemd service $_unit has no valid MainPID" >&2; exit 1; };`,
+    `test "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = "$_bin" || { echo "MainPID $_pid is not running expected binary" >&2; exit 1; };`,
+    `if [ -n "$_pf" ]; then printf '%s\\n' "$_pid" > "$_pf" || true; fi; exit 0`,
   ].join(" ");
 }

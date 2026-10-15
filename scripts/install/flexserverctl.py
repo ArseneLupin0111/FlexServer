@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -79,9 +80,9 @@ USER_PID_NAME = "vps-agent.pid"
 LIFECYCLE_LOCK_NAME = "lifecycle.lock"
 SYSTEMD_LOCK_NAME = "flexserverctl.lock"
 UPDATER_STATE_DIR = "/var/lib/vps-updater"
+RUN_LOCK_DIR = "/run/vps-manager-agent"
 SYSTEMCTL_BIN = "systemctl"
 JOURNALCTL_BIN = "journalctl"
-
 TOKEN_RE = re.compile(r"vma_[A-Za-z0-9_\-]+")
 HEALTH_TIMEOUT = 10
 HEALTH_MAX_BYTES = 64 * 1024
@@ -100,7 +101,7 @@ DETAIL_LIMIT = 300
 # prints and exits, and `-provision-docker-state` exits without looping.
 # All are Booleans in Go, so every combinational form counts: `-once`,
 # `--once`, `-once=true`, `--once=true`, `-once 1` (via parse_go_flags).
-NON_LOOP_FLAGS = ("once", "host-only", "version", "provision-docker-state")
+NON_LOOP_FLAGS = ("once", "host-only", "version", "provision-docker-state", "validate-config")
 # Go's flag package accepts `-flag value` and `-flag=value` for non-booleans,
 # so `-config` also matches `--config`, `-config=/path`, `--config=/path`.
 CONFIG_FLAG = "-config"
@@ -196,6 +197,31 @@ def user_pid_path() -> str:
 
 def user_lock_path() -> str:
     return os.path.join(user_agent_dir(), LIFECYCLE_LOCK_NAME)
+
+def resolve_agent_unit(agent_cfg_path: str = "", vps_id: str = "") -> str:
+    """Resolve the systemd service name for the agent.
+
+    Uses FLEXSERVERCTL_AGENT_UNIT env override if set.
+    Checks for the canonical default AGENT_UNIT on disk or unified unit
+    vps-agent-${sha256(vpsId)}.service on disk, falling back to AGENT_UNIT.
+    """
+    override = os.environ.get("FLEXSERVERCTL_AGENT_UNIT", "").strip()
+    if override:
+        return override
+    if os.path.exists(f"/etc/systemd/system/{AGENT_UNIT}") or os.path.exists(f"/lib/systemd/system/{AGENT_UNIT}"):
+        return AGENT_UNIT
+    if not vps_id and agent_cfg_path and os.path.exists(agent_cfg_path):
+        try:
+            cfg = load_json_file(agent_cfg_path)
+            vps_id = cfg.get("vpsId", "")
+        except Exception:
+            pass
+    if vps_id:
+        vps_hash = hashlib.sha256(str(vps_id).encode("utf-8")).hexdigest().lower()
+        unit = f"vps-agent-{vps_hash}.service"
+        if os.path.exists(f"/etc/systemd/system/{unit}") or os.path.exists(f"/lib/systemd/system/{unit}"):
+            return unit
+    return AGENT_UNIT
 
 
 def systemd_lock_path() -> str:
@@ -601,6 +627,10 @@ class LifecycleLock:
     def release(self) -> None:
         if not self.held:
             return
+        # Invariant: Root lock inode in /run/vps-manager-agent must NEVER be unlinked.
+        if self.lock_path.startswith(RUN_LOCK_DIR):
+            self.held = False
+            return
         try:
             os.rmdir(self.lock_path)
         except OSError:
@@ -885,6 +915,11 @@ def run_cmd(argv, timeout=60, cwd=None, env=None):
 def run_systemctl(args, timeout=SYSTEMCTL_TIMEOUT):
     return run_cmd([systemctl_bin()] + list(args), timeout=timeout)
 
+def run_agent_validate_config(agent_bin: str, config: str, timeout=PREFLIGHT_TIMEOUT):
+    """Preflight validation using -validate-config."""
+    argv = [agent_bin, CONFIG_FLAG, config, "-validate-config"]
+    return run_cmd(argv, timeout=timeout)
+
 
 def run_agent_once(agent_bin: str, config: str, state_path: str, timeout=PREFLIGHT_TIMEOUT):
     """Delivery preflight: one isolated push with the candidate config.
@@ -894,7 +929,6 @@ def run_agent_once(agent_bin: str, config: str, state_path: str, timeout=PREFLIG
     """
     argv = [agent_bin, CONFIG_FLAG, config, "-state", state_path, "-once", "-host-only"]
     return run_cmd(argv, timeout=timeout)
-
 
 def run_updater_status(updater_bin: str, config_path: str, timeout=30):
     return run_cmd([updater_bin, "status", CONFIG_FLAG, config_path], timeout=timeout)
@@ -1376,21 +1410,15 @@ def _stop_spawned(pid: str) -> None:
 
 
 def _preflight(agent_bin: str, config: str):
-    """One isolated `-once -host-only` push against the candidate config.
+    """Candidate config validation using -validate-config.
 
-    The disposable state.json lives in a fresh temp dir so the real persisted
-    state is never clobbered.
+    Validates candidate configuration offline without lock acquisition,
+    state mutation, or network requests.
     """
-    tmp = tempfile.mkdtemp(prefix="flexserverctl-preflight-")
-    state_path = os.path.join(tmp, "state.json")
-    try:
-        rc, out = run_agent_once(agent_bin, config, state_path)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    rc, out = run_agent_validate_config(agent_bin, config)
     if rc == 0:
         return True, "preflight ok"
     return False, f"preflight failed rc={rc}: {redact(' '.join((out or '').split()))[:DETAIL_LIMIT]}"
-
 
 def _health_gate(url: str):
     return health_probe(url)
@@ -1515,14 +1543,27 @@ def _do_systemd_cutover_locked(new_url, agent_cfg, updater_cfg, agent_bin, updat
         _stopped_units_recover([UPDATER_UNIT] if has_updater else [])
         fail(f"cannot snapshot configs: {redact(str(exc))}")
 
-    rc, out = run_systemctl(["stop", AGENT_UNIT])
+    agent_unit = resolve_agent_unit(agent_cfg, agent_cfg_data.get("vpsId", ""))
+    rc, out = run_systemctl(["stop", agent_unit])
     if rc != 0:
         hold_backups(agent_cfg)
         if has_updater:
             hold_backups(updater_cfg)
         _stopped_units_recover([UPDATER_UNIT] if has_updater else [])
-        fail(f"systemctl stop {AGENT_UNIT} failed rc={rc}: {redact(out.strip())[:200]}")
+        fail(f"systemctl stop {agent_unit} failed rc={rc}: {redact(out.strip())[:200]}")
 
+    # Prove process exited before proceeding
+    for _ in range(50):
+        rc_active, _ = run_systemctl(["is-active", "--quiet", agent_unit])
+        if rc_active != 0:
+            break
+        time.sleep(0.1)
+    else:
+        hold_backups(agent_cfg)
+        if has_updater:
+            hold_backups(updater_cfg)
+        _stopped_units_recover([UPDATER_UNIT] if has_updater else [])
+        fail(f"systemctl stop {agent_unit} failed: process still active after stop")
     reason = ""
     rolled_back = False
     try:
@@ -1536,18 +1577,18 @@ def _do_systemd_cutover_locked(new_url, agent_cfg, updater_cfg, agent_bin, updat
         if not ok:
             raise RuntimeError(detail)
 
-        rc, out = run_systemctl(["reset-failed", AGENT_UNIT])
+        rc, out = run_systemctl(["reset-failed", agent_unit])
         if rc != 0:
-            eprint(f"warning: reset-failed {AGENT_UNIT} rc={rc}")
-        rc, out = run_systemctl(["restart", AGENT_UNIT])
+            eprint(f"warning: reset-failed {agent_unit} rc={rc}")
+        rc, out = run_systemctl(["restart", agent_unit])
         if rc != 0:
             raise RuntimeError(
-                f"systemctl restart {AGENT_UNIT} failed rc={rc}: {redact(out.strip())[:200]}"
+                f"systemctl restart {agent_unit} failed rc={rc}: {redact(out.strip())[:200]}"
             )
-        rc, out = run_systemctl(["is-active", AGENT_UNIT])
+        rc, out = run_systemctl(["is-active", agent_unit])
         if rc != 0:
             raise RuntimeError(
-                f"systemctl is-active {AGENT_UNIT} reported inactive after restart: "
+                f"systemctl is-active {agent_unit} reported inactive after restart: "
                 f"{redact(out.strip())[:200]}"
             )
         if has_updater:
@@ -1574,7 +1615,7 @@ def _do_systemd_cutover_locked(new_url, agent_cfg, updater_cfg, agent_bin, updat
         # The restored bytes only take effect once the units are stopped and
         # restarted onto them: a `start` on an already-running unit would leave
         # the loop holding the new URL in memory.
-        recover = [AGENT_UNIT] + ([UPDATER_UNIT] if has_updater else [])
+        recover = [agent_unit] + ([UPDATER_UNIT] if has_updater else [])
         for unit in recover:
             run_systemctl(["stop", unit])
         recovered = True

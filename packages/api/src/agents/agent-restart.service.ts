@@ -209,20 +209,38 @@ export class AgentRestartService {
         await ctx.update("stopping", 30);
         await exec(
           vps,
-          buildRestartStopCommand(binary, config, owned[1], owned[2]),
+          buildRestartStopCommand(binary, config, owned[1], owned[2], {
+            vpsId: vps.id,
+          }),
           auth,
           10_000,
         );
-      } else if (inspect !== "none")
+      } else if (inspect === "none") {
+        // If the service is in auto-restart or activating state with no live PID,
+        // ensure any existing systemd service is stopped before starting anew.
+        await exec(
+          vps,
+          buildRestartStopCommand(binary, config, "0", "0", {
+            vpsId: vps.id,
+          }),
+          auth,
+          10_000,
+        );
+      } else {
         throw new Error(
           "Managed agent process ownership is missing or ambiguous",
         );
+      }
       // Baseline is deliberately captured only after the prior process stopped.
       const baseline = (await this.agents.getState(vps.id))?.lastSeenAt;
       await ctx.update("starting", 60);
       await exec(
         vps,
-        buildRestartStartCommand(binary, config, pidFile),
+        buildRestartStartCommand(binary, config, pidFile, {
+          vpsId: vps.id,
+          user: vps.username || "root",
+          homeDir: home,
+        }),
         auth,
         10_000,
       );

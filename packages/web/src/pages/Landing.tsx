@@ -932,26 +932,6 @@ export function LandingPage() {
           </nav>
 
           <div className="landing-header-actions">
-            <a
-              href={REPO_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="landing-btn landing-btn-secondary landing-btn-small"
-            >
-              GitHub
-              <ArrowUpRight size={14} aria-hidden="true" />
-            </a>
-
-            <a
-              href={DEPLOY_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="landing-btn landing-btn-primary landing-btn-small"
-            >
-              Deploy Guide
-              <ArrowUpRight size={14} aria-hidden="true" />
-            </a>
-
             <button
               ref={menuButtonRef}
               type="button"
@@ -995,26 +975,6 @@ export function LandingPage() {
                   ))}
                 </ul>
               </nav>
-              <div className="landing-mobile-cta">
-                <a
-                  href={DEPLOY_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="landing-btn landing-btn-primary landing-btn-block"
-                >
-                  Deploy Guide
-                  <ArrowUpRight size={14} aria-hidden="true" />
-                </a>
-                <a
-                  href={REPO_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="landing-btn landing-btn-secondary landing-btn-block"
-                >
-                  GitHub Repository
-                  <ArrowUpRight size={14} aria-hidden="true" />
-                </a>
-              </div>
             </motion.div>
           )}
         </AnimatePresence>
@@ -1454,15 +1414,6 @@ export function LandingPage() {
                   className="landing-btn landing-btn-primary"
                 >
                   Deploy Guide
-                  <ArrowUpRight size={16} aria-hidden="true" />
-                </a>
-                <a
-                  href={REPO_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="landing-btn landing-btn-secondary"
-                >
-                  View Source on GitHub
                   <ArrowUpRight size={16} aria-hidden="true" />
                 </a>
               </div>

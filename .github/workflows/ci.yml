@@ -913,8 +913,10 @@ jobs:
           TERMINAL_INPUT_BUFFER_BYTES=$TERMINAL_INPUT_BUFFER_BYTES_VALUE
           TERMINAL_SLOW_CONSUMER_TIMEOUT_MS=$TERMINAL_SLOW_CONSUMER_TIMEOUT_MS_VALUE
           LOCAL_PTY_SOCKET_PATH=/var/run/flexserver/host-pty.sock
+          LOCAL_AGENT_ROTATION_HELPER=/usr/local/bin/local-agent-rotation-client
+          LOCAL_AGENT_ROTATION_SOCKET=/var/run/flexserver/agent-rotation.sock
+          SSH_KEY_ENCRYPTION_KEY_FILE=/etc/flexserver/ssh-keyring.json
           STORAGE_DRIVER=postgres
-
           POSTGRES_DB=vps_manager
           POSTGRES_USER=vps_manager
           POSTGRES_PASSWORD=$POSTGRES_PASSWORD_ONE_LINE
@@ -952,10 +954,14 @@ jobs:
                 AGENT_RELEASE_MANIFEST_URL: \${AGENT_RELEASE_MANIFEST_URL:-}
                 AGENT_RELEASE_TTL_SECONDS: \${AGENT_RELEASE_TTL_SECONDS:-300}
                 LOCAL_PTY_SOCKET_PATH: \${LOCAL_PTY_SOCKET_PATH:-/var/run/flexserver/host-pty.sock}
+                LOCAL_AGENT_ROTATION_HELPER: \${LOCAL_AGENT_ROTATION_HELPER:-/usr/local/bin/local-agent-rotation-client}
+                LOCAL_AGENT_ROTATION_SOCKET: \${LOCAL_AGENT_ROTATION_SOCKET:-/var/run/flexserver/agent-rotation.sock}
+                SSH_KEY_ENCRYPTION_KEY_FILE: \${SSH_KEY_ENCRYPTION_KEY_FILE:-/etc/flexserver/ssh-keyring.json}
               volumes:
                 - vps-manager-data:/app/data
                 - vps-manager-private:/app/private
                 - /var/run/flexserver:/var/run/flexserver
+                - /etc/flexserver:/etc/flexserver:ro
               healthcheck:
                 test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
                 interval: 30s
@@ -983,17 +989,8 @@ jobs:
           EOF
           $SSH "cd '$DEPLOY_PATH' && docker compose pull"
           $SSH "cd '$DEPLOY_PATH' && docker compose up -d postgres"
-          $SSH "cd '$DEPLOY_PATH' && docker compose run --rm api node dist/db/migrate.js"
-          $SSH "cd '$DEPLOY_PATH' && docker compose run --rm api node dist/db/migrate.js --include-optional" || echo "Optional Timescale migration failed or is unavailable; continuing with core PostgreSQL schema."
-          # Bootstrap/rotate dashboard admin password if secret is provided
-          if [ -n "$DASHBOARD_ADMIN_PASSWORD" ]; then
-            printf '%s\n' "$DASHBOARD_ADMIN_PASSWORD" | $SSH "cd '$DEPLOY_PATH' && docker compose run --rm -T api node dist/scripts/set-dashboard-password.js --stdin --skip-if-same"
-            echo "Dashboard admin password set/verified."
-          else
-            echo "DASHBOARD_ADMIN_PASSWORD secret not set — dashboard password must be set manually via SSH after deploy."
-          fi
-          # Provision or upgrade host-pty daemon from API image before starting API container
-          echo "Provisioning host-pty daemon from API image..."
+          # Provision or upgrade host daemons and external SSH keyring from API image before starting API container
+          echo "Provisioning host services and external SSH keyring from API image..."
           "${SSH_BASE[@]}" "
             set -euo pipefail
             SUDO=\"\"
@@ -1010,6 +1007,28 @@ jobs:
             API_UID=\"\${API_UID_GID%%:*}\"
             API_GID=\"\${API_UID_GID##*:}\"
 
+            # Provision external SSH keyring directory (/etc/flexserver)
+            KEYRING_DIR=\"/etc/flexserver\"
+            KEYRING_FILE=\"\${KEYRING_DIR}/ssh-keyring.json\"
+
+            sudo mkdir -p \"\$KEYRING_DIR\"
+            sudo chown \"\${API_UID}:\${API_GID}\" \"\$KEYRING_DIR\"
+            sudo chmod 0750 \"\$KEYRING_DIR\"
+
+            if sudo test -f \"\$KEYRING_FILE\"; then
+              echo \"Preserving existing SSH keyring at \$KEYRING_FILE.\"
+              sudo chown \"\${API_UID}:\${API_GID}\" \"\$KEYRING_FILE\"
+              sudo chmod 0600 \"\$KEYRING_FILE\"
+            else
+              echo \"Initializing external SSH key encryption keyring...\"
+              cd '$DEPLOY_PATH' && docker compose run --rm --no-deps -v \"\${KEYRING_DIR}:\${KEYRING_DIR}:rw\" -e SSH_KEY_ENCRYPTION_KEY_FILE=\"\$KEYRING_FILE\" api node dist/scripts/manage-ssh-keys.js init --path \"\$KEYRING_FILE\"
+              sudo chown \"\${API_UID}:\${API_GID}\" \"\$KEYRING_FILE\"
+              sudo chmod 0600 \"\$KEYRING_FILE\"
+            fi
+
+            # Migrate managed SSH keys to envelope encryption
+            echo \"Migrating managed SSH keys to envelope encryption...\"
+            cd '$DEPLOY_PATH' && docker compose run --rm --no-deps -v \"\${KEYRING_DIR}:\${KEYRING_DIR}:ro\" -e SSH_KEY_ENCRYPTION_KEY_FILE=\"\$KEYRING_FILE\" api node dist/scripts/manage-ssh-keys.js migrate --path \"\$KEYRING_FILE\"
             # Extract packaged host-pty binary from API image
             HOST_PTY_TMP=\"\$(mktemp /tmp/host-pty-bundled.XXXXXX)\"
             if ! docker run --rm --entrypoint cat '$API_IMAGE' /app/agent/host-pty-linux-amd64 > \"\$HOST_PTY_TMP\" || [ ! -s \"\$HOST_PTY_TMP\" ]; then
@@ -1041,14 +1060,52 @@ jobs:
             \$SUDO systemctl enable flexserver-host-pty.service
             \$SUDO systemctl restart flexserver-host-pty.service
             echo \"Host PTY daemon started (socket: /var/run/flexserver/host-pty.sock, uid=\${API_UID}, gid=\${API_GID}).\"
+
+            # Extract packaged local-agent-rotator binary from API image
+            ROTATOR_TMP=\"\$(mktemp /tmp/local-agent-rotator-bundled.XXXXXX)\"
+            if ! docker run --rm --entrypoint cat '$API_IMAGE' /app/agent/local-agent-rotator-linux-amd64 > \"\$ROTATOR_TMP\" || [ ! -s \"\$ROTATOR_TMP\" ]; then
+              echo 'Error: Failed to extract bundled local-agent-rotator binary from API image.' >&2
+              rm -f \"\$ROTATOR_TMP\"
+              exit 1
+            fi
+            chmod 0755 \"\$ROTATOR_TMP\"
+
+            DEST=\"/usr/local/bin/flexserver-local-agent-rotator\"
+            TMP_DEST=\"\${DEST}.tmp.\$\$\"
+            \$SUDO cp -f \"\$ROTATOR_TMP\" \"\$TMP_DEST\"
+            \$SUDO chown root:root \"\$TMP_DEST\"
+            \$SUDO chmod 0755 \"\$TMP_DEST\"
+            \$SUDO mv -f \"\$TMP_DEST\" \"\$DEST\"
+            rm -f \"\$ROTATOR_TMP\"
+
+            # Install systemd root daemon unit for rotation helper
+            ROTATOR_UNIT_FILE=\"/etc/systemd/system/flexserver-local-agent-rotator.service\"
+            ROTATOR_UNIT_TMP=\"\$(mktemp /tmp/flexserver-local-agent-rotator.XXXXXX.service)\"
+            printf '[Unit]\nDescription=VPS Manager Local Agent Rotation Helper Daemon\nDocumentation=https://github.com/sondoan17/vps-manager-nodejs\nAfter=network.target\n\n[Service]\nType=simple\nUser=root\nGroup=root\nRuntimeDirectory=flexserver\nRuntimeDirectoryMode=0755\nExecStart=/usr/local/bin/flexserver-local-agent-rotator -server -socket /var/run/flexserver/agent-rotation.sock -socket-mode 0660 -socket-uid %s -socket-gid %s -config /etc/vps-manager-agent/config.json -service-name vps-manager-agent.service\nRestart=always\nRestartSec=5\n\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectClock=true\n\n[Install]\nWantedBy=multi-user.target\n' \"\$API_UID\" \"\$API_GID\" > \"\$ROTATOR_UNIT_TMP\"
+            \$SUDO chown root:root \"\$ROTATOR_UNIT_TMP\"
+            \$SUDO chmod 0644 \"\$ROTATOR_UNIT_TMP\"
+            \$SUDO mv -f \"\$ROTATOR_UNIT_TMP\" \"\$ROTATOR_UNIT_FILE\"
+            \$SUDO systemctl daemon-reload
+            \$SUDO systemctl enable flexserver-local-agent-rotator.service
+            \$SUDO systemctl restart flexserver-local-agent-rotator.service
+            echo \"Host Agent Rotator daemon started (socket: /var/run/flexserver/agent-rotation.sock, uid=\${API_UID}, gid=\${API_GID}).\"
           "
+          $SSH "cd '$DEPLOY_PATH' && docker compose run --rm api node dist/db/migrate.js"
+          $SSH "cd '$DEPLOY_PATH' && docker compose run --rm api node dist/db/migrate.js --include-optional" || echo "Optional Timescale migration failed or is unavailable; continuing with core PostgreSQL schema."
+          # Bootstrap/rotate dashboard admin password if secret is provided
+          if [ -n "$DASHBOARD_ADMIN_PASSWORD" ]; then
+            printf '%s\n' "$DASHBOARD_ADMIN_PASSWORD" | $SSH "cd '$DEPLOY_PATH' && docker compose run --rm -T api node dist/scripts/set-dashboard-password.js --stdin --skip-if-same"
+            echo "Dashboard admin password set/verified."
+          else
+            echo "DASHBOARD_ADMIN_PASSWORD secret not set — dashboard password must be set manually via SSH after deploy."
+          fi
           $SSH "cd '$DEPLOY_PATH' && docker compose up -d --remove-orphans"
           $SSH "cd '$DEPLOY_PATH' && docker compose ps"
           $SSH "for i in \$(seq 1 30); do curl -fsS http://127.0.0.1:3000/api/health && exit 0; sleep 2; done; docker compose -f '$DEPLOY_PATH/docker-compose.yml' logs --tail=80; exit 1"
           # Refresh or bootstrap local updater on the host using the bundled binary from API image
           echo "Updating host local-updater from API image..."
           # Reuse the authenticated SSH connection; scp uses -P, not ssh's -p.
-          tar -C scripts/install -cf - install-updater.sh installer-lib.sh flexserverctl.py | "${SSH_BASE[@]}" "tar -xf - -C /tmp && chmod 0755 /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py"
+          tar -C scripts/install -cf - install-updater.sh installer-lib.sh flexserverctl.py bootstrap-ssh-keyring.sh | "${SSH_BASE[@]}" "tar -xf - -C /tmp && chmod 0755 /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py /tmp/bootstrap-ssh-keyring.sh"
           "${SSH_BASE[@]}" "
             set -euo pipefail
             SUDO=\"\"

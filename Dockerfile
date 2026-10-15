@@ -38,10 +38,14 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${AGENT_BUILD_ID}" \
     -o /out/vps-updater-linux-amd64 ./cmd/vps-updater && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -o /out/host-pty-linux-amd64 ./cmd/host-pty
+    -o /out/host-pty-linux-amd64 ./cmd/host-pty && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -o /out/local-agent-rotator-linux-amd64 ./cmd/local-agent-rotator
 FROM node:24-alpine AS api-runtime
 ENV NODE_ENV=production \
-    AGENT_BINARY_PATH=/app/agent/vps-agent-linux-amd64
+    AGENT_BINARY_PATH=/app/agent/vps-agent-linux-amd64 \
+    LOCAL_AGENT_ROTATION_HELPER=/usr/local/bin/local-agent-rotation-client \
+    LOCAL_AGENT_ROTATION_SOCKET=/var/run/flexserver/agent-rotation.sock
 WORKDIR /app
 # openssh-client provides ssh-keyscan used for SSH host key provisioning
 RUN apk add --no-cache openssh-client
@@ -53,6 +57,9 @@ COPY --from=api-build --chown=app:app /app/packages/api/db ./db
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-agent-linux-amd64 /app/agent/vps-agent-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-updater-linux-amd64 /app/agent/vps-updater-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-pty-linux-amd64 /app/agent/host-pty-linux-amd64
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/local-agent-rotator-linux-amd64 /app/agent/local-agent-rotator-linux-amd64
+RUN ln -s /app/agent/local-agent-rotator-linux-amd64 /usr/local/bin/local-agent-rotation-client && \
+    ln -s /app/agent/local-agent-rotator-linux-amd64 /usr/local/bin/flexserver-local-agent-rotator
 RUN mkdir -p /app/data /app/private && chown -R app:app /app/data /app/private
 USER app
 EXPOSE 3000

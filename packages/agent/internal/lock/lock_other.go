@@ -55,3 +55,34 @@ func releaseOS(f *os.File) error {
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return f.Close()
 }
+
+func provisionOS(vpsId string, o options) error {
+	dir := o.dir
+	if dir == "" {
+		dir = filepath.Clean(os.TempDir())
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create lock directory %s: %w", dir, err)
+	}
+	lockPath := filepath.Join(dir, LockFilename(vpsId))
+	if _, err := os.Stat(lockPath); errors.Is(err, os.ErrNotExist) {
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o666)
+		if err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("create lock file %s: %w", lockPath, err)
+		}
+		if f != nil {
+			_ = f.Close()
+		}
+	}
+	if o.tmpfilesDir != nil && *o.tmpfilesDir != "" {
+		if err := os.MkdirAll(*o.tmpfilesDir, 0o755); err != nil {
+			return fmt.Errorf("create tmpfiles directory %s: %w", *o.tmpfilesDir, err)
+		}
+		confPath := filepath.Join(*o.tmpfilesDir, TmpfilesDefaultConf)
+		content := fmt.Sprintf("d %s 0755 root root -\nf %s 0666 root root -\n", dir, lockPath)
+		if err := os.WriteFile(confPath, []byte(content), 0o644); err != nil {
+			return fmt.Errorf("write tmpfiles configuration %s: %w", confPath, err)
+		}
+	}
+	return nil
+}

@@ -35,6 +35,7 @@ func main() {
 	identityPath := flag.String("docker-identity-path", "", "Docker identity output path")
 	runtimeKeysPath := flag.String("docker-runtime-keys-path", "", "Docker runtime keys output path")
 	runtimeOwnerUID := flag.String("docker-runtime-owner-uid", "", "expected runtime keys owner UID (nonnegative integer)")
+	provisionLock := flag.Bool("provision-lock", false, "provision singleton lock directory, file and tmpfiles, then exit")
 	flag.Parse()
 
 	if *provision {
@@ -55,6 +56,21 @@ func main() {
 		if err := state.Provision(*identityPath, *runtimeKeysPath, state.ProvisionOptions{RuntimeOwnerUID: &runtimeUID}); err != nil {
 			log.Fatalf("docker state provisioning failed: %v", err)
 		}
+		return
+	}
+	if *provisionLock {
+		if *configPath == "" {
+			fmt.Fprintln(os.Stderr, "provision-lock requires -config <path>")
+			os.Exit(1)
+		}
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			log.Fatalf("config error: %v", err)
+		}
+		if err := lock.Provision(cfg.VpsId); err != nil {
+			log.Fatalf("lock provisioning failed: %v", err)
+		}
+		fmt.Printf("lock provisioned for VPS %s at %s\n", cfg.VpsId, lock.LockPath(cfg.VpsId))
 		return
 	}
 

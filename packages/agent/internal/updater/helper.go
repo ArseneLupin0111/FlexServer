@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/vps-manager/agent/internal/lock"
 )
 
 // jobIDRe is the client-side constraint the API also guarantees
@@ -336,7 +338,7 @@ func handleApply(ctx context.Context, cfg *Config, auth JobAuthorizer, jobID str
 	}
 	apiJob, err := auth.Get(ctx, jobID)
 	if err != nil {
-		res.Outcome, res.Detail = "verify_failed", "api verify job authorization: " + err.Error()
+		res.Outcome, res.Detail = "verify_failed", "api verify job authorization: "+err.Error()
 		return res
 	}
 	if apiJob == nil || apiJob.JobID != jobID {
@@ -387,7 +389,7 @@ func handleApply(ctx context.Context, cfg *Config, auth JobAuthorizer, jobID str
 	}
 	raw, err := os.ReadFile(metaPath)
 	if err != nil {
-		res.Outcome, res.Detail = "verify_failed", "staging meta unreadable: " + err.Error()
+		res.Outcome, res.Detail = "verify_failed", "staging meta unreadable: "+err.Error()
 		return res
 	}
 	var meta struct {
@@ -397,7 +399,7 @@ func handleApply(ctx context.Context, cfg *Config, auth JobAuthorizer, jobID str
 		Size    int64  `json:"size"`
 	}
 	if err := json.Unmarshal(raw, &meta); err != nil {
-		res.Outcome, res.Detail = "verify_failed", "staging meta invalid: " + err.Error()
+		res.Outcome, res.Detail = "verify_failed", "staging meta invalid: "+err.Error()
 		return res
 	}
 	if meta.JobID != "" && meta.JobID != jobID {
@@ -501,6 +503,13 @@ func handleApply(ctx context.Context, cfg *Config, auth JobAuthorizer, jobID str
 	}
 	if err := saveHelperJournal(cfg.StateDir, hj); err != nil {
 		res.Outcome, res.Detail = "verify_failed", "helper journal: "+err.Error()
+		return res
+	}
+
+	// Provision lock and reboot persistence before binary swap so the new agent
+	// can acquire its singleton lock immediately on restart.
+	if err := provisionLockForUpgrade(cfg); err != nil {
+		res.Outcome, res.Detail = "verify_failed", "provision lock: "+err.Error()
 		return res
 	}
 
@@ -617,6 +626,7 @@ func reconcileApply(ctx context.Context, cfg *Config, hj *HelperJournal, res *He
 		// re-triggering systemctl for an already-restarted job would keep
 		// re-running a mutation whose outcome is recorded (or held unclear).
 		if hj.Phase != hjRestarted {
+			_ = provisionLockForUpgrade(cfg)
 			if _, err := runSystemctl(ctx, "restart", cfg.AgentUnit); err == nil {
 				hj.Phase = hjRestarted
 				_ = saveHelperJournal(cfg.StateDir, hj)
@@ -779,4 +789,94 @@ func copyHashed(src, dst, wantSHA string, wantSize int64) (string, error) {
 
 func markHelperJournal(cfg *Config, hj *HelperJournal) {
 	_ = saveHelperJournal(cfg.StateDir, hj)
+}
+
+type localAgentConfigHeader struct {
+	VpsID string `json:"vpsId"`
+}
+
+func readTrustedLocalVpsID(configPath string) (string, error) {
+	if configPath == "" {
+		return "", fmt.Errorf("agent config path is empty")
+	}
+	fi, err := os.Lstat(configPath)
+	if err != nil {
+		return "", fmt.Errorf("stat trusted local agent config %s: %w", configPath, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("trusted local agent config %s must not be a symlink", configPath)
+	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("trusted local agent config %s must be a regular file", configPath)
+	}
+	if os.Geteuid() == 0 {
+		if fi.Mode().Perm()&0o022 != 0 {
+			return "", fmt.Errorf("trusted local agent config %s must not be group- or world-writable (mode %o)", configPath, fi.Mode().Perm())
+		}
+		if rooted, ok := statIsRootOwned(fi); ok && !rooted {
+			return "", fmt.Errorf("trusted local agent config %s must be owned by root", configPath)
+		}
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", fmt.Errorf("read trusted local agent config %s: %w", configPath, err)
+	}
+	var c localAgentConfigHeader
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return "", fmt.Errorf("parse trusted local agent config %s: %w", configPath, err)
+	}
+	vpsID := strings.TrimSpace(c.VpsID)
+	if vpsID == "" {
+		return "", fmt.Errorf("trusted local agent config %s has empty vpsId", configPath)
+	}
+	return vpsID, nil
+}
+
+func provisionLockForUpgrade(cfg *Config) error {
+	var vpsID string
+	if cfg.VpsID != "" {
+		vpsID = strings.TrimSpace(cfg.VpsID)
+	}
+
+	configPath := cfg.AgentConfig
+	if configPath == "" && !cfg.testMode {
+		configPath = FixedAgentConfig
+	}
+
+	// If vpsId was not directly in updater config, read from trusted local agent config
+	if vpsID == "" && configPath != "" {
+		if cfg.testMode {
+			if _, err := os.Stat(configPath); os.IsNotExist(err) && cfg.testLockDir == "" {
+				return nil
+			}
+		}
+		var err error
+		vpsID, err = readTrustedLocalVpsID(configPath)
+		if err != nil {
+			if cfg.testMode && cfg.testLockDir == "" {
+				return nil
+			}
+			return fmt.Errorf("read trusted local agent config: %w", err)
+		}
+	}
+
+	if vpsID == "" {
+		if cfg.testMode && cfg.testLockDir != "" {
+			vpsID = "test-upgrade-vps"
+		} else if cfg.testMode {
+			return nil
+		} else {
+			return fmt.Errorf("trusted local agent config not found or vpsId empty")
+		}
+	}
+
+	var opts []lock.Option
+	if cfg.testLockDir != "" {
+		opts = append(opts, lock.WithDir(cfg.testLockDir))
+	}
+	if cfg.testTmpfilesDir != "" {
+		opts = append(opts, lock.WithTmpfilesDir(cfg.testTmpfilesDir))
+	}
+
+	return lock.Provision(vpsID, opts...)
 }

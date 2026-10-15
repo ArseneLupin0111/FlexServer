@@ -100,6 +100,17 @@ To prevent duplicate running instances, telemetry collisions, and conflicting ba
   - **Explicit Non-Security Boundary & Root Unchanged**: This guard is strictly an ergonomic safety net against paste accidents or fat-finger execution. It is **NOT** a security sandbox, privilege boundary, or authorization restriction. Interactive PTY transports stream raw byte sequences rather than structured command invocations, making server-side or stream-level command denylisting unsound without breaking interactive curses applications, text editors, subshells, pipelines, and terminal escape sequences. Therefore, no server-side runtime input filtering or stream blocking is performed.
   - **Execution Identity**: The underlying host PTY process executes with host root privileges, and remote SSH sessions execute with the configured SSH credentials. Enabling the accidental command guard does not alter the runtime UID/GID or drop root privileges. Disabling it restores raw terminal input forwarding.
   - **Persistence**: Persisted globally across storage backends (PostgreSQL `dashboard_settings.terminal_command_guard_enabled` via migration `025_terminal_command_guard.sql` and JSON `data/settings.json`), exposed via `DashboardOverview.settings.terminalCommandGuardEnabled`, and updated via `PATCH /api/dashboard/settings` with support for independent partial updates.
+
+### Local Agent Credential Rotation Helper Security
+
+- **Constrained Host Daemon**: In containerized deployments, local agent rotation cannot run unprivileged within the container or invoke host `systemctl` directly. The rotation helper daemon (`flexserver-local-agent-rotator.service`) runs on the host as root, listening on the Unix domain socket `/var/run/flexserver/agent-rotation.sock` located inside the existing shared runtime volume `/var/run/flexserver`.
+- **Peer Credential Authentication**: The daemon checks the connecting socket peer using Linux `SO_PEERCRED`. Only processes matching the API container runtime UID/GID (or root) are allowed to connect.
+- **Strictly Bounded Scope**: The daemon accepts only a single bounded JSON line (`{"vpsId": "...", "token": "..."}`, capped at 4096 bytes). Arbitrary commands, parameters, or file paths are prohibited.
+- **Identity Enforcement**: The daemon parses the local host config (`/etc/vps-manager-agent/config.json`) and validates that the requested `vpsId` matches the local host `vpsId` exactly; mismatched IDs are rejected immediately.
+- **Atomic File Update & Rollback**: The daemon atomically rewrites `/etc/vps-manager-agent/config.json` via a unique PID- and sequence-keyed temporary file with `fsync`, preserving original ownership and file mode (`0640`, group `gid 999`), retains an atomic rollback backup, and restarts `vps-manager-agent.service`. If the service restart fails, the configuration is immediately restored from backup and restart is retried.
+- **Serialized Transactions & Fast Reject**: Mutation transactions are serialized via a process-level mutex with immediate `TryLock` rejection (`rotation busy`) to prevent request queueing, race conditions, or deadline drift.
+- **Bounded Timeouts & No Late Mutations**: Systemd restarts are bounded to 8 seconds (rollback restart also 8 seconds), guaranteeing total daemon execution stays well within the 25-second client timeout and 30-second API timeout (`LOCAL_AGENT_ROTATION_TIMEOUT_MS`), preventing split-brain or late accepted mutations.
+- **Zero Token Leakage**: Tokens (`vma_...`) are strictly excluded from command-line arguments, environment logs, daemon logs, and API error responses. Child process output and stderr streams are filtered with regex token sanitization.
 ## SSH Private Key Envelope Encryption & Management
 
 ### Envelope Architecture & Cryptography
@@ -147,7 +158,8 @@ A dedicated CLI tool manages keyrings and key envelopes without printing secret 
 
 ```bash
 # 1. Initialize external keyring (creates file with initial 256-bit KEK)
-npm run manage-ssh-keys -- init --path /etc/flexserver/ssh-keyring.json
+# Optionally pass --migrate to immediately encrypt existing plaintext OpenSSH keys:
+npm run manage-ssh-keys -- init --path /etc/flexserver/ssh-keyring.json --migrate
 # Set SSH_KEY_ENCRYPTION_KEY_FILE=/etc/flexserver/ssh-keyring.json in .env before starting the app.
 # Grant only the application service account access; on Windows restrict NTFS ACLs explicitly.
 
@@ -161,6 +173,15 @@ npm run manage-ssh-keys -- rotate
 npm run manage-ssh-keys -- rotate --skip-rewrap
 ```
 
+### Deployment & Container Wiring
+
+In containerized production deployments:
+- The external keyring resides outside checkout, `DATA_DIR`, and `PRIVATE_DIR` on the host at `/etc/flexserver/ssh-keyring.json`.
+- The host directory `/etc/flexserver` is mounted read-only into the API container: `- /etc/flexserver:/etc/flexserver:ro`.
+- The API container runs with `SSH_KEY_ENCRYPTION_KEY_FILE=/etc/flexserver/ssh-keyring.json` defined in `.env` and `docker-compose.yml`.
+- Permissions are strictly restricted: host directory `/etc/flexserver` has mode `0750` owned by the API runtime UID:GID (`100:101`), and `/etc/flexserver/ssh-keyring.json` has mode `0600` owned by the API runtime UID:GID.
+- An idempotent host bootstrapper script is provided at `scripts/install/bootstrap-ssh-keyring.sh`.
+- For standalone Docker Compose setups, the optional override `docker-compose.keyring.yml` mounts `/etc/flexserver` into the API container without breaking demo mode when unmounted.
 ## Web terminal origin during domain changes
 
 `DASHBOARD_PUBLIC_ORIGIN` must match the browser dashboard origin exactly (scheme, hostname, and optional port). After changing the public dashboard domain, update both the deployment `.env` and the GitHub Actions repository variable `DASHBOARD_PUBLIC_ORIGIN`, then recreate the API container so it receives the new environment. Do not disable origin checks or add a permissive host fallback.

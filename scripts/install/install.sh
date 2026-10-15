@@ -279,9 +279,19 @@ fi
 # Preserve existing dashboard session secret if env file exists.
 CURRENT_DASHBOARD_SECRET=""
 CURRENT_AGENT_PUBLIC_BASE_URL=""
+CURRENT_SSH_KEY_ENCRYPTION_KEY_FILE=""
 if [[ -f "$ENV_FILE" ]]; then
   CURRENT_DASHBOARD_SECRET=$(grep -E '^DASHBOARD_SESSION_SECRET=' "$ENV_FILE" | cut -d= -f2- || true)
   CURRENT_AGENT_PUBLIC_BASE_URL=$(grep -E '^AGENT_PUBLIC_BASE_URL=' "$ENV_FILE" | cut -d= -f2- || true)
+  CURRENT_SSH_KEY_ENCRYPTION_KEY_FILE=$(grep -E '^SSH_KEY_ENCRYPTION_KEY_FILE=' "$ENV_FILE" | cut -d= -f2- || true)
+fi
+
+if [[ -n "$CURRENT_SSH_KEY_ENCRYPTION_KEY_FILE" ]]; then
+  KEYRING_FILE="$CURRENT_SSH_KEY_ENCRYPTION_KEY_FILE"
+  KEYRING_DIR="$(dirname "$KEYRING_FILE")"
+else
+  KEYRING_DIR="/etc/flexserver"
+  KEYRING_FILE="${KEYRING_DIR}/ssh-keyring.json"
 fi
 
 if [[ -z "$CURRENT_DASHBOARD_SECRET" ]]; then
@@ -398,6 +408,9 @@ JOB_HISTORY_LIMIT=1000
 AUDIT_HISTORY_LIMIT=5000
 
 SSH_HOST_KEY_POLICY=strict
+SSH_KEY_ENCRYPTION_KEY_FILE=${KEYRING_FILE}
+LOCAL_AGENT_ROTATION_HELPER=/usr/local/bin/local-agent-rotation-client
+LOCAL_AGENT_ROTATION_SOCKET=/var/run/flexserver/agent-rotation.sock
 ENV
 )
 
@@ -432,10 +445,14 @@ services:
     volumes:
       - ./data:/app/data
       - ./private:/app/private
+      - ${KEYRING_DIR}:${KEYRING_DIR}:ro
 ${TERMINAL_VOLUME_LINE}
     env_file: .env
     environment:
 ${TERMINAL_ENV_LINE}
+      SSH_KEY_ENCRYPTION_KEY_FILE: ${KEYRING_FILE}
+      LOCAL_AGENT_ROTATION_HELPER: /usr/local/bin/local-agent-rotation-client
+      LOCAL_AGENT_ROTATION_SOCKET: /var/run/flexserver/agent-rotation.sock
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -490,6 +507,7 @@ fi
 # be written on first boot.
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "[DRY-RUN] Would set ${DATA_DIR} and ${PRIVATE_DIR} ownership to the API container user"
+  echo "[DRY-RUN] Would prepare ${KEYRING_DIR} (chmod 0750) and initialize/migrate ${KEYRING_FILE}"
 else
   API_UID_GID="$(docker run --rm --entrypoint sh "$API_IMAGE" -lc 'printf "%s:%s" "$(id -u)" "$(id -g)"')"
   if [[ ! "$API_UID_GID" =~ ^[0-9]+:[0-9]+$ ]]; then
@@ -499,6 +517,29 @@ else
   chown -R "$API_UID_GID" "$DATA_DIR" "$PRIVATE_DIR"
   chmod 0700 "$DATA_DIR" "$PRIVATE_DIR"
   echo "[Setup] Data directories owned by API container user (${API_UID_GID})."
+
+  # Ensure external SSH keyring directory exists outside checkout and data roots
+  mkdir -p "$KEYRING_DIR"
+  chown "$API_UID_GID" "$KEYRING_DIR"
+  chmod 0750 "$KEYRING_DIR"
+
+  if test -f "$KEYRING_FILE"; then
+    echo "[Setup] Preserving existing SSH keyring at ${KEYRING_FILE}."
+    chown "$API_UID_GID" "$KEYRING_FILE"
+    chmod 0600 "$KEYRING_FILE"
+  else
+    echo "[Setup] Initializing SSH key encryption keyring..."
+    docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
+      -v "${KEYRING_DIR}:${KEYRING_DIR}:rw" \
+      api node dist/scripts/manage-ssh-keys.js init --path "$KEYRING_FILE"
+    chown "$API_UID_GID" "$KEYRING_FILE"
+    chmod 0600 "$KEYRING_FILE"
+  fi
+  # Migrate any managed plaintext keys to envelope encryption
+  echo "[Setup] Migrating managed SSH keys to envelope encryption..."
+  docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
+    -v "${KEYRING_DIR}:${KEYRING_DIR}:ro" \
+    api node dist/scripts/manage-ssh-keys.js migrate --path "$KEYRING_FILE"
 fi
 
 # ── Start ─────────────────────────────────────────────────────────────────

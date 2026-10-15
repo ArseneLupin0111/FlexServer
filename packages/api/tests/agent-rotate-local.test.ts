@@ -1,6 +1,9 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import net from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
@@ -239,5 +242,349 @@ describe("POST /api/vps/:id/rotate-agent", () => {
       200,
     );
     expect(JSON.stringify(jobsRes.body)).not.toContain("vma_");
+  }, 15_000);
+
+  it("preserves active local-updater credential when rotating agent credential", async () => {
+    const server = app();
+    const vpsId = await createLocalVps();
+    const oldAgent = await sharedAgentRepo.createCredential({
+      vpsId,
+      secretHash: "sha256_old_agent",
+      status: "active",
+      scope: "agent",
+    });
+    const updaterCred = await sharedAgentRepo.createCredential({
+      vpsId,
+      secretHash: "sha256_updater",
+      status: "active",
+      scope: "local-updater",
+    });
+
+    vi.spyOn(
+      LocalAgentRotationHelper.prototype,
+      "applyCredential",
+    ).mockResolvedValueOnce(undefined);
+
+    const post = await withCookie(
+      request(server).post(`/api/vps/${vpsId}/rotate-agent`),
+    ).expect(201);
+
+    await waitForJob(post.body.data.jobId, "succeeded");
+
+    const creds = await sharedAgentRepo.listCredentialsByVps(vpsId);
+    const rotated = creds.find((c) => c.id === post.body.data.credentialId);
+    expect(rotated?.status).toBe("active");
+    expect(rotated?.scope).toBe("agent");
+
+    const oldAgentAfter = creds.find((c) => c.id === oldAgent.id);
+    expect(oldAgentAfter?.status).toBe("revoked");
+
+    const updaterAfter = creds.find((c) => c.id === updaterCred.id);
+    expect(updaterAfter?.status).toBe("active");
+    expect(updaterAfter?.scope).toBe("local-updater");
+  }, 15_000);
+});
+
+describe("LocalAgentRotationHelper process execution", () => {
+  const originalHelperEnv = process.env.LOCAL_AGENT_ROTATION_HELPER;
+  const originalTimeoutEnv = process.env.LOCAL_AGENT_ROTATION_TIMEOUT_MS;
+
+  afterEach(() => {
+    if (originalHelperEnv === undefined) {
+      delete process.env.LOCAL_AGENT_ROTATION_HELPER;
+    } else {
+      process.env.LOCAL_AGENT_ROTATION_HELPER = originalHelperEnv;
+    }
+    if (originalTimeoutEnv === undefined) {
+      delete process.env.LOCAL_AGENT_ROTATION_TIMEOUT_MS;
+    } else {
+      process.env.LOCAL_AGENT_ROTATION_TIMEOUT_MS = originalTimeoutEnv;
+    }
+  });
+
+  it("fails closed when LOCAL_AGENT_ROTATION_HELPER is not configured", async () => {
+    delete process.env.LOCAL_AGENT_ROTATION_HELPER;
+    const helper = new LocalAgentRotationHelper();
+    await expect(
+      helper.applyCredential("vps_local", "vma_cred_secret123"),
+    ).rejects.toThrow("Local agent rotation helper is not configured");
+  });
+
+  it("resolves when helper process exits with code 0", async () => {
+    const scriptPath = join(tempDir, "mock-success-helper.js");
+    await writeFile(
+      scriptPath,
+      `
+      let data = '';
+      process.stdin.on('data', chunk => { data += chunk; });
+      process.stdin.on('end', () => {
+        const parsed = JSON.parse(data.trim());
+        if (parsed.vpsId && parsed.token) process.exit(0);
+        process.exit(2);
+      });
+      `,
+      "utf8",
+    );
+
+    process.env.LOCAL_AGENT_ROTATION_HELPER = scriptPath;
+    const helper = new LocalAgentRotationHelper();
+    await expect(
+      helper.applyCredential("vps_local", "vma_cred_secret123"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects with sanitized stderr when helper exits non-zero and redacts tokens", async () => {
+    const scriptPath = join(tempDir, "mock-fail-helper.js");
+    await writeFile(
+      scriptPath,
+      `
+      process.stderr.write("Failed to update config for token vma_cred_secret123: permission denied\\n");
+      process.exit(1);
+      `,
+      "utf8",
+    );
+
+    process.env.LOCAL_AGENT_ROTATION_HELPER = scriptPath;
+    const helper = new LocalAgentRotationHelper();
+    await expect(
+      helper.applyCredential("vps_local", "vma_cred_secret123"),
+    ).rejects.toThrow(/Rotation helper exited with code 1/);
+
+    try {
+      await helper.applyCredential("vps_local", "vma_cred_secret123");
+    } catch (err: unknown) {
+      const msg = (err as Error).message;
+      expect(msg).not.toContain("vma_cred_secret123");
+      expect(msg).toContain("[REDACTED]");
+    }
+  });
+
+  it("times out and kills child process when helper does not exit", async () => {
+    // Deliberate test of child process timeout termination with short timeout
+    const scriptPath = join(tempDir, "mock-hanging-helper.js");
+    await writeFile(
+      scriptPath,
+      `
+      import net from "node:net";
+      const server = net.createServer().listen(0);
+      `,
+      "utf8",
+    );
+
+    process.env.LOCAL_AGENT_ROTATION_HELPER = scriptPath;
+    process.env.LOCAL_AGENT_ROTATION_TIMEOUT_MS = "200";
+    const helper = new LocalAgentRotationHelper();
+    await expect(
+      helper.applyCredential("vps_local", "vma_cred_secret123"),
+    ).rejects.toThrow(/timed out after 200ms/);
+  });
+});
+
+describe("Local agent rotation client and socket protocol", () => {
+  const originalHelperEnv = process.env.LOCAL_AGENT_ROTATION_HELPER;
+  const originalSocketEnv = process.env.LOCAL_AGENT_ROTATION_SOCKET;
+
+  let testSocketPath: string;
+  let clientBinaryPath: string;
+  let server: net.Server | null = null;
+
+  beforeEach(() => {
+    testSocketPath = join(tempDir, "agent-rotation.sock");
+    const ext = process.platform === "win32" ? ".exe" : "";
+    const here = fileURLToPath(new URL(".", import.meta.url));
+    const candidates = [
+      join(process.cwd(), `packages/agent/dist/local-agent-rotator${ext}`),
+      join(process.cwd(), `packages/agent/dist/local-agent-rotator-linux-amd64`),
+      resolve(here, `../../agent/dist/local-agent-rotator${ext}`),
+      resolve(here, `../../agent/dist/local-agent-rotator-linux-amd64`),
+      "/usr/local/bin/local-agent-rotation-client",
+      "/usr/local/bin/flexserver-local-agent-rotator",
+    ];
+    clientBinaryPath = candidates.find((cand) => existsSync(cand)) || "";
+  });
+  afterEach(async () => {
+    if (server) {
+      await new Promise<void>((resolve) => server!.close(() => resolve()));
+      server = null;
+    }
+    if (originalHelperEnv === undefined) {
+      delete process.env.LOCAL_AGENT_ROTATION_HELPER;
+    } else {
+      process.env.LOCAL_AGENT_ROTATION_HELPER = originalHelperEnv;
+    }
+    if (originalSocketEnv === undefined) {
+      delete process.env.LOCAL_AGENT_ROTATION_SOCKET;
+    } else {
+      process.env.LOCAL_AGENT_ROTATION_SOCKET = originalSocketEnv;
+    }
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "successfully passes payload to socket server and resolves on ok: true",
+    async () => {
+      let receivedPayload: { vpsId?: string; token?: string } | null = null;
+      server = net.createServer((conn) => {
+      let raw = "";
+      conn.on("data", (chunk) => {
+        raw += chunk.toString("utf8");
+        if (raw.includes("\n")) {
+          receivedPayload = JSON.parse(raw.trim());
+          conn.write(JSON.stringify({ ok: true }) + "\n");
+          conn.end();
+        }
+      });
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server!.once("error", reject);
+      server!.listen(testSocketPath, () => resolve());
+    });
+
+    process.env.LOCAL_AGENT_ROTATION_HELPER = clientBinaryPath;
+    process.env.LOCAL_AGENT_ROTATION_SOCKET = testSocketPath;
+
+    const helper = new LocalAgentRotationHelper();
+    await helper.applyCredential("vps_local", "vma_test_secret_999");
+
+    expect(receivedPayload).toEqual({
+      vpsId: "vps_local",
+      token: "vma_test_secret_999",
+    });
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "rejects and redacts token when socket server rejects request",
+    async () => {
+    server = net.createServer((conn) => {
+      let raw = "";
+      conn.on("data", (chunk) => {
+        raw += chunk.toString("utf8");
+        if (raw.includes("\n")) {
+          conn.write(
+            JSON.stringify({
+              ok: false,
+              error: "vpsId mismatch: expected vps_local_host, got wrong_vps",
+            }) + "\n",
+          );
+          conn.end();
+        }
+      });
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server!.once("error", reject);
+      server!.listen(testSocketPath, () => resolve());
+    });
+
+    process.env.LOCAL_AGENT_ROTATION_HELPER = clientBinaryPath;
+    process.env.LOCAL_AGENT_ROTATION_SOCKET = testSocketPath;
+
+    const helper = new LocalAgentRotationHelper();
+    await expect(
+      helper.applyCredential("wrong_vps", "vma_leaky_secret_123"),
+    ).rejects.toThrow(/vpsId mismatch/);
+  });
+
+  it("rejects when rotation socket cannot be reached", async () => {
+    process.env.LOCAL_AGENT_ROTATION_HELPER = clientBinaryPath;
+    process.env.LOCAL_AGENT_ROTATION_SOCKET = testSocketPath;
+
+    const helper = new LocalAgentRotationHelper();
+    await expect(
+      helper.applyCredential("vps_local", "vma_secret"),
+    ).rejects.toThrow(/Socket connection failed|exited with code 1/);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "end-to-end full controller rotation succeeds via client and mock host socket",
+    async () => {
+    const apiApp = app();
+    const vpsId = await createLocalVps();
+    const oldCred = await sharedAgentRepo.createCredential({
+      vpsId,
+      secretHash: "sha256_old",
+      status: "active",
+    });
+
+    server = net.createServer((conn) => {
+      let raw = "";
+      conn.on("data", (chunk) => {
+        raw += chunk.toString("utf8");
+        if (raw.includes("\n")) {
+          conn.write(JSON.stringify({ ok: true }) + "\n");
+          conn.end();
+        }
+      });
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server!.once("error", reject);
+      server!.listen(testSocketPath, () => resolve());
+    });
+
+    process.env.LOCAL_AGENT_ROTATION_HELPER = clientBinaryPath;
+    process.env.LOCAL_AGENT_ROTATION_SOCKET = testSocketPath;
+
+    const post = await withCookie(
+      request(apiApp).post(`/api/vps/${vpsId}/rotate-agent`),
+    ).expect(201);
+
+    const jobId: string = post.body.data.jobId;
+    const newCredentialId: string = post.body.data.credentialId;
+    expect(jobId).toMatch(/^job_/);
+    expect(JSON.stringify(post.body)).not.toContain("vma_");
+
+    await waitForJob(jobId, "succeeded");
+
+    const creds = await sharedAgentRepo.listCredentialsByVps(vpsId);
+    const newCred = creds.find((c) => c.id === newCredentialId);
+    expect(newCred?.status).toBe("active");
+    const oldCredAfter = creds.find((c) => c.id === oldCred.id);
+    expect(oldCredAfter?.status).toBe("revoked");
+  }, 15_000);
+
+  it.skipIf(process.platform === "win32")(
+    "end-to-end full controller rotation fails and preserves old credential on socket failure",
+    async () => {
+    const apiApp = app();
+    const vpsId = await createLocalVps();
+    const oldCred = await sharedAgentRepo.createCredential({
+      vpsId,
+      secretHash: "sha256_old",
+      status: "active",
+    });
+
+    server = net.createServer((conn) => {
+      let raw = "";
+      conn.on("data", (chunk) => {
+        raw += chunk.toString("utf8");
+        if (raw.includes("\n")) {
+          conn.write(JSON.stringify({ ok: false, error: "host systemctl restart failed" }) + "\n");
+          conn.end();
+        }
+      });
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server!.once("error", reject);
+      server!.listen(testSocketPath, () => resolve());
+    });
+    process.env.LOCAL_AGENT_ROTATION_HELPER = clientBinaryPath;
+    process.env.LOCAL_AGENT_ROTATION_SOCKET = testSocketPath;
+
+    const post = await withCookie(
+      request(apiApp).post(`/api/vps/${vpsId}/rotate-agent`),
+    ).expect(201);
+
+    const jobId: string = post.body.data.jobId;
+    const newCredentialId: string = post.body.data.credentialId;
+
+    await waitForJob(jobId, "failed");
+
+    const creds = await sharedAgentRepo.listCredentialsByVps(vpsId);
+    const oldCredAfter = creds.find((c) => c.id === oldCred.id);
+    expect(oldCredAfter?.status).toBe("active");
+    const newCred = creds.find((c) => c.id === newCredentialId);
+    expect(newCred?.status).toBe("revoked");
   }, 15_000);
 });

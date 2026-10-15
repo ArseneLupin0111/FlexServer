@@ -3,6 +3,8 @@ dist/
 .env
 .server/
 private/
+data-local/
+private-local/
 data/vps.json
 *.log
 .omo

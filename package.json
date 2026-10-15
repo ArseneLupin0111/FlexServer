@@ -15,6 +15,7 @@
     "build:api": "npm run build -w @vps-manager/api",
     "start": "node dist/server.js",
     "test": "vitest run",
+    "check:docs": "node scripts/docs/check-links.mjs",
     "typecheck": "npm run typecheck -w @vps-manager/api && npm run typecheck -w @vps-manager/web",
     "build:agent": "node scripts/agent/build-agent.mjs",
     "test:agent": "cd packages/agent && go test ./...",

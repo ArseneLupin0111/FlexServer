@@ -70,12 +70,18 @@ export class AgentRotationService {
       const created = await this.agentService.createCredential(
         vpsId,
         "pending",
+        "agent",
       );
       credentialId = created.credential.id;
       const token = created.token;
       const previous = await this.agentRepository.listCredentialsByVps(vpsId);
       const previousActiveIds = previous
-        .filter((c) => c.id !== credentialId && c.status === "active")
+        .filter(
+          (c) =>
+            c.id !== credentialId &&
+            c.status === "active" &&
+            (c.scope ?? "agent") === "agent",
+        )
         .map((c) => c.id);
 
       job = await this.jobs.create({

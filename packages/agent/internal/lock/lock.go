@@ -13,6 +13,12 @@ import (
 // LinuxDefaultLockDir is the trusted root-owned directory used on Linux systems.
 const LinuxDefaultLockDir = "/run/vps-manager-agent"
 
+// TmpfilesDefaultDir is the systemd tmpfiles configuration directory.
+const TmpfilesDefaultDir = "/etc/tmpfiles.d"
+
+// TmpfilesDefaultConf is the canonical tmpfiles configuration file name for the local agent.
+const TmpfilesDefaultConf = "vps-manager-agent.conf"
+
 // ErrAlreadyRunning indicates another process currently holds the lock for this VPS.
 var ErrAlreadyRunning = errors.New("agent already running for this VPS")
 
@@ -54,6 +60,7 @@ type Option func(*options)
 type options struct {
 	dir              string
 	expectedOwnerUID *int
+	tmpfilesDir      *string
 }
 
 // WithDir overrides the directory in which the lock file is created.
@@ -72,6 +79,15 @@ func WithDir(dir string) Option {
 func WithExpectedOwnerUID(uid int) Option {
 	return func(o *options) {
 		o.expectedOwnerUID = &uid
+	}
+}
+
+// WithTmpfilesDir overrides the directory in which the systemd tmpfiles configuration is written.
+// When omitted, Provision writes to /etc/tmpfiles.d on Linux in production (when WithDir is omitted).
+// In test harnesses with custom directories, tmpfiles writing is skipped unless WithTmpfilesDir is set.
+func WithTmpfilesDir(dir string) Option {
+	return func(o *options) {
+		o.tmpfilesDir = &dir
 	}
 }
 
@@ -127,4 +143,28 @@ func Acquire(vpsId string, opts ...Option) (*Handle, error) {
 		f:    f,
 		path: path,
 	}, nil
+}
+
+// Provision ensures the singleton lock directory, lock file, and systemd tmpfiles
+// configuration are safely created with trusted ownership and permissions.
+//
+// Invariants enforced:
+//  1. Directory (/run/vps-manager-agent) is root-owned (UID 0) with mode 0755.
+//  2. Lock file (/run/vps-manager-agent/vps-agent-<hash>.lock) is root-owned (UID 0) with mode 0666.
+//     If the lock file already exists, it is NEVER unlinked or truncated so any running or
+//     contending processes continue to contend on the exact same inode.
+//  3. Tmpfiles configuration (/etc/tmpfiles.d/vps-manager-agent.conf) is written with mode 0644
+//     (root:root) and systemd-tmpfiles --create is invoked if available, ensuring the directory
+//     and lock file persist across system reboots.
+func Provision(vpsId string, opts ...Option) error {
+	if strings.TrimSpace(vpsId) == "" {
+		return fmt.Errorf("vpsId cannot be empty")
+	}
+
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	return provisionOS(vpsId, o)
 }

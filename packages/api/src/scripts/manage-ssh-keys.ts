@@ -7,7 +7,7 @@
  * Never prints secret key material to stdout/stderr.
  */
 
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAppConfig } from "../config/app-config.js";
@@ -18,10 +18,14 @@ import {
   migrateKeysDirectory,
   rotateKeyring,
   validateExternalSecretPath,
+  ENVELOPE_FORMAT,
 } from "../ssh/key-encryption.js";
 function getArgValue(flag: string): string | undefined {
   const index = process.argv.indexOf(flag);
-  if (index !== -1 && index + 1 < process.argv.length) {
+  if (index !== -1) {
+    if (index + 1 >= process.argv.length || process.argv[index + 1]!.startsWith("-")) {
+      throw new Error(`Missing required value for flag ${flag}`);
+    }
     return process.argv[index + 1];
   }
   return undefined;
@@ -43,6 +47,7 @@ Commands:
 Options:
   --path <file>       Explicit external path to keyring file (default: SSH_KEY_ENCRYPTION_KEY_FILE or system default)
   --keys-dir <dir>    Managed SSH keys directory (default: PRIVATE_DIR/keys)
+  --migrate           Migrate existing plaintext keys immediately after init
   --skip-rewrap       Rotate keyring without immediately rewrapping managed keys
   --help, -h          Show this help message
 `);
@@ -73,6 +78,31 @@ export async function manageSshKeysFromCli(): Promise<void> {
 
   switch (command) {
     case "init": {
+      // Guard against initializing a new keyring if existing encrypted key envelopes exist
+      if (existsSync(keysDir)) {
+        const entries = readdirSync(keysDir);
+        for (const entry of entries) {
+          if (entry.endsWith(".pub") || entry.endsWith(".tmp") || entry.startsWith(".")) {
+            continue;
+          }
+          const fullPath = join(keysDir, entry);
+          try {
+            const content = readFileSync(fullPath, "utf8");
+            if (!content.includes("-----BEGIN")) {
+              const parsed = JSON.parse(content);
+              if (parsed && typeof parsed === "object" && parsed.format === ENVELOPE_FORMAT) {
+                throw new Error(
+                  `Cannot initialize a new keyring: found existing encrypted key envelope ("${entry}") in ${keysDir}. Initializing a new keyring would orphan existing encrypted keys. Restore the original keyring file instead.`,
+                );
+              }
+            }
+          } catch (err: unknown) {
+            if (err instanceof Error && err.message.includes("Cannot initialize a new keyring")) {
+              throw err;
+            }
+          }
+        }
+      }
 
       const result = await initKeyring(keyringPath, {
         dataDir: config.dataDir,
@@ -89,6 +119,32 @@ export async function manageSshKeysFromCli(): Promise<void> {
       console.log("1. Maintain a separate, offline recovery copy of this keyring file.");
       console.log("2. Exclude this keyring file from regular application data backups.");
       console.log("3. Ensure strict file permissions (0600 / owner read-write only).");
+
+      if (hasFlag("--migrate")) {
+        console.log("");
+        console.log(`Migrating existing keys in: ${keysDir}`);
+        const migration = await migrateKeysDirectory(keysDir, result.keyring);
+        console.log("Migration summary:");
+        console.log(`- Total key files evaluated: ${migration.total}`);
+        console.log(
+          `- Migrated from plaintext to encrypted envelope: ${migration.migratedFromPlaintext}`,
+        );
+        console.log(
+          `- Rewrapped older KEK envelopes to active KEK: ${migration.rewrapped}`,
+        );
+        console.log(
+          `- Already encrypted with active KEK: ${migration.unchanged}`,
+        );
+        if (migration.errors.length > 0) {
+          console.error(
+            `- Errors encountered during migration (${migration.errors.length}):`,
+          );
+          for (const err of migration.errors) {
+            console.error(`  - Key "${err.id}": ${err.error}`);
+          }
+          process.exitCode = 1;
+        }
+      }
       break;
     }
 

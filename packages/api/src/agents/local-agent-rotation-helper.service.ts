@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { Injectable } from "@nestjs/common";
+import { sanitiseError } from "../jobs/job-runner.service.js";
 
 /**
  * Invokes the host-side privileged helper through argv-only spawn.
@@ -15,17 +16,49 @@ export class LocalAgentRotationHelper {
       throw new Error("Local agent rotation helper is not configured");
     }
 
+    const isNodeScript = command.endsWith(".js") || command.endsWith(".mjs");
+    const execCmd = isNodeScript ? process.execPath : command;
+    const args = isNodeScript ? [command] : [];
+
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(command, [], { stdio: ["pipe", "ignore", "pipe"] });
+      const child = spawn(execCmd, args, { stdio: ["pipe", "ignore", "pipe"] });
       let stderr = "";
+      let settled = false;
+
+      const timeoutMs =
+        Number(process.env.LOCAL_AGENT_ROTATION_TIMEOUT_MS) || 30_000;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try {
+          child.kill("SIGTERM");
+          setTimeout(() => {
+            try {
+              if (!child.killed) child.kill("SIGKILL");
+            } catch {}
+          }, 2000).unref?.();
+        } catch {}
+        reject(new Error(`Rotation helper timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      timer.unref?.();
+
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => {
         stderr = (stderr + chunk).slice(-512);
       });
-      child.once("error", (error) => reject(new Error(`Rotation helper failed to start: ${error.message}`)));
+      child.once("error", (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(new Error(`Rotation helper failed to start: ${sanitiseError(error.message)}`));
+      });
       child.once("close", (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         if (code === 0) return resolve();
-        reject(new Error(`Rotation helper exited with code ${code ?? "unknown"}${stderr ? `: ${stderr.trim()}` : ""}`));
+        const errDetail = stderr.trim() ? `: ${sanitiseError(stderr.trim())}` : "";
+        reject(new Error(`Rotation helper exited with code ${code ?? "unknown"}${errDetail}`));
       });
       child.stdin.end(JSON.stringify({ vpsId, token }) + "\n");
     });

@@ -44,6 +44,13 @@ type Config struct {
 	// AgentUnit is the fixed systemd unit the helper may restart.
 	AgentUnit string `json:"agentUnit"`
 
+	// AgentConfig is the path to the host agent configuration file used to
+	// discover the trusted local vpsId for lock provisioning.
+	// In production, it must resolve to FixedAgentConfig.
+	AgentConfig string `json:"agentConfig,omitempty"`
+
+	// VpsID is an optional trusted local VPS identifier override in the updater config.
+	VpsID string `json:"vpsId,omitempty"`
 	// StateDir holds journal, staging, pending, results, backups and the lock.
 	StateDir string `json:"stateDir"`
 
@@ -70,8 +77,10 @@ type Config struct {
 	// testMode opts out of the fixed production invariants. It is unexported
 	// so no config file can ever enable it; only in-process test harnesses
 	// call EnableTestOverrides.
-	testMode       bool
-	testAuthorizer JobAuthorizer
+	testMode        bool
+	testAuthorizer  JobAuthorizer
+	testLockDir     string
+	testTmpfilesDir string
 }
 
 // Fixed production targets: the helper may only replace this binary and
@@ -79,6 +88,7 @@ type Config struct {
 const (
 	FixedAgentBinary = "/usr/local/bin/vps-manager-agent"
 	FixedAgentUnit   = "vps-manager-agent.service"
+	FixedAgentConfig = "/etc/vps-manager-agent/config.json"
 )
 
 // EnableTestOverrides allows this in-process Config to deviate from the
@@ -89,6 +99,9 @@ const (
 func (c *Config) EnableTestOverrides() { c.testMode = true }
 
 func (c *Config) SetTestAuthorizer(auth JobAuthorizer) { c.testAuthorizer = auth }
+func (c *Config) SetTestLockDir(dir string)            { c.testLockDir = dir }
+func (c *Config) SetTestTmpfilesDir(dir string)        { c.testTmpfilesDir = dir }
+
 // Defaults applied when duration fields are absent or zero.
 const (
 	defaultHTTPTimeout         = 30 * time.Second
@@ -129,6 +142,7 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	return &c, nil
 }
+
 // NormalizeAndValidate fills defaults and enforces fail-closed invariants.
 //
 // Production (config file) invariants: apiBase must be https, agentBinary
@@ -171,6 +185,19 @@ func (c *Config) NormalizeAndValidate() error {
 	}
 	if !c.testMode && c.AgentUnit != FixedAgentUnit {
 		return fmt.Errorf("agentUnit must be %s", FixedAgentUnit)
+	}
+	if c.AgentConfig == "" {
+		if !c.testMode {
+			c.AgentConfig = FixedAgentConfig
+		}
+	} else {
+		c.AgentConfig = filepath.Clean(c.AgentConfig)
+		if !c.testMode && c.AgentConfig != FixedAgentConfig {
+			return fmt.Errorf("agentConfig must be %s", FixedAgentConfig)
+		}
+		if c.testMode && !filepath.IsAbs(c.AgentConfig) {
+			return fmt.Errorf("agentConfig must be an absolute path")
+		}
 	}
 	if c.StateDir == "" {
 		c.StateDir = "/var/lib/vps-updater"

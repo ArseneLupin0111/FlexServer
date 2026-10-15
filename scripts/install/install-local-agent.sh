@@ -144,6 +144,9 @@ SERVICE_NAME_DEFAULT="vps-manager-agent"
 SERVICE_USER_DEFAULT="vps-manager-agent"
 UNIT_FILE="/etc/systemd/system/${SERVICE_NAME_DEFAULT}.service"
 
+LOCK_DIR="/run/vps-manager-agent"
+TMPFILES_DIR="/etc/tmpfiles.d"
+TMPFILES_FILE="${TMPFILES_DIR}/vps-manager-agent.conf"
 # ── Args ──────────────────────────────────────────────────────────────────
 
 BINARY_SRC=""
@@ -167,6 +170,12 @@ HOST_PTY_SOCKET_PATH="/var/run/flexserver/host-pty.sock"
 HOST_PTY_SOCKET_UID=""
 HOST_PTY_SOCKET_GID=""
 HOST_PTY_UNIT_FILE="/etc/systemd/system/${HOST_PTY_SERVICE_NAME}.service"
+INSTALL_ROTATOR=false
+ROTATOR_SRC=""
+ROTATOR_SERVICE_NAME="flexserver-local-agent-rotator"
+ROTATOR_DEST="/usr/local/bin/flexserver-local-agent-rotator"
+ROTATOR_SOCKET_PATH="/var/run/flexserver/agent-rotation.sock"
+ROTATOR_UNIT_FILE="/etc/systemd/system/${ROTATOR_SERVICE_NAME}.service"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary)
@@ -203,6 +212,12 @@ while [[ $# -gt 0 ]]; do
       HOST_PTY_SRC="$2"; INSTALL_HOST_PTY=true; shift 2 ;;
     --host-pty-socket-path)
       HOST_PTY_SOCKET_PATH="$2"; shift 2 ;;
+    --install-rotator)
+      INSTALL_ROTATOR=true; shift ;;
+    --rotator-binary)
+      ROTATOR_SRC="$2"; INSTALL_ROTATOR=true; shift 2 ;;
+    --rotator-socket-path)
+      ROTATOR_SOCKET_PATH="$2"; shift 2 ;;
     --api-uid-gid)
       HOST_PTY_SOCKET_UID="${2%%:*}"
       HOST_PTY_SOCKET_GID="${2##*:}"
@@ -311,6 +326,43 @@ if [[ "$UNINSTALL" == "true" ]]; then
       echo "  [DRY-RUN] Would remove: ${HOST_PTY_SOCKET_PATH}"
     else
       rm -f "$HOST_PTY_SOCKET_PATH"
+    fi
+  fi
+  if systemctl is-enabled "${ROTATOR_SERVICE_NAME}" &>/dev/null; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would run: systemctl stop ${ROTATOR_SERVICE_NAME}"
+      echo "  [DRY-RUN] Would run: systemctl disable ${ROTATOR_SERVICE_NAME}"
+    else
+      systemctl stop "${ROTATOR_SERVICE_NAME}" 2>/dev/null || true
+      systemctl disable "${ROTATOR_SERVICE_NAME}" 2>/dev/null || true
+    fi
+  fi
+  if [[ -f "$ROTATOR_UNIT_FILE" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would remove: ${ROTATOR_UNIT_FILE}"
+    else
+      rm -f "$ROTATOR_UNIT_FILE"
+    fi
+  fi
+  if [[ -f "$ROTATOR_DEST" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would remove: ${ROTATOR_DEST}"
+    else
+      rm -f "$ROTATOR_DEST"
+    fi
+  fi
+  if [[ -S "$ROTATOR_SOCKET_PATH" || -f "$ROTATOR_SOCKET_PATH" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would remove: ${ROTATOR_SOCKET_PATH}"
+    else
+      rm -f "$ROTATOR_SOCKET_PATH"
+    fi
+  fi
+  if [[ -f "$TMPFILES_FILE" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would remove: ${TMPFILES_FILE}"
+    else
+      rm -f "$TMPFILES_FILE"
     fi
   fi
 
@@ -461,6 +513,7 @@ if [[ "$DRY_RUN" == "true" ]]; then
   echo "  [DRY-RUN] Would create directory: ${CONFIG_DIR} (root:${SERVICE_USER} 0750)"
   echo "  [DRY-RUN] Would install config: ${CONFIG_SRC} -> ${CONFIG_FILE} (root:${SERVICE_USER} 0640)"
   echo "  [DRY-RUN] Would ensure Docker state before starting the service: ${DOCKER_IDENTITY_FILE} (root:root 0600) and ${DOCKER_RUNTIME_KEYS_FILE} (${SERVICE_USER}:${SERVICE_USER} 0600), provisioning idempotently without rotating an existing identity"
+  echo "  [DRY-RUN] Would ensure singleton lock: ${LOCK_DIR} (root:root 0755), deterministic 0666 lock file, and ${TMPFILES_FILE} (root:root 0644)"
 else
   mkdir -p "$CONFIG_DIR"
   chown root:"${SERVICE_USER}" "$CONFIG_DIR"
@@ -517,6 +570,84 @@ else
   fi
   echo "  Ensured Docker state: identity root:root 0600, runtime keys ${SERVICE_USER}:0600"
   echo "  Installed config: ${CONFIG_FILE}"
+  # Singleton lock and tmpfiles provisioning: guarantee root-owned 0755 directory,
+  # root-owned 0666 lock file (preserving existing inode), and systemd-tmpfiles persistence.
+  LOCK_VPS_ID=""
+  if command -v node &>/dev/null; then
+    LOCK_VPS_ID="$(node -e 'try { const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (typeof c.vpsId === "string") console.log(c.vpsId.trim()); } catch (e) {}' "$CONFIG_FILE")"
+  elif command -v jq &>/dev/null; then
+    LOCK_VPS_ID="$(jq -r '.vpsId // empty' "$CONFIG_FILE" 2>/dev/null || true)"
+  elif command -v python3 &>/dev/null; then
+    LOCK_VPS_ID="$(python3 -c 'import json, sys; c = json.load(open(sys.argv[1])); print(str(c.get("vpsId", "")).strip())' "$CONFIG_FILE" 2>/dev/null || true)"
+  fi
+  if [[ -z "$LOCK_VPS_ID" ]]; then
+    LOCK_VPS_ID="$(grep -o '"vpsId"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | head -1 | sed -e 's/.*:[[:space:]]*"//' -e 's/"$//' || true)"
+  fi
+  if [[ -z "$LOCK_VPS_ID" ]]; then
+    echo "Error: Could not extract vpsId from config: ${CONFIG_FILE}" >&2
+    exit 1
+  fi
+
+  LOCK_HASH=""
+  if command -v sha256sum &>/dev/null; then
+    LOCK_HASH="$(printf '%s' "$LOCK_VPS_ID" | sha256sum | awk '{print $1}')"
+  elif command -v shasum &>/dev/null; then
+    LOCK_HASH="$(printf '%s' "$LOCK_VPS_ID" | shasum -a 256 | awk '{print $1}')"
+  elif command -v node &>/dev/null; then
+    LOCK_HASH="$(node -e 'console.log(require("crypto").createHash("sha256").update(process.argv[1]).digest("hex"))' "$LOCK_VPS_ID")"
+  elif command -v python3 &>/dev/null; then
+    LOCK_HASH="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$LOCK_VPS_ID")"
+  fi
+
+  if [[ ! "$LOCK_HASH" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Error: Could not compute sha256 hash of vpsId" >&2
+    exit 1
+  fi
+
+  LOCK_PATH="${LOCK_DIR}/vps-agent-${LOCK_HASH}.lock"
+
+  if [[ -L "$LOCK_DIR" ]]; then
+    echo "Error: lock directory is a symlink: ${LOCK_DIR}" >&2
+    exit 1
+  fi
+  mkdir -p "$LOCK_DIR"
+  chown root:root "$LOCK_DIR"
+  chmod 0755 "$LOCK_DIR"
+  if [[ ! -d "$LOCK_DIR" ]]; then
+    echo "Error: lock directory path is not a directory: ${LOCK_DIR}" >&2
+    exit 1
+  fi
+
+  if [[ -L "$LOCK_PATH" ]]; then
+    echo "Error: lock file is a symlink, refusing to follow: ${LOCK_PATH}" >&2
+    exit 1
+  fi
+  if [[ -e "$LOCK_PATH" && ! -f "$LOCK_PATH" ]]; then
+    echo "Error: lock file path is not a regular file: ${LOCK_PATH}" >&2
+    exit 1
+  fi
+
+  if [[ ! -e "$LOCK_PATH" ]]; then
+    touch "$LOCK_PATH"
+  fi
+  chown root:root "$LOCK_PATH"
+  chmod 0666 "$LOCK_PATH"
+
+  mkdir -p "$TMPFILES_DIR"
+  chown root:root "$TMPFILES_DIR"
+  chmod 0755 "$TMPFILES_DIR"
+  if [[ -L "$TMPFILES_FILE" ]]; then
+    echo "Error: tmpfiles configuration is a symlink, refusing to follow: ${TMPFILES_FILE}" >&2
+    exit 1
+  fi
+  printf 'd %s 0755 root root -\nf %s 0666 root root -\n' "$LOCK_DIR" "$LOCK_PATH" > "$TMPFILES_FILE"
+  chmod 0644 "$TMPFILES_FILE"
+  chown root:root "$TMPFILES_FILE"
+
+  if command -v systemd-tmpfiles &>/dev/null; then
+    systemd-tmpfiles --create "$TMPFILES_FILE" 2>/dev/null || true
+  fi
+  echo "  Provisioned singleton lock and tmpfiles: ${LOCK_PATH} (${TMPFILES_FILE})"
 fi
 
 # Write systemd unit (conditionally include SupplementaryGroups)
@@ -685,6 +816,84 @@ PTYUNIT
     systemctl enable "${HOST_PTY_SERVICE_NAME}"
     systemctl restart "${HOST_PTY_SERVICE_NAME}"
     echo "  Started ${HOST_PTY_SERVICE_NAME} (socket: ${HOST_PTY_SOCKET_PATH})"
+  fi
+fi
+
+if [[ -z "$ROTATOR_SRC" ]]; then
+  cand_dir="$(dirname "$BINARY_SRC")"
+  for cand in "${cand_dir}/local-agent-rotator-linux-amd64" "${cand_dir}/local-agent-rotator" "/app/agent/local-agent-rotator-linux-amd64" "/opt/vps-manager/local-agent-rotator-linux-amd64"; do
+    if [[ -f "$cand" ]]; then
+      ROTATOR_SRC="$cand"
+      break
+    fi
+  done
+fi
+
+if [[ "$INSTALL_ROTATOR" == "true" || -n "$ROTATOR_SRC" ]] && [[ -n "$ROTATOR_SRC" && -f "$ROTATOR_SRC" ]]; then
+  echo "[rotator] Installing local agent rotation helper service..."
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "  [DRY-RUN] Would install rotator binary: ${ROTATOR_SRC} -> ${ROTATOR_DEST} (root:root 0755)"
+  else
+    cp -f "$ROTATOR_SRC" "$ROTATOR_DEST"
+    chown root:root "$ROTATOR_DEST"
+    chmod 0755 "$ROTATOR_DEST"
+    mkdir -p "$(dirname "$ROTATOR_SOCKET_PATH")"
+    chmod 0755 "$(dirname "$ROTATOR_SOCKET_PATH")"
+  fi
+
+  ROTATOR_EXTRA_ARGS=""
+  if [[ -n "$HOST_PTY_SOCKET_UID" ]]; then
+    ROTATOR_EXTRA_ARGS="${ROTATOR_EXTRA_ARGS} -socket-uid ${HOST_PTY_SOCKET_UID}"
+  fi
+  if [[ -n "$HOST_PTY_SOCKET_GID" ]]; then
+    ROTATOR_EXTRA_ARGS="${ROTATOR_EXTRA_ARGS} -socket-gid ${HOST_PTY_SOCKET_GID}"
+  fi
+
+  ROTATOR_SOCKET_DIR="$(basename "$(dirname "$ROTATOR_SOCKET_PATH")")"
+  if [[ "$ROTATOR_SOCKET_DIR" != "run" && -n "$ROTATOR_SOCKET_DIR" && "$ROTATOR_SOCKET_DIR" != "." && "$ROTATOR_SOCKET_DIR" != "/" ]]; then
+    ROTATOR_RUNTIME_DIR_CONFIG="RuntimeDirectory=${ROTATOR_SOCKET_DIR}
+RuntimeDirectoryMode=0755
+"
+  else
+    ROTATOR_RUNTIME_DIR_CONFIG=""
+  fi
+
+  ROTATOR_UNIT_CONTENT=$(cat <<ROTATORUNIT
+[Unit]
+Description=VPS Manager Local Agent Rotation Helper Daemon
+Documentation=https://github.com/sondoan17/vps-manager-nodejs
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+${ROTATOR_RUNTIME_DIR_CONFIG}ExecStart=${ROTATOR_DEST} -server -socket ${ROTATOR_SOCKET_PATH} -socket-mode 0660${ROTATOR_EXTRA_ARGS} -config ${CONFIG_FILE} -service-name ${SERVICE_NAME}
+Restart=always
+RestartSec=5
+
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectClock=true
+
+[Install]
+WantedBy=multi-user.target
+ROTATORUNIT
+)
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "  [DRY-RUN] Would write systemd unit: ${ROTATOR_UNIT_FILE}"
+    echo "---"
+    echo "$ROTATOR_UNIT_CONTENT"
+    echo "---"
+    echo "  [DRY-RUN] Would run: systemctl daemon-reload && systemctl enable ${ROTATOR_SERVICE_NAME} && systemctl restart ${ROTATOR_SERVICE_NAME}"
+  else
+    echo "$ROTATOR_UNIT_CONTENT" > "$ROTATOR_UNIT_FILE"
+    chmod 0644 "$ROTATOR_UNIT_FILE"
+    systemctl daemon-reload
+    systemctl enable "${ROTATOR_SERVICE_NAME}"
+    systemctl restart "${ROTATOR_SERVICE_NAME}"
+    echo "  Started ${ROTATOR_SERVICE_NAME} (socket: ${ROTATOR_SOCKET_PATH})"
   fi
 fi
 

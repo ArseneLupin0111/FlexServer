@@ -240,3 +240,97 @@ func TestLockReleaseOnCrash(t *testing.T) {
 	}
 	defer h.Release()
 }
+
+func TestLockProvision(t *testing.T) {
+	dir := t.TempDir()
+	tmpfilesDir := t.TempDir()
+	vpsId := "vps-provision-test"
+
+	if err := Provision(vpsId, WithDir(dir), WithTmpfilesDir(tmpfilesDir)); err != nil {
+		t.Fatalf("Provision failed: %v", err)
+	}
+
+	expectedFilename := LockFilename(vpsId)
+	lockPath := filepath.Join(dir, expectedFilename)
+
+	fi, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatalf("expected lock file at %s: %v", lockPath, err)
+	}
+	if !fi.Mode().IsRegular() {
+		t.Fatalf("expected regular file, got mode: %v", fi.Mode())
+	}
+
+	confPath := filepath.Join(tmpfilesDir, TmpfilesDefaultConf)
+	confData, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatalf("expected tmpfiles configuration at %s: %v", confPath, err)
+	}
+	confStr := string(confData)
+	if !strings.Contains(confStr, fmt.Sprintf("d %s 0755 root root -", dir)) {
+		t.Fatalf("tmpfiles missing directory entry: %s", confStr)
+	}
+	if !strings.Contains(confStr, fmt.Sprintf("f %s 0666 root root -", lockPath)) {
+		t.Fatalf("tmpfiles missing lock file entry: %s", confStr)
+	}
+
+	// Acquiring lock after provisioning must succeed
+	h, err := Acquire(vpsId, WithDir(dir))
+	if err != nil {
+		t.Fatalf("failed to acquire provisioned lock: %v", err)
+	}
+	_ = h.Release()
+}
+
+func TestLockProvisionPreservesHeldInode(t *testing.T) {
+	dir := t.TempDir()
+	vpsId := "vps-preserve-inode-test"
+
+	// Initial provision
+	if err := Provision(vpsId, WithDir(dir)); err != nil {
+		t.Fatalf("initial provision failed: %v", err)
+	}
+
+	// Acquire lock
+	h, err := Acquire(vpsId, WithDir(dir))
+	if err != nil {
+		t.Fatalf("acquire failed: %v", err)
+	}
+	defer h.Release()
+
+	lockPath := h.Path()
+	fi1, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatalf("stat 1 failed: %v", err)
+	}
+
+	// Re-run provision while lock is held (simulating upgrade helper runtime provisioning)
+	if err := Provision(vpsId, WithDir(dir)); err != nil {
+		t.Fatalf("second provision failed while held: %v", err)
+	}
+
+	fi2, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatalf("stat 2 failed: %v", err)
+	}
+
+	// File must not be replaced with a new inode
+	if !os.SameFile(fi1, fi2) {
+		t.Fatalf("Provision replaced existing lock file inode instead of preserving it")
+	}
+
+	// Lock must still be held exclusively
+	_, err = Acquire(vpsId, WithDir(dir))
+	if !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("expected ErrAlreadyRunning on held lock after provision, got: %v", err)
+	}
+}
+
+func TestLockProvisionEmptyVPSID(t *testing.T) {
+	if err := Provision(""); err == nil {
+		t.Fatal("expected error for empty vpsId")
+	}
+	if err := Provision("   "); err == nil {
+		t.Fatal("expected error for whitespace vpsId")
+	}
+}

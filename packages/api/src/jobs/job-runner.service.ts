@@ -28,6 +28,7 @@ const SENSITIVE_PATTERNS: RegExp[] = [
   /"token"\s*:\s*"[^"]+"/gi,
   /"authorization"\s*:\s*"[^"]+"/gi,
   /token\s*[:=]\s*\S+/gi,
+  /\bvma_[A-Za-z0-9_-]+\b/g,
 ];
 
 function redactSensitive(text: string): string {

@@ -28,6 +28,19 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
 
 jobs:
+  docs:
+    name: Check README links
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check repository-local documentation links
+        run: npm run check:docs
+
   changes:
     name: Detect changes
     runs-on: ubuntu-latest

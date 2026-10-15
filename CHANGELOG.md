@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — self-host setup documentation
+
+- Restore root README source/local-mode, PostgreSQL Compose, and Linux amd64 installer instructions, including password bootstrap, session secrets, persistent storage, SSH host trust, and demo/local isolation.
+- Correct repository-local paths and canonical FlexServer repository/support links; document the enabled GitHub private vulnerability reporting route.
+- Add `npm run check:docs` to validate README local file links and heading anchors without network access; accept additional Markdown paths as arguments.
+
 ## Unreleased — web terminal accidental command guard setting
 
 - Add persisted global `terminalCommandGuardEnabled` setting (defaulting to `false`) for web terminal sessions across local host PTY and remote SSH targets.

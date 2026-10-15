@@ -187,6 +187,18 @@ jobs:
         if: needs.changes.outputs.full == 'true' || needs.changes.outputs.node == 'true'
         run: npm ci
 
+      - name: Setup Go for rotation protocol tests
+        if: needs.changes.outputs.full == 'true' || needs.changes.outputs.node == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+          cache-dependency-path: packages/agent/go.mod
+
+      - name: Build local agent rotation client for Node tests
+        if: needs.changes.outputs.full == 'true' || needs.changes.outputs.node == 'true'
+        working-directory: packages/agent
+        run: go build -o dist/local-agent-rotator ./cmd/local-agent-rotator
+
       - name: Run Node tests
         if: needs.changes.outputs.full == 'true' || needs.changes.outputs.node == 'true'
         run: npm test

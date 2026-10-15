@@ -1,6 +1,10 @@
 # Changelog
 
 
+## Unreleased — CI rotation protocol prerequisites
+
+- Build the native Go local-agent rotation client before Node tests in `Verify checks`, so clean Linux runners exercise the Unix-socket rotation tests with the required executable instead of failing with an unconfigured helper.
+
 ## Unreleased — durable external SSH keyring provisioning and deployment wiring
 
 - Add persistent external SSH keyring provisioning across CI/CD deployment (`.github/workflows/ci.yml`), installer (`scripts/install/install.sh`), and host bootstrap (`scripts/install/bootstrap-ssh-keyring.sh`).

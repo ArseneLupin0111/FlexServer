@@ -24,7 +24,12 @@ Supplied originals stay in `prompt-images/` (`logo.png`, `logo_with_name.png`) a
 
 - Fleet sidebar: 272px desktop host navigation, active host indicator, health count, CPU/RAM snapshots, and create action. Below `lg`, hosts become a horizontally scrollable rail.
 - Fleet page: operational summaries, search/status filters, card/table switch, two-column cards collapsing to one on narrow screens. Search filters the page results, not the persistent host navigation.
-- Workspace: server identity and seven horizontal section links; compact host/container/job summaries, failure notice, three resource gauges, two telemetry panels, recent audit and jobs, then static system facts.
+- Workspace: server identity header with responsive host name, status pill, independent human-formatted agent status pill (`Agent online`, `Agent not installed`), host coordinates and resource readouts.
+- Workspace navigation: seven horizontal section links with discoverable thin scrollbar on narrow viewports, consistent active indicator, and accessible focus rings.
+- Workspace subpages: consistent subpage `h2` headings across all workspace tabs (`Overview for <host>`, `Metrics for <host>`, `Jobs for <host>`, etc.).
+- Overview workload summaries: balanced 3-column operational summary grid (`Host`, `Containers`, `Jobs`) preventing single-card desktop whitespace gaps while maintaining decoupled Docker and job states.
+- Overview telemetry panels: responsive header layout wrapping legends and live readouts cleanly on mobile, with styled empty states for unavailable history without fabricating data or assuming zero.
+- System facts: clear section grouping (Hardware & Platform, Host & Runtime, Configuration & Notes), overflow-safe long ID/hostname wrapping, and panel-matched backgrounds preventing excess dark dividers on ragged final rows while preserving missing facts.
 - Flat square surfaces, no decorative gradients or panel shadows.
 - Body text is compact; `.tnum` provides monospace tabular numerals for telemetry and identifiers.
 - Progress bars are thin. Status pills retain text labels, not color alone.

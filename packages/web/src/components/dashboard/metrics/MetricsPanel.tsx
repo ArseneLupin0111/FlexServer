@@ -371,16 +371,16 @@ export function ChartPanel({
   );
   return (
     <section className="border border-line bg-panel">
-      <header className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
+      <header className="flex flex-col gap-2.5 border-b border-line px-4 py-3 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
         <div>
-          <h2 className="text-[14px] font-semibold">{title}</h2>
+          <h2 className="text-[14px] font-semibold text-text">{title}</h2>
           <p className="mt-0.5 text-[12px] text-dim">{hint}</p>
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-3">
+        <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1.5 sm:justify-end">
           {readouts?.map((readout) => (
-            <span key={readout.label} className="text-[12px] text-dim">
-              {readout.label}{" "}
-              <span className="tnum text-text">{readout.value}</span>
+            <span key={readout.label} className="inline-flex items-center gap-1 text-[12px] text-dim">
+              <span className="font-medium text-dim">{readout.label}</span>
+              <span className="tnum font-semibold text-text">{readout.value}</span>
             </span>
           ))}
           {series.map((entry) => {
@@ -390,18 +390,18 @@ export function ChartPanel({
             return (
               <span
                 key={entry.key}
-                className="flex items-center gap-1.5 text-[12px] text-dim"
+                className="inline-flex items-center gap-1.5 text-[12px] text-dim"
               >
                 <i
-                  className="inline-block h-0.5 w-3"
+                  className="inline-block h-1 w-3 shrink-0 rounded-xs"
                   style={{
                     background: entry.color,
-                    opacity: valid >= 2 ? 1 : 0.35,
+                    opacity: valid >= 2 ? 1 : 0.4,
                   }}
                 />
-                {entry.name}
+                <span className="font-medium text-text">{entry.name}</span>
                 {valid < 2 && (
-                  <span className="text-warn">no history</span>
+                  <span className="text-[11px] text-warn">no history</span>
                 )}
               </span>
             );
@@ -412,15 +412,18 @@ export function ChartPanel({
         {withPoints.length ? (
           <TrendChart series={withPoints} />
         ) : (
-          <div className="px-4 py-8 text-center">
-            <div className="text-[13px] font-medium">
-              {totalPoints === 0
-                ? "History unavailable"
-                : "Not enough history yet"}
+          <div className="flex flex-col items-center justify-center border border-dashed border-line/70 bg-panel/50 px-4 py-10 text-center">
+            <div className="flex items-center gap-2">
+              <span className="h-1.5 w-1.5 rounded-full bg-warn/70" aria-hidden="true" />
+              <p className="text-[13px] font-medium text-text">
+                {totalPoints === 0
+                  ? "History unavailable"
+                  : "Not enough history yet"}
+              </p>
             </div>
-            <p className="mx-auto mt-1 max-w-sm text-[12px] text-dim">
+            <p className="mx-auto mt-1.5 max-w-sm text-[12px] leading-relaxed text-dim">
               {totalPoints === 0
-                ? "No collected samples for this host yet."
+                ? "No collected samples for this host yet. Current values remain in the readouts."
                 : "At least two collected samples are needed to draw history; current values remain in the readouts."}
             </p>
           </div>

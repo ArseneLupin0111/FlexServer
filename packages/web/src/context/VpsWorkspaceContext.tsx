@@ -238,7 +238,7 @@ export function VpsWorkspaceLayout() {
         <div className="mb-2">
           <Link
             to="/vps"
-            className="inline-flex min-h-8 items-center gap-1.5 text-xs text-dim transition-colors duration-160 ease-out hover:text-text focus-visible:outline-2 focus-visible:outline-signal"
+            className="inline-flex min-h-8 items-center gap-1.5 text-xs text-dim transition-colors duration-160 ease-out hover:text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
           >
             <ArrowLeft size={13} aria-hidden="true" />
             Server list
@@ -257,18 +257,22 @@ export function VpsWorkspaceLayout() {
                 {vps.agentStatus ? (
                   <span
                     className={cn(
-                      "inline-flex items-center gap-1 border px-2 py-0.5 text-[11px] font-medium",
+                      "inline-flex shrink-0 items-center gap-1 border px-2 py-0.5 text-[11px] font-medium",
                       vps.agentStatus === "online"
                         ? "border-signal/40 bg-signal/10 text-signal"
-                        : "border-line bg-raised text-dim",
+                        : vps.agentStatus === "failed"
+                          ? "border-crit/40 bg-crit/10 text-crit"
+                          : vps.agentStatus === "offline"
+                            ? "border-warn/40 bg-warn/10 text-warn"
+                            : "border-line bg-raised text-dim",
                     )}
                   >
-                    Agent {vps.agentStatus}
+                    {agentStatusLabel(vps.agentStatus)}
                   </span>
                 ) : null}
               </div>
-              <div className="tnum mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-dim">
-                <span className="font-mono">{vps.username}@{vps.host}:{vps.port}</span>
+              <div className="tnum mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-dim">
+                <span className="font-mono break-all">{vps.username}@{vps.host}:{vps.port}</span>
                 {vps.provider ? <span>· {vps.provider}</span> : null}
                 {vps.city || vps.country ? (
                   <span>· {[vps.city, vps.country].filter(Boolean).join(", ")}</span>
@@ -394,29 +398,31 @@ export function VpsWorkspaceLayout() {
         </div>
 
         {/* Workspace Horizontal Navigation Tabs */}
-        <div className="overflow-x-auto border-b border-line [scrollbar-width:thin]">
-          <nav
-            aria-label={`${displayName} workspace sections`}
-            className="flex w-max min-w-full items-center"
-          >
-            {workspaceSubPages.map((page) => (
-              <NavLink
-                key={page.to || "overview"}
-                end={page.end}
-                to={page.to || ""}
-                className={({ isActive }) =>
-                  [
-                    "-mb-px inline-flex min-h-11 shrink-0 items-center whitespace-nowrap border-b-2 px-4 py-3 text-[13px] font-medium transition-colors duration-160 ease-out focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal",
-                    isActive
-                      ? "border-signal bg-raised/20 text-signal"
-                      : "border-transparent text-dim hover:bg-raised/30 hover:text-text",
-                  ].join(" ")
-                }
-              >
-                {page.label}
-              </NavLink>
-            ))}
-          </nav>
+        <div className="relative border-b border-line">
+          <div className="overflow-x-auto [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1 [&::-webkit-scrollbar-track]:bg-panel [&::-webkit-scrollbar-thumb]:bg-line hover:[&::-webkit-scrollbar-thumb]:bg-dim/40">
+            <nav
+              aria-label={`${displayName} workspace sections`}
+              className="flex w-max min-w-full items-center pr-4"
+            >
+              {workspaceSubPages.map((page) => (
+                <NavLink
+                  key={page.to || "overview"}
+                  end={page.end}
+                  to={page.to || ""}
+                  className={({ isActive }) =>
+                    [
+                      "-mb-px inline-flex min-h-11 shrink-0 items-center whitespace-nowrap border-b-2 px-4 py-3 text-[13px] font-medium transition-colors duration-160 ease-out focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-signal",
+                      isActive
+                        ? "border-signal bg-raised/20 font-semibold text-signal"
+                        : "border-transparent text-dim hover:bg-raised/30 hover:text-text",
+                    ].join(" ")
+                  }
+                >
+                  {page.label}
+                </NavLink>
+              ))}
+            </nav>
+          </div>
         </div>
 
         {/* Smooth 240ms Animated Content Transition */}
@@ -463,8 +469,32 @@ function WorkspaceStatusBadge({ status }: { status?: VpsRecord["status"] }) {
 // ── Child pages ─────────────────────────────────────────────────────
 
 export function VpsWorkspaceOverviewPage() {
-  const { overview } = useVpsWorkspace();
-  return <OverviewPanel overview={overview} />;
+  const { vps, overview } = useVpsWorkspace();
+  return (
+    <div className="space-y-4">
+      <h2 className="text-lg font-semibold tracking-tight text-text">
+        Overview for {vpsDisplayName(vps)}
+      </h2>
+      <OverviewPanel overview={overview} />
+    </div>
+  );
+}
+
+function agentStatusLabel(status?: VpsRecord["agentStatus"]): string {
+  switch (status) {
+    case "not_installed":
+      return "Agent not installed";
+    case "installing":
+      return "Agent installing";
+    case "online":
+      return "Agent online";
+    case "offline":
+      return "Agent offline";
+    case "failed":
+      return "Agent failed";
+    case undefined:
+      return "";
+  }
 }
 
 export function VpsWorkspaceDockerPage() {

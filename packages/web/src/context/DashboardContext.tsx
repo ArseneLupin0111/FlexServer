@@ -107,7 +107,7 @@ export type DashboardCtx = {
   onVerify: (vps: VpsRecord) => void;
   onInstallAgent: (vps: VpsRecord) => void;
   onUninstallAgent: (vps: VpsRecord) => void;
-  onUpgradeAgent: (vps: VpsRecord) => void;
+  onUpgradeAgent: (vps: VpsRecord) => Promise<{ jobId: string } | void>;
   onRestartAgent: (vps: VpsRecord) => void;
   onRotateAgent: (vps: VpsRecord) => void;
   onToggleDockerMetrics: (vps: VpsRecord) => void;
@@ -301,10 +301,11 @@ export function DashboardProvider({
       listMetrics(),
       listAuditEvents(),
     ]);
+    const mergedJobs = mergeJobs(dashboard.jobs ?? [], jobs);
     setOverview({
       ...dashboard,
       servers,
-      jobs,
+      jobs: mergedJobs,
       metrics,
       systemInfo: dashboard.systemInfo ?? [],
       dockerMetrics: dashboard.dockerMetrics ?? [],
@@ -316,29 +317,44 @@ export function DashboardProvider({
         warningServers: servers.filter((s) => s.status === "warning").length,
         unreachableServers: servers.filter((s) => s.status === "unreachable")
           .length,
-        runningJobs: jobs.filter((j) => j.status === "running").length,
+        runningJobs: mergedJobs.filter((j) => j.status === "running").length,
       },
     });
-    setRecords(servers);
+    setRecords(applyAgentJobState(servers, mergedJobs));
     if (message) setStatus({ message, kind: "success" });
   }
 
   async function runAction<T>(
     loadingMessage: string,
     action: () => Promise<T>,
+    options?: { rethrow?: boolean },
   ): Promise<T | undefined> {
-    if (busy) return undefined;
+    if (busy) {
+      if (options?.rethrow) {
+        throw new Error("Another action is still running.");
+      }
+      return undefined;
+    }
     setBusy(true);
     setStatus({ message: loadingMessage, kind: "default" });
     try {
       const result = await action();
-      await loadVps("Dashboard state synced.");
+      try {
+        await loadVps("Dashboard state synced.");
+      } catch {
+        // Background refresh failure does not invalidate the successful action
+      }
       return result;
     } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Request failed";
       setStatus({
-        message: error instanceof Error ? error.message : "Request failed",
+        message,
         kind: "destructive",
       });
+      if (options?.rethrow) {
+        throw error instanceof Error ? error : new Error(message);
+      }
       return undefined;
     } finally {
       setBusy(false);
@@ -741,46 +757,50 @@ export function DashboardProvider({
   async function handleUpgradeAgent(vps: VpsRecord) {
     const label = vpsDisplayName(vps);
     if (isLocalHost(vps)) {
-      // Local hosts never go through the SSH upgrade path; the shared
-      // LocalAgentUpdate control owns that flow (bundled binary + heartbeat).
       setStatus({
-        message: `Local upgrades for ${label} use the Update controls on its server card or Settings.`,
+        message: `Local upgrades for ${label} use the Update controls on its Settings page.`,
         kind: "default",
       });
       return;
     }
-    await runAction(`Starting agent upgrade for ${label}...`, async () => {
-      const result = await upgradeAgent(vps.id);
-      setOverview((current) => ({
-        ...current,
-        jobs: mergeJobs(current.jobs, [
-          {
-            id: result.jobId,
-            vpsId: vps.id,
-            type: "upgrade-agent",
-            status: "queued",
-            step: "queued",
-            progress: 0,
-          },
-        ]),
-      }));
-      setRecords((current) =>
-        current.map((record) =>
-          record.id === vps.id
-            ? {
-                ...record,
-                agentStatus: "installing",
-                lastAgentInstallJobId: result.jobId,
-              }
-            : record,
-        ),
-      );
-      setStatus({
-        message: `Agent upgrade queued for ${label}. Job ${result.jobId} is running in the background.`,
-        kind: "success",
-      });
-    });
+    return await runAction(
+      `Starting agent upgrade for ${label}...`,
+      async () => {
+        const result = await upgradeAgent(vps.id);
+        setOverview((current) => ({
+          ...current,
+          jobs: mergeJobs(current.jobs, [
+            {
+              id: result.jobId,
+              vpsId: vps.id,
+              type: "upgrade-agent",
+              status: "queued",
+              step: "queued",
+              progress: 0,
+            },
+          ]),
+        }));
+        setRecords((current) =>
+          current.map((record) =>
+            record.id === vps.id
+              ? {
+                  ...record,
+                  agentStatus: "installing",
+                  lastAgentInstallJobId: result.jobId,
+                }
+              : record,
+          ),
+        );
+        setStatus({
+          message: `Agent upgrade queued for ${label}. Job ${result.jobId} is running in the background.`,
+          kind: "success",
+        });
+        return result;
+      },
+      { rethrow: true },
+    );
   }
+
 
   async function handleRestartAgent(vps: VpsRecord) {
     const label = vpsDisplayName(vps);

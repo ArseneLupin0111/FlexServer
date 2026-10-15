@@ -23,7 +23,7 @@ Supplied originals stay in `prompt-images/` (`logo.png`, `logo_with_name.png`) a
 ## Layout and typography
 
 - Fleet sidebar: 272px desktop host navigation, active host indicator, health count, CPU/RAM snapshots, and create action. Below `lg`, hosts become a horizontally scrollable rail.
-- Fleet page: operational summaries, search/status filters, card/table switch, two-column cards collapsing to one on narrow screens. Search filters the page results, not the persistent host navigation.
+- Fleet page: operational summaries, search/status filters, card/table switch, two-column cards collapsing to one on narrow screens. Agent updates are configured and triggered from the host Settings tab rather than fleet list cards or tables. Search filters the page results, not the persistent host navigation.
 - Workspace: server identity header with responsive host name, status pill, independent human-formatted agent status pill (`Agent online`, `Agent not installed`), host coordinates and resource readouts.
 - Workspace navigation: seven horizontal section links with discoverable thin scrollbar on narrow viewports, consistent active indicator, and accessible focus rings.
 - Workspace subpages: consistent subpage `h2` headings across all workspace tabs (`Overview for <host>`, `Metrics for <host>`, `Jobs for <host>`, etc.).

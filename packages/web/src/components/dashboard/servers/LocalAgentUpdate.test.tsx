@@ -9,6 +9,8 @@ import type {
   LocalAgentUpgradeState,
   VpsRecord,
 } from "../../../lib/api";
+import { MemoryRouter } from "react-router-dom";
+import { DashboardContext, DashboardProvider, type DashboardCtx } from "../../../context/DashboardContext";
 
 const vps: VpsRecord = {
   id: "local-1",
@@ -20,6 +22,21 @@ const vps: VpsRecord = {
   status: "healthy",
   kind: "local",
   managedBy: "system",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+};
+
+const remoteVps: VpsRecord = {
+  id: "remote-1",
+  name: "web-01",
+  displayName: "web-01",
+  host: "10.0.0.1",
+  port: 22,
+  username: "root",
+  status: "healthy",
+  agentStatus: "online",
+  kind: "remote",
+  managedBy: "user",
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
@@ -139,7 +156,7 @@ function localStatusFetch(): FetchReply {
 describe("LocalAgentUpdate confirm flow", () => {
   it("confirms with a dialog and posts only the releaseId plus an Idempotency-Key", async () => {
     handler = (url) => (url.includes("/agent-update") ? localStatusFetch() : fail(500, { code: "unexpected", message: "unexpected request" }));
-    render(<LocalAgentUpdate vps={vps} variant="workspace" />);
+    render(<LocalAgentUpdate vps={vps} />);
 
     await screen.findByText("Update available");
     const user = userEvent.setup();
@@ -183,7 +200,7 @@ describe("LocalAgentUpdate persisted job progress", () => {
           ? ok(job({ state: "downloading", progress: 55 }))
           : fail(500, { code: "unexpected", message: "unexpected request" });
 
-    render(<LocalAgentUpdate vps={vps} variant="table" />);
+    render(<LocalAgentUpdate vps={vps} />);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
@@ -217,14 +234,13 @@ describe("LocalAgentUpdate disabled upgrade control", () => {
       url.includes("/agent-update")
         ? ok(status({ job: job({ state: "staging", progress: 30 }), state: "available" }))
         : fail(500, { code: "unexpected", message: "unexpected request" });
-    render(<LocalAgentUpdate vps={vps} variant="workspace" />);
+    render(<LocalAgentUpdate vps={vps} />);
 
     expect(await screen.findByText("Staging update")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Upgrade agent" })).toBeDisabled();
     expect(screen.getByText("An upgrade job is already running for this server.")).toBeInTheDocument();
     expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "30");
   });
-
 
   it("associates the disabled upgrade button with its reason for assistive tech", async () => {
     handler = () =>
@@ -234,7 +250,7 @@ describe("LocalAgentUpdate disabled upgrade control", () => {
           installed: { version: "1.0.0", buildId: null, lastSeenAt: "2026-01-01T00:00:00.000Z", fresh: false },
         }),
       );
-    render(<LocalAgentUpdate vps={vps} variant="card" />);
+    render(<LocalAgentUpdate vps={vps} />);
 
     const button = await screen.findByRole("button", { name: "Upgrade agent" });
     expect(button).toBeDisabled();
@@ -244,7 +260,6 @@ describe("LocalAgentUpdate disabled upgrade control", () => {
     expect(reason).not.toBeNull();
     expect(reason).toHaveTextContent(/heartbeat is stale or the build ID is missing/);
   });
-
 });
 
 describe("LocalAgentUpdate live SSE refresh", () => {
@@ -257,7 +272,7 @@ describe("LocalAgentUpdate live SSE refresh", () => {
           ? ok(job({ state: "staging", progress: 70 }))
           : fail(500, { code: "unexpected", message: "unexpected request" });
 
-    render(<LocalAgentUpdate vps={vps} variant="table" />);
+    render(<LocalAgentUpdate vps={vps} />);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
@@ -299,7 +314,7 @@ describe("LocalAgentUpdate live SSE refresh", () => {
           ? ok(job({ state: "verifying", progress: 60 }))
           : fail(500, { code: "unexpected", message: "unexpected request" });
 
-    render(<LocalAgentUpdate vps={vps} variant="table" />);
+    render(<LocalAgentUpdate vps={vps} />);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
@@ -324,7 +339,7 @@ describe("LocalAgentUpdate updater absence", () => {
           updater: { installed: false, healthy: false, lastSeenAt: null },
         }),
       );
-    render(<LocalAgentUpdate vps={vps} variant="card" />);
+    render(<LocalAgentUpdate vps={vps} />);
 
     await screen.findByText("Update status unknown");
     expect(screen.queryByRole("button", { name: "Upgrade agent" })).not.toBeInTheDocument();
@@ -332,7 +347,7 @@ describe("LocalAgentUpdate updater absence", () => {
 });
 
 describe("LocalAgentUpdate terminal results", () => {
-  it("hides a stale succeeded job in dense card rows while workspace keeps the confirmation", async () => {
+  it("keeps the confirmation for a succeeded job in workspace settings", async () => {
     const payload = status({
       installed: { version: "0.1.0", buildId: CURRENT_BUILD, lastSeenAt: new Date().toISOString(), fresh: true },
       state: "release_unavailable",
@@ -348,17 +363,9 @@ describe("LocalAgentUpdate terminal results", () => {
       }),
     });
     handler = () => ok(payload);
-    const { unmount } = render(<LocalAgentUpdate vps={vps} variant="card" />);
-
-    await screen.findByText("Bundled agent unavailable");
-    expect(screen.queryByText(/Upgrade confirmed/)).not.toBeInTheDocument();
-    unmount();
-    cleanup();
-    handler = () => ok(payload);
-    render(<LocalAgentUpdate vps={vps} variant="workspace" />);
+    render(<LocalAgentUpdate vps={vps} />);
     expect(await screen.findByText(/is sending a fresh heartbeat/)).toBeInTheDocument();
   });
-
 
   it("shows a succeeded upgrade confirmed by the fresh heartbeat build", async () => {
     handler = () =>
@@ -374,12 +381,13 @@ describe("LocalAgentUpdate terminal results", () => {
           }),
         }),
       );
-    render(<LocalAgentUpdate vps={vps} variant="workspace" />);
+    render(<LocalAgentUpdate vps={vps} />);
     expect(await screen.findByText(/is sending a fresh heartbeat/)).toBeInTheDocument();
     expect(screen.getByText(/1\.1\.0 \(cccc1111cccc\)/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Upgrade agent" })).not.toBeInTheDocument();
     expect(screen.queryByText(/manual intervention required/)).not.toBeInTheDocument();
   });
+
   it("accurately labels a historical succeeded job as previous upgrade when a new bundled update is available", async () => {
     handler = () =>
       ok(
@@ -395,12 +403,11 @@ describe("LocalAgentUpdate terminal results", () => {
           }),
         }),
       );
-    render(<LocalAgentUpdate vps={vps} variant="workspace" />);
+    render(<LocalAgentUpdate vps={vps} />);
     expect(await screen.findByText(/Previous upgrade — 1\.0\.0 \(aaaa1111aaaa\) was confirmed by heartbeat\./)).toBeInTheDocument();
     expect(screen.queryByText(/is sending a fresh heartbeat/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Upgrade agent" })).toBeInTheDocument();
   });
-
 
   it("marks an unverified rollback as needing manual intervention", async () => {
     handler = () =>
@@ -411,7 +418,7 @@ describe("LocalAgentUpdate terminal results", () => {
           job: job({ state: "rollback_unverified", completedAt: "2026-09-27T10:06:00.000Z", error: { code: "HEARTBEAT_TIMEOUT", message: "No heartbeat after swap deadline" } }),
         }),
       );
-    render(<LocalAgentUpdate vps={vps} variant="workspace" />);
+    render(<LocalAgentUpdate vps={vps} />);
     expect(await screen.findByText(/rollback is unverified — manual intervention required/)).toBeInTheDocument();
     expect(screen.getByText(/journalctl -u vps-manager-agent/)).toBeInTheDocument();
     expect(screen.queryByText(/failed before the agent was swapped/)).not.toBeInTheDocument();
@@ -426,7 +433,7 @@ describe("LocalAgentUpdate terminal results", () => {
           job: job({ state: "rolled_back", completedAt: "2026-09-27T10:05:00.000Z", error: { code: "HEARTBEAT_TIMEOUT", message: "New build missed its heartbeat" } }),
         }),
       );
-    render(<LocalAgentUpdate vps={vps} variant="workspace" />);
+    render(<LocalAgentUpdate vps={vps} />);
     expect(await screen.findByText(/previous build was verified by heartbeat/)).toBeInTheDocument();
     expect(screen.getByText(/New build missed its heartbeat/)).toBeInTheDocument();
     expect(screen.getByText(/journalctl -u vps-manager-agent/)).toBeInTheDocument();
@@ -442,7 +449,7 @@ describe("LocalAgentUpdate terminal results", () => {
           job: job({ state: "failed", completedAt: "2026-09-27T10:07:00.000Z", error: { code: "DOWNLOAD_FAILED", message: "Checksum mismatch from mirror" } }),
         }),
       );
-    render(<LocalAgentUpdate vps={vps} variant="workspace" />);
+    render(<LocalAgentUpdate vps={vps} />);
     expect(await screen.findByText(/Upgrade failed before the agent was swapped/)).toBeInTheDocument();
     expect(screen.getByText(/Checksum mismatch from mirror/)).toBeInTheDocument();
     expect(screen.queryByText(/manual intervention required/)).not.toBeInTheDocument();
@@ -461,7 +468,7 @@ describe("LocalAgentUpdate freshness gating", () => {
           installed: { version: "1.0.0", buildId: null, lastSeenAt: "2026-01-01T00:00:00.000Z", fresh: false },
         }),
       );
-    render(<LocalAgentUpdate vps={vps} variant="workspace" />);
+    render(<LocalAgentUpdate vps={vps} />);
 
     expect(await screen.findByText("Update status unknown")).toBeInTheDocument();
     expect(screen.queryByText("Agent up to date")).not.toBeInTheDocument();
@@ -473,7 +480,7 @@ describe("LocalAgentUpdate freshness gating", () => {
 
   it("shows phase text in the live region but no progressbar until progress is real", async () => {
     handler = () => ok(status({ job: job({ state: "awaiting_heartbeat", progress: null }), state: "available" }));
-    render(<LocalAgentUpdate vps={vps} variant="card" />);
+    render(<LocalAgentUpdate vps={vps} />);
 
     expect(await screen.findByText("Waiting for fresh heartbeat")).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
@@ -486,7 +493,7 @@ describe("LocalAgentUpdate live region persistence", () => {
   it("keeps an empty status region mounted before any job so start and results are announced", async () => {
     vi.useFakeTimers();
     handler = () => ok(status());
-    render(<LocalAgentUpdate vps={vps} variant="card" />);
+    render(<LocalAgentUpdate vps={vps} />);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
@@ -508,5 +515,231 @@ describe("LocalAgentUpdate live region persistence", () => {
 
     expect(screen.getByRole("status")).toBe(region);
     expect(region).toHaveTextContent("Downloading update");
+  });
+});
+
+describe("Remote agent update in Settings", () => {
+  it("renders remote host details and handles upgrade confirmation flow", async () => {
+    let upgraded = false;
+    handler = (url, init) => {
+      if (url.includes("/upgrade-agent") && init?.method === "POST") {
+        upgraded = true;
+        return ok({ jobId: "job-up-1", state: { status: "installing" } });
+      }
+      return fail(500, { code: "unexpected", message: "unexpected request" });
+    };
+
+    render(<LocalAgentUpdate vps={remoteVps} />);
+
+    expect(screen.getByText("Agent updates")).toBeInTheDocument();
+    expect(screen.getByText("Remote SSH")).toBeInTheDocument();
+    expect(screen.getByText("root@10.0.0.1:22")).toBeInTheDocument();
+
+    const upgradeButton = screen.getByRole("button", { name: "Upgrade agent" });
+    expect(upgradeButton).toBeEnabled();
+
+    const user = userEvent.setup();
+    await user.click(upgradeButton);
+
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/Upgrade agent on web-01\?/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/Monitoring will pause briefly/)).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Upgrade agent" }));
+
+    await waitFor(() => expect(upgraded).toBe(true));
+    expect(await screen.findByText("An agent installation or upgrade is currently in progress.")).toBeInTheDocument();
+  });
+
+  it("disables upgrade when agent is not installed and shows concrete reason", () => {
+    const uninstalledVps: VpsRecord = {
+      ...remoteVps,
+      agentStatus: "not_installed",
+    };
+    render(<LocalAgentUpdate vps={uninstalledVps} />);
+
+    const button = screen.getByRole("button", { name: "Upgrade agent" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText("Agent is not installed on this server.")).toBeInTheDocument();
+  });
+
+  it("disables upgrade when an installation or upgrade is in progress", () => {
+    const installingVps: VpsRecord = {
+      ...remoteVps,
+      agentStatus: "installing",
+    };
+    render(<LocalAgentUpdate vps={installingVps} />);
+
+    const button = screen.getByRole("button", { name: "Upgrade agent" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText("An agent installation or upgrade is currently in progress.")).toBeInTheDocument();
+  });
+
+  it("disables upgrade in demo mode", () => {
+    render(
+      <DashboardContext.Provider
+        value={
+          {
+            mode: "demo",
+            busy: false,
+          } as unknown as DashboardCtx
+        }
+      >
+        <LocalAgentUpdate vps={remoteVps} />
+      </DashboardContext.Provider>,
+    );
+
+    const button = screen.getByRole("button", { name: "Upgrade agent" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText("Agent upgrades are unavailable in demo mode.")).toBeInTheDocument();
+  });
+
+  it("disables upgrade when an active restart job is running, even if agentStatus preserves offline", () => {
+    const offlineVps: VpsRecord = {
+      ...remoteVps,
+      agentStatus: "offline",
+    };
+    render(
+      <DashboardContext.Provider
+        value={
+          {
+            mode: "local",
+            busy: false,
+            jobs: [
+              {
+                id: "job-restart-1",
+                vpsId: offlineVps.id,
+                type: "restart-agent",
+                status: "running",
+                step: "running",
+                progress: 50,
+              },
+            ],
+          } as unknown as DashboardCtx
+        }
+      >
+        <LocalAgentUpdate vps={offlineVps} />
+      </DashboardContext.Provider>,
+    );
+
+    const button = screen.getByRole("button", { name: "Upgrade agent" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText("An agent restart is currently in progress.")).toBeInTheDocument();
+  });
+
+  it("disables upgrade when a credential rotation job is queued", () => {
+    render(
+      <DashboardContext.Provider
+        value={
+          {
+            mode: "local",
+            busy: false,
+            jobs: [
+              {
+                id: "job-rotate-1",
+                vpsId: remoteVps.id,
+                type: "rotate-agent",
+                status: "queued",
+                step: "queued",
+                progress: 0,
+              },
+            ],
+          } as unknown as DashboardCtx
+        }
+      >
+        <LocalAgentUpdate vps={remoteVps} />
+      </DashboardContext.Provider>,
+    );
+
+    const button = screen.getByRole("button", { name: "Upgrade agent" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText("An agent credential rotation is currently in progress.")).toBeInTheDocument();
+  });
+
+  it("retains confirmation dialog and shows error when onUpgradeAgent rejects, keeping error visible after cancel", async () => {
+    const onUpgradeAgent = vi.fn().mockRejectedValue(new Error("Remote agent upgrade timed out"));
+    const user = userEvent.setup();
+
+    render(
+      <DashboardContext.Provider
+        value={
+          {
+            mode: "local",
+            busy: false,
+            onUpgradeAgent,
+          } as unknown as DashboardCtx
+        }
+      >
+        <LocalAgentUpdate vps={remoteVps} />
+      </DashboardContext.Provider>,
+    );
+
+    const upgradeButton = screen.getByRole("button", { name: "Upgrade agent" });
+    await user.click(upgradeButton);
+
+    const dialog = await screen.findByRole("alertdialog");
+    const confirmButton = within(dialog).getByRole("button", { name: "Upgrade agent" });
+    await user.click(confirmButton);
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Remote agent upgrade timed out");
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Upgrade agent" })).toBeEnabled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("alert")).toHaveTextContent("Remote agent upgrade timed out");
+  });
+
+  it("propagates API failure through real DashboardProvider and keeps dialog open", async () => {
+    const overviewData = {
+      mode: "local",
+      summary: {
+        totalServers: 1,
+        healthyServers: 1,
+        warningServers: 0,
+        unreachableServers: 0,
+        runningJobs: 0,
+      },
+      servers: [remoteVps],
+      metrics: [],
+      dockerMetrics: [],
+      jobs: [],
+      auditEvents: [],
+      terminal: { label: "Terminal", networkAccess: "disabled", commands: [], sessions: [] },
+      settings: { appMode: "local", webTerminalEnabled: false, terminalCommandGuardEnabled: false, realSshEnabled: false, authRequiredInLocalMode: false },
+      systemInfo: [],
+    };
+
+    handler = (url, init) => {
+      if (url.includes("/api/overview")) {
+        return ok(overviewData);
+      }
+      if (url.includes("/api/vps/remote-1/upgrade-agent") && init?.method === "POST") {
+        return fail(500, { code: "UPGRADE_FAILED", message: "SSH connection timed out" });
+      }
+      if (url.includes("/api/vps")) {
+        return ok([remoteVps]);
+      }
+      return fail(500, { code: "unexpected", message: "unexpected request" });
+    };
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <DashboardProvider authRequired={false}>
+          <LocalAgentUpdate vps={remoteVps} />
+        </DashboardProvider>
+      </MemoryRouter>,
+    );
+
+    const upgradeButton = await screen.findByRole("button", { name: "Upgrade agent" });
+    await user.click(upgradeButton);
+
+    const dialog = await screen.findByRole("alertdialog");
+    const confirmButton = within(dialog).getByRole("button", { name: "Upgrade agent" });
+    await user.click(confirmButton);
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("SSH connection timed out");
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
   });
 });

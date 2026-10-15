@@ -21,7 +21,6 @@ import {
 import type { VpsRecord } from "../../../lib/api";
 import type { DashboardJob } from "../../../lib/api";
 import { AgentLifecycleStatus, agentJobFor, localAgentLabel } from "./AgentLifecycleStatus";
-import { LocalAgentUpdate } from "./LocalAgentUpdate";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,7 +36,6 @@ export function ServerTable({
   onVerify,
   onInstallAgent,
   onUninstallAgent,
-  onUpgradeAgent,
   onRestartAgent,
   onRotateAgent,
   jobs,
@@ -52,7 +50,6 @@ export function ServerTable({
   onVerify: (vps: VpsRecord) => void;
   onInstallAgent: (vps: VpsRecord) => void;
   onUninstallAgent: (vps: VpsRecord) => void;
-  onUpgradeAgent: (vps: VpsRecord) => void;
   onRestartAgent: (vps: VpsRecord) => void;
   onRotateAgent: (vps: VpsRecord) => void;
   jobs: DashboardJob[];
@@ -62,7 +59,6 @@ export function ServerTable({
 }) {
   const [deleteTarget, setDeleteTarget] = useState<VpsRecord | null>(null);
   const [uninstallTarget, setUninstallTarget] = useState<VpsRecord | null>(null);
-  const [upgradeTarget, setUpgradeTarget] = useState<VpsRecord | null>(null);
   const [restartTarget, setRestartTarget] = useState<VpsRecord | null>(null);
   const [rotateAgentTarget, setRotateAgentTarget] = useState<VpsRecord | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -104,7 +100,6 @@ export function ServerTable({
               const agentJob = agentJobFor(vps, serverJobs);
               const agentActionRunning = Boolean(agentJob && (agentJob.status === "queued" || agentJob.status === "running"));
               const canUninstall = vps.agentStatus === "online" || vps.agentStatus === "offline" || vps.agentStatus === "failed";
-              const canUpgrade = mode !== "demo" && !isLocal && !agentActionRunning && canUninstall;
               const canRestart = mode !== "demo" && !isLocal && Boolean(vps.keyProvisionedAt) && !agentActionRunning && (vps.agentStatus === "offline" || vps.agentStatus === "failed");
               const canRotateAgent = mode !== "demo" && isLocal && !agentActionRunning;
               const accessProblem = !isLocal && (!vps.keyProvisionedAt || vps.status === "unreachable");
@@ -152,7 +147,6 @@ export function ServerTable({
                   </td>
                   <td className="px-4 py-3">
                     {agentActionRunning ? <AgentLifecycleStatus vps={vps} jobs={serverJobs} compact /> : <TableStatus kind="agent" label={agentLabel} tone={agentTone} />}
-                    {isLocal ? <div className="mt-1"><LocalAgentUpdate vps={vps} variant="table" /></div> : null}
                   </td>
                   <td className="px-4 py-3">
                     <Badge variant={isReady ? "ready" : "pending"}>
@@ -195,7 +189,6 @@ export function ServerTable({
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end" className="w-48 rounded-none">
                           {!accessProblem ? <DropdownMenuItem disabled={busy || isLocal} onClick={() => onVerify(vps)}><ShieldCheck size={14} /> Verify access</DropdownMenuItem> : null}
-                          {isLocal ? null : <DropdownMenuItem disabled={busy || !canUpgrade} onClick={() => window.setTimeout(() => setUpgradeTarget(vps), 0)}><RotateCw size={14} /> Upgrade agent</DropdownMenuItem>}
                           {canRestart ? <DropdownMenuItem disabled={busy} onClick={() => window.setTimeout(() => setRestartTarget(vps), 0)}><RotateCw size={14} /> Restart agent</DropdownMenuItem> : null}
                           {isLocal ? <DropdownMenuItem disabled={busy || !canRotateAgent} onClick={() => window.setTimeout(() => setRotateAgentTarget(vps), 0)}><KeyRound size={14} /> Rotate agent credential</DropdownMenuItem> : null}
                           <DropdownMenuItem disabled={busy || isLocal || !provisionPasswords[vps.id]?.trim()} onClick={() => onProvision(vps)}><KeyRound size={14} /> Reinstall SSH key</DropdownMenuItem>
@@ -225,12 +218,6 @@ export function ServerTable({
         </table>
       </div>
       {/* Delete confirmation dialog (single instance for table) */}
-      <AlertDialog open={upgradeTarget !== null} onOpenChange={(open) => { if (!open) setUpgradeTarget(null); }}>
-        <AlertDialogContent>
-          <AlertDialogHeader><AlertDialogTitle>Upgrade agent on {upgradeTarget ? vpsDisplayName(upgradeTarget) : "server"}?</AlertDialogTitle><AlertDialogDescription>Monitoring will pause briefly while the agent is upgraded. If the upgrade cannot complete, the previous version is restored automatically. Existing credentials are preserved and are not changed or stored again.</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => { if (upgradeTarget) onUpgradeAgent(upgradeTarget); setUpgradeTarget(null); }}>Upgrade agent</AlertDialogAction></AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
       <AlertDialog open={restartTarget !== null} onOpenChange={(open) => { if (!open) setRestartTarget(null); }}>
         <AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Restart agent on {restartTarget ? vpsDisplayName(restartTarget) : "server"}?</AlertDialogTitle><AlertDialogDescription>This restarts the monitoring agent only. It does not reboot the VPS.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction disabled={busy} onClick={() => { if (restartTarget && !busy) onRestartAgent(restartTarget); setRestartTarget(null); }}>Restart agent</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
       </AlertDialog>

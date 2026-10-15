@@ -37,7 +37,6 @@ export type ServersPanelProps = {
   onVerify: (vps: VpsRecord) => void;
   onInstallAgent: (vps: VpsRecord) => void;
   onUninstallAgent: (vps: VpsRecord) => void;
-  onUpgradeAgent: (vps: VpsRecord) => void;
   onRestartAgent: (vps: VpsRecord) => void;
   onRotateAgent: (vps: VpsRecord) => void;
   onEdit: (vps: VpsRecord, payload: UpdateVpsPayload) => Promise<void>;

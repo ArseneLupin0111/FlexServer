@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — agent updates relocated to host Settings
+
+- Relocate remote SSH agent upgrade action from VPS fleet list cards/tables to the per-host Settings tab (`/vps/:vpsId/settings`).
+- Extend `LocalAgentUpdate` to support both local host updates (bundled daemon updater via `/api/vps/:id/local-agent-upgrades`) and remote SSH host upgrades (`POST /api/vps/:id/upgrade-agent`), retaining host identity, status badge, eligibility gating, upgrade reason feedback, and confirmation dialogs.
+- Clean up obsolete `card` and `table` variants and dense display branches from `LocalAgentUpdate`, consolidating into a unified host Settings component.
+- Restore frontend `upgradeAgent(id)` API helper and wire it to workspace and Settings actions.
+
 ## Unreleased — self-host setup documentation
 
 - Restore root README source/local-mode, PostgreSQL Compose, and Linux amd64 installer instructions, including password bootstrap, session secrets, persistent storage, SSH host trust, and demo/local isolation.

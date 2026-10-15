@@ -73,7 +73,6 @@ describe("ServerTable local agent cell", () => {
           onVerify={vi.fn()}
           onInstallAgent={vi.fn()}
           onUninstallAgent={vi.fn()}
-          onUpgradeAgent={vi.fn()}
           onRestartAgent={vi.fn()}
           onRotateAgent={vi.fn()}
           jobs={[]}

@@ -35,6 +35,7 @@ Supplied originals stay in `prompt-images/` (`logo.png`, `logo_with_name.png`) a
 - Progress bars are thin. Status pills retain text labels, not color alone.
 - Secondary text uses the shared `dim` token at 68% lightness. Capacity labels use explicit binary units (KiB/MiB/GiB/TiB), consistent across host and Docker byte counts.
 - Overview audit rows prioritize time/actor and event/outcome; redundant server and opaque identifiers stay in the details drawer. Compact job panels size to content rather than stretching to match audit height.
+- VPS Settings uses a two-column layout at `xl`: Terminal & safety and host-specific Agent updates in the main column, Runtime posture and Dashboard access in the side column. Narrow layouts retain that reading order. Global terminal controls carry a scope badge; repeated terminal/guard runtime facts are omitted. Keep root-session and non-security-boundary warnings visible, with technical explanations and input limitations in native disclosures. Dashboard session details are collapsed by default.
 
 ## Data and interaction
 

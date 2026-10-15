@@ -732,6 +732,11 @@
   -webkit-backdrop-filter: none;
 }
 
+/* Distilled navigation-only mobile drawer */
+.landing-home .landing-mobile-panel .landing-mobile-links {
+  margin-bottom: 0;
+}
+
 /* ── 1. Workspace-As-Proof Hero Opening ── */
 .landing-home .landing-home-hero {
   position: relative;

@@ -35,7 +35,7 @@ async function installScenario(mode: "new" | "none" | "old") {
       state = { vpsId: "audit", status: "online", version: "1.2.3", buildId: "a".repeat(40), lastSeenAt: now };
     } },
   ] as unknown as ConstructorParameters<typeof AgentInstallerService>));
-  await service.install("audit");
+  await service.install("audit", undefined, undefined);
   let error: unknown;
   try { await task({ update: async () => {}, succeed: async () => { succeeded = true; } }); }
   catch (e) { error = e; }

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — retryable server removal
+
+- Remove remote managed agents synchronously before deleting a VPS record or its SSH key. SSH/uninstall failures retain the record and key so removal can be retried.
+- Close the removed server's terminal and Docker log sessions, reject removal while server jobs are active, and purge server-scoped credentials, agent state, metrics, jobs, Docker data, upgrade history, and host-key pins. Repeated deletion completes any remaining local cleanup.
+- Verified through authenticated HTTP and a disposable SSH server: failed authentication retains the server, a corrected retry returns 204 and removes the installation and local data, unrelated remote files survive, and repeated deletion returns 204.
+
 
 ## Unreleased — systemd-aware managed process ownership
 

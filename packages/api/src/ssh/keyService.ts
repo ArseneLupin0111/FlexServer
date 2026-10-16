@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, stat, unlink } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import type ssh2 from "ssh2";
@@ -31,15 +31,25 @@ function getErrorCode(err: unknown): string | undefined {
   return undefined;
 }
 
-async function pathExists(filePath: string): Promise<boolean> {
+async function unlinkQuiet(filePath: string): Promise<boolean> {
   try {
-    await stat(filePath);
+    await unlink(filePath);
     return true;
   } catch (error: unknown) {
     if (getErrorCode(error) === "ENOENT") return false;
     throw error;
   }
 }
+
+ async function pathExists(filePath: string): Promise<boolean> {
+   try {
+     await stat(filePath);
+     return true;
+   } catch (error: unknown) {
+     if (getErrorCode(error) === "ENOENT") return false;
+     throw error;
+   }
+ }
 
 export interface KeyPairResult {
   privateKeyPath: string;
@@ -54,9 +64,20 @@ export interface KeyServiceOptions {
   keyring?: Keyring;
 }
 
+export interface KeyRemovalResult {
+  privateDeleted: boolean;
+  publicDeleted: boolean;
+}
+
 export interface KeyService {
   ensureKeyPair(id: string): Promise<KeyPairResult>;
   readPrivateKey(id: string): Promise<string>;
+  /**
+   * Delete only the per-VPS key files (`join(baseDir, id)` and
+   * `join(baseDir, `${id}.pub`)`). Missing files report `false` per slot and
+   * never throw; other filesystem errors propagate so callers fail closed.
+   */
+  removeKeyPair(id: string): Promise<KeyRemovalResult>;
 }
 
 export function createKeyService(
@@ -73,6 +94,9 @@ export function createKeyService(
       : (maybeOptions ?? {});
 
   function paths(id: string) {
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) {
+      throw new Error("Invalid VPS key identifier");
+    }
     return {
       privateKeyPath: join(baseDir, id),
       publicKeyPath: join(baseDir, `${id}.pub`),
@@ -190,6 +214,14 @@ export function createKeyService(
       }
 
       return writeNewKeyPair(id);
+    },
+    async removeKeyPair(id: string) {
+      const keyPaths = paths(id);
+      const [privateDeleted, publicDeleted] = await Promise.all([
+        unlinkQuiet(keyPaths.privateKeyPath),
+        unlinkQuiet(keyPaths.publicKeyPath),
+      ]);
+      return { privateDeleted, publicDeleted };
     },
     async readPrivateKey(id: string) {
       return readAndDecryptPrivateKey(id);

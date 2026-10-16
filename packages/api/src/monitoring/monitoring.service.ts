@@ -733,6 +733,11 @@ export class MonitoringService {
         }));
 
         const overview = await this.dashboardService.overview();
+        if (!overview.servers.some((server) => server.id === vpsId)) {
+          clearInterval(interval);
+          res.end();
+          return;
+        }
         const filteredSystemInfo = (overview.systemInfo ?? []).filter(
           (s) => s.vpsId === vpsId,
         );

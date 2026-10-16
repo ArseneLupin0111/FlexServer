@@ -91,6 +91,13 @@ export function createPostgresJobRepository(pool: DatabasePool): JobRepository {
         return result.rows[0] ? rowToJob(result.rows[0]) : undefined;
       });
     },
+    async deleteByVps(vpsId) {
+      const result = await pool.query(
+        "DELETE FROM jobs WHERE vps_id = $1",
+        [vpsId],
+      );
+      return result.rowCount ?? 0;
+    },
     async append(input) {
       return this.create(input);
     },

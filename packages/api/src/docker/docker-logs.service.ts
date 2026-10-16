@@ -675,6 +675,12 @@ export class DockerLogsService implements OnModuleDestroy, OnApplicationShutdown
     }
   }
 
+  closeByVps(vpsId: string): void {
+    for (const entry of this.subscriptions.values()) {
+      if (entry.vpsId === vpsId) this.close(entry, "completed");
+    }
+  }
+
   private close(
     entry: RegistryEntry,
     reason: "completed" | "failed" | "expired",

@@ -237,7 +237,7 @@ export function ServerTable({
             </AlertDialogTitle>
             <AlertDialogDescription>
               {deleteTarget
-                ? `This permanently removes the server record for ${deleteTarget.username}@${deleteTarget.host}:${deleteTarget.port}. This cannot be undone.`
+                ? `This permanently removes ${deleteTarget.username}@${deleteTarget.host}:${deleteTarget.port}: the monitoring agent/service, stored data and backend SSH keys. Containers and apps on the host are left untouched. If SSH cleanup fails, the server is kept so you can retry. This cannot be undone.`
                 : ""}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -245,7 +245,9 @@ export function ServerTable({
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={busy}
               onClick={() => {
+                if (busy) return;
                 if (deleteTarget) onDelete(deleteTarget);
                 setDeleteTarget(null);
               }}

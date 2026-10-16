@@ -30,6 +30,8 @@ import { HostKeyPinService } from "../ssh/host-key-pin.service.js";
 import { applyAgentState, type VpsRecord } from "./vps.models.js";
 import { deriveHostStatus } from "../common/host-health.js";
 import { DockerMonitoringService } from "../docker/docker-monitoring.service.js";
+import type { VpsCleanup } from "../persistence/vps-cleanup.js";
+import { AgentLifecycleCoordinator } from "../agents/agent-lifecycle-coordinator.js";
 
 @Injectable()
 export class VpsService {
@@ -46,6 +48,8 @@ export class VpsService {
     private readonly agentUpgrader?: AgentUpgraderService,
     private readonly agentRestarter?: AgentRestartService,
     private readonly dockerMonitoring?: DockerMonitoringService,
+    private readonly removalCleanup?: VpsCleanup,
+    private readonly lifecycle?: AgentLifecycleCoordinator,
   ) {}
 
   async list() {
@@ -133,6 +137,11 @@ export class VpsService {
   }
 
   async update(id: string, body: unknown) {
+    const release = await this.lifecycle?.tryAcquire(id, "update");
+    try { return await this.updateUnlocked(id, body); } finally { release?.(); }
+  }
+
+  private async updateUnlocked(id: string, body: unknown) {
     this.assertNotDemo();
     const vps = await this.get(id);
 
@@ -263,18 +272,36 @@ export class VpsService {
 
   async delete(id: string) {
     this.assertNotDemo();
-    this.assertRemoteUserManaged(await this.get(id));
-    if (!(await this.store.delete(id))) throw new VpsNotFoundError();
+    const record = await this.store.get(id);
+    if (record) this.assertRemoteUserManaged(record);
+    if (!this.removalCleanup) throw new Error("Server removal cleanup is unavailable");
+    if (record) {
+      await this.agentUninstaller.removeForDelete(id, async () => {
+        await this.removalCleanup!.prepare(id);
+        await this.keys.removeKeyPair(id);
+        if (!(await this.store.delete(id))) throw new VpsNotFoundError();
+        await this.removalCleanup!.purge(id);
+      });
+    } else {
+      // A previous attempt may have deleted the row before local cleanup failed.
+      await this.keys.removeKeyPair(id);
+      await this.removalCleanup.purge(id);
+    }
     await this.audit.record({
       actor: "system",
       action: "vps.delete",
       resourceType: "vps",
       resourceId: id,
       result: "success",
-    });
+    }).catch(() => undefined);
   }
 
   async provisionKey(id: string, body: unknown) {
+    const release = await this.lifecycle?.tryAcquire(id, "provision");
+    try { return await this.provisionKeyUnlocked(id, body); } finally { release?.(); }
+  }
+
+  private async provisionKeyUnlocked(id: string, body: unknown) {
     this.assertNotDemo();
     const vps = await this.get(id);
     this.assertRemoteUserManaged(vps);

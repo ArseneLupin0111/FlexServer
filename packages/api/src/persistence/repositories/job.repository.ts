@@ -16,13 +16,16 @@ export type JobRepository = {
     id: string,
     patch: Partial<Omit<CommandJob, "id">>,
   ): Promise<CommandJob | undefined>;
+  /**
+   * Delete every job for a VPS. Returns the number removed.
+   * Mirrors Postgres `jobs.vps_id ... ON DELETE CASCADE`.
+   */
+  deleteByVps(vpsId: string): Promise<number>;
   append(
     job: Omit<CommandJob, "id"> & { id?: string },
     historyLimit?: number,
   ): Promise<CommandJob>;
 };
-
-/** Normalize jobs that may be missing progress/updatedAt from old files. */
 function normalizeJob(job: CommandJob): CommandJob {
   return {
     ...job,
@@ -125,9 +128,35 @@ export function createJsonJobRepository(
         return data.jobs[index];
       });
     },
-
+    async deleteByVps(vpsId) {
+      let removed = 0;
+      await withFileLock(filePath, async () => {
+        const data = await readJsonFile<JobFile>(filePath, { jobs: [] });
+        const kept = data.jobs.filter((j) => j.vpsId !== vpsId);
+        removed = data.jobs.length - kept.length;
+        if (removed > 0) {
+          data.jobs = kept;
+          await writeJsonFile(filePath, data);
+        }
+      });
+      return removed;
+    },
     async append(input, historyLimit) {
-      return this.create(input, historyLimit);
+      return withFileLock(filePath, async () => {
+        const data = await readJsonFile<JobFile>(filePath, { jobs: [] });
+        const job: CommandJob = {
+          ...input,
+          id: input.id ?? `job_${nanoid(12)}`,
+          progress: input.progress ?? 0,
+          updatedAt: new Date().toISOString(),
+        };
+        data.jobs.push(job);
+        if (historyLimit !== undefined) {
+          data.jobs = trimJobs(data.jobs, historyLimit);
+        }
+        await writeJsonFile(filePath, data);
+        return job;
+      });
     },
   };
 }

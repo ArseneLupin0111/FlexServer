@@ -156,6 +156,10 @@ export function createPostgresLocalUpgradeRepository(
   pool: Pool,
 ): LocalUpgradeRepository {
   return {
+    async deleteByVps(vpsId) {
+      await pool.query("DELETE FROM local_agent_upgrade_jobs WHERE vps_id=$1", [vpsId]);
+      await pool.query("DELETE FROM updater_heartbeats WHERE vps_id=$1", [vpsId]);
+    },
     async create(job) {
       try {
         await pool.query(

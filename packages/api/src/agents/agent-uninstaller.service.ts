@@ -73,6 +73,50 @@ export class AgentUninstallerService {
     private readonly lifecycle: AgentLifecycleCoordinator,
   ) {}
 
+  /** Keep the uninstall slot until local finalization has completed. */
+  async removeForDelete(
+    vpsId: string,
+    finalize: (vps: VpsRecord) => Promise<void>,
+  ): Promise<void> {
+    const release = await this.lifecycle.tryAcquire(vpsId, "uninstall");
+    try {
+      const vps = await this.vpsRepository.get(vpsId);
+      if (!vps) throw new VpsNotFoundError();
+      if (vps.kind === "local" || vps.managedBy === "system") {
+        throw new BadRequestException("Local host is managed by the built-in agent");
+      }
+      const state = await this.agentRepository.getState(vpsId);
+      if (state?.status === "installing") throw new DuplicateAgentInstallError();
+      const credentials = await this.agentRepository.listCredentialsByVps(vpsId);
+      const verifiedRemoved = state?.status === "not_installed" &&
+        credentials.every((credential) => credential.status === "revoked");
+      const untouched = !vps.keyProvisionedAt && !state && credentials.length === 0 &&
+        !(await this.agentRepository.getSystemInfo(vpsId));
+      if (!verifiedRemoved && !untouched) {
+        if (!vps.keyProvisionedAt) {
+          throw new BadRequestException("Server removal requires a provisioned SSH key to clean up the agent. Provision the key and retry.");
+        }
+        let privateKey: string;
+        try {
+          privateKey = await this.keys.readPrivateKey(vpsId);
+        } catch {
+          throw new BadRequestException("SSH private key is unavailable. Provision the key again before removing this server.");
+        }
+        await this.runRemoteRemoval(vps, privateKey);
+        for (const credential of credentials) {
+          if (!(await this.agentRepository.revokeCredential(credential.id))) {
+            throw new Error("Credential revocation failed");
+          }
+        }
+      }
+      // Durable checkpoint permits retry after key deletion or local cleanup failure.
+      await this.agentRepository.upsertState({ vpsId, status: "not_installed" });
+      await finalize(vps);
+    } finally {
+      release();
+    }
+  }
+
   /**
    * Start asynchronous agent removal for a VPS.
    *
@@ -160,7 +204,7 @@ export class AgentUninstallerService {
       // 7. Start async removal task
       this.jobRunner.start(dispatchedJob, async (ctx) => {
         try {
-          await this.runRemoteRemoval(vps, privateKey, ctx);
+          await this.runRemoteRemoval(vps, privateKey, (step, progress) => ctx.update(step, progress));
 
           // Remote removal succeeded → revoke all credentials for this VPS.
           const credentials =
@@ -274,12 +318,12 @@ export class AgentUninstallerService {
   private async runRemoteRemoval(
     vps: VpsRecord,
     privateKey: string,
-    ctx: JobTaskContext,
+    report?: (step: string, progress: number) => Promise<void>,
   ): Promise<void> {
     const auth = { privateKey };
 
     // Determine remote home directory (same approach as the installer).
-    await ctx.update("connecting", 5);
+    await report?.("connecting", 5);
     const homeResult = await this.ssh.execCommand(
       vps,
       "echo $HOME",
@@ -299,7 +343,7 @@ export class AgentUninstallerService {
     const qDir = shellQuote(remoteDir);
 
     // Stop and remove the managed service, ensuring process is stopped
-    await ctx.update("stopping", 30);
+    await report?.("stopping", 30);
     await this.ssh.execCommand(
       vps,
       buildStopAgentCommand(remoteDir, vps.id),
@@ -308,8 +352,8 @@ export class AgentUninstallerService {
     );
 
     // Remove only the agent directory.
-    await ctx.update("removing-files", 60);
-    await this.ssh.execCommand(vps, `rm -rf -- ${qDir}`, auth, 15_000);
+    await report?.("removing-files", 60);
+    await this.ssh.execCommand(vps, `if [ "$(id -u)" -eq 0 ]; then rm -rf -- ${qDir}; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then sudo -n rm -rf -- ${qDir}; else rm -rf -- ${qDir}; fi`, auth, 15_000);
 
     // Verify removal so credentials are only revoked after the agent is gone.
     const check = await this.ssh.execCommand(

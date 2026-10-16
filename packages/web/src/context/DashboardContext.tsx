@@ -918,10 +918,19 @@ export function DashboardProvider({
 
   async function handleDelete(vps: VpsRecord) {
     const label = vpsDisplayName(vps);
-    await runAction(`Deleting ${label}...`, async () => {
-      await deleteVps(vps.id);
-      setStatus({ message: `Deleted ${label}.`, kind: "success" });
-    });
+    const removed = await runAction(
+      `Removing ${label}... Cleaning up the monitoring agent, backend data and SSH keys (this can take a minute or two).`,
+      async () => {
+        await deleteVps(vps.id);
+        return true;
+      },
+    );
+    if (removed) {
+      setStatus({
+        message: `Removed ${label}. Monitoring agent, backend data and SSH keys removed where present. Containers and apps were left untouched.`,
+        kind: "success",
+      });
+    }
   }
 
   // ── Derived state ─────────────────────────────────────────────────

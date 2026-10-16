@@ -80,6 +80,7 @@ function applyPage(
 // ── Repository type ────────────────────────────────────────────────────
 
 export type MetricRepository = {
+  deleteByVps(vpsId: string): Promise<void>;
   /** Returns latest samples for each VPS (backward compat) */
   list(page?: PaginationParams): Promise<MetricSample[]>;
   /** Upserts latest + appends to bounded window */
@@ -103,6 +104,14 @@ export function createJsonMetricRepository(
   filePath = "data/metrics.json",
 ): MetricRepository {
   return {
+    async deleteByVps(vpsId) {
+      await withFileLock(filePath, async () => {
+        const data = await readMetricFile(filePath);
+        delete data.latest[vpsId];
+        delete data.windows[vpsId];
+        await writeJsonFile(filePath, data);
+      });
+    },
     async list(page) {
       const data = await readMetricFile(filePath);
       return applyPage(sortLatestDesc(Object.values(data.latest)), page);

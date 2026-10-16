@@ -30,13 +30,25 @@ export type AgentRepository = {
   /** Only synthesize local state while no real agent owns the heartbeat. */
   upsertSyntheticLocalState(state: AgentState): Promise<AgentState | undefined>;
   listStates(): Promise<AgentState[]>;
+  /** Delete persisted lifecycle state for a VPS. Returns true if anything was removed. */
+  deleteState(vpsId: string): Promise<boolean>;
+  /**
+   * Delete all credentials for a VPS. Returns the number removed.
+   * Removal (not revoke) mirrors Postgres `ON DELETE CASCADE`.
+   */
+  deleteCredentialsByVps(vpsId: string): Promise<number>;
 
   upsertSystemInfo(info: AgentSystemInfo): Promise<AgentSystemInfo>;
   getSystemInfo(vpsId: string): Promise<AgentSystemInfo | undefined>;
   listSystemInfo(): Promise<AgentSystemInfo[]>;
   /** Delete persisted system info for a VPS. Returns true if anything was removed. */
   deleteSystemInfo(vpsId: string): Promise<boolean>;
-
+  /**
+   * Delete every agent-scoped row for a VPS: credentials, system info, then
+   * lifecycle state last so a `not_installed` retry checkpoint survives until
+   * the terminal `store.delete` succeeds. Idempotent.
+   */
+  deleteVpsData(vpsId: string): Promise<void>;
 };
 
 // ── Storage shape ───────────────────────────────────────────────────────
@@ -156,6 +168,38 @@ export function createJsonAgentRepository(
       });
       return Object.values(data.states ?? {});
     },
+    async deleteState(vpsId) {
+      let deleted = false;
+      await readModifyWriteJsonFile<AgentFile>(
+        filePath,
+        { credentials: [], states: {} },
+        (data) => {
+          if (data.states[vpsId]) {
+            // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+            delete data.states[vpsId];
+            deleted = true;
+          }
+          return data;
+        },
+      );
+      return deleted;
+    },
+
+    async deleteCredentialsByVps(vpsId) {
+      let removed = 0;
+      await readModifyWriteJsonFile<AgentFile>(
+        filePath,
+        { credentials: [], states: {} },
+        (data) => {
+          const kept = data.credentials.filter((c) => c.vpsId !== vpsId);
+          removed = data.credentials.length - kept.length;
+          data.credentials = kept;
+          return data;
+        },
+      );
+      return removed;
+    },
+
 
     async upsertSystemInfo(info) {
       let stored = info;
@@ -212,6 +256,11 @@ export function createJsonAgentRepository(
         },
       );
       return deleted;
+    },
+    async deleteVpsData(vpsId) {
+      await this.deleteCredentialsByVps(vpsId);
+      await this.deleteSystemInfo(vpsId);
+      await this.deleteState(vpsId);
     },
   };
 }

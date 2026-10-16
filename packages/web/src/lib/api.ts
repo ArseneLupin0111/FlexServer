@@ -297,27 +297,33 @@ export type AuthStatus = {
   session?: AuthSession;
 };
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers);
-  if (options.body && !headers.has("Content-Type")) {
+type RequestOptions = RequestInit & { timeoutMs?: number };
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const { timeoutMs, ...fetchOptions } = options;
+  const headers = new Headers(fetchOptions.headers);
+  if (fetchOptions.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(
+    () => controller.abort(),
+    timeoutMs ?? REQUEST_TIMEOUT_MS,
+  );
 
   let response: Response;
   try {
     response = await fetch(path, {
-      ...options,
-      credentials: options.credentials || "same-origin",
+      ...fetchOptions,
+      credentials: fetchOptions.credentials || "same-origin",
       headers,
-      signal: options.signal || controller.signal,
+      signal: fetchOptions.signal || controller.signal,
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       throw new Error(
-        "Request timed out. Check backend connectivity and retry.",
+        "Request timed out. The operation may still be running — refresh before retrying.",
       );
     }
     throw error;
@@ -484,8 +490,13 @@ export function rotateAgent(id: string) {
   }>(`${vpsPath(id)}/rotate-agent`, { method: "POST" });
 }
 
+const DELETE_VPS_TIMEOUT_MS = 120_000;
+
 export function deleteVps(id: string) {
-  return request<null>(`${vpsPath(id)}`, { method: "DELETE" });
+  return request<null>(`${vpsPath(id)}`, {
+    method: "DELETE",
+    timeoutMs: DELETE_VPS_TIMEOUT_MS,
+  });
 }
 
 // ── Local agent updates (local hosts only; remote upgrades stay SSH) ─

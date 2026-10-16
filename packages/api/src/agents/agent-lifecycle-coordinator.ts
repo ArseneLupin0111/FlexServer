@@ -1,6 +1,6 @@
 import { ConflictException, Injectable } from "@nestjs/common";
 export type LifecycleOperation =
-  "install" | "uninstall" | "upgrade" | "restart" | "rotate";
+  "install" | "uninstall" | "upgrade" | "restart" | "rotate" | "update" | "provision";
 type Slot = {
   lifecycle?: LifecycleOperation;
   ingests: number;

@@ -18,6 +18,7 @@ export type LocalUpgradeListOptions = {
 };
 
 export type LocalUpgradeRepository = {
+  deleteByVps(vpsId: string): Promise<void>;
   /**
    * Insert a new job. Enforces the single-active-job-per-VPS rule and
    * idempotency-key uniqueness; violations throw
@@ -80,6 +81,14 @@ export function createJsonLocalUpgradeRepository(
   const fallback: LocalUpgradeFile = { jobs: [], updaterHeartbeats: {} };
 
   return {
+    async deleteByVps(vpsId) {
+      await withFileLock(filePath, async () => {
+        const data = await readJsonFile<LocalUpgradeFile>(filePath, fallback);
+        data.jobs = data.jobs.filter(job => job.vpsId !== vpsId);
+        if (data.updaterHeartbeats) delete data.updaterHeartbeats[vpsId];
+        await writeJsonFile(filePath, data);
+      });
+    },
     async create(job) {
       return withFileLock(filePath, async () => {
         const data = await readJsonFile<LocalUpgradeFile>(filePath, fallback);

@@ -86,6 +86,10 @@ export class TerminalSessionService implements OnApplicationShutdown {
     await this.registry.closeAll(reason);
   }
 
+  async closeByVps(vpsId: string): Promise<void> {
+    await this.registry.closeByVps(vpsId);
+  }
+
   async isWebTerminalEnabled(): Promise<boolean> {
     if (this.config.mode !== "local") {
       return false;

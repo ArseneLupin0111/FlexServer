@@ -881,4 +881,76 @@ describe("monitoring SSE dockerMetrics contract", () => {
       timer.mockRestore();
     }
   });
+
+  it("scoped local stream ends and releases timers and activity subscriptions when the host disappears", async () => {
+    // Arrange: capture the scoped loop + keepalive intervals so teardown is
+    // observable instead of inferred from output.
+    const callbacks: Array<() => unknown> = [];
+    const setTimer = vi
+      .spyOn(globalThis, "setInterval")
+      .mockImplementation(((cb: () => unknown) => {
+        callbacks.push(cb);
+        return callbacks.length as never;
+      }) as never);
+    const clearTimer = vi.spyOn(globalThis, "clearInterval");
+    try {
+      const dockerAt = new Date().toISOString();
+      const fixture = overviewFixture([dockerSnapshot("vps-a", dockerAt)]);
+      const dashboardService = { overview: vi.fn(async () => fixture) };
+      const metricService = {
+        list: vi.fn(async (vpsId?: string) => {
+          if (vpsId) return fixture.metrics.filter((m) => m.vpsId === vpsId);
+          return [...fixture.metrics];
+        }),
+      };
+      const jobUnsubscribe = vi.fn();
+      const jobActivity = { subscribe: vi.fn(() => jobUnsubscribe) };
+      const dockerUnsubscribe = vi.fn();
+      const dockerActivity = { subscribe: vi.fn(() => dockerUnsubscribe) };
+      const service = new MonitoringService(
+        localConfig,
+        dashboardService as never,
+        metricService as never,
+        {} as never,
+        {} as never,
+        jobActivity as never,
+        dockerActivity as never,
+      );
+      const res = createFakeSseResponse();
+
+      // Act: start an active scoped stream, prove one healthy tick, then delete the host.
+      await service.streamForVps(res, "vps-a");
+      expect(callbacks.length).toBe(2);
+      expect(jobActivity.subscribe).toHaveBeenCalledTimes(1);
+      expect(dockerActivity.subscribe).toHaveBeenCalledTimes(1);
+      const tick = callbacks.find((cb) => cb.constructor.name === "AsyncFunction") ?? callbacks[0]!;
+      await tick();
+      const healthyUpdates = parseSse(res.text()).filter((e) => e.envelope.type === "metrics.updated");
+      expect(healthyUpdates.length).toBeGreaterThan(0);
+      expect(res.end).not.toHaveBeenCalled();
+
+      fixture.servers = fixture.servers.filter((s) => s.id !== "vps-a");
+      await tick();
+
+      // Assert: the vanished host ends the stream and clears its loop interval
+      // without emitting another scoped update.
+      expect(res.end).toHaveBeenCalledTimes(1);
+      expect(clearTimer).toHaveBeenCalledWith(1);
+      const updatesAfterDelete = parseSse(res.text()).filter((e) => e.envelope.type === "metrics.updated");
+      expect(updatesAfterDelete).toHaveLength(healthyUpdates.length);
+
+      // Assert: the close/finish handlers Express fires release activity
+      // subscriptions and the keepalive interval.
+      const wireCalls = vi.mocked(res.on).mock.calls.concat(vi.mocked(res.once).mock.calls);
+      const endHandlers = wireCalls.filter((call) => call[0] === "close" || call[0] === "finish");
+      expect(endHandlers).toHaveLength(4);
+      for (const call of endHandlers) call[1]();
+      expect(jobUnsubscribe).toHaveBeenCalledTimes(1);
+      expect(dockerUnsubscribe).toHaveBeenCalledTimes(1);
+      expect(clearTimer).toHaveBeenCalledWith(2);
+    } finally {
+      setTimer.mockRestore();
+      clearTimer.mockRestore();
+    }
+  });
 });

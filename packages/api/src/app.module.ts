@@ -6,6 +6,7 @@ import {
   type OnApplicationShutdown,
 } from "@nestjs/common";
 import { join } from "node:path";
+import { createVpsCleanup } from "./persistence/vps-cleanup.js";
 import type { Pool } from "pg";
 import { AuditService } from "./audit/audit.service.js";
 import { loadAppConfig, type AppConfig } from "./config/app-config.js";
@@ -372,6 +373,10 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           AgentUpgraderService,
            AgentRestartService,
            DockerMonitoringService,
+          JOB_REPOSITORY, METRIC_REPOSITORY, DOCKER_MONITORING_REPOSITORY,
+          DOCKER_MANAGEMENT_REPOSITORY, LOCAL_UPGRADE_REPOSITORY,
+          HOST_KEY_PIN_REPOSITORY, TerminalSessionService, DockerLogsService,
+          AgentLifecycleCoordinator,
          ],
         useFactory: (
           store: VpsRepository,
@@ -386,6 +391,10 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           upgrader: AgentUpgraderService,
            restarter: AgentRestartService,
            dockerMonitoringService: DockerMonitoringService,
+          jobs: JobRepository, metrics: MetricRepository, docker: DockerMonitoringRepository,
+          management: DockerManagementRepository, upgrades: LocalUpgradeRepository,
+          pins: HostKeyPinRepository, terminal: TerminalSessionService, logs: DockerLogsService,
+          lifecycle: AgentLifecycleCoordinator,
          ) =>
           new VpsService(
             store,
@@ -400,6 +409,8 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
              upgrader,
              restarter,
              dockerMonitoringService,
+             createVpsCleanup(agentRepo, jobs, metrics, docker, management, upgrades, pins, terminal, logs),
+             lifecycle,
            ),
       },
     ],

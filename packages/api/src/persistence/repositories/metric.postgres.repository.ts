@@ -51,6 +51,10 @@ export function createPostgresMetricRepository(
   }
 
   return {
+    async deleteByVps(vpsId) {
+      await pool.query("DELETE FROM metric_samples WHERE vps_id=$1", [vpsId]);
+      await pool.query("DELETE FROM metric_latest WHERE vps_id=$1", [vpsId]);
+    },
     async list(page) {
       return listLatest(page);
     },

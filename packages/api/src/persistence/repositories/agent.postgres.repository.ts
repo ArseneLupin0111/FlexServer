@@ -58,6 +58,19 @@ export function createPostgresAgentRepository(
   }
 
   return {
+    async deleteState(vpsId) {
+      const result = await pool.query("DELETE FROM agent_states WHERE vps_id=$1", [vpsId]);
+      return (result.rowCount ?? 0) > 0;
+    },
+    async deleteCredentialsByVps(vpsId) {
+      const result = await pool.query("DELETE FROM agent_credentials WHERE vps_id=$1", [vpsId]);
+      return result.rowCount ?? 0;
+    },
+    async deleteVpsData(vpsId) {
+      await pool.query("DELETE FROM agent_credentials WHERE vps_id=$1", [vpsId]);
+      await pool.query("DELETE FROM agent_system_info WHERE vps_id=$1", [vpsId]);
+      await pool.query("DELETE FROM agent_states WHERE vps_id=$1", [vpsId]);
+    },
     async createCredential(input) {
       const credential: AgentCredential = {
         ...input,

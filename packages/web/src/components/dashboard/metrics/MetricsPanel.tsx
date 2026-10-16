@@ -756,7 +756,7 @@ function CanonicalDockerWorkloads({
                     >
                       {container.image}
                     </span>
-                    <span className="capitalize">{container.state}</span>
+                    <span data-container-state={container.state} className="docker-container-state capitalize">{container.state}</span>
                     <span className="tnum font-medium text-text">
                       {container.cpuPercent.toFixed(1)}%
                     </span>

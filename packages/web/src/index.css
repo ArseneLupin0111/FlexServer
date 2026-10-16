@@ -130,6 +130,12 @@
   -webkit-backdrop-filter: none !important;
 }
 
+/* Container lifecycle states share colors across inventory and detail views. */
+.docker-container-state { color: hsl(var(--dim)); }
+.docker-container-state[data-container-state="running" i] { color: hsl(var(--signal)); }
+.docker-container-state:is([data-container-state="created" i], [data-container-state="exited" i], [data-container-state="stopped" i], [data-container-state="paused" i], [data-container-state="restarting" i]) { color: hsl(var(--warn)); }
+.docker-container-state:is([data-container-state="dead" i], [data-container-state="unhealthy" i], [data-container-state="failed" i]) { color: hsl(var(--crit)); }
+
 /* Reduced motion strictly scoped to dashboard without overriding public landing or color transitions */
 @media (prefers-reduced-motion: reduce) {
   .dashboard-root,

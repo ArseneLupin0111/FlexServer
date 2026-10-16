@@ -704,7 +704,7 @@ export function DockerContainerManagementPanel({
                     </p>
                     <p className="mt-1 truncate text-[11px] text-dim" title={selected.image}>
                       key {selected.containerKey} · {selected.image} ·{" "}
-                      {selected.state}
+                      <span data-container-state={selected.state} className="docker-container-state">{selected.state}</span>
                     </p>
                   </>
                 ) : (
@@ -761,7 +761,7 @@ export function DockerContainerManagementPanel({
             {selected ? (
               <p className="mt-1 truncate text-[11px] text-dim">
                 Target: {selected.name} · key {selected.containerKey} ·{" "}
-                {selected.image} · {selected.state}
+                {selected.image} · <span data-container-state={selected.state} className="docker-container-state">{selected.state}</span>
               </p>
             ) : (
               <p className="mt-1 text-[11px] text-dim">

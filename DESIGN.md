@@ -43,6 +43,8 @@ Retain existing API-backed actions, dialogs, authentication, capability restrict
 
 Docker prioritizes a current-container list and an inline workspace: snapshot resources, confirmed controls, realtime logs, and expandable container history. The list stacks above the workspace on narrow screens. Selection uses the full agent-instance/container-key pair; stale snapshot rows never become actionable targets. Snapshot/monitoring configuration, host history, events, alerts, and storage stay in collapsed disclosures. Preserve dedicated container deep links and capability restrictions; keep explanatory copy out of the primary work area.
 
+Container lifecycle text uses shared semantic colors: running → signal; created/exited/stopped/paused/restarting → warning; dead/unhealthy/failed → critical; unknown → dim. Preserve the written state as the non-color cue.
+
 Keep keyboard focus visible and dialogs dismissible. Tables may scroll within their containers on narrow screens. Pulse indicators respect reduced motion; existing overlay transitions remain in the shared primitives.
 
 - Host health is independent of job outcomes and container counts. Recent failed jobs produce a notice linking to Jobs; non-running containers have a neutral count and Docker link, not an inferred failure. Stale Docker counts retain an explicit snapshot label.

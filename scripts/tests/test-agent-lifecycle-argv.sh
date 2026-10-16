@@ -26,6 +26,10 @@
 #        - Corrupted non-numeric PID file yields "invalid".
 #        - Multiple matching processes yields "ambiguous".
 #        - Single valid matching process with matching PID file yields "owned:<pid>:<starttime>".
+#   5.6 Live regression (Linux only, skipped elsewhere): real background process
+#      with emulated active unit (unit_active=1/MainPID) — stale pidfile with
+#      an active unit whose MainPID is the live process yields
+#      "owned:<pid>:<starttime>"; a foreign MainPID fails closed as "mismatch".
 #
 # Safe to run anywhere: uses a temporary directory for mock proc/state and never mutates host processes.
 
@@ -306,6 +310,8 @@ run_inspect_emulation() {
   local _rk_path="$6"
   local _uid_val="$7"
   local _proc_root="$8"
+  local _unit_active="${9:-0}"
+  local _mainpid="${10:-}"
 
   local _matches=0
   local _owned=''
@@ -333,11 +339,12 @@ run_inspect_emulation() {
     return 0
   fi
 
-  if [ ! -f "$_pf" ]; then
-    if [ "$_matches" -eq 0 ]; then
-      echo "none"
+  if [ "$_unit_active" = "1" ]; then
+    case "$_mainpid" in ''|0*|*[!0-9]*) echo "mismatch"; return 0;; esac
+    if [ "$_matches" = "1" ] && [ "$_owned" = "$_mainpid" ]; then
+      printf 'owned:%s:%s\n' "$_mainpid" "$_ost"
     else
-      echo "ambiguous"
+      echo "mismatch"
     fi
     return 0
   fi
@@ -427,6 +434,63 @@ if [ "$OUT" = "ambiguous" ]; then
 else
   fail "Inspection expected ambiguous for multiple matches, got: $OUT"
 fi
+
+# 5.6 Live regression (Linux only): real process plus active unit MainPID.
+# Simulates systemd auto-restart leaving a stale pidfile: the pidfile holds a
+# dead PID while the deterministic unit's MainPID is the live process.
+if [ -r /proc/self/stat ] && [ "$(uname -s 2>/dev/null || echo unknown)" = "Linux" ] && command -v yes >/dev/null 2>&1; then
+  LIVE_DIR="$TMP_BASE/live"
+  mkdir -p "$LIVE_DIR"
+  LIVE_DIR="$(readlink -f "$LIVE_DIR")"
+  LIVE_BIN="$LIVE_DIR/vps-agent"
+  LIVE_CFG="$LIVE_DIR/config.json"
+  LIVE_STATE="$LIVE_DIR/state.json"
+  LIVE_ID="$LIVE_DIR/docker-identity.json"
+  LIVE_RK="$LIVE_DIR/runtime-keys.json"
+  LIVE_PIDFILE="$LIVE_DIR/vps-agent.pid"
+  cp "$(command -v yes)" "$LIVE_BIN"
+  chmod 0755 "$LIVE_BIN"
+  echo '{"test":true}' > "$LIVE_CFG"
+  echo '{"state":1}' > "$LIVE_STATE"
+  echo '{"id":"dock-1"}' > "$LIVE_ID"
+  echo '{"keys":"rk-1"}' > "$LIVE_RK"
+  "$LIVE_BIN" -config "$LIVE_CFG" >/dev/null 2>&1 &
+  LIVE_PID="$!"
+  echo "999999" > "$LIVE_PIDFILE"
+  sleep 0.2
+  LIVE_OUT="$(run_inspect_emulation "$LIVE_PIDFILE" "$LIVE_BIN" "$LIVE_CFG" "$LIVE_STATE" "$LIVE_ID" "$LIVE_RK" "$MOCK_UID" "/proc" 1 "$LIVE_PID")"
+  case "$LIVE_OUT" in
+    "owned:$LIVE_PID:"*) pass "Live process with active unit MainPID overrides stale pidfile ($LIVE_OUT)" ;;
+    *) fail "Live stale-pidfile regression expected owned:$LIVE_PID:<starttime>, got: $LIVE_OUT" ;;
+  esac
+  FOREIGN_OUT="$(run_inspect_emulation "$LIVE_PIDFILE" "$LIVE_BIN" "$LIVE_CFG" "$LIVE_STATE" "$LIVE_ID" "$LIVE_RK" "$MOCK_UID" "/proc" 1 "1")"
+  if [ "$FOREIGN_OUT" = "mismatch" ]; then
+    pass "Live foreign MainPID fails closed as mismatch"
+  else
+    fail "Live foreign MainPID expected mismatch, got: $FOREIGN_OUT"
+  fi
+  # Fake systemctl contract: the generated inspect command queries
+  # `systemctl is-active --quiet "$_unit"` then
+  # `systemctl show -p MainPID --value "$_unit"`.
+  FAKEBIN="$TMP_BASE/fakebin"
+  mkdir -p "$FAKEBIN"
+  cat > "$FAKEBIN/systemctl" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "is-active" ]; then exit \$FAKE_SYSTEMCTL_ACTIVE; fi
+if [ "\$1" = "show" ]; then echo "\$FAKE_MAINPID"; exit 0; fi
+exit 1
+EOF
+  chmod 0755 "$FAKEBIN/systemctl"
+  FAKE_MAINPID="$LIVE_PID" FAKE_SYSTEMCTL_ACTIVE=0 PATH="$FAKEBIN:$PATH" \
+    bash -c 'if systemctl is-active --quiet "dummy.service" 2>/dev/null; then _a=1; _m=$(systemctl show -p MainPID --value "dummy.service" 2>/dev/null || true); fi; test "${_a:-0}" = "1" && test "$_m" = "'"$LIVE_PID"'"' \
+    && pass "Fake systemctl reports active unit MainPID matching live process" \
+    || fail "Fake systemctl contract broke for active unit MainPID"
+  kill "$LIVE_PID" 2>/dev/null || true
+  wait "$LIVE_PID" 2>/dev/null || true
+else
+  pass "Live stale-pidfile regression skipped (non-Linux or missing yes/proc)"
+fi
+
 
 echo "All tests finished: $PASS passed, $FAIL failed."
 test "$FAIL" -eq 0

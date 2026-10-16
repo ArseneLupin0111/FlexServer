@@ -42,6 +42,27 @@ describe("agent-lifecycle-argv behavioral tests", () => {
     expect(classifyManagedProcessInspection(1, { pid: "999", starttime: "456" }, { exists: true, content: "123" }, () => true)).toBe("mismatch");
   });
 
+  it("prefers authoritative MainPID over stale pidfiles and fails closed", () => {
+    // Systemd auto-restart: pidfile holds stale 3818287, live MainPID is 3818523.
+    expect(classifyManagedProcessInspection(1, { pid: "3818523", starttime: "9001" }, { exists: true, content: "3818287" }, () => false, { active: true, mainPid: "3818523" })).toBe("owned:3818523:9001");
+    // Foreign MainPID never falls back to the pidfile.
+    expect(classifyManagedProcessInspection(1, { pid: "3818523", starttime: "9001" }, { exists: true, content: "3818523" }, () => false, { active: true, mainPid: "9999999" })).toBe("mismatch");
+    // Zero exact matches with an active unit fails closed, never none.
+    expect(classifyManagedProcessInspection(0, null, { exists: true, content: "3818287" }, () => false, { active: true, mainPid: "3818523" })).toBe("mismatch");
+    expect(classifyManagedProcessInspection(0, null, { exists: false }, () => false, { active: true, mainPid: "3818523" })).toBe("mismatch");
+    // Missing, zero, or non-numeric MainPID on an active unit fails closed.
+    expect(classifyManagedProcessInspection(1, { pid: "3818523", starttime: "9001" }, { exists: true, content: "3818523" }, () => false, { active: true, mainPid: "" })).toBe("mismatch");
+    expect(classifyManagedProcessInspection(1, { pid: "3818523", starttime: "9001" }, { exists: true, content: "3818523" }, () => false, { active: true })).toBe("mismatch");
+    expect(classifyManagedProcessInspection(1, { pid: "3818523", starttime: "9001" }, { exists: true, content: "3818523" }, () => false, { active: true, mainPid: "0" })).toBe("mismatch");
+    expect(classifyManagedProcessInspection(1, { pid: "3818523", starttime: "9001" }, { exists: true, content: "3818523" }, () => false, { active: true, mainPid: "abc" })).toBe("mismatch");
+    // Ambiguity still wins even with an authoritative MainPID.
+    expect(classifyManagedProcessInspection(2, null, { exists: true, content: "3818523" }, () => false, { active: true, mainPid: "3818523" })).toBe("ambiguous");
+    // Inactive or absent unit retains the legacy pidfile policy.
+    expect(classifyManagedProcessInspection(1, { pid: "3818523", starttime: "9001" }, { exists: true, content: "3818287" }, () => false, { active: false, mainPid: "3818523" })).toBe("mismatch");
+    expect(classifyManagedProcessInspection(0, null, { exists: true, content: "3818287" }, () => false, { active: false })).toBe("none");
+    expect(classifyManagedProcessInspection(0, null, { exists: true, content: "3818287" }, () => false, null)).toBe("none");
+  });
+
   it("enforces complete required context on buildTransactionalStartCommand", () => {
     expect(() =>
       buildTransactionalStartCommand(binary, config, pidFile, {

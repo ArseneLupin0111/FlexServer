@@ -269,6 +269,7 @@ export class AgentUpgraderService {
         binary,
         config,
         pidFile,
+        { vpsId: vps.id },
       );
       const ownership = (
         await this.ssh.execCommand(vps, inspect, auth, 10_000)
@@ -362,7 +363,9 @@ export class AgentUpgraderService {
   ) {
     const result = await this.ssh.execCommand(
       vps,
-      buildManagedProcessInspectCommand(binary, config, pidFile),
+      buildManagedProcessInspectCommand(binary, config, pidFile, {
+        vpsId: vps.id,
+      }),
       auth,
       10_000,
     );

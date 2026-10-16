@@ -196,14 +196,32 @@ function formatProcessContext(
  * Pure mirror of the tail classification in {@link buildManagedProcessInspectCommand}.
  * Exists so the stale-PID policy is unit-testable without a live /proc.
  * Shell remains the source of truth on hosts; this must stay in sync with it.
+ *
+ * When the deterministic per-VPS unit is active (`unit.active`), that unit is
+ * authoritative and the legacy PID file is ignored. A valid MainPID must equal
+ * the single exact exe/argv match to report owned; any foreign, missing, or
+ * invalid MainPID fails closed as mismatch (never falls back to the pidfile).
+ * This recovers from any supervisor restart that leaves
+ * `~/.vps-manager-agent/vps-agent.pid` stale: the live MainPID still reports
+ * owned when it is the single exact match. When no active unit is available
+ * the legacy PID file policy applies.
  */
 export function classifyManagedProcessInspection(
   matches: number,
   owned: { pid: string; starttime: string } | null,
   pidFile: { exists: boolean; content?: string },
   pidAlive: (pid: string) => boolean,
+  unit?: { active: boolean; mainPid?: string } | null,
 ): string {
   if (matches > 1) return "ambiguous";
+  if (unit?.active) {
+    const mainPid = unit.mainPid ?? "";
+    if (/^[1-9][0-9]*$/.test(mainPid)) {
+      if (owned && owned.pid === mainPid) return `owned:${owned.pid}:${owned.starttime}`;
+      return "mismatch";
+    }
+    return "mismatch";
+  }
   if (!pidFile.exists) return matches === 0 ? "none" : "ambiguous";
   const pid = pidFile.content ?? "";
   if (pid === "" || /[^0-9]/.test(pid)) return "invalid";
@@ -224,10 +242,20 @@ export function buildManagedProcessInspectCommand(
   if (options?.vpsId) assertNoNewlines(options.vpsId, "vpsId");
   const p = shellQuote(pidFile);
   const { vars } = formatProcessContext(binary, config, options);
+  const vpsId = options?.vpsId && options.vpsId.length > 0 ? options.vpsId : null;
+  const unitVars = vpsId
+    ? `_unit=${shellQuote(getAgentServiceName(vpsId))}; if systemctl is-active --quiet "$_unit" 2>/dev/null; then _unit_active=1; _mainpid=$(systemctl show -p MainPID --value "$_unit" 2>/dev/null || true); fi;`
+    : `_unit='';`;
   return [
-    `_pf=${p}; ${vars} _matches=0; _owned=''; _ost=''; ${REMOTE_ST_HELPER}`,
+    `_pf=${p}; ${vars} _matches=0; _owned=''; _ost=''; _mainpid=''; _unit_active=0; ${REMOTE_ST_HELPER} ${unitVars}`,
     `for _d in /proc/[0-9]*; do _pid=\${_d##*/}; test "$(readlink -f /proc/$_pid/exe 2>/dev/null)" = "$_bin" || continue; _cwd=$(readlink -f "/proc/$_pid/cwd" 2>/dev/null || true); ${EXACT_ARGV} || continue; _st_time=$(st "$_pid"); test -n "$_st_time" || continue; _matches=$((_matches+1)); _owned=$_pid; _ost=$_st_time; done;`,
-    `test "$_matches" -le 1 || { echo ambiguous; exit 0; }; test -f "$_pf" || { test "$_matches" = 0 && echo none || echo ambiguous; exit 0; }; _pid=$(cat "$_pf" 2>/dev/null); case "$_pid" in (''|*[!0-9]*) echo invalid; exit 0;; esac; if test "$_matches" = 0; then test -d "/proc/$_pid" && echo mismatch || echo none; exit 0; fi; test "$_pid" = "$_owned" || { echo mismatch; exit 0; }; printf 'owned:%s:%s\\n' "$_pid" "$_ost"`,
+    `test "$_matches" -le 1 || { echo ambiguous; exit 0; };`,
+    `if [ "$_unit_active" = "1" ]; then`,
+    `  case "$_mainpid" in ''|0*|*[!0-9]*) echo mismatch; exit 0;; esac;`,
+    `  test "$_matches" = "1" && test "$_owned" = "$_mainpid" || { echo mismatch; exit 0; };`,
+    `  printf 'owned:%s:%s\\n' "$_mainpid" "$_ost"; exit 0;`,
+    `fi;`,
+    `test -f "$_pf" || { test "$_matches" = 0 && echo none || echo ambiguous; exit 0; }; _pid=$(cat "$_pf" 2>/dev/null); case "$_pid" in (''|*[!0-9]*) echo invalid; exit 0;; esac; if test "$_matches" = 0; then test -d "/proc/$_pid" && echo mismatch || echo none; exit 0; fi; test "$_pid" = "$_owned" || { echo mismatch; exit 0; }; printf 'owned:%s:%s\\n' "$_pid" "$_ost"`,
   ].join(" ");
 }
 

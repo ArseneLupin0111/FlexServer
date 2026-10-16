@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased — systemd-aware managed process ownership
+
+- Make restart/upgrade inspection systemd-aware: when the deterministic per-VPS unit is active, its `MainPID` is authoritative and the legacy `vps-agent.pid` file is ignored, recovering from supervisor restarts that leave a stale pidfile. Exact exe/cwd/argv, UID, and identity matching are unchanged; foreign, missing, or invalid `MainPID` fails closed as `mismatch`, and ambiguity still reports `ambiguous`. With no active unit the legacy pidfile policy applies unchanged.
+- Stage and checksum remote reinstall binaries/configs before stopping the managed service, then atomically replace them; never SFTP-write a running executable (`ETXTBSY`). Keep rollback copies until job completion, restore the prior installation after cutover failure, and release only an acquired lifecycle lock.
+- Azure production smoke: dashboard restart and reinstall service jobs succeeded on 2026-10-16; fresh metric ingest followed reinstall and the managed unit MainPID matched its PID file. This verifies remote SSH lifecycle recovery, not the separate local-updater rollout gate.
+
 ## Unreleased — CI rotation protocol prerequisites
 
 - Build the native Go local-agent rotation client before Node tests in `Verify checks`, so clean Linux runners exercise the Unix-socket rotation tests with the required executable instead of failing with an unconfigured helper.

@@ -199,7 +199,9 @@ export class AgentRestartService {
       const inspect = (
         await exec(
           vps,
-          buildRestartInspectCommand(binary, config, pidFile),
+          buildRestartInspectCommand(binary, config, pidFile, {
+            vpsId: vps.id,
+          }),
           auth,
           10_000,
         )

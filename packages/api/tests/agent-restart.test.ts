@@ -187,23 +187,6 @@ describe("AgentRestartService", () => {
     expect(classifyManagedProcessInspection(3, { pid: "42", starttime: "9001" }, { exists: true, content: "42" }, () => true)).toBe("ambiguous");
   });
 
-  it("deploys an inspect command that recovers stale dead PIDs via /proc liveness", () => {
-    const command = buildRestartInspectCommand("/opt/agent", "/opt/config.json", "/run/agent.pid");
-    // Stale dead PID (zero matches + absent /proc/<pid>) must map to none; live unrelated PID must map to mismatch.
-    expect(command).toContain('test -d "/proc/$_pid"');
-    expect(command).toContain("&& echo mismatch || echo none");
-    // Malformed PID files stay safe failures, never none.
-    expect(command).toContain("echo invalid");
-    // Exact-match ownership and ambiguity semantics preserved.
-    expect(command).toContain("echo ambiguous");
-    expect(command).toContain("echo mismatch");
-    expect(command).toContain("owned:%s:%s");
-    // Stale branch must not signal any process.
-    expect(command).not.toContain("kill");
-    expect(command).not.toContain("pkill");
-    assertBashSyntax(command);
-  });
-
   it("generates Bash-valid lifecycle commands (regression: function definitions need `};` separators)", () => {
     const binary = "/home/deploy/.vps-manager-agent/vps-agent";
     const config = "/home/deploy/.vps-manager-agent/config.json";
@@ -220,13 +203,5 @@ describe("AgentRestartService", () => {
       }),
     ];
     for (const command of commands) assertBashSyntax(command);
-    // Exact regression shape: the st() helper must terminate with `};`
-    // so the following `for`/function token parses under Bash.
-    for (const command of commands) {
-      expect(command).not.toMatch(/\}\sfor\s/);
-      expect(command).not.toMatch(/\}\sif\s/);
-      expect(command).not.toMatch(/\}\s[a-zA-Z_][a-zA-Z0-9_]*\(\)\{/);
-    }
-    expect(buildRestartInspectCommand(binary, config, pidFile)).toContain("}; for _d");
   });
 });

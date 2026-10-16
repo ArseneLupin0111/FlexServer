@@ -1,4 +1,5 @@
-import { BadRequestException, Inject, Injectable } from "@nestjs/common";
+import { BadRequestException, ConflictException, Inject, Injectable } from "@nestjs/common";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AppConfig } from "../config/app-config.js";
@@ -18,7 +19,12 @@ import { JobRunnerService } from "../jobs/job-runner.service.js";
 import { JobService } from "../jobs/job.service.js";
 import { AgentLifecycleCoordinator } from "./agent-lifecycle-coordinator.js";
 import {
+  AGENT_LIFECYCLE_LOCK,
   buildDockerStateProvisionCommand,
+  buildLifecycleLockAcquireCommand,
+  buildLifecycleLockReleaseCommand,
+  buildManagedProcessInspectCommand,
+  buildManagedProcessStopCommand,
   buildTransactionalStartCommand,
 } from "./agent-lifecycle-remote.js";
 import { resolveAgentBackendUrl } from "./agent-backend-url.js";
@@ -34,6 +40,24 @@ import {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function validInstallHome(value: string): boolean {
+  return (
+    value.startsWith("/") &&
+    value !== "/" &&
+    !/[\r\n\0]/.test(value) &&
+    value
+      .split("/")
+      .slice(1)
+      .every((part) => part.length > 0 && part !== "." && part !== "..")
+  );
+}
+
+function stageName(kind: "binary" | "config", nonce: string): string {
+  return kind === "binary"
+    ? `vps-agent.stage-${nonce}`
+    : `config.stage-${nonce}.json`;
 }
 
 /**
@@ -170,6 +194,21 @@ export class AgentInstallerService {
 
       // 10. Start async install task
       this.jobRunner.start(job, async (ctx) => {
+        const nonce = randomBytes(12).toString("hex");
+        let swapped = false;
+        let remoteLock = "";
+        let lockAcquired = false;
+        let hadBinary = false;
+        let hadConfig = false;
+        let stagedBinary = "";
+        let stagedConfig = "";
+        let backupBinary = "";
+        let backupConfig = "";
+        let liveDir = "";
+        let liveBinary = "";
+        let liveConfig = "";
+        let livePidFile = "";
+        let liveHome = "";
         try {
           await ctx.update("connecting", 5);
 
@@ -181,26 +220,65 @@ export class AgentInstallerService {
             10_000,
           );
           const homeDir = homeResult.stdout.trim();
-          if (!homeDir) {
+          if (!homeDir || !validInstallHome(homeDir)) {
             throw new Error("Could not determine remote home directory");
           }
-          const remoteDir = `${homeDir}/.vps-manager-agent`;
+          liveDir = `${homeDir}/.vps-manager-agent`;
+          liveBinary = `${liveDir}/vps-agent`;
+          liveConfig = `${liveDir}/config.json`;
+          livePidFile = `${liveDir}/vps-agent.pid`;
+          liveHome = homeDir;
+          const remoteDir = liveDir;
+          const remoteBinary = liveBinary;
+          const remoteConfig = liveConfig;
+          const pidFile = livePidFile;
+          remoteLock = `${remoteDir}/${AGENT_LIFECYCLE_LOCK}`;
+          stagedBinary = `${remoteDir}/${stageName("binary", nonce)}`;
+          stagedConfig = `${remoteDir}/${stageName("config", nonce)}`;
+          backupBinary = `${remoteDir}/vps-agent.backup-${nonce}`;
+          backupConfig = `${remoteDir}/config.backup-${nonce}.json`;
 
           await ctx.update("creating-directory", 10);
           await this.ssh.makeDirectory(vps, remoteDir, 0o700, sshAuth);
 
+          // Serialize against concurrent lifecycle ops on the host.
+          const lockResult = await this.ssh.execCommand(
+            vps,
+            buildLifecycleLockAcquireCommand(remoteLock),
+            sshAuth,
+            10_000,
+          );
+          if (lockResult.stdout.trim() !== "acquired") {
+            throw new ConflictException(
+              "Agent lifecycle lock is already held",
+            );
+          }
+          lockAcquired = true;
+
+          // Stage binary to a temp path — never overwrite the live executable
+          // (Linux returns ETXTBSY/text-file-busy on open-for-write of a
+          // running image). Staged path is removed on every failure path.
           await ctx.update("uploading-binary", 30);
           const binaryContent = readFileSync(binaryPath);
-          const remoteBinary = `${remoteDir}/vps-agent`;
+          const checksum = createHash("sha256")
+            .update(binaryContent)
+            .digest("hex");
           await this.ssh.uploadFile(
             vps,
-            remoteBinary,
+            stagedBinary,
             binaryContent,
             0o700,
             sshAuth,
           );
+          await this.ssh.execCommand(
+            vps,
+            `chmod 700 -- ${shellQuote(stagedBinary)} && test "$(sha256sum -- ${shellQuote(stagedBinary)} | cut -d' ' -f1)" = ${shellQuote(checksum)}`,
+            sshAuth,
+            15_000,
+          );
 
-          // Build agent config — token embedded in config on VPS only
+          // Stage config with the new pending token — live config.json keeps
+          // serving the running agent until cutover.
           const agentConfig = {
             backendUrl,
             vpsId,
@@ -212,38 +290,104 @@ export class AgentInstallerService {
             JSON.stringify(agentConfig, null, 2) + "\n",
             "utf8",
           );
-          const remoteConfig = `${remoteDir}/config.json`;
 
           await ctx.update("uploading-config", 50);
           await this.ssh.uploadFile(
             vps,
-            remoteConfig,
+            stagedConfig,
             configContent,
             0o600,
             sshAuth,
           );
 
-          // Provision Docker identity/runtime state before any agent run.
-          // Fail-closed: a non-zero exit rejects here, the install job fails,
-          // and neither -once nor the background start is reached. An existing
-          // identity is preserved (state.Provision is idempotent).
+          // Pre-cutover preflight with the STAGED binary. Fail-closed: any
+          // non-zero exit rejects here while the live agent keeps running
+          // untouched on the old binary + old config + old credential.
           await ctx.update("provisioning-docker-state", 60);
           await this.ssh.execCommand(
             vps,
-            buildDockerStateProvisionCommand(remoteBinary, remoteDir),
+            buildDockerStateProvisionCommand(stagedBinary, remoteDir),
             sshAuth,
             30_000,
           );
 
-          // Run -validate-config offline validation
           await ctx.update("validating", 70);
-          const validateCmd = `${shellQuote(remoteBinary)} -config ${shellQuote(remoteConfig)} -validate-config`;
-          // 45s timeout for the preflight validation
-          await this.ssh.execCommand(vps, validateCmd, sshAuth, 45_000);
+          await this.ssh.execCommand(
+            vps,
+            `${shellQuote(stagedBinary)} -config ${shellQuote(stagedConfig)} -validate-config`,
+            sshAuth,
+            45_000,
+          );
 
-          // Start background loop via transactional start
+          // Stop the verified old process/unit BEFORE committing the new
+          // binary/config. Atomic rename-before-stop would leave a deleted
+          // exe running and the transactional start a no-op that never loads
+          // the new token.
+          await ctx.update("stopping", 75);
+          const ownership = (
+            await this.ssh.execCommand(
+              vps,
+              buildManagedProcessInspectCommand(remoteBinary, remoteConfig, pidFile, {
+                vpsId,
+              }),
+              sshAuth,
+              10_000,
+            )
+          ).stdout.trim();
+          const owned = /^owned:([1-9][0-9]*):([1-9][0-9]*)$/.exec(ownership);
+          if (!owned && ownership !== "none") {
+            throw new Error("Managed agent process ownership is missing or ambiguous");
+          }
+          const existing = await this.ssh.execCommand(vps,
+            `test ! -e ${shellQuote(remoteBinary)} || printf binary; test ! -e ${shellQuote(remoteConfig)} || printf config`, sshAuth, 10_000);
+          hadBinary = existing.stdout.includes("binary");
+          hadConfig = existing.stdout.includes("config");
+          await this.ssh.execCommand(vps, [
+            hadBinary ? `cp -p -- ${shellQuote(remoteBinary)} ${shellQuote(backupBinary)}` : ":",
+            hadConfig ? `cp -p -- ${shellQuote(remoteConfig)} ${shellQuote(backupConfig)}` : ":",
+          ].join(" && "), sshAuth, 15_000);
+          // Any failure from stop onward must restore the prior installation.
+          swapped = true;
+          if (owned) {
+            await this.ssh.execCommand(
+              vps,
+              buildManagedProcessStopCommand(remoteBinary, remoteConfig, owned[1], owned[2], {
+                vpsId,
+              }),
+              sshAuth,
+              30_000,
+            );
+          } else if (ownership === "none") {
+            await this.ssh.execCommand(
+              vps,
+              buildManagedProcessStopCommand(remoteBinary, remoteConfig, undefined, undefined, {
+                vpsId,
+              }),
+              sshAuth,
+              30_000,
+            );
+          } else {
+            throw new Error(
+              "Managed agent process ownership is missing or ambiguous",
+            );
+          }
+
+          // Commit: backup live files (when present) then rename staged into
+          // place. Fresh installs have nothing to back up.
+          await ctx.update("swapping", 80);
+          await this.ssh.execCommand(
+            vps,
+            [
+              `mv -- ${shellQuote(stagedBinary)} ${shellQuote(remoteBinary)}`,
+              `mv -- ${shellQuote(stagedConfig)} ${shellQuote(remoteConfig)}`,
+            ].join(" && "),
+            sshAuth,
+            10_000,
+          );
+
+          // Start background loop via transactional start (existing safe
+          // cutover: reconciles systemd unit, legacy pidfile, MainPID).
           await ctx.update("starting-background", 85);
-          const pidFile = `${remoteDir}/vps-agent.pid`;
           const loopCmd = buildTransactionalStartCommand(
             remoteBinary,
             remoteConfig,
@@ -270,17 +414,80 @@ export class AgentInstallerService {
           });
 
           await ctx.succeed("complete");
+          await this.ssh.execCommand(vps,
+            `rm -f -- ${shellQuote(backupBinary)} ${shellQuote(backupConfig)} ${shellQuote(stagedBinary)} ${shellQuote(stagedConfig)}`,
+            sshAuth, 10_000).catch(() => undefined);
         } catch (error: unknown) {
-          await this.agentRepository.revokeCredential(credential!.id);
-
-          // Mark state as failed
-          await this.agentRepository.upsertState({
-            vpsId,
-            status: "failed",
-            lastError: sanitiseError(error),
-            lastSeenAt: priorState?.lastSeenAt,
-            lastInstallJobId: job!.id,
-          });
+          if (!swapped) {
+            // Pre-cutover: live binary/config/credential untouched. Remove
+            // staged artifacts only, revoke the pending credential, and keep
+            // prior state fields (upsertState replaces the whole record).
+            const staged = [stagedBinary, stagedConfig].filter((p) => p.length > 0);
+            if (staged.length > 0) {
+              await this.ssh
+                .execCommand(
+                  vps,
+                  `rm -f -- ${staged.map((p) => shellQuote(p)).join(" ")}`,
+                  sshAuth,
+                  10_000,
+                )
+                .catch(() => undefined);
+            }
+            if (credential) {
+              await this.agentRepository
+                .revokeCredential(credential.id)
+                .catch(() => undefined);
+            }
+            await this.agentRepository.upsertState({
+              ...priorState,
+              vpsId,
+              status: "failed",
+              lastError: sanitiseError(error),
+              lastSeenAt: priorState?.lastSeenAt,
+              lastInstallJobId: job!.id,
+            });
+          } else {
+            // Post-cutover: restore old binary/config and restart the old
+            // agent so the failed reinstall does not leave the host dark.
+            // Rollback artifacts stay discoverable if this leg fails.
+            try {
+              await ctx.update("rolling-back", 90);
+              await this.ssh.execCommand(vps,
+                buildManagedProcessStopCommand(liveBinary, liveConfig, undefined, undefined, { vpsId }),
+                sshAuth, 30_000);
+              await this.ssh.execCommand(
+                vps,
+                [
+                  hadBinary ? `mv -f -- ${shellQuote(backupBinary)} ${shellQuote(liveBinary)}` : `rm -f -- ${shellQuote(liveBinary)}`,
+                  hadConfig ? `mv -f -- ${shellQuote(backupConfig)} ${shellQuote(liveConfig)}` : `rm -f -- ${shellQuote(liveConfig)}`,
+                  `rm -f -- ${shellQuote(stagedBinary)} ${shellQuote(stagedConfig)}`,
+                ].join(" && "),
+                sshAuth,
+                10_000,
+              );
+              if (hadBinary && hadConfig) {
+                await this.ssh.execCommand(vps,
+                  buildTransactionalStartCommand(liveBinary, liveConfig, livePidFile, {
+                    vpsId, user: vps.username || undefined, homeDir: liveHome,
+                  }), sshAuth, 30_000);
+              }
+            } catch {
+              // Preserve backups for manual recovery; surface original error.
+            }
+            if (credential) {
+              await this.agentRepository
+                .revokeCredential(credential.id)
+                .catch(() => undefined);
+            }
+            await this.agentRepository.upsertState({
+              ...priorState,
+              vpsId,
+              status: "failed",
+              lastError: sanitiseError(error),
+              lastSeenAt: priorState?.lastSeenAt,
+              lastInstallJobId: job!.id,
+            });
+          }
 
           await this.audit.record({
             actor: "system",
@@ -294,6 +501,16 @@ export class AgentInstallerService {
           // Re-throw so JobRunnerService can also update job status
           throw error;
         } finally {
+          if (lockAcquired) {
+            await this.ssh
+              .execCommand(
+                vps,
+                buildLifecycleLockReleaseCommand(remoteLock),
+                sshAuth,
+                10_000,
+              )
+              .catch(() => undefined);
+          }
           releaseLifecycle();
         }
       });

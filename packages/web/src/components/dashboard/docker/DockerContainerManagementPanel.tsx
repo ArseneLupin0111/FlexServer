@@ -689,20 +689,7 @@ export function DockerContainerManagementPanel({
         <h3 className="text-[14px] font-semibold">
           {fixedTarget ? "Container detail" : "Container management"}
         </h3>
-        <p className="mt-0.5 text-[12px] text-dim">
-          Capability: {capability.actions.join(", ") || "no actions"} · logs{" "}
-          {logsSupported ? "supported" : "not supported"} (last{" "}
-          {BACKEND_TAIL_LINES} lines, then live).{" "}
-          {fixedTarget
-            ? "This page targets one container; every action asks for confirmation first."
-            : "Target a single container below; every action asks for confirmation first."}
-        </p>
-        {!enabled || !capability.supported ? (
-          <p className="mt-2 text-[11px] text-dim">
-            Read-only logs are available by default. Start, stop, and restart
-            require Docker management to be enabled.
-          </p>
-        ) : null}
+        <p className="mt-1 text-xs text-dim">Logs: {logsSupported ? `${BACKEND_TAIL_LINES} lines + live` : "unavailable"}{!enabled || !capability.supported ? " · Controls disabled" : ""}</p>
       </header>
 
       <div className="p-4">
@@ -710,7 +697,6 @@ export function DockerContainerManagementPanel({
           <div className="min-w-0">
             {fixedTarget ? (
               <>
-                <p className="mb-1 block text-[11px] text-dim">Target container</p>
                 {selected ? (
                   <>
                     <p className="truncate text-[12px] font-medium text-text">
@@ -858,11 +844,7 @@ export function DockerContainerManagementPanel({
               </div>
             </>
           ) : (
-            <p className="mt-1 text-[11px] text-dim">
-              No operation for this target yet. Confirm an action above, then
-              check status manually. Live updates never change this status
-              automatically.
-            </p>
+            <p className="mt-1 text-[11px] text-dim">No operations</p>
           )}
           {operationState.error ? (
             <p role="alert" className="mt-1 text-[11px] text-crit">
@@ -951,8 +933,7 @@ export function DockerContainerManagementPanel({
             <>
               <p className="mt-2 text-[11px] text-dim">
                 {buffer.count} line{buffer.count === 1 ? "" : "s"} ·{" "}
-                {buffer.bytes} bytes shown · text only. This window reopens
-                with the last {BACKEND_TAIL_LINES} lines on every reconnect.
+                {buffer.bytes} bytes shown
               </p>
               {buffer.discarded ? (
                 <p className="mt-1 text-[11px] text-dim">

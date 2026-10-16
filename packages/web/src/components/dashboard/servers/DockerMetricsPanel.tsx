@@ -98,7 +98,7 @@ function HealthSummary({ runningCount, stoppedCount, unhealthyCount }: { running
   );
 }
 
-export function DockerMetricsPanel({ vps, dockerMetrics, busy, onToggle, presentation = "compact" }: { vps: VpsRecord; dockerMetrics?: DashboardOverview["dockerMetrics"][number]; busy: boolean; onToggle: (vps: VpsRecord) => void; presentation?: "compact" | "detail" }) {
+export function DockerMetricsPanel({ vps, dockerMetrics, busy, onToggle, presentation = "compact", showContainers = true }: { vps: VpsRecord; dockerMetrics?: DashboardOverview["dockerMetrics"][number]; busy: boolean; onToggle: (vps: VpsRecord) => void; presentation?: "compact" | "detail"; /** Detail pages that own the container inventory pass false to keep one list. */ showContainers?: boolean }) {
   const enabled = vps.dockerMetricsEnabled === true;
   const detail = presentation === "detail";
   const [expanded, setExpanded] = useState(false);
@@ -144,7 +144,7 @@ export function DockerMetricsPanel({ vps, dockerMetrics, busy, onToggle, present
   </div>;
   else body = <div className="space-y-2.5">
     <HealthSummary runningCount={runningCount} stoppedCount={stoppedCount} unhealthyCount={unhealthyCount} />
-    {containers.length ? <><div className="flex flex-wrap items-center gap-1.5 border-b border-line pb-3 sm:gap-2">
+    {!showContainers ? null : containers.length ? <><div className="flex flex-wrap items-center gap-1.5 border-b border-line pb-3 sm:gap-2">
       <div className="relative min-w-52 flex-1">
         <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-dim" aria-hidden="true" />
         <label className="sr-only" htmlFor={`docker-search-${vps.id}`}>Search containers by name or image</label>
@@ -179,7 +179,6 @@ export function DockerMetricsPanel({ vps, dockerMetrics, busy, onToggle, present
           <header className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
             <div className="min-w-0">
               <span className="block text-[14px] font-semibold">Container snapshot</span>
-              <p className="mt-0.5 text-[12px] text-dim">Monitoring is {enabled ? "enabled" : "disabled"} for this server.</p>
             </div>
             <Button type="button" size="sm" variant={enabled ? "secondary" : "outline"} className={`${detail ? "min-w-20" : "h-7 px-2 text-[11px]"} rounded-none`} disabled={busy} aria-pressed={enabled} aria-label={`${enabled ? "Disable" : "Enable"} Docker metrics for ${vpsDisplayName(vps)}`} onClick={() => enabled ? onToggle(vps) : setDialogOpen(true)}>{busy ? "Updating…" : enabled ? "On" : "Off"}</Button>
           </header>

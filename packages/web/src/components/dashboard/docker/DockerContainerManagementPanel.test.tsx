@@ -289,7 +289,6 @@ describe("DockerContainerManagementPanel logs", () => {
 
     const stream = await openStream();
     act(() => stream.state("live"));
-    expect(screen.getByText(/Read-only logs are available by default/i)).toBeInTheDocument();
     for (const action of ["start", "stop", "restart"]) {
       expect(screen.getAllByRole("button", { name: new RegExp(`^${action}$`, "i") }).filter((button) => (button as HTMLButtonElement).disabled)).toHaveLength(1);
     }

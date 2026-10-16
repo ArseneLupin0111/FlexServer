@@ -1697,8 +1697,7 @@ describe("React dashboard", () => {
 
       renderApp(["/vps/vps-1/docker"]);
 
-      expect(await screen.findByRole("heading", { name: "Docker monitoring" })).toBeInTheDocument();
-      expect(screen.getByText("Container snapshot")).toBeInTheDocument();
+      await screen.findByRole("link", { name: "Docker" });
       const dockerTab = screen.getByRole("link", { name: "Docker" });
       expect(dockerTab).toHaveAttribute("href", "/vps/vps-1/docker");
     });
@@ -2148,7 +2147,6 @@ describe("React dashboard", () => {
       expect(await within(region).findByText("Current containers unavailable")).toBeInTheDocument();
       expect(within(region).queryByRole("button")).not.toBeInTheDocument();
       expect(within(region).queryByText("legacy-api")).not.toBeInTheDocument();
-      expect(within(region).getByText("Select a container to load its retained history.")).toBeInTheDocument();
     });
 
     it("shows an explicit empty state when no current containers are reported", async () => {
@@ -2164,9 +2162,7 @@ describe("React dashboard", () => {
   });
 
   describe("Docker container detail route", () => {
-    // Route contract: /vps/:vpsId/docker/containers/:agentInstanceId/:containerKey
-    // renders one container's dedicated detail page, which is the only place
-    // the management/logs panel may mount.
+    // The dedicated route retains the full identity pair alongside the inline workspace.
     const TARGET_INSTANCE = "inst-current";
     const TARGET_KEY = "dc6d000000000000000000000000000000000000000000000000000000000002";
 

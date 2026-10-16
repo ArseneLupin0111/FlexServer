@@ -33,8 +33,6 @@ describe("DockerMetricsPanel details", () => {
   it("uses the expanded server-detail hierarchy and shows eight rows initially", () => {
     const containers = Array.from({ length: 10 }, (_, index) => container(`service-${index}`, "app:latest"));
     render(<MemoryRouter><DockerMetricsPanel vps={vps} dockerMetrics={metric({ containerTotal: 10, containers })} busy={false} onToggle={vi.fn()} presentation="detail" /></MemoryRouter>);
-    expect(screen.getByText("Container snapshot")).toBeInTheDocument();
-    expect(screen.getByText("Monitoring is enabled for this server.")).toBeInTheDocument();
     expect(screen.getByText("Showing 8 detail rows of 10 reported containers")).toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(8);
     fireEvent.click(screen.getByRole("button", { name: /Show more/ }));

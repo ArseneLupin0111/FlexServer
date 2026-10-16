@@ -109,7 +109,7 @@ export function DockerHistoryChart({
         </header>
         <div className="p-4">
           <EmptyState>
-            No Docker history retained yet. Snapshots appear here once the agent reports host samples.
+            No history retained yet.
           </EmptyState>
         </div>
       </section>
@@ -134,10 +134,9 @@ export function DockerHistoryChart({
     <section aria-label="Docker history" className="border border-line bg-panel">
       <header className="border-b border-line px-4 py-3">
         <h3 className="text-[14px] font-semibold">History</h3>
-        <p className="mt-0.5 text-[12px] text-dim">Raw host samples; {rollups?.length ?? 0} hourly rollups available for longer-range context.</p>
+        <p className="mt-1 text-xs text-dim">{samples.length} samples · {rollups?.length ?? 0} rollups</p>
       </header>
       <div className="space-y-2 p-4">
-        <p className="text-[12px] text-dim">showing {samples.length} loaded raw host samples</p>
         <p className="tnum text-[11px] text-dim">
           {first !== undefined && last !== undefined
             ? `${new Date(first).toLocaleString()} – ${new Date(last).toLocaleString()}`

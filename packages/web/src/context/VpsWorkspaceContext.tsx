@@ -529,7 +529,7 @@ export function VpsWorkspaceDockerPage() {
   const [containerHistoryLoading, setContainerHistoryLoading] = useState(false);
 
   const currentTargets = currentContainers?.scopeId === vps.id ? currentContainers.targets : EMPTY_CURRENT_TARGETS;
-  const selectedTarget = currentTargets.find((item) => item.containerKey === selectedContainer) ?? null;
+  const selectedTarget = currentTargets.find((item) => JSON.stringify([item.agentInstanceId, item.containerKey]) === selectedContainer) ?? null;
 
   const loadMore = async (resource: "history" | "rollups" | "events" | "alerts") => {
     const cursor = resourcePages[resource]?.cursor;
@@ -640,7 +640,7 @@ export function VpsWorkspaceDockerPage() {
   // A selection must always resolve to a live current target: keys removed
   // from the list (refresh, error, or VPS switch) are cleared, not kept.
   useEffect(() => {
-    if (selectedContainer && !currentContainersLoading && !currentTargets.some((item) => item.containerKey === selectedContainer)) {
+    if (selectedContainer && !currentContainersLoading && !currentTargets.some((item) => JSON.stringify([item.agentInstanceId, item.containerKey]) === selectedContainer)) {
       setSelectedContainer(null);
     }
   }, [currentTargets, currentContainersLoading, selectedContainer]);
@@ -678,39 +678,31 @@ export function VpsWorkspaceDockerPage() {
 
   return (
     <section aria-labelledby="server-docker-heading" className="min-w-0">
-      <div className="mb-5 max-w-2xl">
-        <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-dim">
-          Workloads
-        </p>
-        <h2
-          id="server-docker-heading"
-          className="text-xl font-semibold tracking-tight text-text sm:text-2xl"
-        >
-          Docker monitoring
-        </h2>
-        <p className="mt-1.5 text-sm leading-6 text-dim">
-          Container health and resource use reported by this server.
-        </p>
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <h2 id="server-docker-heading" className="text-lg font-semibold text-text">Docker</h2>
       </div>
+      <details className="mb-4 border border-line bg-panel">
+        <summary className="cursor-pointer px-4 py-3 text-sm text-dim focus-visible:outline-signal">Snapshot & monitoring</summary>
       <DockerMetricsPanel
         vps={vps}
         dockerMetrics={snapshot}
         busy={dashboard.busy}
         onToggle={dashboard.onToggleDockerMetrics}
         presentation="detail"
+        showContainers={false}
       />
-      <p className="mt-2 text-[11px] text-dim">
-        Select a container to open its own page with realtime logs and
-        confirmed controls.
-      </p>
+      </details>
       <div className="mt-4 space-y-4">
         {monitoringEnabled ? (
           <>
-            <DockerHistoryChart samples={history} rollups={rollups} retained={historyTotal} loading={loading} error={resourceErrors.history} />{resourcePages.history?.hasMore ? <button type="button" onClick={() => loadMore("history")} disabled={loadingMore === "history"} className="text-xs text-signal underline">{loadingMore === "history" ? "Loading…" : "Load more history"}</button> : null}{resourcePages.rollups?.hasMore ? <button type="button" onClick={() => loadMore("rollups")} disabled={loadingMore === "rollups"} className="text-xs text-signal underline">{loadingMore === "rollups" ? "Loading…" : "Load more rollups"}</button> : null}
-            <section aria-label="Container history" className="border border-line bg-panel p-4">
-              <h3 className="text-xs font-medium text-text">Container history</h3>
+            <div className="grid min-w-0 gap-4 xl:grid-cols-[17rem_minmax(0,1fr)]">
+            <section aria-label="Container history" className="min-w-0 self-start border border-line bg-panel">
+              <h3 className="border-b border-line px-4 py-3 text-sm font-semibold">Containers <span className="tnum text-dim">{currentTargets.length}</span></h3>
               {currentTargets.length > 0 ? (
-                <div className="mt-2 flex flex-wrap gap-2">{currentTargets.map((target) => <button key={target.containerKey} type="button" title={target.containerKey} className={`border px-2 py-1 text-[11px] ${selectedContainer === target.containerKey ? "border-signal text-signal" : "border-line text-dim"}`} onClick={() => setSelectedContainer(selectedContainer === target.containerKey ? null : target.containerKey)}>{target.name ?? target.containerKey.slice(0, 12)}</button>)}</div>
+                <div className="max-h-80 overflow-y-auto xl:max-h-[40rem]">{currentTargets.map((target) => {
+                  const identity = JSON.stringify([target.agentInstanceId, target.containerKey]);
+                  return <button key={identity} type="button" aria-label={target.name ?? target.containerKey.slice(0, 12)} title={`${target.agentInstanceId} / ${target.containerKey}`} aria-pressed={selectedContainer === identity} className={`flex w-full items-center justify-between gap-3 border-b border-line px-4 py-3 text-left text-sm focus-visible:outline-2 focus-visible:outline-signal ${selectedContainer === identity ? "bg-signal/10 text-signal" : "text-text hover:bg-raised"}`} onClick={() => setSelectedContainer(identity)}><span className="min-w-0 truncate">{target.name ?? target.containerKey.slice(0, 12)}</span><span className="shrink-0 text-[11px] text-dim">{target.state ?? "n/a"}</span></button>;
+                })}</div>
               ) : currentContainersError ? (
                 <p className="mt-2 text-[11px] text-crit">{currentContainersError}</p>
               ) : currentContainersLoading ? (
@@ -718,11 +710,31 @@ export function VpsWorkspaceDockerPage() {
               ) : (
                 <p className="mt-2 text-[11px] text-dim">No containers reported for this server.</p>
               )}
-              {selectedTarget ? <DockerHistoryChart samples={containerHistory} retained={containerHistory.length} loading={containerHistoryLoading} error={containerHistoryError} /> : <p className="mt-2 text-[11px] text-dim">Select a container to load its retained history.</p>}
             </section>
+            <div className="min-w-0 space-y-4">
+              {selectedTarget ? <>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-base font-semibold text-text">{selectedTarget.name ?? selectedTarget.containerKey.slice(0, 12)}</h3>
+                  <Link className="text-xs text-info underline-offset-4 hover:underline focus-visible:outline-signal" to={`/vps/${encodeURIComponent(vps.id)}/docker/containers/${encodeURIComponent(selectedTarget.agentInstanceId)}/${encodeURIComponent(selectedTarget.containerKey)}`}>Open container</Link>
+                </div>
+                {snapshot?.agentInstanceId === selectedTarget.agentInstanceId ? snapshot.containers.filter((item) => item.containerKey === selectedTarget.containerKey).map((item) => <dl key={item.containerKey} className="grid grid-cols-2 gap-4 border-y border-line py-4 text-xs sm:grid-cols-4">
+                  <div className="col-span-2 min-w-0"><dt className="text-dim">Image</dt><dd className="mt-1 break-all text-text">{item.image}</dd></div>
+                  <div><dt className="text-dim">CPU · {snapshot.freshness === "fresh" ? "snapshot" : "saved snapshot"}</dt><dd className="tnum mt-1 text-text">{item.cpuPercent.toFixed(1)}%</dd></div>
+                  <div><dt className="text-dim">Memory · PIDs</dt><dd className="tnum mt-1 text-text">{(item.memoryUsageBytes / 1048576).toFixed(1)} MiB · {item.pids}</dd></div>
+                </dl>) : null}
+                <DockerContainerManagementPanel key={`${vps.id}:${selectedTarget.agentInstanceId}:${selectedTarget.containerKey}`} vpsId={vps.id} enabled={vps.dockerManagementEnabled === true} fixedTarget={{agentInstanceId:selectedTarget.agentInstanceId, containerKey:selectedTarget.containerKey}} />
+                <details className="border border-line bg-panel"><summary className="cursor-pointer px-4 py-3 text-sm focus-visible:outline-signal">History</summary><DockerHistoryChart samples={containerHistory} retained={containerHistory.length} loading={containerHistoryLoading} error={containerHistoryError} /></details>
+              </> : <div className="flex min-h-48 items-center justify-center border border-dashed border-line p-6 text-sm text-dim">Select a container</div>}
+            </div>
+            </div>
+            <details className="border border-line bg-panel"><summary className="cursor-pointer px-4 py-3 text-sm text-dim focus-visible:outline-signal">Host history</summary>
+            <DockerHistoryChart samples={history} rollups={rollups} retained={historyTotal} loading={loading} error={resourceErrors.history} />{resourcePages.history?.hasMore ? <button type="button" onClick={() => loadMore("history")} disabled={loadingMore === "history"} className="p-3 text-xs text-signal underline">{loadingMore === "history" ? "Loading…" : "Load more history"}</button> : null}{resourcePages.rollups?.hasMore ? <button type="button" onClick={() => loadMore("rollups")} disabled={loadingMore === "rollups"} className="p-3 text-xs text-signal underline">{loadingMore === "rollups" ? "Loading…" : "Load more rollups"}</button> : null}
+            </details>
+            <details className="border border-line bg-panel"><summary className="cursor-pointer px-4 py-3 text-sm text-dim focus-visible:outline-signal">Events, alerts & storage</summary><div className="space-y-4 p-3">
             <DockerEventTimeline events={events} retained={eventsTotal} loading={loading} error={resourceErrors.events} />{resourcePages.events?.hasMore ? <button type="button" onClick={() => loadMore("events")} disabled={loadingMore === "events"} className="text-xs text-signal underline">{loadingMore === "events" ? "Loading…" : "Load more events"}</button> : null}
             <DockerAlertsPanel alerts={alerts} retained={alertsTotal} loading={loading} error={resourceErrors.alerts} vpsId={vps.id} onAcknowledged={(updated) => setAlerts((current) => current.map((alert) => alert.id === updated.id ? updated : alert))} />{resourcePages.alerts?.hasMore ? <button type="button" onClick={() => loadMore("alerts")} disabled={loadingMore === "alerts"} className="text-xs text-signal underline">{loadingMore === "alerts" ? "Loading…" : "Load more alerts"}</button> : null}
             <DockerStorageOverview storage={storage} loading={loading} error={resourceErrors.storage} />
+            </div></details>
           </>
         ) : null}
       </div>
@@ -755,19 +767,12 @@ export function VpsWorkspaceDockerContainerPage() {
           <ArrowLeft size={13} aria-hidden="true" />
           Back to containers
         </Link>
-        <p className="mb-2 mt-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-dim">
-          Container detail
-        </p>
         <h2
           id="server-docker-container-heading"
           className="text-xl font-semibold tracking-tight text-text sm:text-2xl"
         >
           Container logs and controls
         </h2>
-        <p className="mt-1.5 text-sm leading-6 text-dim">
-          Read-only realtime logs for this container on this server. Start,
-          stop, and restart require management permission and confirmation.
-        </p>
       </div>
       <DockerContainerManagementPanel
         vpsId={vps.id}

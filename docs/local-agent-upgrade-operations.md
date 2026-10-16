@@ -12,6 +12,10 @@ Sudo/root access is required for remote service configuration, unit installation
 
 Remote reinstall uploads a separate staged binary/config and validates them before stopping the current service. It keeps rollback copies through job completion and replaces files by rename, avoiding Linux `Text file busy` errors from writing an active executable. Restart and reinstall inspect the deterministic unit's live `MainPID`, not a stale PID file left by an earlier supervisor restart. A foreign or invalid MainPID remains a hard ownership failure.
 
+Remote install/reinstall completion requires an online ingest with a version and fresh usage of the newly issued install credential after the pre-start baseline. A heartbeat from an older credential alone cannot complete the install. The job preserves the observed version, build ID, and heartbeat timestamp; absence of confirmation within `max(60 seconds, 3 × agent interval)` fails the job and enters the existing rollback/revocation path.
+
+Server deletion checks persisted queued/running jobs while holding the per-VPS uninstall slot, before touching the remote installation or revoking credentials. Finish or resolve the active job before retrying deletion. This guard does not add automatic recovery for jobs stranded by an API crash, nor does deletion remove the host's `authorized_keys` entry.
+
 Azure remote lifecycle recovery was exercised on 2026-10-16: restart job `job_y2E7WgZOMw3D` and reinstall job `job_XdfQMZYGdem0` both succeeded, followed by fresh metric ingest and matching systemd/PID-file PID `4015012`. The API-only operational hotfix uses `/opt/vps-manager-nodejs/docker-compose.azure-hotfix.yml` and image `flexserver-api:azure-lifecycle-hotfix-20261016`; retain this override until a normal release includes the source fix. This is not evidence for the local-updater gate below.
 
 #### Per-VPS singleton process lock

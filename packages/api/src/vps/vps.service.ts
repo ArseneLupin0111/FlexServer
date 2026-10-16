@@ -277,11 +277,10 @@ export class VpsService {
     if (!this.removalCleanup) throw new Error("Server removal cleanup is unavailable");
     if (record) {
       await this.agentUninstaller.removeForDelete(id, async () => {
-        await this.removalCleanup!.prepare(id);
         await this.keys.removeKeyPair(id);
         if (!(await this.store.delete(id))) throw new VpsNotFoundError();
         await this.removalCleanup!.purge(id);
-      });
+      }, () => this.removalCleanup!.prepare(id));
     } else {
       // A previous attempt may have deleted the row before local cleanup failed.
       await this.keys.removeKeyPair(id);

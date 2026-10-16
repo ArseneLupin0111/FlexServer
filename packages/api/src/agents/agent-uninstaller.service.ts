@@ -73,10 +73,15 @@ export class AgentUninstallerService {
     private readonly lifecycle: AgentLifecycleCoordinator,
   ) {}
 
-  /** Keep the uninstall slot until local finalization has completed. */
+  /**
+   * Keep the uninstall slot until local finalization has completed.
+   * `preflight` runs inside the held slot before any destructive step, so a
+   * busy server is rejected without remote teardown or local side effects.
+   */
   async removeForDelete(
     vpsId: string,
     finalize: (vps: VpsRecord) => Promise<void>,
+    preflight: (vps: VpsRecord) => Promise<void>,
   ): Promise<void> {
     const release = await this.lifecycle.tryAcquire(vpsId, "uninstall");
     try {
@@ -85,6 +90,7 @@ export class AgentUninstallerService {
       if (vps.kind === "local" || vps.managedBy === "system") {
         throw new BadRequestException("Local host is managed by the built-in agent");
       }
+      await preflight(vps);
       const state = await this.agentRepository.getState(vpsId);
       if (state?.status === "installing") throw new DuplicateAgentInstallError();
       const credentials = await this.agentRepository.listCredentialsByVps(vpsId);

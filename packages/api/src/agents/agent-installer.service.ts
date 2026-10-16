@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable } from "@nestjs/common";
+import { BadRequestException, ConflictException, Inject, Injectable, Optional } from "@nestjs/common";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -60,6 +60,14 @@ function stageName(kind: "binary" | "config", nonce: string): string {
     : `config.stage-${nonce}.json`;
 }
 
+type Polling = {
+  intervalMs: number;
+  timeoutMs: number;
+  sleep(ms: number): Promise<void>;
+};
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 /**
  * Build auth object for SSH operations.
  * Prefers private key if keyProvisionedAt, falls back to password when supplied.
@@ -109,6 +117,7 @@ export class AgentInstallerService {
     @Inject(JobService) private readonly jobs: JobService,
     @Inject(AgentLifecycleCoordinator)
     private readonly lifecycle: AgentLifecycleCoordinator,
+    @Optional() private readonly polling?: Partial<Polling>,
   ) {}
 
   /**
@@ -388,6 +397,13 @@ export class AgentInstallerService {
           // Start background loop via transactional start (existing safe
           // cutover: reconciles systemd unit, legacy pidfile, MainPID).
           await ctx.update("starting-background", 85);
+          // Baseline captured immediately before the new agent is launched:
+          // only credential usage / state strictly newer than this can prove
+          // the staged binary + token actually took over.
+          const baselineCredentialLastUsedAt = (
+            await this.agentRepository.getCredential(credential!.id)
+          )?.lastUsedAt;
+          const baselineStateLastSeenAt = priorState?.lastSeenAt;
           const loopCmd = buildTransactionalStartCommand(
             remoteBinary,
             remoteConfig,
@@ -395,12 +411,26 @@ export class AgentInstallerService {
             { vpsId, user: vps.username || undefined, homeDir },
           );
           await this.ssh.execCommand(vps, loopCmd, sshAuth, 10_000);
-          // Mark success
+          // Bounded wait for a real observation: the freshly issued
+          // credential must be active and used by an ingest strictly newer
+          // than the pre-start baseline, and that ingest must have published
+          // an online state with a version.
+          await this.waitForReadyObservation(
+            vpsId,
+            credential!.id,
+            baselineCredentialLastUsedAt,
+            baselineStateLastSeenAt,
+          );
+          // Preserve the identity published by the real ingest (version,
+          // buildId, lastSeenAt) — never synthesize lastSeenAt. Re-read so a
+          // heartbeat that landed after the wait is not overwritten either.
+          const observed = await this.agentRepository.getState(vpsId);
           await this.agentRepository.upsertState({
+            ...observed,
             vpsId,
             status: "online",
-            installedAt: new Date().toISOString(),
-            lastSeenAt: new Date().toISOString(),
+            installedAt: observed?.installedAt ?? new Date().toISOString(),
+            lastError: undefined,
             lastInstallJobId: job!.id,
           });
 
@@ -438,14 +468,7 @@ export class AgentInstallerService {
                 .revokeCredential(credential.id)
                 .catch(() => undefined);
             }
-            await this.agentRepository.upsertState({
-              ...priorState,
-              vpsId,
-              status: "failed",
-              lastError: sanitiseError(error),
-              lastSeenAt: priorState?.lastSeenAt,
-              lastInstallJobId: job!.id,
-            });
+            await this.recordInstallFailure(vpsId, job!.id, priorState, error);
           } else {
             // Post-cutover: restore old binary/config and restart the old
             // agent so the failed reinstall does not leave the host dark.
@@ -479,14 +502,7 @@ export class AgentInstallerService {
                 .revokeCredential(credential.id)
                 .catch(() => undefined);
             }
-            await this.agentRepository.upsertState({
-              ...priorState,
-              vpsId,
-              status: "failed",
-              lastError: sanitiseError(error),
-              lastSeenAt: priorState?.lastSeenAt,
-              lastInstallJobId: job!.id,
-            });
+            await this.recordInstallFailure(vpsId, job!.id, priorState, error);
           }
 
           await this.audit.record({
@@ -531,6 +547,77 @@ export class AgentInstallerService {
     } finally {
       if (!handedOff) releaseLifecycle();
     }
+  }
+
+  /**
+   * Bounded wait for proof that the newly issued credential and the staged
+   * binary actually took over: credential active with usage strictly newer
+   * than the pre-start baseline, plus an online state with a version and a
+   * lastSeenAt strictly newer than the pre-start baseline.
+   */
+  private async waitForReadyObservation(
+    vpsId: string,
+    credentialId: string,
+    baselineLastUsedAt: string | undefined,
+    baselineLastSeenAt: string | undefined,
+  ): Promise<void> {
+    const interval = this.polling?.intervalMs ?? 500;
+    const timeout =
+      this.polling?.timeoutMs ??
+      Math.max(60_000, this.config.agentInstallIntervalSeconds * 3_000);
+    const nap = this.polling?.sleep ?? sleep;
+    const credentialBaseline = Date.parse(baselineLastUsedAt ?? "");
+    const stateBaseline = Date.parse(baselineLastSeenAt ?? "");
+    for (let i = 0; i < Math.max(1, Math.ceil(timeout / interval)); i++) {
+      const credential = await this.agentRepository.getCredential(credentialId);
+      const state = await this.agentRepository.getState(vpsId);
+      const usedAt = Date.parse(credential?.lastUsedAt ?? "");
+      const seenAt = Date.parse(state?.lastSeenAt ?? "");
+      if (
+        credential?.status === "active" &&
+        Number.isFinite(usedAt) &&
+        (!Number.isFinite(credentialBaseline) || usedAt > credentialBaseline) &&
+        state?.status === "online" &&
+        typeof state.version === "string" &&
+        state.version.length > 0 &&
+        Number.isFinite(seenAt) &&
+        (!Number.isFinite(stateBaseline) || seenAt > stateBaseline)
+      ) {
+        return;
+      }
+      await nap(interval);
+    }
+    throw new Error("Timed out waiting for installed agent observation");
+  }
+
+  /**
+   * Record an install failure without blindly replacing identity that a real
+   * ingest published while the install was running. `upsertState` replaces the
+   * whole record, so keep the freshest observed identity (version / buildId /
+   * lastSeenAt / installedAt) and only then stamp the failure.
+   */
+  private async recordInstallFailure(
+    vpsId: string,
+    jobId: string,
+    priorState: AgentState | undefined,
+    error: unknown,
+  ): Promise<void> {
+    const current = await this.agentRepository
+      .getState(vpsId)
+      .catch(() => undefined);
+    const observed = Date.parse(current?.lastSeenAt ?? "");
+    const previous = Date.parse(priorState?.lastSeenAt ?? "");
+    const keepObserved =
+      Number.isFinite(observed) &&
+      (!Number.isFinite(previous) || observed > previous);
+    const identity = keepObserved ? current : priorState;
+    await this.agentRepository.upsertState({
+      ...identity,
+      vpsId,
+      status: "failed",
+      lastError: sanitiseError(error),
+      lastInstallJobId: jobId,
+    });
   }
 
   private resolveBinaryPath(): string {

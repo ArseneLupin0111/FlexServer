@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — fail-closed agent lifecycle confirmation
+
+- Check persisted queued/running server jobs inside the held uninstall slot before remote agent removal, credential revocation, state checkpoints, or local deletion. A busy-job refusal leaves the installation intact and can be retried after the job finishes.
+- Confirm remote installs using fresh usage of the newly issued agent credential and real online ingest with a version before completing the job. Preserve observed version, build ID, and heartbeat timestamp instead of manufacturing online state; timeout uses the existing rollback and credential revocation path.
+
 ## Unreleased — retryable server removal
 
 - Remove remote managed agents synchronously before deleting a VPS record or its SSH key. SSH/uninstall failures retain the record and key so removal can be retried.

@@ -72,12 +72,8 @@ afterEach(() => {
 });
 
 describe("SettingsPanel", () => {
-  it("renders runtime facts and initial disabled state", () => {
+  it("renders the terminal and command guard toggles in their initial disabled state", () => {
     renderWithContext(mockOverview);
-
-    expect(screen.getByText("App mode")).toBeInTheDocument();
-    expect(screen.getByText("Real SSH")).toBeInTheDocument();
-    expect(screen.getByText("Local auth")).toBeInTheDocument();
 
     const toggleButton = screen.getByTestId("web-terminal-toggle");
     expect(toggleButton).toHaveTextContent("Enable");

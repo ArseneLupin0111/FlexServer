@@ -532,8 +532,6 @@ describe("Remote agent update in Settings", () => {
     render(<LocalAgentUpdate vps={remoteVps} />);
 
     expect(screen.getByText("Agent updates")).toBeInTheDocument();
-    expect(screen.getByText("Remote SSH")).toBeInTheDocument();
-    expect(screen.getByText("root@10.0.0.1:22")).toBeInTheDocument();
 
     const upgradeButton = screen.getByRole("button", { name: "Upgrade agent" });
     expect(upgradeButton).toBeEnabled();
@@ -544,6 +542,7 @@ describe("Remote agent update in Settings", () => {
     const dialog = await screen.findByRole("alertdialog");
     expect(within(dialog).getByText(/Upgrade agent on web-01\?/)).toBeInTheDocument();
     expect(within(dialog).getByText(/Monitoring will pause briefly/)).toBeInTheDocument();
+    expect(within(dialog).getByText("root@10.0.0.1:22")).toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "Upgrade agent" }));
 

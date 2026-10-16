@@ -1768,7 +1768,6 @@ describe("React dashboard", () => {
 
       expect(await screen.findByRole("heading", { name: "Settings for web-01" })).toBeInTheDocument();
       expect(screen.getByText("Agent updates")).toBeInTheDocument();
-      expect(screen.getByText("Remote SSH")).toBeInTheDocument();
 
       const upgradeButton = screen.getByRole("button", { name: "Upgrade agent" });
       expect(upgradeButton).toBeEnabled();

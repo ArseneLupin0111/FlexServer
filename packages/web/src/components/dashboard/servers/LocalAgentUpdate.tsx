@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useId, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, LoaderCircle, RefreshCw } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, Info, LoaderCircle, RefreshCw } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -535,13 +535,7 @@ function LocalHostAgentUpdate({ vps }: { vps: VpsRecord }) {
 
   const details = status ? (
     <>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-        {installedText ? <span className="text-text">{installedText}</span> : null}
-        {heartbeatText ? (
-          <span className={`text-[11px] ${installed?.fresh ? "text-dim" : "text-warn/80"}`} title={formatDate(installed?.lastSeenAt ?? undefined)}>
-            {heartbeatText}
-          </span>
-        ) : null}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         {chip ? (
           <Badge
             variant={chip.variant}
@@ -550,54 +544,83 @@ function LocalHostAgentUpdate({ vps }: { vps: VpsRecord }) {
             {chip.label}
           </Badge>
         ) : null}
-      </div>
-      <div className="mt-2 space-y-1 text-xs">
-        <DetailRow label="Installed build" value={installed?.buildId ?? "Not reported"} mono />
-        <DetailRow label="Last heartbeat" value={installed ? formatDate(installed.lastSeenAt ?? undefined) : "Not reported"} />
-        <DetailRow
-          label="Updater"
-          value={
-            updater?.installed
-              ? `Installed · ${updater.healthy ? "healthy" : "unhealthy"} · last seen ${freshnessLabel(updater.lastSeenAt ?? undefined)}`
-              : "Not installed on this host"
-          }
-        />
-        {available ? (
-          <>
-            <DetailRow label="Bundled build" value={`${available.version} (${shortBuild(available.buildId)})`} />
-            <DetailRow label="Build ID" value={available.buildId} mono />
-            <DetailRow label="Source" value="Deployed API image" />
-          </>
-        ) : (
-          <DetailRow
-            label="Bundled build"
-            value={status.state === "release_unavailable" ? "Bundled binary unavailable" : "Already running bundled build"}
-          />
-        )}
-        {status.compatibility.reason !== "ok" ? (
-          <DetailRow label="Compatibility" value={INCOMPATIBLE_REASONS[status.compatibility.reason]} />
+        {installedText ? <span className="text-xs text-text">{installedText}</span> : null}
+        {heartbeatText ? (
+          <span
+            className={`text-[11px] ${installed?.fresh ? "text-dim" : "text-warn/80"}`}
+            title={formatDate(installed?.lastSeenAt ?? undefined)}
+          >
+            {heartbeatText}
+          </span>
         ) : null}
       </div>
-      {/* Persistent empty live region: job start/results are only reliably
-          announced when the container already exists before the content is
-          inserted, so it stays mounted whenever the status details render. */}
-      <div role="status" aria-live="polite">
-        {liveContent ? <div className="mt-2">{liveContent}</div> : null}
-      </div>
       {showUpgrade ? (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {actions}
         </div>
       ) : null}
       {displayedReason ? (
-        <p id={reasonId} className="mt-1 text-[11px] text-dim">{displayedReason}</p>
+        <p id={reasonId} className="text-[11px] text-dim">{displayedReason}</p>
       ) : null}
       {actionError ? (
-        <p role="alert" className="mt-1 text-[11px] text-crit">
+        <p role="alert" className="text-[11px] text-crit">
           {actionError}
         </p>
       ) : null}
-      {retryRow ? <div className="mt-1">{retryRow}</div> : null}
+      {/* Persistent empty live region: job start/results are only reliably
+          announced when the container already exists before the content is
+          inserted, so it stays mounted whenever the status details render. */}
+      <div role="status" aria-live="polite">
+        {liveContent ? <div>{liveContent}</div> : null}
+      </div>
+      {retryRow}
+      <details className="group border border-line bg-raised/20 text-xs">
+        <summary className="flex cursor-pointer select-none items-center justify-between p-3 font-medium text-text transition-colors duration-160 hover:bg-raised/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal list-none [&::-webkit-details-marker]:hidden">
+          <span className="flex items-center gap-2">
+            <Info
+              size={14}
+              className="text-dim group-open:text-signal"
+              aria-hidden="true"
+            />
+            <span>Build &amp; updater details</span>
+          </span>
+          <ChevronDown
+            size={14}
+            className="text-dim transition-transform duration-160 group-open:rotate-180"
+            aria-hidden="true"
+          />
+        </summary>
+        <div className="space-y-1 border-t border-line p-3 text-xs">
+          <DetailRow label="Installed build" value={installed?.buildId ?? "Not reported"} mono />
+          <DetailRow
+            label="Last heartbeat"
+            value={installed ? formatDate(installed.lastSeenAt ?? undefined) : "Not reported"}
+          />
+          <DetailRow
+            label="Updater"
+            value={
+              updater?.installed
+                ? `Installed · ${updater.healthy ? "healthy" : "unhealthy"} · last seen ${freshnessLabel(updater.lastSeenAt ?? undefined)}`
+                : "Not installed on this host"
+            }
+          />
+          {available ? (
+            <>
+              <DetailRow label="Bundled build" value={`${available.version} (${shortBuild(available.buildId)})`} />
+              <DetailRow label="Build ID" value={available.buildId} mono />
+              <DetailRow label="Source" value="Deployed API image" />
+            </>
+          ) : (
+            <DetailRow
+              label="Bundled build"
+              value={status.state === "release_unavailable" ? "Bundled binary unavailable" : "Already running bundled build"}
+            />
+          )}
+          {status.compatibility.reason !== "ok" ? (
+            <DetailRow label="Compatibility" value={INCOMPATIBLE_REASONS[status.compatibility.reason]} />
+          ) : null}
+        </div>
+      </details>
     </>
   ) : (
     retryRow
@@ -610,7 +633,7 @@ function LocalHostAgentUpdate({ vps }: { vps: VpsRecord }) {
         <CardHeader>
           <CardTitle>Agent updates</CardTitle>
           <CardDescription>
-            Upgrade {displayName} using the bundled agent binary in this deployment. Progress is confirmed by a fresh agent
+            Installs the bundled release in this deployment; completion is confirmed by a fresh
             heartbeat, not by the service status.
           </CardDescription>
         </CardHeader>
@@ -798,51 +821,22 @@ function RemoteAgentUpdate({
         <CardHeader>
           <CardTitle>Agent updates</CardTitle>
           <CardDescription>
-            Upgrade the agent on {displayName} via SSH. The server will download and install the
-            latest compatible agent release.
+            Installs the latest compatible agent release over SSH.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-            <span className="text-text">{agentStatusLabel(agentStatus)}</span>
-            {vps.lastSeenAt ? (
-              <span
-                className="text-[11px] text-dim"
-                title={formatDate(vps.lastSeenAt)}
-              >
-                heartbeat {freshnessLabel(vps.lastSeenAt)}
-              </span>
-            ) : null}
-            {chip ? (
+          {chip ? (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <Badge
                 variant={chip.variant}
                 className="text-[10px] uppercase tracking-wide"
               >
                 {chip.label}
               </Badge>
-            ) : null}
-          </div>
+            </div>
+          ) : null}
 
-          <div className="mt-2 space-y-1 text-xs">
-            <DetailRow label="Host type" value="Remote SSH" />
-            <DetailRow label="Connection" value={`${vps.username}@${vps.host}:${vps.port}`} mono />
-            <DetailRow
-              label="Last heartbeat"
-              value={vps.lastSeenAt ? formatDate(vps.lastSeenAt) : "Not reported"}
-            />
-            {lastJobId || vps.lastAgentInstallJobId ? (
-              <DetailRow
-                label="Last install/upgrade job"
-                value={lastJobId || vps.lastAgentInstallJobId || ""}
-                mono
-              />
-            ) : null}
-            {vps.agentLastError ? (
-              <DetailRow label="Last error" value={vps.agentLastError} />
-            ) : null}
-          </div>
-
-          <div className="mt-2 flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               ref={upgradeTriggerRef}
               type="button"
@@ -867,16 +861,50 @@ function RemoteAgentUpdate({
           </div>
 
           {disabledReason ? (
-            <p id={reasonId} className="mt-1 text-[11px] text-dim">
+            <p id={reasonId} className="text-[11px] text-dim">
               {disabledReason}
             </p>
           ) : null}
 
           {actionError ? (
-            <p role="alert" className="mt-1 text-[11px] text-crit">
+            <p role="alert" className="text-[11px] text-crit">
               {actionError}
             </p>
           ) : null}
+
+          <details className="group border border-line bg-raised/20 text-xs">
+            <summary className="flex cursor-pointer select-none items-center justify-between p-3 font-medium text-text transition-colors duration-160 hover:bg-raised/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal list-none [&::-webkit-details-marker]:hidden">
+              <span className="flex items-center gap-2">
+                <Info
+                  size={14}
+                  className="text-dim group-open:text-signal"
+                  aria-hidden="true"
+                />
+                <span>Updater details</span>
+              </span>
+              <ChevronDown
+                size={14}
+                className="text-dim transition-transform duration-160 group-open:rotate-180"
+                aria-hidden="true"
+              />
+            </summary>
+            <div className="space-y-1 border-t border-line p-3 text-xs">
+              <DetailRow
+                label="Last heartbeat"
+                value={vps.lastSeenAt ? formatDate(vps.lastSeenAt) : "Not reported"}
+              />
+              {lastJobId || vps.lastAgentInstallJobId ? (
+                <DetailRow
+                  label="Last install/upgrade job"
+                  value={lastJobId || vps.lastAgentInstallJobId || ""}
+                  mono
+                />
+              ) : null}
+              {vps.agentLastError ? (
+                <DetailRow label="Last error" value={vps.agentLastError} />
+              ) : null}
+            </div>
+          </details>
         </CardContent>
       </Card>
 

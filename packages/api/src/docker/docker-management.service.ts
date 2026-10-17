@@ -35,10 +35,14 @@ export class DockerManagementService {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
+  private isManagementHostAllowed(record: { managedBy?: string; kind?: string }): boolean {
+    return record.managedBy !== "system" || record.kind === "local";
+  }
+
   async capability(vpsId: string) {
     const record = await this.vps.get(vpsId);
     if (!record) throw new NotFoundException("VPS not found");
-    const enabled = record.managedBy !== "system" && record.dockerManagementEnabled === true;
+    const enabled = this.isManagementHostAllowed(record) && record.dockerManagementEnabled === true;
     // Realtime logs need a real agent-backed Docker source, so demo mode
     // reports them unsupported while keeping identity and actions usable.
     // Local app mode allows logs for user-managed VPS records as well as the
@@ -47,7 +51,7 @@ export class DockerManagementService {
     const isLocalHost = record.kind === "local" && record.managedBy === "system";
     const logsSupported = (record.managedBy !== "system" || isLocalHost) && this.config.mode === "local";
     let reason: string | undefined;
-    if (record.managedBy === "system") reason = "Docker management is unavailable";
+    if (!this.isManagementHostAllowed(record)) reason = "Docker management is unavailable";
     else if (record.dockerManagementEnabled !== true) reason = "Docker management is disabled";
     else if (this.config.mode === "demo") reason = DEMO_LOGS_REASON;
     return {
@@ -91,7 +95,7 @@ export class DockerManagementService {
   async create(vpsId: string, input: { action: DockerManagementAction; target: DockerManagementTarget; idempotencyKey: string; confirmedAt?: string }) {
     const record = await this.vps.get(vpsId);
     if (!record) throw new NotFoundException("VPS not found");
-    if (record.managedBy === "system") throw new ForbiddenException("Docker management is unavailable");
+    if (!this.isManagementHostAllowed(record)) throw new ForbiddenException("Docker management is unavailable");
     if (record.dockerManagementEnabled !== true) throw new ForbiddenException("Docker management is disabled");
     if (!(input.action in ACTIONS)) throw new ForbiddenException("Action is not allowed");
     if (input.confirmedAt && Math.abs(Date.now() - Date.parse(input.confirmedAt)) > TTL_MS) throw new ForbiddenException("Confirmation expired");
@@ -123,13 +127,13 @@ export class DockerManagementService {
   /**
    * Queue claim for the authenticated agent (its credential is bound to
    * vpsId). Returns null — not an error — when the queue is empty or
-   * management is not allowed (disabled, missing, or a system-managed host),
+   * management is not allowed (disabled, missing, or a system-managed remote host),
    * mirroring create() policy: an empty queue and a denied queue are
    * indistinguishable to the agent, so policy state never leaks.
    */
   async claimForAgent(vpsId: string, agentInstanceId: string): Promise<AgentCommand | null> {
     const record = await this.vps.get(vpsId);
-    if (!record || record.managedBy === "system" || record.dockerManagementEnabled !== true) return null;
+    if (!record || !this.isManagementHostAllowed(record) || record.dockerManagementEnabled !== true) return null;
     const op = await this.repository.claimNextQueued(vpsId, agentInstanceId);
     if (!op) return null;
     if (!op.leaseExpiresAt) throw new InternalServerErrorException("Claimed operation is missing its lease");

@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { ArrowLeft } from "lucide-react";
+import { Button } from "../components/ui/button";
 import { Link, NavLink, Outlet, useLocation, useParams } from "react-router-dom";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "../lib/utils";
@@ -502,6 +503,7 @@ export function VpsWorkspaceDockerPage() {
   const dashboard = useDashboard();
   const snapshot = overview.dockerMetrics[0];
   const monitoringEnabled = vps.dockerMetricsEnabled === true;
+  const managementEnabled = vps.dockerManagementEnabled === true;
   const [history, setHistory] = useState<DockerHostSample[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [rollups, setRollups] = useState<DockerMetricRollup[]>([]);
@@ -562,7 +564,7 @@ export function VpsWorkspaceDockerPage() {
     if (!monitoringEnabled) {
       setLoading(false);
       setHistory([]); setHistoryTotal(0); setRollups([]); setEvents([]); setEventsTotal(0); setAlerts([]); setAlertsTotal(0); setStorage(null);
-      setResourceErrors({}); setResourcePages({}); setContainerHistory([]); setSelectedContainer(null);
+      setResourceErrors({}); setResourcePages({}); setContainerHistory([]);
       return;
     }
     let cancelled = false;
@@ -616,12 +618,6 @@ export function VpsWorkspaceDockerPage() {
   // every monitoring refresh tick.
   useEffect(() => {
     const scopeId = vps.id;
-    if (!monitoringEnabled) {
-      setCurrentContainers(null);
-      setCurrentContainersLoading(false);
-      setCurrentContainersError(null);
-      return;
-    }
     let cancelled = false;
     setCurrentContainersLoading(true);
     setCurrentContainersError(null);
@@ -635,7 +631,7 @@ export function VpsWorkspaceDockerPage() {
       })
       .finally(() => { if (!cancelled) setCurrentContainersLoading(false); });
     return () => { cancelled = true; };
-  }, [vps.id, monitoringEnabled, refreshTick]);
+  }, [vps.id, refreshTick]);
 
   // A selection must always resolve to a live current target: keys removed
   // from the list (refresh, error, or VPS switch) are cleared, not kept.
@@ -681,6 +677,7 @@ export function VpsWorkspaceDockerPage() {
       <div className="mb-4 flex items-center justify-between gap-3">
         <h2 id="server-docker-heading" className="text-lg font-semibold text-text">Docker</h2>
       </div>
+      <Button type="button" size="sm" variant="outline" className="mb-4" disabled={currentContainersLoading} onClick={() => setRefreshTick((tick) => tick + 1)}>Refresh containers</Button>
       <details className="mb-4 border border-line bg-panel">
         <summary className="cursor-pointer px-4 py-3 text-sm text-dim focus-visible:outline-signal">Snapshot & monitoring</summary>
       <DockerMetricsPanel
@@ -693,8 +690,6 @@ export function VpsWorkspaceDockerPage() {
       />
       </details>
       <div className="mt-4 space-y-4">
-        {monitoringEnabled ? (
-          <>
             <div className="grid min-w-0 gap-4 xl:grid-cols-[17rem_minmax(0,1fr)]">
             <section aria-label="Container history" className="min-w-0 self-start border border-line bg-panel">
               <h3 className="border-b border-line px-4 py-3 text-sm font-semibold">Containers <span className="tnum text-dim">{currentTargets.length}</span></h3>
@@ -717,16 +712,17 @@ export function VpsWorkspaceDockerPage() {
                   <h3 className="text-base font-semibold text-text">{selectedTarget.name ?? selectedTarget.containerKey.slice(0, 12)}</h3>
                   <Link className="text-xs text-info underline-offset-4 hover:underline focus-visible:outline-signal" to={`/vps/${encodeURIComponent(vps.id)}/docker/containers/${encodeURIComponent(selectedTarget.agentInstanceId)}/${encodeURIComponent(selectedTarget.containerKey)}`}>Open container</Link>
                 </div>
-                {snapshot?.agentInstanceId === selectedTarget.agentInstanceId ? snapshot.containers.filter((item) => item.containerKey === selectedTarget.containerKey).map((item) => <dl key={item.containerKey} className="grid grid-cols-2 gap-4 border-y border-line py-4 text-xs sm:grid-cols-4">
+                {monitoringEnabled && snapshot?.agentInstanceId === selectedTarget.agentInstanceId ? snapshot.containers.filter((item) => item.containerKey === selectedTarget.containerKey).map((item) => <dl key={item.containerKey} className="grid grid-cols-2 gap-4 border-y border-line py-4 text-xs sm:grid-cols-4">
                   <div className="col-span-2 min-w-0"><dt className="text-dim">Image</dt><dd className="mt-1 break-all text-text">{item.image}</dd></div>
                   <div><dt className="text-dim">CPU · {snapshot.freshness === "fresh" ? "snapshot" : "saved snapshot"}</dt><dd className="tnum mt-1 text-text">{item.cpuPercent.toFixed(1)}%</dd></div>
                   <div><dt className="text-dim">Memory · PIDs</dt><dd className="tnum mt-1 text-text">{(item.memoryUsageBytes / 1048576).toFixed(1)} MiB · {item.pids}</dd></div>
                 </dl>) : null}
-                <DockerContainerManagementPanel key={`${vps.id}:${selectedTarget.agentInstanceId}:${selectedTarget.containerKey}`} vpsId={vps.id} enabled={vps.dockerManagementEnabled === true} fixedTarget={{agentInstanceId:selectedTarget.agentInstanceId, containerKey:selectedTarget.containerKey}} />
-                <details className="border border-line bg-panel"><summary className="cursor-pointer px-4 py-3 text-sm focus-visible:outline-signal">History</summary><DockerHistoryChart samples={containerHistory} retained={containerHistory.length} loading={containerHistoryLoading} error={containerHistoryError} /></details>
+                <DockerContainerManagementPanel key={`${vps.id}:${selectedTarget.agentInstanceId}:${selectedTarget.containerKey}`} vpsId={vps.id} enabled={managementEnabled} refreshTick={refreshTick} fixedTarget={{agentInstanceId:selectedTarget.agentInstanceId, containerKey:selectedTarget.containerKey}} />
+                {monitoringEnabled ? <details className="border border-line bg-panel"><summary className="cursor-pointer px-4 py-3 text-sm focus-visible:outline-signal">History</summary><DockerHistoryChart samples={containerHistory} retained={containerHistory.length} loading={containerHistoryLoading} error={containerHistoryError} /></details> : null}
               </> : <div className="flex min-h-48 items-center justify-center border border-dashed border-line p-6 text-sm text-dim">Select a container</div>}
             </div>
             </div>
+            {monitoringEnabled ? <>
             <details className="border border-line bg-panel"><summary className="cursor-pointer px-4 py-3 text-sm text-dim focus-visible:outline-signal">Host history</summary>
             <DockerHistoryChart samples={history} rollups={rollups} retained={historyTotal} loading={loading} error={resourceErrors.history} />{resourcePages.history?.hasMore ? <button type="button" onClick={() => loadMore("history")} disabled={loadingMore === "history"} className="p-3 text-xs text-signal underline">{loadingMore === "history" ? "Loading…" : "Load more history"}</button> : null}{resourcePages.rollups?.hasMore ? <button type="button" onClick={() => loadMore("rollups")} disabled={loadingMore === "rollups"} className="p-3 text-xs text-signal underline">{loadingMore === "rollups" ? "Loading…" : "Load more rollups"}</button> : null}
             </details>
@@ -736,7 +732,7 @@ export function VpsWorkspaceDockerPage() {
             <DockerStorageOverview storage={storage} loading={loading} error={resourceErrors.storage} />
             </div></details>
           </>
-        ) : null}
+        : null}
       </div>
     </section>
   );
@@ -852,12 +848,43 @@ export function VpsWorkspaceTerminalPage() {
 
 export function VpsWorkspaceSettingsPage() {
   const { vps, overview } = useVpsWorkspace();
+  const dashboard = useDashboard();
+  const managementEnabled = vps.dockerManagementEnabled === true;
+  const managementAllowed = vps.managedBy !== "system" || vps.kind === "local";
+  const [managementBusy, setManagementBusy] = useState(false);
+  const [managementError, setManagementError] = useState<string | null>(null);
+  const managementLock = useRef(false);
+
+  async function handleToggleManagement(): Promise<void> {
+    if (managementLock.current || dashboard.busy || dashboard.mode === "demo" || !managementAllowed) return;
+    managementLock.current = true;
+    setManagementBusy(true);
+    setManagementError(null);
+    try {
+      await dashboard.onEdit(vps, { dockerManagementEnabled: !managementEnabled });
+    } catch (err) {
+      setManagementError(err instanceof Error ? err.message : "Unable to update Docker management.");
+    } finally {
+      managementLock.current = false;
+      setManagementBusy(false);
+    }
+  }
   return (
     <div className="space-y-4">
       <h2 className="text-lg font-semibold tracking-tight text-text">
         Settings for {vpsDisplayName(vps)}
       </h2>
       <SettingsPanel overview={overview}>
+      <section aria-label="Docker management" className="mb-4 space-y-3 border border-line bg-panel p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h3 className="text-sm font-semibold text-text">Docker management</h3>
+          <Button type="button" size="sm" variant="outline" aria-pressed={managementEnabled} disabled={dashboard.busy || managementBusy || dashboard.mode === "demo" || !managementAllowed} onClick={() => void handleToggleManagement()}>
+            {managementEnabled ? "Disable Docker management" : "Enable Docker management"}
+          </Button>
+        </div>
+        <p className="text-xs text-dim">Docker controls can interrupt services, including this dashboard on the local host. Agent access to Docker is root-equivalent.</p>
+        {managementError ? <p role="alert" className="text-xs text-crit">{managementError}</p> : null}
+      </section>
         <LocalAgentUpdate vps={vps} variant="workspace" jobs={overview.jobs} />
       </SettingsPanel>
     </div>

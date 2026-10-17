@@ -32,7 +32,7 @@ FlexServer brings server health, resource history, SSH workflows, jobs, and audi
 | **Host metrics** | CPU, memory, disk, load, network throughput, and uptime; retained per-host CPU/RAM histories and availability-aware network charts. |
 | **SSH operations** | Key provisioning and verification, command jobs, and audit activity. Real connections require local mode, allowed targets, and trusted host keys. |
 | **Docker visibility** | Agent-backed container monitoring. Read-only container logs are available by default for non-system VPS records in local mode, with a compatible real agent and Docker access. |
-| **Controlled Docker actions** | Confirmed start, stop, and restart operations. Management is disabled by default and remains separate from monitoring and read-only logs. |
+| **Controlled Docker actions** | Opt-in controls for added VPSs and the local host. Start runs immediately; Stop and Restart require confirmation. Management is disabled by default, independently of monitoring and read-only logs. |
 | **Deployment choices** | Run from source, use Docker Compose with PostgreSQL, or deploy with the Linux amd64 installer. An optional Go agent collects host metrics and supports safe local updates using bundled binaries. |
 
 The web terminal is optional and disabled by default. Demo mode shows canned output only; it never opens a real SSH connection.

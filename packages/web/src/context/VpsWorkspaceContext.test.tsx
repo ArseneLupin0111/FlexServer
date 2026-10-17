@@ -1,13 +1,20 @@
 import "../test/setup";
 import type * as DashboardPanelsModule from "../components/dashboard/DashboardPanels";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   VpsWorkspaceContext,
   VpsWorkspaceTerminalPage,
+  VpsWorkspaceDockerPage,
+  VpsWorkspaceSettingsPage,
 } from "./VpsWorkspaceContext";
 import type { DashboardOverview, VpsRecord } from "../lib/api";
+import * as api from "../lib/api";
+import { DashboardContext, type DashboardCtx } from "./DashboardContext";
+import { MemoryRouter } from "react-router-dom";
+
+vi.mock("../lib/live-api", () => ({ subscribeMonitoring: () => () => {} }));
 
 // Mock TerminalPanel to inspect enabled prop without mounting xterm
 vi.mock("../components/dashboard/DashboardPanels", async (importOriginal) => {
@@ -222,5 +229,39 @@ describe("VpsWorkspaceTerminalPage gating", () => {
 
     const panel = screen.getByTestId("terminal-panel");
     expect(panel).toHaveAttribute("data-guard-enabled", "true");
+  });
+});
+
+describe("Docker management without monitoring", () => {
+  it.each([localVps, remoteVps])("keeps inventory and opt-in available for $id without enabling metrics", async (vps) => {
+    const target = { agentInstanceId: "inst_a", containerKey: "container_key", name: "fixture", state: "exited" };
+    const inventory = vi.spyOn(api, "listVpsDockerCurrentContainers").mockResolvedValue([target] as api.DockerCurrentContainer[]);
+    vi.spyOn(api, "getVpsDockerManagementCapability").mockResolvedValue({ supported: false, actions: [], logsSupported: false, maxLogLines: 200, targets: [target] });
+    const onEdit = vi.fn().mockResolvedValue(undefined);
+    const dashboard = { busy: false, mode: "local", onEdit, onToggleDockerMetrics: vi.fn() } as unknown as DashboardCtx;
+    const view = (record: VpsRecord) => <MemoryRouter><DashboardContext.Provider value={dashboard}><VpsWorkspaceContext.Provider value={{ vps: record, overview: baseOverview }}><VpsWorkspaceDockerPage /></VpsWorkspaceContext.Provider></DashboardContext.Provider></MemoryRouter>;
+    const settings = (record: VpsRecord) => <MemoryRouter><DashboardContext.Provider value={dashboard}><VpsWorkspaceContext.Provider value={{ vps: record, overview: baseOverview }}><VpsWorkspaceSettingsPage /></VpsWorkspaceContext.Provider></DashboardContext.Provider></MemoryRouter>;
+    const { rerender } = render(settings(vps));
+    expect(screen.queryByRole("button", { name: "Refresh containers" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Enable Docker management" }));
+    await waitFor(() => expect(onEdit).toHaveBeenCalledWith(vps, { dockerManagementEnabled: true }));
+    rerender(settings({ ...vps, dockerManagementEnabled: true }));
+    expect(screen.getByRole("button", { name: "Disable Docker management" })).toHaveAttribute("aria-pressed", "true");
+    rerender(view({ ...vps, dockerManagementEnabled: true }));
+    fireEvent.click(await screen.findByRole("button", { name: "fixture" }));
+    expect(screen.getByRole("link", { name: "Open container" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Disable Docker management" })).not.toBeInTheDocument();
+    inventory.mockResolvedValue([]);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh containers" }));
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Open container" })).not.toBeInTheDocument());
+  });
+
+  it("preserves consent on a failed update", async () => {
+    vi.spyOn(api, "listVpsDockerCurrentContainers").mockResolvedValue([]);
+    const dashboard = { busy: false, mode: "local", onEdit: vi.fn().mockRejectedValue(new Error("Permission denied")), onToggleDockerMetrics: vi.fn() } as unknown as DashboardCtx;
+    render(<MemoryRouter><DashboardContext.Provider value={dashboard}><VpsWorkspaceContext.Provider value={{ vps: localVps, overview: baseOverview }}><VpsWorkspaceSettingsPage /></VpsWorkspaceContext.Provider></DashboardContext.Provider></MemoryRouter>);
+    fireEvent.click(screen.getByRole("button", { name: "Enable Docker management" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Permission denied");
+    expect(screen.getByRole("button", { name: "Enable Docker management" })).toHaveAttribute("aria-pressed", "false");
   });
 });

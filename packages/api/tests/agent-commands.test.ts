@@ -242,7 +242,7 @@ describe("DockerManagementService capability gating", () => {
     );
     await expect(localService.capability(local.id)).resolves.toEqual({
       supported: false,
-      reason: "Docker management is unavailable",
+      reason: "Docker management is disabled",
       actions: [],
       logsSupported: true,
       maxLogLines: 200,
@@ -256,7 +256,7 @@ describe("DockerManagementService capability gating", () => {
         target: { containerKey: "ck_a" },
         idempotencyKey: "local-start-denied",
       }),
-    ).rejects.toThrow("Docker management is unavailable");
+    ).rejects.toThrow("Docker management is disabled");
   });
 
   it("blocks logs and targets for the system-managed local host in demo mode", async () => {
@@ -278,7 +278,7 @@ describe("DockerManagementService capability gating", () => {
     );
     await expect(demoService.capability(local.id)).resolves.toEqual({
       supported: false,
-      reason: "Docker management is unavailable",
+      reason: "Docker management is disabled",
       actions: [],
       logsSupported: false,
       maxLogLines: 200,
@@ -474,7 +474,7 @@ describe("POST /api/agent/commands/claim", () => {
     expect((await mgmtRepo.get(op.id))!.status).toBe("queued");
   });
 
-  it("never serves the system-managed local host, even force-enabled", async () => {
+  it("serves opted-in local operations only to its credential and records results", async () => {
     const local = await vpsRepo.ensureLocalHost({
       id: "local-host",
       name: "local-host",
@@ -485,22 +485,26 @@ describe("POST /api/agent/commands/claim", () => {
       managedBy: "system",
     });
     await vpsRepo.update(local.id, { dockerManagementEnabled: true });
-    // service.create() forbids the system host; queue directly at the
-    // repository to prove the claim gate itself refuses to expose ops.
-    const { operation } = await mgmtRepo.create({
-      vpsId: local.id,
+    const operation = await mgmtService.create(local.id, {
       idempotencyKey: "localhost1",
-      requestDigest: "digest",
       action: "start",
       target: { containerKey: "localcontainerkey01" },
     });
+    expect((await mgmtService.capability(local.id)).supported).toBe(true);
+    expect((await claim({ agentInstanceId: "inst_a" }).expect(200)).body.data.command).toBeNull();
     const localToken = (await agentService.createCredential(local.id)).token;
 
     const res = await claim({ agentInstanceId: "inst_a" }, localToken).expect(
       200,
     );
-    expect(res.body).toEqual({ data: { command: null } });
-    expect((await mgmtRepo.get(operation.id))!.status).toBe("queued");
+    expect(res.body.data.command).toMatchObject({ commandId: operation.id, vpsId: local.id });
+    await report(receipt(operation.id), localToken).expect(200);
+    expect((await mgmtRepo.get(operation.id))!.status).toBe("succeeded");
+    await vpsRepo.update(local.id, { dockerManagementEnabled: false });
+    await expect(mgmtService.create(local.id, {
+      action: "stop", target: operation.target, idempotencyKey: "local-disabled",
+    })).rejects.toThrow("Docker management is disabled");
+    expect((await claim({ agentInstanceId: "inst_a" }, localToken).expect(200)).body.data.command).toBeNull();
   });
 
   it("only serves commands queued for the credential's VPS", async () => {

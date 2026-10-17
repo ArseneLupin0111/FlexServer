@@ -971,3 +971,52 @@ describe("DockerContainerManagementPanel fixed target (container detail)", () =>
     expect(screen.getByText("web")).toBeInTheDocument();
   });
 });
+
+describe("container lifecycle consent", () => {
+  it("starts immediately once, checks outcome manually, and confirms or cancels Stop", async () => {
+    const operation = { id: "op-1", vpsId: "vps-1", action: "start", target: { agentInstanceId: "agent-alpha", containerKey: "container-one" }, status: "queued", createdAt: "2026-01-01T00:00:00Z" };
+    let finish: (value: Response) => void = () => {};
+    const posts: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/capability")) return jsonResponse(DEFAULT_CAPABILITY);
+      if (init?.method === "POST") {
+        posts.push(JSON.parse(init.body as string));
+        return new Promise<Response>((resolve) => { finish = resolve; });
+      }
+      return jsonResponse({ data: { ...operation, status: "succeeded" } });
+    }));
+    render(<DockerContainerManagementPanel vpsId="vps-1" enabled />);
+    const start = await screen.findByRole("button", { name: "start" });
+    await waitFor(() => expect(start).toBeEnabled());
+    fireEvent.click(start); fireEvent.click(start);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toMatchObject({ action: "start", target: operation.target });
+    await act(async () => { finish(jsonResponse({ data: operation })); });
+    expect(screen.getByText(/Operation status:/)).toHaveTextContent("queued");
+    fireEvent.click(screen.getByRole("button", { name: "Check status manually" }));
+    await waitFor(() => expect(screen.getByText(/Operation status:/)).toHaveTextContent("succeeded"));
+    fireEvent.click(screen.getByRole("button", { name: "stop" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(posts).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "stop" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm stop" }));
+    expect(posts).toHaveLength(2);
+    expect(posts[1]).toMatchObject({ action: "stop", target: operation.target });
+    await act(async () => { finish(jsonResponse({ data: { ...operation, action: "stop" } })); });
+  });
+
+  it("cancels confirmation when the selected identity changes", async () => {
+    const calls = stubCapability({});
+    const { rerender } = render(<DockerContainerManagementPanel vpsId="vps-1" enabled />);
+    const stop = await screen.findByRole("button", { name: "stop" });
+    await waitFor(() => expect(stop).toBeEnabled());
+    fireEvent.click(stop);
+    fireEvent.change(screen.getByRole("combobox", { hidden: true }), { target: { value: "agent-alpha::container-two" } });
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    fireEvent.click(stop);
+    rerender(<DockerContainerManagementPanel vpsId="vps-2" enabled />);
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(calls.filter((url) => url.endsWith("/actions"))).toEqual([]);
+  });
+});

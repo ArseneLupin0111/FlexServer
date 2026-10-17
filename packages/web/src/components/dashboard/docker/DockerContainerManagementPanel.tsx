@@ -258,8 +258,10 @@ export function DockerContainerManagementPanel({
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [capabilityRetry, setCapabilityRetry] = useState(0);
   const [targetPair, setTargetPair] = useState<TargetPair | null>(null);
-  const [pendingAction, setPendingAction] =
-    useState<DockerManagementAction | null>(null);
+  const [pendingAction, setPendingAction] = useState<{ action: DockerManagementAction; target: TargetPair; name: string; vpsId: string } | null>(null);
+  const actionLock = useRef(false);
+  const actionScope = useRef({ vpsId, pair: targetPair });
+  actionScope.current = { vpsId, pair: targetPair };
   const [operationState, setOperationState] = useState<OperationState>({
     operation: null,
     checking: false,
@@ -349,6 +351,12 @@ export function DockerContainerManagementPanel({
   if (scopedPair !== targetPair) {
     setTargetPair(scopedPair);
   }
+
+  useEffect(() => {
+    if (pendingAction && (pendingAction.vpsId !== vpsId || !samePair(pendingAction.target, scopedPair) || !enabled || capabilityError || !capability?.supported || !capability.actions.includes(pendingAction.action))) {
+      setPendingAction(null);
+    }
+  }, [vpsId, scopedPair, enabled, capability, capabilityError, pendingAction]);
 
   // Scope changes never leak operation status into another target.
   useEffect(() => {
@@ -490,10 +498,9 @@ export function DockerContainerManagementPanel({
 
   const buffer = published ?? EMPTY_BUFFER;
 
-  const confirmAction = async () => {
-    if (!enabled || !capability?.supported || !pendingAction || !selected || !capability.actions.includes(pendingAction)) return;
-    // Dialog Cancel closes without calling this; only explicit confirmation
-    // reaches the API, and only once per click.
+  const submitAction = async (action: DockerManagementAction, target: TargetPair): Promise<void> => {
+    if (actionLock.current || !enabled || capabilityError || !capability?.supported || !selected || !samePair(target, scopedPair) || !capability.actions.includes(action)) return;
+    actionLock.current = true;
     setOperationState((prev) => ({
       ...prev,
       requestBusy: true,
@@ -502,12 +509,10 @@ export function DockerContainerManagementPanel({
     try {
       const result = await requestVpsDockerContainerAction(
         vpsId,
-        {
-          agentInstanceId: selected.agentInstanceId,
-          containerKey: selected.containerKey,
-        },
-        pendingAction,
+        target,
+        action,
       );
+      if (actionScope.current.vpsId !== vpsId || !samePair(actionScope.current.pair, target)) return;
       setOperationState({
         operation: result,
         checking: false,
@@ -515,6 +520,7 @@ export function DockerContainerManagementPanel({
         error: null,
       });
     } catch (err) {
+      if (actionScope.current.vpsId !== vpsId || !samePair(actionScope.current.pair, target)) return;
       setOperationState((prev) => ({
         ...prev,
         requestBusy: false,
@@ -524,6 +530,8 @@ export function DockerContainerManagementPanel({
             : "Unable to start this container operation.",
       }));
     } finally {
+      actionLock.current = false;
+      setOperationState((prev) => ({ ...prev, requestBusy: false }));
       // No optimistic container update; dialog closes and status is
       // checked manually below.
       setPendingAction(null);
@@ -789,7 +797,12 @@ export function DockerContainerManagementPanel({
                     operationState.checking ||
                     !capability.actions.includes(action)
                   }
-                  onClick={() => setPendingAction(action)}
+                  onClick={() => {
+                    const target = selected && targetPairOf(selected);
+                    if (!target || !selected) return;
+                    if (action === "start") void submitAction(action, target);
+                    else setPendingAction({ action, target, name: selected.name, vpsId });
+                  }}
                 >
                   {action}
                 </Button>
@@ -1005,23 +1018,18 @@ export function DockerContainerManagementPanel({
               <AlertDialogTitle>
                 {pendingAction ? (
                   <>
-                    {pendingAction === "start"
-                      ? "Start"
-                      : pendingAction === "stop"
-                        ? "Stop"
-                        : "Restart"}{" "}
-                    container “{selected?.name ?? selected?.containerKey}”?
+                    {pendingAction.action === "stop" ? "Stop" : "Restart"}{" "}
+                    container “{pendingAction.name}”?
                   </>
                 ) : (
                   "Confirm container action"
                 )}
               </AlertDialogTitle>
               <AlertDialogDescription>
-                This targets {selected?.name ?? "the selected container"} (key{" "}
-                {selected?.containerKey ?? "—"}) on this server. The action is
-                sent once on confirmation; container state below is not
-                updated optimistically. Check operation status manually
-                afterwards.
+                This targets {pendingAction?.name ?? "the selected container"} (key{" "}
+                {pendingAction?.target.containerKey ?? "—"}) on this server and can interrupt services.
+                The action is sent once on confirmation; container state is not updated optimistically.
+                Check operation status manually afterwards.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
@@ -1032,12 +1040,14 @@ export function DockerContainerManagementPanel({
                   !selected ||
                   operationState.requestBusy
                 }
-                onClick={() => void confirmAction()}
+                onClick={() => {
+                  if (pendingAction && pendingAction.vpsId === vpsId) void submitAction(pendingAction.action, pendingAction.target);
+                }}
               >
                 {operationState.requestBusy
                   ? "Sending…"
                   : pendingAction
-                    ? `Confirm ${pendingAction}`
+                    ? `Confirm ${pendingAction.action}`
                     : "Confirm"}
               </AlertDialogAction>
             </AlertDialogFooter>

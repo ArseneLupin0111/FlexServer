@@ -243,14 +243,14 @@ describe("Docker management without monitoring", () => {
     const settings = (record: VpsRecord) => <MemoryRouter><DashboardContext.Provider value={dashboard}><VpsWorkspaceContext.Provider value={{ vps: record, overview: baseOverview }}><VpsWorkspaceSettingsPage /></VpsWorkspaceContext.Provider></DashboardContext.Provider></MemoryRouter>;
     const { rerender } = render(settings(vps));
     expect(screen.queryByRole("button", { name: "Refresh containers" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Enable Docker management" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Enable Docker management" }));
     await waitFor(() => expect(onEdit).toHaveBeenCalledWith(vps, { dockerManagementEnabled: true }));
     rerender(settings({ ...vps, dockerManagementEnabled: true }));
-    expect(screen.getByRole("button", { name: "Disable Docker management" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("switch", { name: "Disable Docker management" })).toHaveAttribute("aria-checked", "true");
     rerender(view({ ...vps, dockerManagementEnabled: true }));
     fireEvent.click(await screen.findByRole("button", { name: "fixture" }));
     expect(screen.getByRole("link", { name: "Open container" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Disable Docker management" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch", { name: "Disable Docker management" })).not.toBeInTheDocument();
     inventory.mockResolvedValue([]);
     fireEvent.click(screen.getByRole("button", { name: "Refresh containers" }));
     await waitFor(() => expect(screen.queryByRole("link", { name: "Open container" })).not.toBeInTheDocument());
@@ -260,8 +260,8 @@ describe("Docker management without monitoring", () => {
     vi.spyOn(api, "listVpsDockerCurrentContainers").mockResolvedValue([]);
     const dashboard = { busy: false, mode: "local", onEdit: vi.fn().mockRejectedValue(new Error("Permission denied")), onToggleDockerMetrics: vi.fn() } as unknown as DashboardCtx;
     render(<MemoryRouter><DashboardContext.Provider value={dashboard}><VpsWorkspaceContext.Provider value={{ vps: localVps, overview: baseOverview }}><VpsWorkspaceSettingsPage /></VpsWorkspaceContext.Provider></DashboardContext.Provider></MemoryRouter>);
-    fireEvent.click(screen.getByRole("button", { name: "Enable Docker management" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Enable Docker management" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Permission denied");
-    expect(screen.getByRole("button", { name: "Enable Docker management" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("switch", { name: "Enable Docker management" })).toHaveAttribute("aria-checked", "false");
   });
 });

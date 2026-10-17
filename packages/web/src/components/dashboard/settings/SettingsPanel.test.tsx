@@ -76,17 +76,10 @@ describe("SettingsPanel", () => {
     renderWithContext(mockOverview);
 
     const toggleButton = screen.getByTestId("web-terminal-toggle");
-    expect(toggleButton).toHaveTextContent("Enable");
-    expect(toggleButton).toHaveAttribute("aria-pressed", "false");
-    expect(toggleButton).toHaveAttribute("aria-label", "Enable web terminal");
+    expect(toggleButton).toHaveAttribute("aria-checked", "false");
 
     const guardToggle = screen.getByTestId("terminal-command-guard-toggle");
-    expect(guardToggle).toHaveTextContent("Enable");
-    expect(guardToggle).toHaveAttribute("aria-pressed", "false");
-    expect(guardToggle).toHaveAttribute(
-      "aria-label",
-      "Enable terminal command guard",
-    );
+    expect(guardToggle).toHaveAttribute("aria-checked", "false");
   });
 
   it("handles enabling web terminal with pending state and provider update", async () => {
@@ -135,9 +128,7 @@ describe("SettingsPanel", () => {
       </DashboardContext.Provider>,
     );
 
-    expect(toggleButton).toHaveTextContent("Disable");
-    expect(toggleButton).toHaveAttribute("aria-pressed", "true");
-    expect(toggleButton).toHaveAttribute("aria-label", "Disable web terminal");
+    expect(toggleButton).toHaveAttribute("aria-checked", "true");
   });
 
   it("surfaces actionable error message on failure and allows retry", async () => {
@@ -161,8 +152,7 @@ describe("SettingsPanel", () => {
         "DASHBOARD_PUBLIC_ORIGIN must be configured to enable web terminal.",
       );
       expect(toggleButton).not.toBeDisabled();
-      expect(toggleButton).toHaveTextContent("Enable");
-      expect(toggleButton).toHaveAttribute("aria-pressed", "false");
+      expect(toggleButton).toHaveAttribute("aria-checked", "false");
     });
 
     // Retry
@@ -191,8 +181,7 @@ describe("SettingsPanel", () => {
     renderWithContext(enabledOverview, { onUpdateSettings });
 
     const toggleButton = screen.getByTestId("web-terminal-toggle");
-    expect(toggleButton).toHaveTextContent("Disable");
-    expect(toggleButton).toHaveAttribute("aria-pressed", "true");
+    expect(toggleButton).toHaveAttribute("aria-checked", "true");
 
     fireEvent.click(toggleButton);
 
@@ -233,12 +222,7 @@ describe("SettingsPanel", () => {
       </DashboardContext.Provider>,
     );
 
-    expect(guardToggle).toHaveTextContent("Disable");
-    expect(guardToggle).toHaveAttribute("aria-pressed", "true");
-    expect(guardToggle).toHaveAttribute(
-      "aria-label",
-      "Disable terminal command guard",
-    );
+    expect(guardToggle).toHaveAttribute("aria-checked", "true");
   });
 
   it("surfaces error on command guard update failure", async () => {

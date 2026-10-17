@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "../components/ui/button";
+import { Switch } from "../components/ui/switch";
 import { Link, NavLink, Outlet, useLocation, useParams } from "react-router-dom";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "../lib/utils";
@@ -879,9 +880,7 @@ export function VpsWorkspaceSettingsPage() {
       <section aria-label="Docker management" className="mb-4 space-y-3 border border-line bg-panel p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-sm font-semibold text-text">Docker management</h3>
-          <Button type="button" size="sm" variant="outline" aria-pressed={managementEnabled} disabled={dashboard.busy || managementBusy || dashboard.mode === "demo" || !managementAllowed} onClick={() => void handleToggleManagement()}>
-            {managementEnabled ? "Disable Docker management" : "Enable Docker management"}
-          </Button>
+          <Switch checked={managementEnabled} pending={managementBusy} aria-label={`${managementEnabled ? "Disable" : "Enable"} Docker management`} disabled={dashboard.busy || dashboard.mode === "demo" || !managementAllowed} onCheckedChange={() => void handleToggleManagement()} />
         </div>
         <p className="text-xs text-dim">Docker controls can interrupt services, including this dashboard on the local host. Agent access to Docker is root-equivalent.</p>
         {managementError ? <p role="alert" className="text-xs text-crit">{managementError}</p> : null}

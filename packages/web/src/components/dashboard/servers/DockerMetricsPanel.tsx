@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Box, Search } from "lucide-react";
 import { Button } from "../../ui/button";
+import { Switch } from "../../ui/switch";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "../../ui/alert-dialog";
 import type { DashboardDockerContainerMetric, DashboardOverview, VpsRecord } from "../../../lib/api";
 import { freshnessLabel, vpsDisplayName } from "../../../lib/dashboard-formatters";
@@ -180,12 +181,12 @@ export function DockerMetricsPanel({ vps, dockerMetrics, busy, onToggle, present
             <div className="min-w-0">
               <span className="block text-[14px] font-semibold">Container snapshot</span>
             </div>
-            <Button type="button" size="sm" variant={enabled ? "secondary" : "outline"} className={`${detail ? "min-w-20" : "h-7 px-2 text-[11px]"} rounded-none`} disabled={busy} aria-pressed={enabled} aria-label={`${enabled ? "Disable" : "Enable"} Docker metrics for ${vpsDisplayName(vps)}`} onClick={() => enabled ? onToggle(vps) : setDialogOpen(true)}>{busy ? "Updating…" : enabled ? "On" : "Off"}</Button>
+            <Switch checked={enabled} pending={busy} aria-label={`${enabled ? "Disable" : "Enable"} Docker metrics for ${vpsDisplayName(vps)}`} onCheckedChange={() => enabled ? onToggle(vps) : setDialogOpen(true)} />
           </header>
         ) : (
           <div className="mb-2 flex items-center justify-between gap-3">
             <span className="flex items-center gap-2 text-[12px] text-dim"><Box size={14} aria-hidden="true" />Docker</span>
-            <Button type="button" size="sm" variant={enabled ? "secondary" : "outline"} className="h-7 px-2 text-[11px] rounded-none" disabled={busy} aria-pressed={enabled} aria-label={`${enabled ? "Disable" : "Enable"} Docker metrics for ${vpsDisplayName(vps)}`} onClick={() => enabled ? onToggle(vps) : setDialogOpen(true)}>{busy ? "Updating…" : enabled ? "On" : "Off"}</Button>
+            <Switch checked={enabled} pending={busy} aria-label={`${enabled ? "Disable" : "Enable"} Docker metrics for ${vpsDisplayName(vps)}`} onCheckedChange={() => enabled ? onToggle(vps) : setDialogOpen(true)} />
           </div>
         )}
         <div className={detail ? "space-y-2.5 p-4" : ""}>{body}</div>

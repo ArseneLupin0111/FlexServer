@@ -4,12 +4,11 @@ import {
   AlertTriangle,
   ChevronDown,
   Info,
-  Loader2,
   ShieldAlert,
   TerminalSquare,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "../../ui/card";
-import { Button } from "../../ui/button";
+import { Switch } from "../../ui/switch";
 import type { DashboardOverview } from "../../../lib/api";
 import { useDashboard } from "../../../context/DashboardContext";
 
@@ -53,31 +52,13 @@ function ToggleRow({
             <p className="mt-0.5 text-xs text-dim">{description}</p>
           </div>
         </div>
-        <Button
-          type="button"
-          size="sm"
-          variant={enabled ? "secondary" : "outline"}
-          className="h-8 shrink-0 rounded-none px-3 text-xs"
-          disabled={pending}
-          aria-pressed={enabled}
+        <Switch
+          checked={enabled}
+          pending={pending}
           aria-label={`${enabled ? "Disable" : "Enable"} ${actionLabel}`}
           data-testid={testId}
-          onClick={onToggle}
-        >
-          {pending ? (
-            <span className="flex items-center gap-1.5">
-              <Loader2
-                className="h-3.5 w-3.5 animate-spin"
-                aria-hidden="true"
-              />
-              <span>Updating…</span>
-            </span>
-          ) : enabled ? (
-            "Disable"
-          ) : (
-            "Enable"
-          )}
-        </Button>
+          onCheckedChange={onToggle}
+        />
       </div>
       {error ? (
         <div

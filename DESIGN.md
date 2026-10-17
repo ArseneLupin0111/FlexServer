@@ -49,6 +49,8 @@ Container lifecycle text uses shared semantic colors: running → signal; create
 
 Keep keyboard focus visible and dialogs dismissible. Tables may scroll within their containers on narrow screens. Pulse indicators respect reduced motion; existing overlay transitions remain in the shared primitives.
 
+Boolean configuration controls (web terminal, command guard, Docker monitoring and Docker management) use the shared sliding `Switch` with `role="switch"` and `aria-checked`. Lime/right means on; neutral/left means off, with a written state alongside. Keep provider-confirmed state during updates, disable pending interactions, preserve errors and monitoring consent dialogs. Start/stop/restart remain command buttons.
+
 - Host health is independent of job outcomes and container counts. Recent failed jobs produce a notice linking to Jobs; non-running containers have a neutral count and Docker link, not an inferred failure. Stale Docker counts retain an explicit snapshot label.
 - Failed jobs display the percentage reached, reported failure reason and finish time when available. Progress bars appear only while jobs are running; absent worker/duration metadata is omitted. Existing log links remain available.
 

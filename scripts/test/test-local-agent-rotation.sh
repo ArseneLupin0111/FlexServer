@@ -24,7 +24,7 @@ fi
 if [[ "$MODE" == "live" ]]; then
   echo "=== Running Safe Live Local Agent Rotation Smoke Test ==="
   CONFIG_FILE="/etc/vps-manager-agent/config.json"
-  SOCKET_PATH="/var/run/flexserver/agent-rotation.sock"
+  SOCKET_PATH="/var/run/flexserver/agent-rotation/agent-rotation.sock"
 
   if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "Error: Host config file $CONFIG_FILE not found." >&2

@@ -166,7 +166,7 @@ INSTALL_HOST_PTY=false
 HOST_PTY_SRC=""
 HOST_PTY_SERVICE_NAME="flexserver-host-pty"
 HOST_PTY_DEST="/usr/local/bin/flexserver-host-pty"
-HOST_PTY_SOCKET_PATH="/var/run/flexserver/host-pty.sock"
+HOST_PTY_SOCKET_PATH="/var/run/flexserver/host-pty/host-pty.sock"
 HOST_PTY_SOCKET_UID=""
 HOST_PTY_SOCKET_GID=""
 HOST_PTY_UNIT_FILE="/etc/systemd/system/${HOST_PTY_SERVICE_NAME}.service"
@@ -174,7 +174,7 @@ INSTALL_ROTATOR=false
 ROTATOR_SRC=""
 ROTATOR_SERVICE_NAME="flexserver-local-agent-rotator"
 ROTATOR_DEST="/usr/local/bin/flexserver-local-agent-rotator"
-ROTATOR_SOCKET_PATH="/var/run/flexserver/agent-rotation.sock"
+ROTATOR_SOCKET_PATH="/var/run/flexserver/agent-rotation/agent-rotation.sock"
 ROTATOR_UNIT_FILE="/etc/systemd/system/${ROTATOR_SERVICE_NAME}.service"
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -751,6 +751,12 @@ if [[ -z "$HOST_PTY_SRC" ]]; then
   done
 fi
 
+# Stop the legacy PTY unit before the rotation helper starts in its new child.
+# Its old RuntimeDirectory may otherwise remove the helper's new socket.
+if [[ -n "$HOST_PTY_SRC" && -f "$HOST_PTY_SRC" && "$DRY_RUN" != "true" ]]; then
+  systemctl stop "${HOST_PTY_SERVICE_NAME}" || true
+fi
+
 if [[ "$INSTALL_HOST_PTY" == "true" || -n "$HOST_PTY_SRC" ]] && [[ -n "$HOST_PTY_SRC" && -f "$HOST_PTY_SRC" ]]; then
   echo "[host-pty] Installing host PTY service..."
   if [[ "$DRY_RUN" == "true" ]]; then
@@ -771,13 +777,12 @@ if [[ "$INSTALL_HOST_PTY" == "true" || -n "$HOST_PTY_SRC" ]] && [[ -n "$HOST_PTY
     HOST_PTY_EXTRA_ARGS="${HOST_PTY_EXTRA_ARGS} -socket-gid ${HOST_PTY_SOCKET_GID}"
   fi
 
-  HOST_PTY_SOCKET_DIR="$(basename "$(dirname "$HOST_PTY_SOCKET_PATH")")"
-  if [[ "$HOST_PTY_SOCKET_DIR" != "run" && -n "$HOST_PTY_SOCKET_DIR" && "$HOST_PTY_SOCKET_DIR" != "." && "$HOST_PTY_SOCKET_DIR" != "/" ]]; then
-    HOST_PTY_RUNTIME_DIR_CONFIG="RuntimeDirectory=${HOST_PTY_SOCKET_DIR}
+  # Only own this daemon's child directory; never the shared mount parent.
+  HOST_PTY_RUNTIME_DIR_CONFIG=""
+  if [[ "$HOST_PTY_SOCKET_PATH" == /var/run/flexserver/host-pty/* || "$HOST_PTY_SOCKET_PATH" == /run/flexserver/host-pty/* ]]; then
+    HOST_PTY_RUNTIME_DIR_CONFIG="RuntimeDirectory=flexserver/host-pty
 RuntimeDirectoryMode=0755
 "
-  else
-    HOST_PTY_RUNTIME_DIR_CONFIG=""
   fi
 
   HOST_PTY_UNIT_CONTENT=$(cat <<PTYUNIT
@@ -814,8 +819,7 @@ PTYUNIT
     chmod 0644 "$HOST_PTY_UNIT_FILE"
     systemctl daemon-reload
     systemctl enable "${HOST_PTY_SERVICE_NAME}"
-    systemctl restart "${HOST_PTY_SERVICE_NAME}"
-    echo "  Started ${HOST_PTY_SERVICE_NAME} (socket: ${HOST_PTY_SOCKET_PATH})"
+    # Start after rotator migration: its old unit may still clean the shared parent.
   fi
 fi
 
@@ -849,13 +853,11 @@ if [[ "$INSTALL_ROTATOR" == "true" || -n "$ROTATOR_SRC" ]] && [[ -n "$ROTATOR_SR
     ROTATOR_EXTRA_ARGS="${ROTATOR_EXTRA_ARGS} -socket-gid ${HOST_PTY_SOCKET_GID}"
   fi
 
-  ROTATOR_SOCKET_DIR="$(basename "$(dirname "$ROTATOR_SOCKET_PATH")")"
-  if [[ "$ROTATOR_SOCKET_DIR" != "run" && -n "$ROTATOR_SOCKET_DIR" && "$ROTATOR_SOCKET_DIR" != "." && "$ROTATOR_SOCKET_DIR" != "/" ]]; then
-    ROTATOR_RUNTIME_DIR_CONFIG="RuntimeDirectory=${ROTATOR_SOCKET_DIR}
+  ROTATOR_RUNTIME_DIR_CONFIG=""
+  if [[ "$ROTATOR_SOCKET_PATH" == /var/run/flexserver/agent-rotation/* || "$ROTATOR_SOCKET_PATH" == /run/flexserver/agent-rotation/* ]]; then
+    ROTATOR_RUNTIME_DIR_CONFIG="RuntimeDirectory=flexserver/agent-rotation
 RuntimeDirectoryMode=0755
 "
-  else
-    ROTATOR_RUNTIME_DIR_CONFIG=""
   fi
 
   ROTATOR_UNIT_CONTENT=$(cat <<ROTATORUNIT
@@ -895,6 +897,10 @@ ROTATORUNIT
     systemctl restart "${ROTATOR_SERVICE_NAME}"
     echo "  Started ${ROTATOR_SERVICE_NAME} (socket: ${ROTATOR_SOCKET_PATH})"
   fi
+fi
+if [[ -n "$HOST_PTY_SRC" && -f "$HOST_PTY_SRC" && "$DRY_RUN" != "true" ]]; then
+  systemctl restart "${HOST_PTY_SERVICE_NAME}"
+  echo "  Started ${HOST_PTY_SERVICE_NAME} (socket: ${HOST_PTY_SOCKET_PATH})"
 fi
 
 echo ""

@@ -68,9 +68,9 @@ services:
       AGENT_RELEASE_PUBLIC_KEY: ${AGENT_RELEASE_PUBLIC_KEY:-}
       AGENT_RELEASE_MANIFEST_URL: ${AGENT_RELEASE_MANIFEST_URL:-}
       AGENT_RELEASE_TTL_SECONDS: ${AGENT_RELEASE_TTL_SECONDS:-300}
-      LOCAL_PTY_SOCKET_PATH: ${LOCAL_PTY_SOCKET_PATH:-/var/run/flexserver/host-pty.sock}
+      LOCAL_PTY_SOCKET_PATH: ${LOCAL_PTY_SOCKET_PATH:-/var/run/flexserver/host-pty/host-pty.sock}
       LOCAL_AGENT_ROTATION_HELPER: ${LOCAL_AGENT_ROTATION_HELPER:-/usr/local/bin/local-agent-rotation-client}
-      LOCAL_AGENT_ROTATION_SOCKET: ${LOCAL_AGENT_ROTATION_SOCKET:-/var/run/flexserver/agent-rotation.sock}
+      LOCAL_AGENT_ROTATION_SOCKET: ${LOCAL_AGENT_ROTATION_SOCKET:-/var/run/flexserver/agent-rotation/agent-rotation.sock}
       SSH_KEY_ENCRYPTION_KEY_FILE: ${SSH_KEY_ENCRYPTION_KEY_FILE:-}
     depends_on:
       migrate:

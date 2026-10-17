@@ -410,7 +410,7 @@ AUDIT_HISTORY_LIMIT=5000
 SSH_HOST_KEY_POLICY=strict
 SSH_KEY_ENCRYPTION_KEY_FILE=${KEYRING_FILE}
 LOCAL_AGENT_ROTATION_HELPER=/usr/local/bin/local-agent-rotation-client
-LOCAL_AGENT_ROTATION_SOCKET=/var/run/flexserver/agent-rotation.sock
+LOCAL_AGENT_ROTATION_SOCKET=/var/run/flexserver/agent-rotation/agent-rotation.sock
 ENV
 )
 
@@ -432,7 +432,7 @@ TERMINAL_VOLUME_LINE=""
 TERMINAL_ENV_LINE=""
 if [[ "$ENABLE_LOCAL_TERMINAL" == "true" ]]; then
   TERMINAL_VOLUME_LINE="      - /var/run/flexserver:/var/run/flexserver"
-  TERMINAL_ENV_LINE="      LOCAL_PTY_SOCKET_PATH: /var/run/flexserver/host-pty.sock"
+  TERMINAL_ENV_LINE="      LOCAL_PTY_SOCKET_PATH: /var/run/flexserver/host-pty/host-pty.sock"
 fi
 
 COMPOSE_CONTENT=$(
@@ -452,7 +452,7 @@ ${TERMINAL_VOLUME_LINE}
 ${TERMINAL_ENV_LINE}
       SSH_KEY_ENCRYPTION_KEY_FILE: ${KEYRING_FILE}
       LOCAL_AGENT_ROTATION_HELPER: /usr/local/bin/local-agent-rotation-client
-      LOCAL_AGENT_ROTATION_SOCKET: /var/run/flexserver/agent-rotation.sock
+      LOCAL_AGENT_ROTATION_SOCKET: /var/run/flexserver/agent-rotation/agent-rotation.sock
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -700,6 +700,18 @@ else
       echo "  Extracted bundled host-pty binary."
     fi
   fi
+  ROTATOR_BIN_TMP=""
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "  [DRY-RUN] Would extract bundled local-agent-rotator binary and pass --rotator-binary..."
+  else
+    ROTATOR_BIN_TMP="$(mktemp)"
+    INSTALLER_TMP_FILES+=("$ROTATOR_BIN_TMP")
+    if ! docker cp "${API_CONTAINER}:/app/agent/local-agent-rotator-linux-amd64" "$ROTATOR_BIN_TMP" &>/dev/null; then
+      echo "Error: Failed to extract bundled local-agent-rotator; cannot migrate host socket services safely." >&2
+      exit 1
+    fi
+    chmod 0755 "$ROTATOR_BIN_TMP"
+  fi
   # Bootstrap agent credential and generate config using --config-only
   AGENT_CONFIG_TMP=""
   AGENT_CONFIG_CREATED=false
@@ -785,6 +797,9 @@ EOF
 
     if [[ -n "$INSTALL_SCRIPT" ]] || [[ "$DRY_RUN" == "true" ]]; then
       AGENT_INSTALL_ARGS=(--binary "$AGENT_BIN_TMP" --config "$AGENT_CONFIG_TMP" --service-name "$AGENT_SERVICE_NAME")
+      if [[ -n "$ROTATOR_BIN_TMP" ]]; then
+        AGENT_INSTALL_ARGS+=(--rotator-binary "$ROTATOR_BIN_TMP")
+      fi
       if [[ "$ENABLE_DOCKER_METRICS_ACCESS" == "true" ]]; then
         AGENT_INSTALL_ARGS+=(--enable-docker-metrics-access)
       fi
@@ -812,6 +827,8 @@ EOF
         echo "  [DRY-RUN] Would clean up temp files."
       else
         bash "$INSTALL_SCRIPT" "${AGENT_INSTALL_ARGS[@]}"
+        # Legacy RuntimeDirectory cleanup may replace the mounted parent inode.
+        docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate api
         if [[ "$AGENT_CONFIG_CREATED" == "true" ]]; then
           TOKEN_LINE="$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$AGENT_CONFIG_TMP" | head -1)"
           KEEP_CREDENTIAL_ID="${TOKEN_LINE#vma_}"

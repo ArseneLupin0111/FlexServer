@@ -953,9 +953,9 @@ jobs:
           TERMINAL_OUTPUT_BUFFER_BYTES=$TERMINAL_OUTPUT_BUFFER_BYTES_VALUE
           TERMINAL_INPUT_BUFFER_BYTES=$TERMINAL_INPUT_BUFFER_BYTES_VALUE
           TERMINAL_SLOW_CONSUMER_TIMEOUT_MS=$TERMINAL_SLOW_CONSUMER_TIMEOUT_MS_VALUE
-          LOCAL_PTY_SOCKET_PATH=/var/run/flexserver/host-pty.sock
+          LOCAL_PTY_SOCKET_PATH=/var/run/flexserver/host-pty/host-pty.sock
           LOCAL_AGENT_ROTATION_HELPER=/usr/local/bin/local-agent-rotation-client
-          LOCAL_AGENT_ROTATION_SOCKET=/var/run/flexserver/agent-rotation.sock
+          LOCAL_AGENT_ROTATION_SOCKET=/var/run/flexserver/agent-rotation/agent-rotation.sock
           SSH_KEY_ENCRYPTION_KEY_FILE=/etc/flexserver/ssh-keyring.json
           STORAGE_DRIVER=postgres
           POSTGRES_DB=vps_manager
@@ -994,9 +994,9 @@ jobs:
                 AGENT_RELEASE_PUBLIC_KEY: \${AGENT_RELEASE_PUBLIC_KEY:-}
                 AGENT_RELEASE_MANIFEST_URL: \${AGENT_RELEASE_MANIFEST_URL:-}
                 AGENT_RELEASE_TTL_SECONDS: \${AGENT_RELEASE_TTL_SECONDS:-300}
-                LOCAL_PTY_SOCKET_PATH: \${LOCAL_PTY_SOCKET_PATH:-/var/run/flexserver/host-pty.sock}
+                LOCAL_PTY_SOCKET_PATH: \${LOCAL_PTY_SOCKET_PATH:-/var/run/flexserver/host-pty/host-pty.sock}
                 LOCAL_AGENT_ROTATION_HELPER: \${LOCAL_AGENT_ROTATION_HELPER:-/usr/local/bin/local-agent-rotation-client}
-                LOCAL_AGENT_ROTATION_SOCKET: \${LOCAL_AGENT_ROTATION_SOCKET:-/var/run/flexserver/agent-rotation.sock}
+                LOCAL_AGENT_ROTATION_SOCKET: \${LOCAL_AGENT_ROTATION_SOCKET:-/var/run/flexserver/agent-rotation/agent-rotation.sock}
                 SSH_KEY_ENCRYPTION_KEY_FILE: \${SSH_KEY_ENCRYPTION_KEY_FILE:-/etc/flexserver/ssh-keyring.json}
               volumes:
                 - vps-manager-data:/app/data
@@ -1070,6 +1070,9 @@ jobs:
             # Migrate managed SSH keys to envelope encryption
             echo \"Migrating managed SSH keys to envelope encryption...\"
             cd '$DEPLOY_PATH' && docker compose run --rm --no-deps -v \"\${KEYRING_DIR}:\${KEYRING_DIR}:ro\" -e SSH_KEY_ENCRYPTION_KEY_FILE=\"\$KEYRING_FILE\" api node dist/scripts/manage-ssh-keys.js migrate --path \"\$KEYRING_FILE\"
+            # Retire both old shared-runtime units before creating isolated sockets.
+            # Existing API mounts may refer to the old directory until Compose recreates it.
+            \$SUDO systemctl stop flexserver-host-pty.service flexserver-local-agent-rotator.service || true
             # Extract packaged host-pty binary from API image
             HOST_PTY_TMP=\"\$(mktemp /tmp/host-pty-bundled.XXXXXX)\"
             if ! docker run --rm --entrypoint cat '$API_IMAGE' /app/agent/host-pty-linux-amd64 > \"\$HOST_PTY_TMP\" || [ ! -s \"\$HOST_PTY_TMP\" ]; then
@@ -1091,7 +1094,7 @@ jobs:
             # Install systemd root daemon unit with RuntimeDirectory for boot directory recreation
             UNIT_FILE=\"/etc/systemd/system/flexserver-host-pty.service\"
             UNIT_TMP=\"\$(mktemp /tmp/flexserver-host-pty.XXXXXX.service)\"
-            printf '[Unit]\nDescription=VPS Manager Host PTY Daemon\nDocumentation=https://github.com/sondoan17/vps-manager-nodejs\nAfter=network.target\n\n[Service]\nType=simple\nUser=root\nGroup=root\nRuntimeDirectory=flexserver\nRuntimeDirectoryMode=0755\nExecStart=/usr/local/bin/flexserver-host-pty -socket /var/run/flexserver/host-pty.sock -socket-mode 0660 -socket-uid %s -socket-gid %s\nRestart=always\nRestartSec=5\n\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectClock=true\n\n[Install]\nWantedBy=multi-user.target\n' \"\$API_UID\" \"\$API_GID\" > \"\$UNIT_TMP\"
+            printf '[Unit]\nDescription=VPS Manager Host PTY Daemon\nDocumentation=https://github.com/sondoan17/vps-manager-nodejs\nAfter=network.target\n\n[Service]\nType=simple\nUser=root\nGroup=root\nRuntimeDirectory=flexserver/host-pty\nRuntimeDirectoryMode=0755\nExecStart=/usr/local/bin/flexserver-host-pty -socket /var/run/flexserver/host-pty/host-pty.sock -socket-mode 0660 -socket-uid %s -socket-gid %s\nRestart=always\nRestartSec=5\n\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectClock=true\n\n[Install]\nWantedBy=multi-user.target\n' \"\$API_UID\" \"\$API_GID\" > \"\$UNIT_TMP\"
             \$SUDO chown root:root \"\$UNIT_TMP\"
             \$SUDO chmod 0644 \"\$UNIT_TMP\"
             \$SUDO mv -f \"\$UNIT_TMP\" \"\$UNIT_FILE\"
@@ -1100,7 +1103,7 @@ jobs:
             \$SUDO systemctl daemon-reload
             \$SUDO systemctl enable flexserver-host-pty.service
             \$SUDO systemctl restart flexserver-host-pty.service
-            echo \"Host PTY daemon started (socket: /var/run/flexserver/host-pty.sock, uid=\${API_UID}, gid=\${API_GID}).\"
+            echo \"Host PTY daemon started (socket: /var/run/flexserver/host-pty/host-pty.sock, uid=\${API_UID}, gid=\${API_GID}).\"
 
             # Extract packaged local-agent-rotator binary from API image
             ROTATOR_TMP=\"\$(mktemp /tmp/local-agent-rotator-bundled.XXXXXX)\"
@@ -1122,14 +1125,14 @@ jobs:
             # Install systemd root daemon unit for rotation helper
             ROTATOR_UNIT_FILE=\"/etc/systemd/system/flexserver-local-agent-rotator.service\"
             ROTATOR_UNIT_TMP=\"\$(mktemp /tmp/flexserver-local-agent-rotator.XXXXXX.service)\"
-            printf '[Unit]\nDescription=VPS Manager Local Agent Rotation Helper Daemon\nDocumentation=https://github.com/sondoan17/vps-manager-nodejs\nAfter=network.target\n\n[Service]\nType=simple\nUser=root\nGroup=root\nRuntimeDirectory=flexserver\nRuntimeDirectoryMode=0755\nExecStart=/usr/local/bin/flexserver-local-agent-rotator -server -socket /var/run/flexserver/agent-rotation.sock -socket-mode 0660 -socket-uid %s -socket-gid %s -config /etc/vps-manager-agent/config.json -service-name vps-manager-agent.service\nRestart=always\nRestartSec=5\n\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectClock=true\n\n[Install]\nWantedBy=multi-user.target\n' \"\$API_UID\" \"\$API_GID\" > \"\$ROTATOR_UNIT_TMP\"
+            printf '[Unit]\nDescription=VPS Manager Local Agent Rotation Helper Daemon\nDocumentation=https://github.com/sondoan17/vps-manager-nodejs\nAfter=network.target\n\n[Service]\nType=simple\nUser=root\nGroup=root\nRuntimeDirectory=flexserver/agent-rotation\nRuntimeDirectoryMode=0755\nExecStart=/usr/local/bin/flexserver-local-agent-rotator -server -socket /var/run/flexserver/agent-rotation/agent-rotation.sock -socket-mode 0660 -socket-uid %s -socket-gid %s -config /etc/vps-manager-agent/config.json -service-name vps-manager-agent.service\nRestart=always\nRestartSec=5\n\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectClock=true\n\n[Install]\nWantedBy=multi-user.target\n' \"\$API_UID\" \"\$API_GID\" > \"\$ROTATOR_UNIT_TMP\"
             \$SUDO chown root:root \"\$ROTATOR_UNIT_TMP\"
             \$SUDO chmod 0644 \"\$ROTATOR_UNIT_TMP\"
             \$SUDO mv -f \"\$ROTATOR_UNIT_TMP\" \"\$ROTATOR_UNIT_FILE\"
             \$SUDO systemctl daemon-reload
             \$SUDO systemctl enable flexserver-local-agent-rotator.service
             \$SUDO systemctl restart flexserver-local-agent-rotator.service
-            echo \"Host Agent Rotator daemon started (socket: /var/run/flexserver/agent-rotation.sock, uid=\${API_UID}, gid=\${API_GID}).\"
+            echo \"Host Agent Rotator daemon started (socket: /var/run/flexserver/agent-rotation/agent-rotation.sock, uid=\${API_UID}, gid=\${API_GID}).\"
           "
           $SSH "cd '$DEPLOY_PATH' && docker compose run --rm api node dist/db/migrate.js"
           $SSH "cd '$DEPLOY_PATH' && docker compose run --rm api node dist/db/migrate.js --include-optional" || echo "Optional Timescale migration failed or is unavailable; continuing with core PostgreSQL schema."
@@ -1140,7 +1143,7 @@ jobs:
           else
             echo "DASHBOARD_ADMIN_PASSWORD secret not set — dashboard password must be set manually via SSH after deploy."
           fi
-          $SSH "cd '$DEPLOY_PATH' && docker compose up -d --remove-orphans"
+          $SSH "cd '$DEPLOY_PATH' && docker compose up -d --remove-orphans --force-recreate api web"
           $SSH "cd '$DEPLOY_PATH' && docker compose ps"
           $SSH "for i in \$(seq 1 30); do curl -fsS http://127.0.0.1:3000/api/health && exit 0; sleep 2; done; docker compose -f '$DEPLOY_PATH/docker-compose.yml' logs --tail=80; exit 1"
           # Refresh or bootstrap local updater on the host using the bundled binary from API image

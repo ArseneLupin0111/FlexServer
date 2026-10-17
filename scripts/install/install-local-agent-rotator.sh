@@ -4,7 +4,7 @@
 # for the VPS Manager local agent credential rotation helper daemon.
 #
 # Installs a constrained root systemd daemon that listens on a Unix domain socket
-# (/var/run/flexserver/agent-rotation.sock) restricted to the unprivileged API container
+# (/var/run/flexserver/agent-rotation/agent-rotation.sock) restricted to the unprivileged API container
 # user (uid 100, gid 101). The daemon validates peer OS credentials, validates that the
 # requested vpsId matches the host agent configuration, atomically updates only the token
 # in /etc/vps-manager-agent/config.json preserving permissions (0640) and group (gid 999),
@@ -15,7 +15,7 @@
 #
 # Options:
 #   --binary <path>       Path to local-agent-rotator binary (optional; auto-located if omitted).
-#   --socket-path <path>  Socket path (default: /var/run/flexserver/agent-rotation.sock).
+#   --socket-path <path>  Socket path (default: /var/run/flexserver/agent-rotation/agent-rotation.sock).
 #   --socket-uid <uid>    API container user UID (default: auto-detected or 100).
 #   --socket-gid <gid>    API container group GID (default: auto-detected or 101).
 #   --config-file <path>  Target agent config file (default: /etc/vps-manager-agent/config.json).
@@ -30,7 +30,7 @@ umask 022
 SERVICE_NAME="flexserver-local-agent-rotator"
 SERVICE_DEST="/usr/local/bin/flexserver-local-agent-rotator"
 UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-SOCKET_PATH_DEFAULT="/var/run/flexserver/agent-rotation.sock"
+SOCKET_PATH_DEFAULT="/var/run/flexserver/agent-rotation/agent-rotation.sock"
 CONFIG_FILE_DEFAULT="/etc/vps-manager-agent/config.json"
 AGENT_SERVICE_NAME_DEFAULT="vps-manager-agent.service"
 
@@ -217,10 +217,9 @@ fi
 
 # ── Systemd Unit Installation ───────────────────────────────────────────────
 SOCKET_DIR="$(dirname "$SOCKET_PATH")"
-SOCKET_DIR_NAME="$(basename "$SOCKET_DIR")"
 RUNTIME_DIR_LINE=""
-if [[ "$SOCKET_DIR_NAME" != "run" && -n "$SOCKET_DIR_NAME" && "$SOCKET_DIR_NAME" != "." && "$SOCKET_DIR_NAME" != "/" ]]; then
-  RUNTIME_DIR_LINE="RuntimeDirectory=${SOCKET_DIR_NAME}
+if [[ "$SOCKET_PATH" == /var/run/flexserver/agent-rotation/* || "$SOCKET_PATH" == /run/flexserver/agent-rotation/* ]]; then
+  RUNTIME_DIR_LINE="RuntimeDirectory=flexserver/agent-rotation
 RuntimeDirectoryMode=0755"
 fi
 

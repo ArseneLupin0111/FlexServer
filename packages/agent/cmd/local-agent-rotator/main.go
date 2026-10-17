@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	defaultSocketPath  = "/var/run/flexserver/agent-rotation.sock"
+	defaultSocketPath  = "/var/run/flexserver/agent-rotation/agent-rotation.sock"
 	defaultConfigPath  = "/etc/vps-manager-agent/config.json"
 	defaultServiceName = "vps-manager-agent.service"
 	defaultSocketMode  = "0660"

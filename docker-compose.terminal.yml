@@ -1,7 +1,7 @@
 # Opt-in Docker Compose override to enable local host web terminal.
 # Mounts the dedicated host-pty Unix domain socket from the host system.
 # The host-pty daemon runs as a root systemd service on the host, creating
-# the socket at /var/run/flexserver/host-pty.sock with 0660 permissions
+# the socket at /var/run/flexserver/host-pty/host-pty.sock with 0660 permissions
 # granted to the API runtime UID/GID.
 #
 # The Docker daemon socket (/var/run/docker.sock) is NEVER mounted.
@@ -14,4 +14,4 @@ services:
     volumes:
       - /var/run/flexserver:/var/run/flexserver
     environment:
-      LOCAL_PTY_SOCKET_PATH: /var/run/flexserver/host-pty.sock
+      LOCAL_PTY_SOCKET_PATH: /var/run/flexserver/host-pty/host-pty.sock

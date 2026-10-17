@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — isolate host daemon socket lifecycles
+
+- Give host PTY and local agent rotation separate runtime child directories under the stable `/var/run/flexserver` mount, preventing one service restart from unlinking the other's socket.
+- Migrate socket defaults across API, rotation client, Compose, installers and deployment; stop legacy shared-runtime daemons before cutover and refresh API bind mounts during deployment.
+
 ## Unreleased - configuration sliding toggles
 
 - Replace Enable/Disable buttons for web terminal, dangerous command guard, Docker monitoring and Docker management with accessible sliding toggles. Preserve update errors, pending states, capability restrictions and Docker monitoring confirmation.

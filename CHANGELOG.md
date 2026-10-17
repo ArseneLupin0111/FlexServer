@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — terminal mode-query build fix
+
+- Target ES2021 in the frontend production build to preserve logical assignment in xterm's mode-query parser. ES2020 lowering combined with esbuild minification could remove a local enum declaration, causing `ReferenceError` and freezing TUI rendering when applications such as OpenCode query terminal modes. Browsers must support ES2021 syntax.
+- Verified the frontend production build and exercised xterm bundled through the same Vite configuration in Chromium: alternate-screen output rendered, cursor-visibility and bracketed-paste mode queries returned the expected replies, and no browser errors were recorded. This is local build/parser verification, not a production deployment or a new end-to-end OpenCode run.
+
 ## Unreleased — isolate host daemon socket lifecycles
 
 - Give host PTY and local agent rotation separate runtime child directories under the stable `/var/run/flexserver` mount, preventing one service restart from unlinking the other's socket.

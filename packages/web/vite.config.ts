@@ -11,6 +11,9 @@ export default defineConfig({
     },
   },
   build: {
+    // Preserve logical assignment in xterm's mode-query parser: esbuild's
+    // ES2020 lowering + minification can drop its local enum declaration.
+    target: "es2021",
     outDir: "../../public",
     emptyOutDir: true,
   },

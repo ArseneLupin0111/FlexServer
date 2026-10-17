@@ -73,6 +73,25 @@ Follow the [local-mode setup](#run-in-local-mode) to configure `APP_MODE=local`,
 
 Use separate storage for demo exploration and real infrastructure. Read the [security model](docs/security.md) before enabling remote access or granting an agent Docker permissions.
 
+## Browser integration tests
+
+Use Node.js 22 and run from the repository root:
+
+```bash
+npm ci
+npx playwright install chromium
+npm run test:e2e
+npm run test:e2e -- --repeat-each=2
+npm run test:e2e:headed -- --grep "persists and revokes session"
+npm run test:e2e -- e2e/vps.spec.ts
+```
+
+On Linux, install browser system dependencies with `npx playwright install --with-deps chromium` instead. Each E2E command builds the React UI and NestJS API first. Chromium journeys verify the login gate, invalid passwords, session persistence across reload, logout, server-side rejection of a revoked cookie, and creation of a VPS through the UI with connection details preserved in the API and fleet list after reload.
+
+The fixture starts a real loopback NestJS server on a dynamic port with temporary JSON storage and generated credentials, then closes it and removes its data. It does not read `.env` or reuse a running server. VPS creation uses a documentation-only IP and leaves the optional provisioning password blank: it creates a real inventory record, without SSH key installation, agent installation, or remote connectivity checks. The local agent and web terminal remain disabled. PostgreSQL, reverse proxies, and other browsers are outside this suite. `npm test` remains the separate Vitest runner.
+
+Open the local HTML report with `npx playwright show-report`. Reports and failure traces/screenshots are ignored by Git; traces can contain the disposable test credentials. CI runs E2E on every existing workflow event and requires both `verify` and `e2e` before deployment. See [CI/CD](docs/ci-cd.md).
+
 ## Run in local mode
 
 Prerequisites: Node.js 22, npm, Git, and an OpenSSH client (`ssh-keyscan` is needed for host-key discovery). The commands below use Bash; on Windows, use Git Bash or equivalent PowerShell commands. Run from a fresh checkout, not a demo deployment:

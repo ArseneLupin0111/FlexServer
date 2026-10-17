@@ -828,7 +828,7 @@ export function requestVpsDockerContainerAction(
   signal?: AbortSignal,
 ) {
   const idempotencyKey = crypto.randomUUID().replace(/-/g, "");
-  return request<DockerManagementOperation>(
+  return requestRaw<DockerManagementOperation>(
     `${dockerManagementPath(id)}/actions`,
     {
       method: "POST",
@@ -848,7 +848,7 @@ export function getVpsDockerManagementOperation(
   operationId: string,
   signal?: AbortSignal,
 ) {
-  return request<DockerManagementOperation>(
+  return requestRaw<DockerManagementOperation>(
     `${dockerManagementPath(id)}/actions/${encodeURIComponent(operationId)}`,
     { signal },
   );

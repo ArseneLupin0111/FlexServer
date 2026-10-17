@@ -15,3 +15,5 @@ dashboard-*.png
 prompt-images/
 .omp
 .impeccable/review/
+/playwright-report/
+/test-results/

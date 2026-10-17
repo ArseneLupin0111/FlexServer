@@ -8,13 +8,17 @@ Workflow file: `.github/workflows/ci.yml`
 
 ### Pull requests
 
-Pull requests run conditional verification behind a lightweight `changes` job (path filters, no toolchains installed): Node, Go, installer, updater, database, and image steps run only when their paths change, so a docs-only PR skips almost everything. Pushes to `main` force the full check matrix and both image builds. Pull requests do not publish images to GHCR and do not run the production deploy job.
+Pull requests run Chromium E2E unconditionally and conditional verification behind a lightweight `changes` job (path filters, no toolchains installed): Node, Go, installer, updater, database, and image steps run only when their paths change. Pushes to `main` force the full check matrix and both image builds. Pull requests do not publish images to GHCR and do not run the production deploy job.
 
 API and Web use independent Docker build stages and GitHub Actions cache scopes (`api-runtime`, `web-runtime`). Current path filters still rebuild both images for changes in either Node workspace; database integrations skip web-only changes. Docs-only PRs skip Node, Go, image, installer/updater, and database checks. Workflow and hardening-fixture changes re-run the affected safety checks.
 After change detection, `verify-checks` (Node tests/typecheck/CLI smoke), `verify-go` (Go, installer/updater and Compose checks), `verify` (image builds, identity checks, scans and publishing), and the two database jobs run independently. Existing status names remain. The Go job pins Node 24 for updater validation without installing npm dependencies. Go race tests use the runner's GCC, installing it only when absent.
 
+The independent `e2e` job (`E2E Chromium`) always runs on pull requests, pushes to `main`, and manual dispatch, without path filters or production secrets. It uses Node.js 22, `npm ci`, `npx playwright install --with-deps chromium`, and `npm run test:e2e` with a 15-minute job timeout. It builds the real React/NestJS application and checks authentication against isolated temporary JSON storage, not `.env` or a deployed server.
 
-Every pull request runs change detection, then only the matching checks:
+Unless cancelled, the job uploads `playwright-report/` and `test-results/` as `e2e-chromium`, retained for seven days. Download the artifact and open `playwright-report/index.html` to inspect the report; failure traces/screenshots use disposable test credentials. Temporary data/private directories are not uploaded. Deploy explicitly requires both `verify` and `e2e` to succeed; image building/publishing may run alongside E2E, but an E2E failure blocks deployment.
+
+
+In addition to unconditional Chromium E2E, every pull request runs change detection and the matching checks below:
 
 1. When Node paths change: `npm ci`, `npm test`, `npm run typecheck`, and the `--help` script smoke tests. `npm run build` runs only as a fallback when no Docker target builds; each Docker target compiles its own workspace.
 2. When installer paths change: `bash scripts/tests/test-installer-docker-access.sh`.

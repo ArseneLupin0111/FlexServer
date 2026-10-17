@@ -41,6 +41,35 @@ jobs:
       - name: Check repository-local documentation links
         run: npm run check:docs
 
+  e2e:
+    name: E2E Chromium
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Install Chromium and dependencies
+        run: npx playwright install --with-deps chromium
+      - name: Run browser authentication journeys
+        run: npm run test:e2e
+      - name: Upload E2E report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-chromium
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
@@ -717,7 +746,7 @@ jobs:
 
   deploy:
     name: Deploy over SSH
-    needs: verify
+    needs: [verify, e2e]
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     permissions:

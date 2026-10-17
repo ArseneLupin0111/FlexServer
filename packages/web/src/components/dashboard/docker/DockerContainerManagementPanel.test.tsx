@@ -983,7 +983,7 @@ describe("container lifecycle consent", () => {
         posts.push(JSON.parse(init.body as string));
         return new Promise<Response>((resolve) => { finish = resolve; });
       }
-      return jsonResponse({ data: { ...operation, status: "succeeded" } });
+      return jsonResponse({ ...operation, status: "succeeded" });
     }));
     render(<DockerContainerManagementPanel vpsId="vps-1" enabled />);
     const start = await screen.findByRole("button", { name: "start" });
@@ -992,7 +992,7 @@ describe("container lifecycle consent", () => {
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(posts).toHaveLength(1);
     expect(posts[0]).toMatchObject({ action: "start", target: operation.target });
-    await act(async () => { finish(jsonResponse({ data: operation })); });
+    await act(async () => { finish(jsonResponse(operation)); });
     expect(screen.getByText(/Operation status:/)).toHaveTextContent("queued");
     fireEvent.click(screen.getByRole("button", { name: "Check status manually" }));
     await waitFor(() => expect(screen.getByText(/Operation status:/)).toHaveTextContent("succeeded"));
@@ -1003,7 +1003,7 @@ describe("container lifecycle consent", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirm stop" }));
     expect(posts).toHaveLength(2);
     expect(posts[1]).toMatchObject({ action: "stop", target: operation.target });
-    await act(async () => { finish(jsonResponse({ data: { ...operation, action: "stop" } })); });
+    await act(async () => { finish(jsonResponse({ ...operation, action: "stop" })); });
   });
 
   it("cancels confirmation when the selected identity changes", async () => {

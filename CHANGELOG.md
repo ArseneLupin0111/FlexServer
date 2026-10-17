@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — Docker action status response fix
+
+- Read Docker management action creation and status responses as raw resources, matching the Nest API contract. Previously the browser discarded the returned operation and showed `Operation status: none` even when the agent executed the command.
+- Chromium smoke against an isolated Docker-in-Docker daemon, real Nest API/JSON persistence, and Linux Go agent verified cancel leaves the workload running, confirmed stop exits it, start runs it again, and confirmed restart changes its PID and start timestamp. All three operation results and manually refreshed browser statuses reported `succeeded`; refreshed inventory reported `running`. This is local verification, not production TLS or remote-host verification.
+
+## Unreleased — local agent verification harness fixes
+
+- Keep the live Linux lifecycle argv fixture running with an exact managed command line instead of invoking GNU `yes` with unsupported `-config` options. Verified all 20 lifecycle assertions, including the real `/proc` stale-pidfile case.
+- Remove the docs checker's hashbang: Vite SSR moves imports before it, making the imported script invalid JavaScript. Direct `node scripts/docs/check-links.mjs` usage is unchanged; all eight checker tests pass.
+- Disposable Debian/systemd SSH smoke verified host-key trust, password-to-key provisioning, agent install with real heartbeat/metrics, restart, upgrade, reinstall, uninstall, and idempotent server deletion. Callback transport used loopback HTTP inside the isolated target network namespace; this does not verify production TLS or a cross-version upgrade.
+- Local installer access/state fixtures passed (16/14 assertions), updater checks passed (26 assertions), and the rotation helper verified successful config replacement, wrong-VPS rejection, and restart-failure rollback with simulated `systemctl`. Linux Go race tests and vet passed. The local updater's full signed rollout against a live systemd service remains outside this smoke; no production host or existing credential was used.
+
 ## Unreleased — fail-closed agent lifecycle confirmation
 
 - Check persisted queued/running server jobs inside the held uninstall slot before remote agent removal, credential revocation, state checkpoints, or local deletion. A busy-job refusal leaves the installation intact and can be retried after the job finishes.

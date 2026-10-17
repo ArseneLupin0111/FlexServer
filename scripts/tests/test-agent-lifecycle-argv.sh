@@ -438,7 +438,7 @@ fi
 # 5.6 Live regression (Linux only): real process plus active unit MainPID.
 # Simulates systemd auto-restart leaving a stale pidfile: the pidfile holds a
 # dead PID while the deterministic unit's MainPID is the live process.
-if [ -r /proc/self/stat ] && [ "$(uname -s 2>/dev/null || echo unknown)" = "Linux" ] && command -v yes >/dev/null 2>&1; then
+if [ -r /proc/self/stat ] && [ "$(uname -s 2>/dev/null || echo unknown)" = "Linux" ] && command -v cc >/dev/null 2>&1; then
   LIVE_DIR="$TMP_BASE/live"
   mkdir -p "$LIVE_DIR"
   LIVE_DIR="$(readlink -f "$LIVE_DIR")"
@@ -448,8 +448,10 @@ if [ -r /proc/self/stat ] && [ "$(uname -s 2>/dev/null || echo unknown)" = "Linu
   LIVE_ID="$LIVE_DIR/docker-identity.json"
   LIVE_RK="$LIVE_DIR/runtime-keys.json"
   LIVE_PIDFILE="$LIVE_DIR/vps-agent.pid"
-  cp "$(command -v yes)" "$LIVE_BIN"
-  chmod 0755 "$LIVE_BIN"
+  # GNU yes rejects -config and exits before /proc inspection. Use a live
+  # process that accepts the exact managed argv without interpreting flags.
+  printf '#include <unistd.h>\nint main(void) { for (;;) pause(); }\n' > "$LIVE_DIR/agent.c"
+  cc "$LIVE_DIR/agent.c" -o "$LIVE_BIN"
   echo '{"test":true}' > "$LIVE_CFG"
   echo '{"state":1}' > "$LIVE_STATE"
   echo '{"id":"dock-1"}' > "$LIVE_ID"
@@ -488,7 +490,7 @@ EOF
   kill "$LIVE_PID" 2>/dev/null || true
   wait "$LIVE_PID" 2>/dev/null || true
 else
-  pass "Live stale-pidfile regression skipped (non-Linux or missing yes/proc)"
+  pass "Live stale-pidfile regression skipped (non-Linux or missing cc/proc)"
 fi
 
 

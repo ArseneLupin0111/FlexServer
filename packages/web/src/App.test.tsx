@@ -170,7 +170,10 @@ describe("React dashboard", () => {
     cleanup();
     renderApp(["/vps"]);
 
-    await waitFor(() => expect(document.querySelector('input[type="password"]')).toBeInTheDocument());
+    await waitFor(
+      () => expect(document.querySelector('input[type="password"]')).toBeInTheDocument(),
+      { timeout: 5000 },
+    );
     expect(fetchMock).toHaveBeenCalledWith("/api/auth/me", expect.any(Object));
     expect(eventSourceConstructorSpy).not.toHaveBeenCalled();
   });

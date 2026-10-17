@@ -35,7 +35,7 @@
   border-radius: 1.5rem;
   background: linear-gradient(165deg, hsl(var(--l-panel)), hsl(var(--l-bg-alt)));
   box-shadow:
-    0 0 45px hsl(var(--l-accent) / 0.22),
+    0 18px 44px -22px hsl(var(--l-accent) / 0.45),
     inset 0 1px 0 hsl(var(--l-line-soft) / 0.18);
 }
 
@@ -44,12 +44,8 @@
   font-size: clamp(2.25rem, 5vw, 3.75rem);
   font-weight: 600;
   line-height: 1.1;
-  letter-spacing: -0.045em;
+  letter-spacing: -0.035em;
   text-wrap: balance;
-}
-
-.security-page .security-hero .landing-section-eyebrow {
-  margin-bottom: 0.875rem;
 }
 
 .security-page .security-lead {
@@ -72,8 +68,6 @@
   margin: clamp(2.5rem, 5vw, 3.5rem) auto 0;
   max-width: 62rem;
   text-align: left;
-  list-style: none;
-  padding: 0;
 }
 
 .security-page .security-overview article {
@@ -125,7 +119,7 @@
 }
 
 .security-page .security-doc-mark span {
-  font-size: 0.625rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.18em;
   color: hsl(var(--l-dim));
@@ -208,14 +202,14 @@
 
 .security-page .security-layers span {
   color: hsl(var(--l-dim));
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
 }
 
 .security-page .security-layer-note {
   margin: 1.75rem auto 0;
   max-width: 30rem;
   color: hsl(var(--l-dimmer));
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
 }
 
 /* ── Grouped two-column: sidebar anchors + stacked detail cards ── */
@@ -266,7 +260,7 @@
   align-items: center;
   gap: 0.5rem;
   padding: 0.5rem 0.75rem;
-  min-height: 2.25rem;
+  min-height: 2.75rem;
   color: hsl(var(--l-dim));
   font-size: 0.8125rem;
   text-decoration: none;
@@ -315,6 +309,7 @@
 
 .security-page .security-detail-card p {
   margin: 0;
+  max-width: 72ch;
   color: hsl(var(--l-dim));
   font-size: 0.875rem;
   line-height: 1.65;
@@ -323,13 +318,18 @@
 .security-page .security-detail-card p + p {
   margin-top: 0.75rem;
 }
+/* Sidebar anchor feedback: the targeted card lifts with an accent border */
+.security-page .security-detail-card:target {
+  border-color: hsl(var(--l-accent) / 0.45);
+  background: linear-gradient(170deg, hsl(var(--l-panel)), hsl(var(--l-bg)));
+}
+
 
 /* Boundary note: what is deliberately not claimed */
 .security-page .security-boundary {
   margin: 0;
   padding: 1.125rem 1.25rem;
   border: 1px solid hsl(var(--l-line));
-  border-left: 2px solid hsl(var(--l-accent) / 0.5);
   border-radius: 0.625rem;
   background: hsl(var(--l-bg-alt) / 0.6);
   color: hsl(var(--l-dim));
@@ -356,14 +356,14 @@
 }
 
 .security-page .security-contact h2 {
-  margin: 0.875rem 0 0.75rem;
+  margin: 0 0 0.75rem;
   font-size: clamp(1.75rem, 3.2vw, 2.375rem);
   font-weight: 600;
   line-height: 1.15;
   letter-spacing: -0.035em;
 }
 
-.security-page .security-contact > .landing-wrap > div > p:last-of-type {
+.security-page .security-contact-panel > p {
   margin: 0 auto 1.75rem;
   max-width: 32rem;
   color: hsl(var(--l-dim));

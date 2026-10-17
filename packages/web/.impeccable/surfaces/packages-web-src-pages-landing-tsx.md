@@ -27,9 +27,17 @@ Dark technical operational console with deep charcoal panels (`--ink`, `--panel`
 The visitor immediately recognizes FlexServer as a self-hosted, operator-controlled VPS console. They inspect the realistic multi-host workspace proof, verify the core capabilities, understand the direct architecture and security guarantees, review deployment prerequisites, and proceed to self-deploy via Docker Compose.
 
 ### FIRST VIEWPORT
-Top bar with brand and clear navigation only; immediate actions are concentrated in the hero message row (Deploy Guide + View Source on GitHub), removing duplicate CTA clutter between the sticky header and hero above the fold. The closing section distills to a single Deploy Guide primary CTA. A concise, authoritative headline and lead text alongside the hero primary "Deploy Guide" and secondary source actions, immediately followed by an expansive, full-width fleet workspace preview dominating the opening. The preview displays an interactive host selector rail, real-time-styled resource telemetry gauges, decoupled container runtime status, and an isolated SSH execution audit strip—all clearly labeled with static sample proof metadata.
+Top bar with brand and clear navigation only. A concise headline and one-sentence description form a left-aligned stack, with Deploy Guide (primary) and View Source (secondary) directly below; actions stack full-width on mobile. Omit redundant trust facts. An expansive, full-width fleet workspace preview follows, with an interactive host selector rail, resource telemetry gauges, decoupled container status, and SSH job evidence—all clearly labeled as static sample data. Keep subsequent explanations brief and link to documentation for implementation details. The closing section retains a single Deploy Guide primary CTA.
 ### FORM
 Technical precision operational console; high-order, structured, deterministic layout adhering to strict craft-floor rules. Refuses eyebrows/kickers and floating cards; uses balanced section rhythm and accessible semantic controls.
 
 ### SIGNATURE
 A full-width operational fleet workspace preview where visitors can select between sample hosts to inspect live-styled telemetry gauges, decoupled Docker daemon state, and isolated SSH execution evidence without mistaking it for live infrastructure.
+
+## Implementation notes
+
+- Use plain capability labels: Host Metrics, Docker Containers, SSH Jobs, History & Audit, Data Storage, and Access & Security.
+- Describe SSH keys as AES-256-GCM encrypted at rest and decrypted only in memory; do not imply raw private-key storage.
+- Wrap sample host metadata on narrow screens. Buttons, feature tabs, menu controls, and footer links have at least 44px touch height.
+- Public routes load independently of the lazy dashboard module. Authentication is checked only when entering dashboard routes.
+- Preview grid tracks use zero minimum widths so content fits the viewport rather than being clipped. Docker and SSH rows wrap; only host and capability selection rails scroll horizontally, with thin themed scrollbars.

@@ -20,7 +20,7 @@ const ISSUES_URL = `${REPO_URL}/issues`;
 // Desktop + mobile nav shared by the pricing header. Anchor targets point at
 // the landing page because this page has no such sections of its own.
 const PRICING_NAV_LINKS = [
-  { href: "/#features", label: "Feature" },
+  { href: "/#features", label: "Features" },
   { href: "/security", label: "Security" },
   { href: "/pricing", label: "Pricing", current: true },
   { href: "/enterprise", label: "Enterprise" },
@@ -331,7 +331,6 @@ export function PricingPage() {
                 about Plus or Pro only registers interest.
               </span>
             </p>
-            <p className="landing-section-eyebrow">Pricing</p>
             <h1 className="landing-section-title" id="pricing-title">
               Simple plans for your VPS workspace
             </h1>
@@ -412,7 +411,6 @@ export function PricingPage() {
         >
           <div className="landing-wrap">
             <div className="landing-section-head">
-              <p className="landing-section-eyebrow">Compare</p>
               <h2 className="landing-section-title" id="pricing-compare-title">
                 Compare plans by feature area
               </h2>
@@ -477,7 +475,6 @@ export function PricingPage() {
         >
           <div className="landing-wrap">
             <div className="landing-contact-panel">
-              <p className="landing-section-eyebrow">Large estates</p>
               <h2 className="landing-contact-title" id="pricing-scale-title">
                 Need more than 15 servers?
               </h2>
@@ -511,7 +508,6 @@ export function PricingPage() {
         >
           <div className="landing-wrap landing-faq-wrap">
             <div className="landing-section-head">
-              <p className="landing-section-eyebrow">FAQ</p>
               <h2 className="landing-section-title" id="pricing-faq-title">
                 Pricing questions, answered honestly
               </h2>

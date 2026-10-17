@@ -63,7 +63,7 @@
   padding: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 1rem;
+  gap: 2rem 1rem;
 }
 
 .landing-page .pricing-card {
@@ -77,10 +77,15 @@
   border-radius: 1rem;
 }
 
+@media (max-width: 63.99rem) {
+  .landing-page .pricing-card {
+    padding: clamp(1.25rem, 4vw, 1.75rem);
+  }
+}
+
 .landing-page .pricing-card.is-recommended {
   background: hsl(var(--l-accent) / 0.1);
   border-color: hsl(var(--l-accent) / 0.6);
-  box-shadow: 0 0 48px -18px hsl(var(--l-accent) / 0.55);
 }
 
 .landing-page .pricing-badge {
@@ -181,6 +186,8 @@
   border: 1px solid hsl(var(--l-line));
   border-radius: 1rem;
   background: hsl(var(--l-bg) / 0.4);
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--l-dim)) hsl(var(--l-panel));
 }
 
 .landing-page .pricing-table-scroll:focus-visible {
@@ -245,7 +252,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-@media (min-width: 48rem) {
+@media (min-width: 64rem) {
   .landing-page .pricing-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     align-items: stretch;

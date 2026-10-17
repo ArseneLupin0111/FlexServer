@@ -20,7 +20,7 @@ import "./landing.css";
 import { Brand, FooterBrand } from "../components/Brand";
 
 const NAV_LINKS = [
-  { href: "#features", label: "Feature" },
+  { href: "#features", label: "Features" },
   { href: "/security", label: "Security" },
   { href: "/pricing", label: "Pricing" },
   { href: "/enterprise", label: "Enterprise" },
@@ -51,44 +51,44 @@ interface FeatureItem {
 const FEATURES: FeatureItem[] = [
   {
     id: "health",
-    title: "Host Telemetry",
+    title: "Host Metrics",
     shortTitle: "Telemetry",
-    desc: "CPU, RAM, disk, load, and network telemetry reported via lightweight Go host agent (or local collector) to the NestJS API.",
+    desc: "Track CPU, memory, disk, and network usage.",
     icon: Activity,
   },
   {
     id: "docker",
-    title: "Decoupled Containers",
+    title: "Docker Containers",
     shortTitle: "Containers",
-    desc: "Docker container daemon inspected independently from host reachability. Granular restart/stop/inspect without foreign agent bloat.",
+    desc: "Inspect Docker state independently from host health.",
     icon: Container,
   },
   {
     id: "ssh",
-    title: "Remote SSH Dispatch",
-    shortTitle: "Dispatch",
-    desc: "Execute curated maintenance commands, package updates, and ad-hoc scripts across hosts with retained stdout/stderr and web terminal access.",
+    title: "SSH Jobs",
+    shortTitle: "Jobs",
+    desc: "Run SSH jobs and review their output.",
     icon: TerminalSquare,
   },
   {
     id: "history",
-    title: "Retained History & Audit",
+    title: "History & Audit",
     shortTitle: "History",
-    desc: "Bounded metric history and structured audit log. Retains recent CPU, memory, and network throughput data within configured storage limits.",
+    desc: "Review metric history and audit activity.",
     icon: History,
   },
   {
     id: "storage",
-    title: "Storage Durability",
+    title: "Data Storage",
     shortTitle: "Storage",
-    desc: "Dual storage driver: local JSON file storage (STORAGE_DRIVER=json) for single-node setups, or PostgreSQL (STORAGE_DRIVER=postgres) with optional TimescaleDB migrations.",
+    desc: "Keep data in local JSON or PostgreSQL.",
     icon: Database,
   },
   {
     id: "security",
-    title: "Session Security & Policy",
+    title: "Access & Security",
     shortTitle: "Security",
-    desc: "Session-based console authentication, raw OpenSSH key mode 0600 filesystem isolation, and zero password persistence on disk.",
+    desc: "Authenticated access. Server-side keys. No saved passwords.",
     icon: ShieldCheck,
   },
 ];
@@ -262,8 +262,6 @@ function SshPreview() {
             <span className="code-comment">[14:32:01] Host key verified: SHA256:7uK8x... (trusted host fingerprint)</span>{'\n'}
             <span className="code-comment">[14:32:02] $ pg_dump --format=custom flexserver_db &gt; /backups/daily.dump</span>{'\n'}
             <span className="code-val">[14:32:03] Backup completed successfully (42.8 MB written)</span>{'\n'}
-            <span className="code-comment">[14:32:03] $ sha256sum /backups/daily.dump &gt; /backups/daily.dump.sha256</span>{'\n'}
-            <span className="code-key">[14:32:03] Checksum: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855</span>{'\n'}
             <span className="ssh-status-ok">[14:32:03] Playbook finished with returncode 0</span>
           </pre>
         </div>
@@ -412,9 +410,9 @@ function SecurityPreview() {
 
           <div className="metric-gauge-box">
             <div className="gauge-top">
-              <strong>Mode 0600 Key Storage</strong>
+              <strong>Encrypted Key Storage</strong>
             </div>
-            <p className="gauge-subtext">Private keys written as raw OpenSSH files with mode 0600 filesystem permissions in private storage. Passwords never saved to disk.</p>
+            <p className="gauge-subtext">SSH keys use AES-256-GCM envelope encryption at rest and are decrypted only in memory. Provisioning passwords are never saved.</p>
           </div>
 
           <div className="metric-gauge-box">
@@ -658,13 +656,13 @@ function FleetWorkspacePreview({
                   role="tab"
                   tabIndex={isSelected ? 0 : -1}
                   aria-selected={isSelected}
-                  aria-controls={`workspace-panel-${item.id}`}
-                  className={`workspace-host-btn ${isSelected ? "is-active" : ""}`}
+                  aria-controls="workspace-panel"
+                  className="workspace-host-btn"
                   onClick={() => setSelectedHostIndex(idx)}
                 >
                   <div className="workspace-host-btn-top">
                     <div className="workspace-host-name-row">
-                      <span className={`status-indicator-dot ${isSelected ? "is-pulse" : ""}`} />
+                      <span className="status-indicator-dot" />
                       <span className="workspace-host-name">{item.name}</span>
                     </div>
                     <span className="workspace-host-status">Healthy</span>
@@ -691,7 +689,7 @@ function FleetWorkspacePreview({
         {/* Right Selected Host Detail Stage */}
         <section
           className="workspace-host-detail"
-          id={`workspace-panel-${host.id}`}
+          id="workspace-panel"
           role="tabpanel"
           tabIndex={0}
           aria-labelledby={`workspace-tab-${host.id}`}
@@ -992,11 +990,8 @@ export function LandingPage() {
                 </h1>
 
                 <p className="hero-lead-text">
-                  Self-hosted Linux VPS manager with a NestJS control plane and React operator console. Inspect real host metrics, decoupled container runtimes, and isolated SSH execution directly on your own infrastructure.
+                  Monitor hosts, inspect containers, and run SSH jobs. One self-hosted workspace.
                 </p>
-              </div>
-
-              <div className="hero-action-col">
                 <div className="hero-cta-row">
                   <a
                     href={DEPLOY_URL}
@@ -1014,16 +1009,9 @@ export function LandingPage() {
                     rel="noreferrer"
                     className="landing-btn landing-btn-secondary"
                   >
-                    View Source on GitHub
+                    View Source
                     <ArrowUpRight size={16} aria-hidden="true" />
                   </a>
-                </div>
-
-                <div className="hero-trust-bar">
-                  <span className="hero-trust-item">Zero cloud dependencies</span>
-                  <span className="hero-trust-item">Self-hosted control plane</span>
-                  <span className="hero-trust-item">Local storage durability</span>
-                  <span className="hero-trust-item">Decoupled container health</span>
                 </div>
               </div>
             </div>
@@ -1044,9 +1032,6 @@ export function LandingPage() {
               <h2 className="landing-section-title" id="capabilities-title">
                 Core tools for VPS operations.
               </h2>
-              <p className="landing-section-sub">
-                Six dedicated capabilities built for engineers who value transparent system internals, deterministic command execution, and direct control.
-              </p>
             </div>
 
             <div className="showcase-layout">
@@ -1119,10 +1104,10 @@ export function LandingPage() {
           <div className="landing-wrap">
             <div className="landing-section-head">
               <h2 className="landing-section-title" id="arch-title">
-                Direct control plane. Zero middlemen.
+                How it connects.
               </h2>
               <p className="landing-section-sub">
-                A minimalist architectural pipeline that connects your browser directly to your servers without SaaS proxies, external telemetry ingest, or vendor lock-in.
+                Your console, API, and servers. No SaaS intermediary.
               </p>
             </div>
 
@@ -1130,44 +1115,44 @@ export function LandingPage() {
               <div className="arch-flow-node">
                 <h3 className="arch-node-title">Operator Console</h3>
                 <p className="arch-node-desc">
-                  React single-page application running locally in dark technical precision editorial mode. Authenticated via scoped token sessions without external trackers.
+                  Authenticated React dashboard.
                 </p>
               </div>
 
               <div className="arch-flow-node">
                 <h3 className="arch-node-title">Control Plane API</h3>
                 <p className="arch-node-desc">
-                  NestJS backend process with minimal memory footprint. Supports JSON or PostgreSQL storage drivers, manages host authentication policies, and executes isolated SSH commands.
+                  NestJS API for storage, access, and jobs.
                 </p>
               </div>
 
               <div className="arch-flow-node">
                 <h3 className="arch-node-title">Direct Transport</h3>
                 <p className="arch-node-desc">
-                  Direct SSH transport for interactive terminal and command execution, plus optional Go push agent for continuous host metric reporting.
+                  SSH for commands. Go agent for metrics.
                 </p>
               </div>
 
               <div className="arch-flow-node">
                 <h3 className="arch-node-title">Managed Fleet</h3>
                 <p className="arch-node-desc">
-                  Any Linux host (Ubuntu, Debian, AlmaLinux, Alpine, Arch). Reads raw OS primitives and the decoupled Docker daemon socket.
+                  Linux hosts and agent-backed Docker monitoring.
                 </p>
               </div>
             </div>
 
             <div className="arch-notes-box">
               <div className="arch-note-item">
-                <strong>Key Isolation & Zero Passwords</strong>
-                <span>Private keys are saved as raw OpenSSH files with mode 0600 in private directory storage; passwords are never persisted to disk or database.</span>
+                <strong>Encrypted SSH keys</strong>
+                <span>Encrypted at rest. Decrypted only in memory.</span>
               </div>
               <div className="arch-note-item">
-                <strong>Configurable Storage Drivers</strong>
-                <span>Dual drivers via STORAGE_DRIVER (json or postgres). PostgreSQL supports optional manual TimescaleDB migrations for metric series (no SQLite).</span>
+                <strong>Your choice of storage</strong>
+                <span>Local JSON or PostgreSQL, with optional TimescaleDB.</span>
               </div>
               <div className="arch-note-item">
-                <strong>Air-Gapped Viable</strong>
-                <span>Backend runs completely within private VPCs, LANs, or air-gapped environments without phoning home to external cloud telemetry.</span>
+                <strong>Your own network</strong>
+                <span>Self-contained backend operations on your own network.</span>
               </div>
             </div>
           </div>
@@ -1181,14 +1166,14 @@ export function LandingPage() {
                 Run it on your infrastructure.
               </h2>
               <p className="landing-section-sub">
-                Two distinct deployment paths: explore simulated infrastructure in Demo mode, or configure Local mode for real production servers.
+                Demo mode for simulated hosts. Local mode for real infrastructure.
               </p>
             </div>
 
             <div className="deploy-split">
               <div>
                 <p>
-                  FlexServer distributes via Docker Compose with dedicated API runtime, static web server, migration runner, and PostgreSQL container. Clean volume separation isolates state and private SSH keys.
+                  Deploy with Docker Compose. Keep application data and SSH keys in separate volumes.
                 </p>
 
                 <div className="sys-req-list">
@@ -1217,7 +1202,7 @@ export function LandingPage() {
                     rel="noreferrer"
                     className="landing-inline-link"
                   >
-                    Read the complete deployment guide on GitHub →
+                    Full deployment guide →
                   </a>
                 </div>
               </div>
@@ -1251,7 +1236,7 @@ export function LandingPage() {
                   </button>
                 </div>
                 <div className="code-prereq-note">
-                  <strong>Configuration Prerequisite:</strong> Copy <code>.env.example</code> to <code>.env</code> and define <code>POSTGRES_PASSWORD</code> and secrets before running.
+                  <strong>Before running:</strong> Set <code>POSTGRES_PASSWORD</code> and secrets in <code>.env</code>.
                 </div>
                 <pre className="code-content">{DEPLOY_COMMANDS}</pre>
                 <div className="code-terminal-footer">
@@ -1269,60 +1254,51 @@ export function LandingPage() {
           <div className="landing-wrap">
             <div className="landing-section-head">
               <h2 className="landing-section-title" id="boundaries-title">
-                Truthful positioning. No marketing hyperbole.
+                Built for your own fleet.
               </h2>
-              <p className="landing-section-sub">
-                We clearly state what FlexServer is built to accomplish, and just as importantly, the boundaries of what it is not intended to replace.
-              </p>
             </div>
 
             <div className="boundaries-grid">
               <div className="boundary-card">
                 <div className="boundary-header">
-                  <span className="boundary-pill for-pill">INTENDED USE CASES</span>
                   <h3 className="boundary-title">Built For</h3>
                 </div>
                 <ul className="boundary-list">
                   <li>
                     <Check size={16} className="landing-inline-icon" aria-hidden="true" />
-                    <span><strong>Developers & operations teams:</strong> Managing self-hosted Linux VPS instances who need clarity without SaaS overhead.</span>
+                    <span>Developers and operators managing Linux VPS hosts.</span>
                   </li>
                   <li>
                     <Check size={16} className="landing-inline-icon" aria-hidden="true" />
-                    <span><strong>Homelabs & self-hosters:</strong> Requiring lightweight host telemetry, container health inspection, and playbook dispatch.</span>
+                    <span>Homelabs needing metrics, Docker visibility, and SSH jobs.</span>
                   </li>
                   <li>
                     <Check size={16} className="landing-inline-icon" aria-hidden="true" />
-                    <span><strong>Privacy-conscious teams:</strong> Credentials, SSH private keys, and telemetry remain on your infrastructure without SaaS proxying.</span>
-                  </li>
-                  <li>
-                    <Check size={16} className="landing-inline-icon" aria-hidden="true" />
-                    <span><strong>Resource-constrained environments:</strong> Where running heavy enterprise monitoring stacks consumes too much host RAM.</span>
+                    <span>Self-hosters who want control of data and credentials.</span>
                   </li>
                 </ul>
               </div>
 
               <div className="boundary-card">
                 <div className="boundary-header">
-                  <span className="boundary-pill not-pill">EXPLICIT BOUNDARIES</span>
                   <h3 className="boundary-title">What We Are Not</h3>
                 </div>
                 <ul className="boundary-list">
                   <li>
                     <X size={16} className="landing-inline-icon" aria-hidden="true" />
-                    <span><strong>Not a hyperscale cloud orchestrator:</strong> We do not provision AWS/GCP clusters or manage complex multi-region VPC topologies.</span>
+                    <span>No cloud infrastructure provisioning.</span>
                   </li>
                   <li>
                     <X size={16} className="landing-inline-icon" aria-hidden="true" />
-                    <span><strong>Not a Kubernetes control plane:</strong> We do not offer pod autoscaling, ingress controllers, or service mesh instrumentation.</span>
+                    <span>No Kubernetes orchestration.</span>
                   </li>
                   <li>
                     <X size={16} className="landing-inline-icon" aria-hidden="true" />
-                    <span><strong>Hardware-governed uptime:</strong> Uptime is determined by your server infrastructure and provider network, not synthetic marketing SLAs.</span>
+                    <span>Uptime depends on your infrastructure, not a product SLA.</span>
                   </li>
                   <li>
                     <X size={16} className="landing-inline-icon" aria-hidden="true" />
-                    <span><strong>Not a SaaS subscription:</strong> There are no seat limits, tiered metric quotas, or recurring monthly fees.</span>
+                    <span>Single administrator today; no team access controls.</span>
                   </li>
                 </ul>
               </div>
@@ -1335,11 +1311,8 @@ export function LandingPage() {
           <div className="landing-wrap landing-faq-wrap">
             <div className="landing-section-head">
               <h2 className="landing-section-title" id="faq-title">
-                Answers to operational questions.
+                Common questions.
               </h2>
-              <p className="landing-section-sub">
-                Clear answers regarding key security protocols, system dependencies, container monitoring, and deployment modes.
-              </p>
             </div>
 
             <div className="landing-faq">
@@ -1349,7 +1322,7 @@ export function LandingPage() {
                   <ChevronDown size={18} aria-hidden="true" />
                 </summary>
                 <div className="landing-faq-answer">
-                  Private keys are saved as raw OpenSSH files restricted to mode 0600 on disk within the server's private directory storage. Passwords are only accepted during provisioning and are never saved to disk, JSON files, database tables, or cookies. No AES-256 vault or SQLite store exists.
+                  SSH keys stay server-side with mode 0600 permissions. Provisioning passwords are never saved.
                 </div>
               </details>
 
@@ -1359,7 +1332,7 @@ export function LandingPage() {
                   <ChevronDown size={18} aria-hidden="true" />
                 </summary>
                 <div className="landing-faq-answer">
-                  For remote metrics collection, the lightweight Go host agent collects system statistics (CPU, memory, disk, network) and pushes them to the API. FlexServer does not poll metrics over SSH. For direct interactive terminal and command execution, FlexServer connects directly via OpenSSH.
+                  Remote metrics require the Go host agent. SSH jobs and terminal access connect directly over SSH.
                 </div>
               </details>
 
@@ -1369,7 +1342,7 @@ export function LandingPage() {
                   <ChevronDown size={18} aria-hidden="true" />
                 </summary>
                 <div className="landing-faq-answer">
-                  The decoupled container monitor detects state transitions via the local Docker socket. Container exit codes, restart loops, and recent stdout/stderr logs remain inspectable directly from the console even if the host application is unhealthy.
+                  Container state is separate from host health. Read-only logs require a compatible agent and Docker permissions.
                 </div>
               </details>
 
@@ -1379,7 +1352,7 @@ export function LandingPage() {
                   <ChevronDown size={18} aria-hidden="true" />
                 </summary>
                 <div className="landing-faq-answer">
-                  Yes for backend operations. The backend NestJS control plane and agent operate completely self-contained within private VPCs, LANs, and air-gapped networks with zero outbound cloud calls. The web client accesses standard web fonts when connected, or falls back to native system fonts offline.
+                  Backend and agent operations are self-contained. Offline web clients use system fonts.
                 </div>
               </details>
 
@@ -1389,7 +1362,7 @@ export function LandingPage() {
                   <ChevronDown size={18} aria-hidden="true" />
                 </summary>
                 <div className="landing-faq-answer">
-                  No. In accordance with strict security architecture, the public landing page provides no unauthorized dashboard shortcut. You can spin up the full application locally in Demo mode with Docker Compose using the instructions in the GitHub repository.
+                  No public dashboard shortcut. Follow the deployment guide to run Demo mode locally with simulated hosts.
                 </div>
               </details>
             </div>
@@ -1401,11 +1374,8 @@ export function LandingPage() {
           <div className="landing-wrap">
             <div className="final-cta-inner">
               <h2 className="final-title" id="cta-title">
-                Infrastructure, under control.
+                Deploy your workspace.
               </h2>
-              <p className="final-sub">
-                Deploy the self-hosted console to your infrastructure today with Docker Compose, or review the source code on GitHub.
-              </p>
               <div className="hero-cta-row">
                 <a
                   href={DEPLOY_URL}
@@ -1429,7 +1399,7 @@ export function LandingPage() {
             <div className="landing-footer-brand">
               <FooterBrand />
               <p className="landing-footer-tagline">
-                Self-hosted Linux VPS manager. Real host metrics, decoupled container visibility, and remote SSH dispatch.
+                Your VPS fleet. One operational workspace.
               </p>
             </div>
 

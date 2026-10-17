@@ -39,9 +39,16 @@ The web terminal is optional and disabled by default. Demo mode shows canned out
 
 ## Screenshots
 
-This archived demo capture shows an earlier interface, not the current dashboard or live infrastructure. It uses simulated data; run the [demo](#explore-without-a-vps) to inspect the current UI.
+Current **Servers** workspace, captured with Playwright/Chromium from an isolated `APP_MODE=demo` instance at 1440px desktop and 390px mobile widths. All three hosts and their metrics are simulated; these images do not show live infrastructure. Run the [demo](#explore-without-a-vps) to explore the interface.
 
-[![Archived FlexServer demo dashboard with simulated infrastructure](docs/screenshots/overview.png)](docs/screenshots/overview.png)
+[![FlexServer Servers workspace with three simulated hosts](docs/screenshots/overview.png)](docs/screenshots/overview.png)
+
+<details>
+<summary>Mobile screenshot</summary>
+
+<a href="docs/screenshots/mobile.png"><img src="docs/screenshots/mobile.png" alt="FlexServer Servers workspace on mobile with simulated hosts" width="390"></a>
+
+</details>
 
 ## Quick start
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — README demo screenshots
+
+- Replace archived desktop/mobile captures with the current Servers workspace captured through Playwright/Chromium in isolated demo mode. README now identifies the simulated data and includes an expandable mobile preview.
+
 ## Unreleased — Docker action status response fix
 
 - Read Docker management action creation and status responses as raw resources, matching the Nest API contract. Previously the browser discarded the returned operation and showed `Operation status: none` even when the agent executed the command.

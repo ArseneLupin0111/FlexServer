@@ -28,10 +28,6 @@ import {
 } from "./historySeries";
 import { formatUptime } from "../shared/formatUptime";
 import { EmptyState } from "../shared/EmptyState";
-import {
-  formatBytes as formatDockerBytes,
-  formatDockerError,
-} from "../servers/helpers";
 
 type Tone = "ok" | "warn" | "crit";
 
@@ -46,11 +42,9 @@ const loadTone = (value: number): Tone =>
 
 export function MetricsPanel({
   metrics,
-  dockerMetrics,
   scopedVpsId,
 }: {
   metrics: DashboardOverview["metrics"];
-  dockerMetrics: DashboardOverview["dockerMetrics"];
   scopedVpsId?: string;
 }) {
   const [serverFilter, setServerFilter] = useState(scopedVpsId || "all");
@@ -62,16 +56,8 @@ export function MetricsPanel({
     }
   }, [scopedVpsId]);
 
-  const serverIds = Array.from(
-    new Set([
-      ...metrics.map((metric) => metric.vpsId),
-      ...dockerMetrics.map((metric) => metric.vpsId),
-    ]),
-  ).sort();
+  const serverIds = Array.from(new Set(metrics.map((metric) => metric.vpsId))).sort();
   const visibleMetrics = metrics.filter(
-    (metric) => serverFilter === "all" || metric.vpsId === serverFilter,
-  );
-  const visibleDockerMetrics = dockerMetrics.filter(
     (metric) => serverFilter === "all" || metric.vpsId === serverFilter,
   );
   const fresh = metrics.filter((metric) => metric.freshness === "fresh").length;
@@ -243,12 +229,6 @@ export function MetricsPanel({
           <EmptyState>No metrics match these filters.</EmptyState>
         )
       ) : null}
-
-      <CanonicalDockerWorkloads
-        dockerMetrics={visibleDockerMetrics}
-        totalDockerMetrics={dockerMetrics}
-        scoped={Boolean(scopedVpsId)}
-      />
 
       <section
         className="border border-line bg-panel"
@@ -626,160 +606,6 @@ function TrendChart({ series }: { series: ChartSeries[] }) {
         </ResponsiveContainer>
       </div>
     </div>
-  );
-}
-function CanonicalDockerWorkloads({
-  dockerMetrics,
-  totalDockerMetrics,
-  scoped,
-}: {
-  dockerMetrics: DashboardOverview["dockerMetrics"];
-  totalDockerMetrics: DashboardOverview["dockerMetrics"];
-  scoped?: boolean;
-}) {
-  const available = totalDockerMetrics.filter((metric) => metric.available);
-  const scopedAvailable = dockerMetrics.filter((metric) => metric.available);
-  const activeMetrics = scoped ? scopedAvailable : available;
-  const totals = activeMetrics.reduce(
-    (summary, metric) => ({
-      containers: summary.containers + metric.containerTotal,
-      running: summary.running + metric.containerRunning,
-      cpu: summary.cpu + metric.cpuPercent,
-      memory: summary.memory + metric.memoryUsageBytes,
-      network: summary.network + metric.networkRxBytes + metric.networkTxBytes,
-      pids: summary.pids + metric.pids,
-    }),
-    { containers: 0, running: 0, cpu: 0, memory: 0, network: 0, pids: 0 },
-  );
-
-  const allContainers = dockerMetrics
-    .filter((metric) => metric.available)
-    .flatMap((metric) =>
-      metric.containers.map((container) => ({
-        ...container,
-        vpsId: metric.vpsId,
-      })),
-    )
-    .sort((a, b) => b.cpuPercent - a.cpuPercent);
-
-  const firstMetric = dockerMetrics[0];
-
-  return (
-    <section className="border border-line bg-panel" aria-label="Docker metrics">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
-        <div>
-          <h2 className="text-[14px] font-semibold">Docker workloads</h2>
-          <p className="mt-0.5 text-[12px] text-dim">
-            {scoped
-              ? "Agent-reported container workloads and resource utilization."
-              : "Top containers and resource utilization across reporting hosts."}
-          </p>
-        </div>
-        <Pill tone={activeMetrics.length ? "ok" : "neutral"}>
-          {activeMetrics.length ? `${totals.running} running` : "Docker inactive"}
-        </Pill>
-      </header>
-
-      {totalDockerMetrics.length ? (
-        <div className="space-y-4 p-4">
-          <section
-            className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5"
-            aria-label="Docker metrics summary"
-          >
-            <MetricStat
-              label="Containers"
-              value={`${totals.running}/${totals.containers}`}
-              sub={`${totals.running} running`}
-            />
-            {!scoped ? (
-              <MetricStat
-                label="Docker hosts"
-                value={`${available.length}/${totalDockerMetrics.length}`}
-                sub="Reporting agents"
-              />
-            ) : (
-              <MetricStat
-                label="PIDs"
-                value={String(totals.pids)}
-                sub="Active processes"
-              />
-            )}
-            <MetricStat
-              label="Container CPU"
-              value={`${totals.cpu.toFixed(1)}%`}
-              sub={scoped ? "Host total" : "Across hosts"}
-            />
-            <MetricStat
-              label="Container RAM"
-              value={formatDockerBytes(totals.memory)}
-              sub="Current usage"
-            />
-            <MetricStat
-              label="Container network"
-              value={formatDockerBytes(totals.network)}
-              sub="RX + TX"
-            />
-          </section>
-
-          {firstMetric && !firstMetric.available ? (
-            <div className="border-l-2 border-line pl-3">
-              <p className="text-[13px] text-dim">
-                {formatDockerError(firstMetric.errorCode)}
-              </p>
-              <p className="mt-1 text-[12px] text-dim">
-                Check Docker socket access for the agent.
-              </p>
-            </div>
-          ) : allContainers.length ? (
-            <div className="overflow-hidden border border-line">
-              <div className="hidden grid-cols-[minmax(140px,1fr)_minmax(160px,1.25fr)_0.7fr_0.7fr_0.8fr_0.6fr] gap-3 bg-raised px-3 py-2 text-[11px] uppercase tracking-[0.14em] text-dim md:grid">
-                <span>Container</span>
-                <span>Image</span>
-                <span>State</span>
-                <span>CPU</span>
-                <span>Memory</span>
-                <span>PIDs</span>
-              </div>
-              <div className="divide-y divide-line">
-                {allContainers.map((container) => (
-                  <div
-                    key={`${container.vpsId}-${container.containerKey}`}
-                    className="grid gap-2 border-t border-line px-3 py-2.5 text-[13px] text-dim hover:bg-raised md:grid-cols-[minmax(140px,1fr)_minmax(160px,1.25fr)_0.7fr_0.7fr_0.8fr_0.6fr] md:items-center"
-                    title={container.status}
-                  >
-                    <span className="min-w-0 truncate font-medium text-text">
-                      {container.name}
-                    </span>
-                    <span
-                      className="min-w-0 truncate font-mono text-[12px]"
-                      title={container.image}
-                    >
-                      {container.image}
-                    </span>
-                    <span data-container-state={container.state} className="docker-container-state capitalize">{container.state}</span>
-                    <span className="tnum font-medium text-text">
-                      {container.cpuPercent.toFixed(1)}%
-                    </span>
-                    <span className="tnum">
-                      {formatDockerBytes(container.memoryUsageBytes)}
-                    </span>
-                    <span className="tnum">{container.pids}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <p className="text-[13px] text-dim">
-              No containers reported by this agent.
-            </p>
-          )}
-        </div>
-      ) : (
-        <div className="p-4">
-          <EmptyState>No Docker metrics reported for this server.</EmptyState>
-        </div>
-      )}
-    </section>
   );
 }
 

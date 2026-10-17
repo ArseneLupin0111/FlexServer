@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — Docker workload tab placement
+
+- Move Docker workloads and container resource summaries from Metrics into the Docker workspace. Metrics now displays host telemetry only; existing Docker controls, logs, and history remain in the Docker tab.
+
 ## Unreleased — README demo screenshots
 
 - Replace archived desktop/mobile captures with the current Servers workspace captured through Playwright/Chromium in isolated demo mode. README now identifies the simulated data and includes an expandable mobile preview.

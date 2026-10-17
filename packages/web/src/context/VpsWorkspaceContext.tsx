@@ -46,6 +46,7 @@ import { DockerEventTimeline } from "../components/dashboard/docker/DockerEventT
 import { DockerAlertsPanel } from "../components/dashboard/docker/DockerAlertsPanel";
 import { DockerContainerManagementPanel } from "../components/dashboard/docker/DockerContainerManagementPanel";
 import { DockerStorageOverview } from "../components/dashboard/docker/DockerStorageOverview";
+import { DockerWorkloads } from "../components/dashboard/docker/DockerWorkloads";
 import { LocalAgentUpdate } from "../components/dashboard/servers/LocalAgentUpdate";
 
 // ── Context type ────────────────────────────────────────────────────
@@ -690,6 +691,7 @@ export function VpsWorkspaceDockerPage() {
       />
       </details>
       <div className="mt-4 space-y-4">
+            <DockerWorkloads dockerMetrics={overview.dockerMetrics} />
             <div className="grid min-w-0 gap-4 xl:grid-cols-[17rem_minmax(0,1fr)]">
             <section aria-label="Container history" className="min-w-0 self-start border border-line bg-panel">
               <h3 className="border-b border-line px-4 py-3 text-sm font-semibold">Containers <span className="tnum text-dim">{currentTargets.length}</span></h3>
@@ -798,7 +800,6 @@ export function VpsWorkspaceMetricsPage() {
       </h2>
       <MetricsPanel
         metrics={overview.metrics}
-        dockerMetrics={overview.dockerMetrics}
         scopedVpsId={vps.id}
       />
     </div>

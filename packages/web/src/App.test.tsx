@@ -1686,13 +1686,7 @@ describe("React dashboard", () => {
       renderApp(["/vps/vps-1/metrics"]);
 
       expect(await screen.findByText("Metrics for web-01")).toBeInTheDocument();
-      expect(screen.getByRole("heading", { level: 2, name: "Docker workloads" })).toBeInTheDocument();
-      const dockerMetricsSection = screen.getByRole("region", { name: "Docker metrics" });
-      expect(within(dockerMetricsSection).getByText("workspace-api")).toBeInTheDocument();
-      expect(screen.getByText("app:latest")).toBeInTheDocument();
-      expect(
-        screen.getByRole("region", { name: "Docker metrics summary" }),
-      ).toHaveTextContent("1/2");
+      expect(screen.queryByRole("region", { name: "Docker metrics" })).not.toBeInTheDocument();
     });
 
     it("renders Docker monitoring as its own workspace tab", async () => {
@@ -1703,6 +1697,10 @@ describe("React dashboard", () => {
       await screen.findByRole("link", { name: "Docker" });
       const dockerTab = screen.getByRole("link", { name: "Docker" });
       expect(dockerTab).toHaveAttribute("href", "/vps/vps-1/docker");
+      const workloads = await screen.findByRole("region", { name: "Docker metrics" });
+      expect(within(workloads).getByText("workspace-api")).toBeInTheDocument();
+      expect(within(workloads).getByText("app:latest")).toBeInTheDocument();
+      expect(within(workloads).getByRole("region", { name: "Docker metrics summary" })).toHaveTextContent("1/2");
     });
 
     it("does not embed Docker monitoring in the workspace overview", async () => {

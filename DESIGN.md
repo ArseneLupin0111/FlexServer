@@ -41,6 +41,8 @@ Supplied originals stay in `prompt-images/` (`logo.png`, `logo_with_name.png`) a
 
 Retain existing API-backed actions, dialogs, authentication, capability restrictions, and terminal lifecycle. Missing telemetry must be labeled unavailable; charts must not relabel CPU history as memory or network history. Docker monitoring remains a separate workspace tab.
 
+Metrics contains host resource telemetry only. Docker workload summaries and container resource utilization belong in the Docker workspace, not Metrics.
+
 Docker prioritizes a current-container list and an inline workspace: snapshot resources, confirmed controls, realtime logs, and expandable container history. The list stacks above the workspace on narrow screens. Selection uses the full agent-instance/container-key pair; stale snapshot rows never become actionable targets. Snapshot/monitoring configuration, host history, events, alerts, and storage stay in collapsed disclosures. Preserve dedicated container deep links and capability restrictions; keep explanatory copy out of the primary work area.
 
 Container lifecycle text uses shared semantic colors: running → signal; created/exited/stopped/paused/restarting → warning; dead/unhealthy/failed → critical; unknown → dim. Preserve the written state as the non-color cue.

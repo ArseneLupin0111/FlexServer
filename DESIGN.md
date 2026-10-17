@@ -69,6 +69,8 @@ The public `/enterprise` page follows the reference's lime-lit hero and alternat
 
 The public `/security` page follows the reference's shield hero, overview cards, review CTA, layered-control strip, and grouped two-column sidebar/card layout. Keep claims grounded in `docs/security.md` and implementation, with explicit self-hosted operator responsibilities and unsupported enterprise/compliance boundaries. Sidebar anchors focus their card targets with sticky-header clearance; narrow layouts stack the groups. Documentation links and email contact replace certification reports or fake submission forms. Include Security in all public navigation/footers and the API SPA fallback; expanded navigation collapses below 80rem.
 
+Security refinements keep the shield hero and existing charcoal/lime surfaces. Below 48rem, overview cards pair the icon with a compact text column and the capability strip retains two columns. Below 64rem, topic anchors wrap into bordered 44px-minimum targets instead of a long vertical index. Detail copy uses 15px text with 1.75 line height; sidebar links retain explicit keyboard focus and card targets retain sticky-header clearance. The security-document CTA uses the book icon without a decorative eyebrow.
+
 ## Reusable components
 
 - `components/layout/FleetSidebar.tsx`: fleet navigation from VPS records and metric snapshots; `FleetHostItem.tsx`: route-aware selectable host row.

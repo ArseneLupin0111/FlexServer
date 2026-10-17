@@ -138,12 +138,6 @@
   border-bottom: 1px solid hsl(var(--l-line));
 }
 
-/* Home page override: strict flat surface per approved visual thesis */
-.landing-home .landing-header {
-  background: hsl(var(--l-bg));
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-}
 
 .landing-header-inner {
   display: flex;

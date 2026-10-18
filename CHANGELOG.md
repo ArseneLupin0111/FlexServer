@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — descriptive local shell prompt
+
+- Give host PTY sessions using `sh` or `dash` a default `user@hostname:${PWD}` prompt, with `#` for root and `$` for other users. Preserve a non-empty inherited `PS1` and allow shell startup files to override the default; other shells are unchanged.
+- Cross-compiled the Linux helper and exercised a disposable instance on the host: the prompt changed from `root@weepingangel:/root#` to `root@weepingangel:/tmp#` after `cd /tmp`. Removed the temporary helper; the installed daemon was not replaced or restarted. Applying this change requires deploying the host-pty binary and opening a new terminal session.
+
 ## Unreleased — terminal mode-query build fix
 
 - Target ES2021 in the frontend production build to preserve logical assignment in xterm's mode-query parser. ES2020 lowering combined with esbuild minification could remove a local enum declaration, causing `ReferenceError` and freezing TUI rendering when applications such as OpenCode query terminal modes. Browsers must support ES2021 syntax.

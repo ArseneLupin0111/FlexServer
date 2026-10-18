@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
@@ -117,6 +119,26 @@ func main() {
 
 func runSession(in io.Reader, out io.Writer, shell string, rows, cols uint16) error {
 	cmd := exec.Command(shell)
+	// Minimal POSIX shells do not normally load a descriptive prompt. Preserve
+	// an explicitly configured PS1; shell startup files can override this default.
+	if runtime.GOOS != "windows" && os.Getenv("PS1") == "" {
+		name := filepath.Base(shell)
+		if name == "sh" || name == "dash" {
+			account, err := user.Current()
+			if err != nil {
+				return fmt.Errorf("resolve terminal user: %w", err)
+			}
+			host, err := os.Hostname()
+			if err != nil {
+				return fmt.Errorf("resolve terminal hostname: %w", err)
+			}
+			marker := "$ "
+			if os.Geteuid() == 0 {
+				marker = "# "
+			}
+			cmd.Env = append(os.Environ(), "PS1="+account.Username+"@"+host+":${PWD}"+marker)
+		}
+	}
 	session, err := pty.Start(cmd, pty.Winsize{Rows: rows, Cols: cols})
 	if err != nil {
 		_ = pty.WriteFrame(out, pty.Frame{

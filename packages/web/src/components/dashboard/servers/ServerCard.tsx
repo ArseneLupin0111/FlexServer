@@ -8,7 +8,6 @@ import {
   Eye,
   EyeOff,
   KeyRound,
-  MoreHorizontal,
   RotateCw,
   Server,
   ShieldCheck,
@@ -26,12 +25,8 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "../../ui/alert-dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../../ui/dropdown-menu";
+import { DropdownMenuItem } from "../../ui/dropdown-menu";
+import { RowActionsMenu } from "../shared/RowActionsMenu";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
 import {
@@ -499,18 +494,7 @@ function ServerOverflow({
 }) {
   const displayName = vpsDisplayName(vps);
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          aria-label={`More actions for ${displayName}`}
-        >
-          <MoreHorizontal size={16} />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-48 rounded-none">
+    <RowActionsMenu label={displayName}>
         {canRestart ? <DropdownMenuItem disabled={busy} onClick={onRequestRestart}><RotateCw size={15} />Restart agent</DropdownMenuItem> : null}
         {isLocalHost ? <DropdownMenuItem disabled={busy || !canRotateAgent} onClick={onRequestRotateAgent}><KeyRound size={15} />Rotate agent credential</DropdownMenuItem> : null}
         <DropdownMenuItem onClick={onRotate} disabled={busy || isLocalHost}>
@@ -534,7 +518,6 @@ function ServerOverflow({
           <Trash2 size={15} />
           Remove server
         </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    </RowActionsMenu>
   );
 }

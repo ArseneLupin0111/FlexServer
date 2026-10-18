@@ -79,6 +79,14 @@ Security refinements keep the shield hero and existing charcoal/lime surfaces. B
 
 ## Reusable components
 
+- `components/dashboard/shared/RowActionsMenu.tsx`: shared `⋯` overflow button for file, server, and job rows/cards. Requires `label` (row identity) and `DropdownMenuItem` children; supports `disabled`, `triggerClassName`, and `contentClassName`. Defaults to an outline/small trigger and end-aligned `w-48` menu. Callers retain permissions, handlers, and confirmation dialogs outside the menu; do not use it for account/navigation menus.
+
+  ```tsx
+  <RowActionsMenu label={entry.name} disabled={loading} contentClassName="w-40">
+    <DropdownMenuItem onSelect={() => setRenameTarget(entry)}>Rename</DropdownMenuItem>
+  </RowActionsMenu>
+  ```
+
 - `components/layout/FleetSidebar.tsx`: fleet navigation from VPS records and metric snapshots; `FleetHostItem.tsx`: route-aware selectable host row.
 - `components/dashboard/shared/ResourceGauge.tsx`: labelled percentage, capacity/detail, segmented meter, unavailable state, and warning/critical thresholds.
 - `components/dashboard/shared/SystemFacts.tsx`: responsive labelled facts strip from `{ label, value }` pairs.

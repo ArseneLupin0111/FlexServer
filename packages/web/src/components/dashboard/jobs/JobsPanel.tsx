@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { MoreHorizontal } from "lucide-react";
 import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
+import { DropdownMenuItem } from "../../ui/dropdown-menu";
+import { RowActionsMenu } from "../shared/RowActionsMenu";
 import {
   Card,
   CardContent,
@@ -11,16 +12,11 @@ import {
   CardTitle,
 } from "../../ui/card";
 import { Input } from "../../ui/input";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../../ui/dropdown-menu";
 import { chipVariant, formatDate, freshnessLabel } from "../../../lib/dashboard-formatters";
 import type { DashboardOverview } from "../../../lib/api";
 import { EmptyState } from "../shared/EmptyState";
 import { SummaryPill } from "../shared/SummaryPill";
+
 
 const selectClassName =
   "h-9 w-full rounded-none border border-line bg-ink px-3 text-[13px] text-text outline-none transition focus:border-signal focus:outline-none";
@@ -523,33 +519,23 @@ function JobStatusBadge({
   );
 }
 
+
 function JobOverflow({ job }: { job: DashboardOverview["jobs"][number] }) {
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="h-8 px-2"
-          aria-label={`More actions for ${job.id}`}
-        >
-          <MoreHorizontal size={15} />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-44">
-        <DropdownMenuItem disabled className="opacity-45">
-          Restart worker
-        </DropdownMenuItem>
-        <DropdownMenuItem disabled className="opacity-45">
-          Open server
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          onClick={() => navigator.clipboard?.writeText(job.id)}
-        >
-          Copy job id
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <RowActionsMenu
+      label={job.id}
+      triggerClassName="h-8 px-2"
+      contentClassName="w-44"
+    >
+      <DropdownMenuItem disabled className="opacity-45">
+        Restart worker
+      </DropdownMenuItem>
+      <DropdownMenuItem disabled className="opacity-45">
+        Open server
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => navigator.clipboard?.writeText(job.id)}>
+        Copy job id
+      </DropdownMenuItem>
+    </RowActionsMenu>
   );
 }

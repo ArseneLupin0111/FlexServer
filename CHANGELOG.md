@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — reusable dashboard actions
+
+- Extract the shared row action trigger/menu into `RowActionsMenu` and reuse it in Files, server tables/cards, and Jobs while retaining each feature's permissions and confirmation flows.
+
+## Unreleased — Files row actions
+
+- Replace inline file action buttons with a single row action menu, preserving Download, Rename, Delete confirmation, and capability restrictions on desktop and mobile.
+
 ## Unreleased — local Files helper startup
 
 - Pass supported socket UID/GID flags from the host-files installer and align the binary's default socket path with the API and Compose (`host-files/files.sock`).

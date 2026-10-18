@@ -1,6 +1,7 @@
 import "../../../test/setup";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { FilesPanel } from "./FilesPanel";
 import type { VpsRecord } from "../../../lib/api";
@@ -80,7 +81,9 @@ describe("FilesPanel behavior", () => {
     stubListing([file]);
     renderPanel();
     await screen.findByText("report.txt");
-    fireEvent.click(screen.getByRole("button", { name: "Delete report.txt" }));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "More actions for report.txt" }));
+    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
     expect(screen.getByRole("alertdialog")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());

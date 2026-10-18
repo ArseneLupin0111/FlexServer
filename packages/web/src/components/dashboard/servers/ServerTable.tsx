@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Edit3, KeyRound, MoreHorizontal, RotateCw, ShieldCheck, Trash2 } from "lucide-react";
+import { Edit3, KeyRound, RotateCw, ShieldCheck, Trash2 } from "lucide-react";
 import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
+import { RowActionsMenu } from "../shared/RowActionsMenu";
+import { DropdownMenuItem } from "../../ui/dropdown-menu";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -21,12 +23,6 @@ import {
 import type { VpsRecord } from "../../../lib/api";
 import type { DashboardJob } from "../../../lib/api";
 import { AgentLifecycleStatus, agentJobFor, localAgentLabel } from "./AgentLifecycleStatus";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../../ui/dropdown-menu";
 
 export function ServerTable({
   vpsList,
@@ -181,34 +177,27 @@ export function ServerTable({
                         <ShieldCheck size={13} />
                         Verify access
                       </Button> : null}
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button type="button" size="sm" variant="outline" aria-label={`More actions for ${displayName}`}>
-                            <MoreHorizontal size={13} />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="w-48 rounded-none">
-                          {!accessProblem ? <DropdownMenuItem disabled={busy || isLocal} onClick={() => onVerify(vps)}><ShieldCheck size={14} /> Verify access</DropdownMenuItem> : null}
-                          {canRestart ? <DropdownMenuItem disabled={busy} onClick={() => window.setTimeout(() => setRestartTarget(vps), 0)}><RotateCw size={14} /> Restart agent</DropdownMenuItem> : null}
-                          {isLocal ? <DropdownMenuItem disabled={busy || !canRotateAgent} onClick={() => window.setTimeout(() => setRotateAgentTarget(vps), 0)}><KeyRound size={14} /> Rotate agent credential</DropdownMenuItem> : null}
-                          <DropdownMenuItem disabled={busy || isLocal || !provisionPasswords[vps.id]?.trim()} onClick={() => onProvision(vps)}><KeyRound size={14} /> Reinstall SSH key</DropdownMenuItem>
-                          <DropdownMenuItem
-                            disabled={busy || isLocal || mode === "demo"}
-                            onClick={() => window.setTimeout(() => onEdit(vps), 0)}
-                            title={mode === "demo" ? "Editing is unavailable in demo mode." : isLocal ? "Local servers are managed by the system." : undefined}
-                            aria-label={`Edit server${mode === "demo" ? ": unavailable in demo mode" : isLocal ? ": local servers are system managed" : ""}`}
-                          >
-                            <Edit3 size={14} /> Edit
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            className="text-destructive focus:text-destructive"
-                            disabled={busy || isLocal}
-                            onClick={() => window.setTimeout(() => handleDeleteClick(vps), 0)}
-                          >
-                            <Trash2 size={14} /> Remove
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                      <RowActionsMenu label={displayName}>
+                        {!accessProblem ? <DropdownMenuItem disabled={busy || isLocal} onClick={() => onVerify(vps)}><ShieldCheck size={14} /> Verify access</DropdownMenuItem> : null}
+                        {canRestart ? <DropdownMenuItem disabled={busy} onClick={() => window.setTimeout(() => setRestartTarget(vps), 0)}><RotateCw size={14} /> Restart agent</DropdownMenuItem> : null}
+                        {isLocal ? <DropdownMenuItem disabled={busy || !canRotateAgent} onClick={() => window.setTimeout(() => setRotateAgentTarget(vps), 0)}><KeyRound size={14} /> Rotate agent credential</DropdownMenuItem> : null}
+                        <DropdownMenuItem disabled={busy || isLocal || !provisionPasswords[vps.id]?.trim()} onClick={() => onProvision(vps)}><KeyRound size={14} /> Reinstall SSH key</DropdownMenuItem>
+                        <DropdownMenuItem
+                          disabled={busy || isLocal || mode === "demo"}
+                          onClick={() => window.setTimeout(() => onEdit(vps), 0)}
+                          title={mode === "demo" ? "Editing is unavailable in demo mode." : isLocal ? "Local servers are managed by the system." : undefined}
+                          aria-label={`Edit server${mode === "demo" ? ": unavailable in demo mode" : isLocal ? ": local servers are system managed" : ""}`}
+                        >
+                          <Edit3 size={14} /> Edit
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          className="text-destructive focus:text-destructive"
+                          disabled={busy || isLocal}
+                          onClick={() => window.setTimeout(() => handleDeleteClick(vps), 0)}
+                        >
+                          <Trash2 size={14} /> Remove
+                        </DropdownMenuItem>
+                      </RowActionsMenu>
                     </div>
                   </td>
                 </tr>

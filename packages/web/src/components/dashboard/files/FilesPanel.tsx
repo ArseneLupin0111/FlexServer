@@ -17,6 +17,8 @@ import {
 } from "lucide-react";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
+import { DropdownMenuItem } from "../../ui/dropdown-menu";
+import { RowActionsMenu } from "../shared/RowActionsMenu";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -561,50 +563,35 @@ export function FilesPanel({ vps }: { vps: VpsRecord }) {
                     </td>
 
                     <td className="p-2 text-right whitespace-nowrap">
-                      <div className="flex items-center justify-end gap-1">
-
-                        {canDownload && (
-                          <button
-                            type="button"
-                            disabled={!capabilities?.available || loading}
-                            onClick={() => void handleDownload(entry)}
-                            className="p-1 text-dim hover:text-text focus:outline-none disabled:opacity-40"
-                            title="Download file"
-                            aria-label={`Download ${entry.name}`}
-                          >
-                            <Download size={13} />
-                          </button>
-                        )}
-
-                        {canMutate && (
-                          <button
-                            type="button"
-                            disabled={!capabilities?.available || loading}
-                            onClick={() => {
-                              setRenameTarget(entry);
-                              setRenameNewName(entry.name);
-                            }}
-                            className="p-1 text-dim hover:text-text focus:outline-none disabled:opacity-40"
-                            title="Rename"
-                            aria-label={`Rename ${entry.name}`}
-                          >
-                            <Edit3 size={13} />
-                          </button>
-                        )}
-
-                        {canMutate && (
-                          <button
-                            type="button"
-                            disabled={!capabilities?.available || loading}
-                            onClick={() => setDeleteTarget(entry)}
-                            className="p-1 text-dim hover:text-crit focus:outline-none disabled:opacity-40"
-                            title="Delete"
-                            aria-label={`Delete ${entry.name}`}
-                          >
-                            <Trash2 size={13} />
-                          </button>
-                        )}
-                      </div>
+                      {(canDownload || canMutate) && (
+                        <RowActionsMenu
+                          label={entry.name}
+                          disabled={!capabilities?.available || loading}
+                          contentClassName="w-40"
+                        >
+                            {canDownload && (
+                              <DropdownMenuItem onSelect={() => void handleDownload(entry)}>
+                                <Download size={14} /> Download
+                              </DropdownMenuItem>
+                            )}
+                            {canMutate && (
+                              <DropdownMenuItem onSelect={() => {
+                                setRenameTarget(entry);
+                                setRenameNewName(entry.name);
+                              }}>
+                                <Edit3 size={14} /> Rename
+                              </DropdownMenuItem>
+                            )}
+                            {canMutate && (
+                              <DropdownMenuItem
+                                className="text-destructive focus:text-destructive"
+                                onSelect={() => setDeleteTarget(entry)}
+                              >
+                                <Trash2 size={14} /> Delete
+                              </DropdownMenuItem>
+                            )}
+                        </RowActionsMenu>
+                      )}
                     </td>
                   </tr>
                 );

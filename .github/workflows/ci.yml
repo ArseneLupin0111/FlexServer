@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # 07:00 ICT (UTC+7) = 00:00 UTC
+    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
       force_api_build:

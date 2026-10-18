@@ -1,0 +1,37 @@
+name: opencode daily review trigger
+
+on:
+  schedule:
+    # 07:00 ICT (UTC+7) = 00:00 UTC
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  trigger-opencode-review:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    env:
+      TARGET_ISSUE_NUMBER: ${{ vars.OPENCODE_DAILY_ISSUE_NUMBER }}
+    steps:
+      - name: Validate target issue number
+        run: |
+          if ! [[ "$TARGET_ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "Repository variable OPENCODE_DAILY_ISSUE_NUMBER must be set to a valid issue number."
+            exit 1
+          fi
+
+      - name: Post scheduled opencode trigger comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue_number = Number(process.env.TARGET_ISSUE_NUMBER)
+            const body = `/opencode Đọc README, tài liệu kiến trúc/roadmap, code trên nhánh mặc định, thay đổi gần đây, cấu hình triển khai, kiểm thử và CI có liên quan; không suy đoán lỗi chỉ từ tên file hoặc README. Tìm vấn đề còn tồn tại và các tính năng mới/mở rộng có giá trị thực tế, phù hợp định hướng ưu tiên bản mã nguồn mở self-host trước khi phát triển SaaS; xác minh định hướng trong tài liệu hiện tại nếu có thay đổi. Trước mỗi issue, kiểm tra toàn bộ issue liên quan cả mở và đã đóng, các thảo luận/comment liên quan và PR đang mở/đã merge; phân trang và tìm theo từ đồng nghĩa, triệu chứng, nguyên nhân và phạm vi để tránh trùng hoặc đề xuất việc đã hoàn thành/đang xử lý/đã bị từ chối. Đánh giá sự cần thiết dựa trên bằng chứng code hiện tại, tác động đến người dùng, rủi ro và lợi ích so với công sức/độ phức tạp; ưu tiên lỗi thực tế, bảo mật, độ ổn định, trải nghiệm self-host và nhu cầu vận hành VPS/Docker. Chỉ tự động tạo issue mới khi có bằng chứng rõ ràng, hữu ích và có thể hành động; không cần xin xác nhận lại. Không tạo cho đủ số lượng và không tạo nếu không có mục nào đạt yêu cầu. Trước khi gửi mỗi issue, kiểm tra trùng lại lần cuối. Tuân thủ issue template và ngôn ngữ của repo; nếu chưa có quy ước, viết tiếng Việt. Mỗi issue cần tiêu đề cụ thể, vấn đề hoặc nhu cầu, bằng chứng liên kết file/dòng ở commit đã đọc, cách tái hiện nếu là bug (phân biệt đã kiểm chứng với suy luận), tác động, lý do cần làm và ưu tiên, phạm vi giải pháp đề xuất, tiêu chí nghiệm thu và các issue/PR liên quan đã đối chiếu. Không công khai secret hoặc chi tiết khai thác nhạy cảm. Không sửa code, tạo PR hay thay đổi issue cũ trong tác vụ này. Báo cáo ngắn bằng tiếng Việt với phạm vi/commit đã rà soát, liên kết issue đã tạo và lý do ưu tiên; nếu không tạo issue thì nêu rõ lý do; nếu thiếu quyền/truy cập hoặc không kiểm tra đủ dữ liệu thì báo giới hạn và không khẳng định đã rà soát đầy đủ.`
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              body,
+            })

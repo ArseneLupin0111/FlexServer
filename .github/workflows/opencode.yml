@@ -25,6 +25,10 @@ jobs:
           ACTOR: ${{ github.event.comment.user.login }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          if [ "$ACTOR" = "github-actions[bot]" ]; then
+            echo "Allowing scheduled trigger from ${ACTOR}."
+            exit 0
+          fi
           permission="$(gh api "repos/${REPOSITORY}/collaborators/${ACTOR}/permission" --jq '.permission' 2>/dev/null || echo none)"
           case "$permission" in
             admin|maintain|write)

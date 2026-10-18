@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — local Files helper startup
+
+- Pass supported socket UID/GID flags from the host-files installer and align the binary's default socket path with the API and Compose (`host-files/files.sock`).
+- Run the root helper with the API runtime group so systemd preserves group access to its runtime directory and socket instead of resetting ownership to root:root.
+
 ## Unreleased — CI fixture fixes
 
 - Route Settings agent-upgrade test responses by endpoint so Files capability requests cannot consume upgrade success or failure responses; assert successful confirmation closes and failed confirmation retains the API error.

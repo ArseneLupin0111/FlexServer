@@ -40,7 +40,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -o /out/host-pty-linux-amd64 ./cmd/host-pty && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -o /out/local-agent-rotator-linux-amd64 ./cmd/local-agent-rotator
+    -o /out/local-agent-rotator-linux-amd64 ./cmd/local-agent-rotator && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -o /out/host-files-linux-amd64 ./cmd/host-files
 FROM node:24-alpine AS api-runtime
 ENV NODE_ENV=production \
     AGENT_BINARY_PATH=/app/agent/vps-agent-linux-amd64 \
@@ -58,6 +60,8 @@ COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-agent-linux-amd6
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-updater-linux-amd64 /app/agent/vps-updater-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-pty-linux-amd64 /app/agent/host-pty-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/local-agent-rotator-linux-amd64 /app/agent/local-agent-rotator-linux-amd64
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-files-linux-amd64 /app/agent/host-files-linux-amd64
+COPY scripts/install/install-host-files.sh /app/scripts/install-host-files.sh
 RUN ln -s /app/agent/local-agent-rotator-linux-amd64 /usr/local/bin/local-agent-rotation-client && \
     ln -s /app/agent/local-agent-rotator-linux-amd64 /usr/local/bin/flexserver-local-agent-rotator
 RUN mkdir -p /app/data /app/private && chown -R app:app /app/data /app/private

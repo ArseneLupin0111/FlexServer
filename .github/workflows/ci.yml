@@ -1133,6 +1133,28 @@ jobs:
             \$SUDO systemctl enable flexserver-local-agent-rotator.service
             \$SUDO systemctl restart flexserver-local-agent-rotator.service
             echo \"Host Agent Rotator daemon started (socket: /var/run/flexserver/agent-rotation/agent-rotation.sock, uid=\${API_UID}, gid=\${API_GID}).\"
+
+            # Provision the host-files helper using the packaged installer script
+            # from the API image. The helper serves the same verb/path/body
+            # contract as the Files API over a dedicated Unix socket owned by
+            # the API runtime UID/GID; it never touches the container runtime.
+            FILES_BIN_TMP=\"\$(mktemp /tmp/host-files-bundled.XXXXXX)\"
+            FILES_SH_TMP=\"\$(mktemp /tmp/install-host-files.XXXXXX)\"
+            if ! docker run --rm --entrypoint cat '$API_IMAGE' /app/agent/host-files-linux-amd64 > \"\$FILES_BIN_TMP\" || [ ! -s \"\$FILES_BIN_TMP\" ]; then
+              echo 'Error: Failed to extract bundled host-files binary from API image.' >&2
+              rm -f \"\$FILES_BIN_TMP\" \"\$FILES_SH_TMP\"
+              exit 1
+            fi
+            chmod 0755 \"\$FILES_BIN_TMP\"
+            if ! docker run --rm --entrypoint cat '$API_IMAGE' /app/scripts/install-host-files.sh > \"\$FILES_SH_TMP\" || [ ! -s \"\$FILES_SH_TMP\" ]; then
+              echo 'Error: Failed to extract bundled install-host-files.sh from API image.' >&2
+              rm -f \"\$FILES_BIN_TMP\" \"\$FILES_SH_TMP\"
+              exit 1
+            fi
+            chmod 0755 \"\$FILES_SH_TMP\"
+            \$SUDO bash \"\$FILES_SH_TMP\" --binary \"\$FILES_BIN_TMP\" --api-uid-gid \"\${API_UID}:\${API_GID}\"
+            rm -f \"\$FILES_BIN_TMP\" \"\$FILES_SH_TMP\"
+            echo \"Host files helper provisioned (socket: /var/run/flexserver/host-files/files.sock, uid=\${API_UID}, gid=\${API_GID}).\"
           "
           $SSH "cd '$DEPLOY_PATH' && docker compose run --rm api node dist/db/migrate.js"
           $SSH "cd '$DEPLOY_PATH' && docker compose run --rm api node dist/db/migrate.js --include-optional" || echo "Optional Timescale migration failed or is unavailable; continuing with core PostgreSQL schema."

@@ -62,6 +62,8 @@ The production deployment runs three containers:
 
 The production docker-compose binds the web container to `127.0.0.1:3000` so it listens only on the loopback interface. An external HTTPS reverse proxy (nginx, Caddy, Cloudflare Tunnel) must terminate TLS and forward to `http://127.0.0.1:3000`. The API health endpoint is reachable through the web proxy at `/api/health`.
 
+The SSH deploy also extracts the bundled `host-files-linux-amd64` binary and its installer from the API image, then installs `flexserver-host-files.service` on the Linux host using the API container's actual UID/GID. The root helper exposes only `/var/run/flexserver/host-files/files.sock`; the existing `/var/run/flexserver` bind mount makes it available to the API without mounting the host filesystem. Installing the helper does not enable Files for any VPS: the per-VPS Settings toggle remains operator-controlled. For native or manual deployments, use `scripts/install/install-host-files.sh --binary <path> --api-uid-gid <UID:GID>` as root.
+
 ## Required secrets for deployment
 
 Set these in GitHub repository settings:

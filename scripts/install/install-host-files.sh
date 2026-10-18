@@ -106,6 +106,7 @@ if ! [[ "$API_UID_GID" =~ ^[0-9]+:[0-9]+$ ]]; then
   exit 1
 fi
 
+API_UID="${API_UID_GID%%:*}"
 API_GID="${API_UID_GID#*:}"
 
 if [[ "$DRY_RUN" == true ]]; then
@@ -143,12 +144,12 @@ After=network.target
 [Service]
 Type=simple
 User=root
-Group=root
+Group=${API_GID}
 RuntimeDirectory=flexserver/host-files
 RuntimeDirectoryMode=0750
 ExecStartPost=/bin/chown root:${API_GID} /run/flexserver/host-files
 ExecStartPost=/bin/chmod 0750 /run/flexserver/host-files
-ExecStart=${INSTALL_BIN} -socket ${SOCKET_PATH} -socket-mode 0660 -socket-owner ${API_UID_GID}
+ExecStart=${INSTALL_BIN} -socket ${SOCKET_PATH} -socket-mode 0660 -socket-uid ${API_UID} -socket-gid ${API_GID}
 Restart=on-failure
 RestartSec=2s
 KillMode=process

@@ -26,9 +26,11 @@ const outputDir = join(agentDir, "dist");
 const agentOutputPath = join(outputDir, "vps-agent-linux-amd64");
 const updaterOutputPath = join(outputDir, "vps-updater-linux-amd64");
 const hostPtyOutputPath = join(outputDir, "host-pty-linux-amd64");
+const hostFilesOutputPath = join(outputDir, "host-files-linux-amd64");
 const rotatorOutputPath = join(outputDir, "local-agent-rotator-linux-amd64");
 const nativeExt = process.platform === "win32" ? ".exe" : "";
 const hostPtyNativePath = join(outputDir, `host-pty${nativeExt}`);
+const hostFilesNativePath = join(outputDir, `host-files${nativeExt}`);
 const rotatorNativePath = join(outputDir, `local-agent-rotator${nativeExt}`);
 
 const GIT_SHA_RE = /^[0-9a-f]{40}$/;
@@ -96,6 +98,7 @@ try {
     ["./cmd/vps-agent", agentOutputPath],
     ["./cmd/vps-updater", updaterOutputPath],
     ["./cmd/host-pty", hostPtyOutputPath],
+    ["./cmd/host-files", hostFilesOutputPath],
     ["./cmd/local-agent-rotator", rotatorOutputPath],
   ]) {
     execSync('go build -ldflags "' + ldflags + '" -o "' + out + '" ' + pkg, {
@@ -126,6 +129,21 @@ if (process.platform !== "linux" || process.arch !== "amd64") {
 }
 if (process.platform !== "linux" || process.arch !== "amd64") {
   try {
+    execSync('go build -ldflags "' + ldflags + '" -o "' + hostFilesNativePath + '" ./cmd/host-files', {
+      cwd: agentDir,
+      stdio: "inherit",
+      env: { ...process.env, CGO_ENABLED: "0" },
+    });
+  } catch (err) {
+    if (process.platform === "win32" || process.platform === "linux") {
+      console.error(`Native host-files build failed on ${process.platform}:`, err.message);
+      process.exit(1);
+    }
+    console.warn("Native host-files build skipped:", err.message);
+  }
+}
+if (process.platform !== "linux" || process.arch !== "amd64") {
+  try {
     execSync('go build -ldflags "' + ldflags + '" -o "' + rotatorNativePath + '" ./cmd/local-agent-rotator', {
       cwd: agentDir,
       stdio: "inherit",
@@ -141,7 +159,7 @@ if (process.platform !== "linux" || process.arch !== "amd64") {
 }
 
 
-for (const out of [agentOutputPath, updaterOutputPath, hostPtyOutputPath, hostPtyNativePath, rotatorOutputPath, rotatorNativePath]) {
+for (const out of [agentOutputPath, updaterOutputPath, hostPtyOutputPath, hostPtyNativePath, hostFilesOutputPath, hostFilesNativePath, rotatorOutputPath, rotatorNativePath]) {
   if (existsSync(out)) {
     const stats = statSync(out);
     const sizeKB = (stats.size / 1024).toFixed(1);

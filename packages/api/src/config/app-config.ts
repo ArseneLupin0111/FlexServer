@@ -57,6 +57,7 @@ export type AppConfig = {
   sshHostKeyPolicy: "strict" | "permissive";
   terminal?: { global: number; perDashboard: number; perVps: number; openTimeoutMs: number; idleTimeoutMs: number; lifetimeMs: number; revocationPollMs: number; heartbeatMs: number; outputBufferBytes: number; inputBufferBytes: number; slowConsumerTimeoutMs: number; pendingLimit: number };
   sshKeyEncryptionKeyFile?: string;
+  localFilesSocketPath?: string;
 };
 
 const booleanSchema = z
@@ -165,6 +166,7 @@ const envSchema = z.object({
     (value) => (value === "" ? undefined : value),
     z.string().trim().optional(),
   ),
+  LOCAL_FILES_SOCKET_PATH: z.string().trim().min(1).default("/var/run/flexserver/host-files/files.sock"),
   TERMINAL_GLOBAL_LIMIT: z.coerce.number().int().min(1).max(100).default(10),
   TERMINAL_DASHBOARD_LIMIT: z.coerce.number().int().min(1).max(20).default(3),
   TERMINAL_VPS_LIMIT: z.coerce.number().int().min(1).max(20).default(2),
@@ -316,6 +318,7 @@ export function parseAppConfig(
       : {},
     sshHostKeyPolicy: parsed.SSH_HOST_KEY_POLICY,
     sshKeyEncryptionKeyFile,
+    localFilesSocketPath: parsed.LOCAL_FILES_SOCKET_PATH,
     terminal: {
       global: parsed.TERMINAL_GLOBAL_LIMIT,
       perDashboard: parsed.TERMINAL_DASHBOARD_LIMIT,

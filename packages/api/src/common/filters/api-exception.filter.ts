@@ -25,6 +25,7 @@ import {
   VpsNotFoundError,
 } from "../errors.js";
 import { safeErrorMessage } from "../redaction.js";
+import { FilesError } from "../../files/files-error.js";
 
 function errorBody(
   message: string,
@@ -46,6 +47,15 @@ export class ApiExceptionFilter implements ExceptionFilter {
 
     if (error instanceof VpsNotFoundError) {
       return response.status(404).json(errorBody("VPS not found", requestId));
+    }
+
+    if (error instanceof FilesError) {
+      return response.status(error.status).json({
+        error: {
+          code: error.code,
+          message: error.message,
+        },
+      });
     }
 
     if (error instanceof DockerManagementConflict) {

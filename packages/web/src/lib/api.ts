@@ -21,6 +21,7 @@ export type VpsRecord = {
   managedBy?: "user" | "system";
   dockerMetricsEnabled?: boolean;
   dockerManagementEnabled?: boolean;
+  sftpEnabled?: boolean;
   agentStatus?:
     "not_installed" | "installing" | "online" | "offline" | "failed";
   lastAgentInstallJobId?: string;
@@ -415,6 +416,7 @@ export type UpdateVpsPayload = Partial<
     | "notes"
     | "dockerMetricsEnabled"
     | "dockerManagementEnabled"
+    | "sftpEnabled"
   >
 >;
 

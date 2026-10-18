@@ -1,0 +1,17 @@
+# Opt-in Docker Compose override to enable local host files management.
+# Mounts the dedicated host-files Unix domain socket directory from the host system.
+# The host-files helper runs as a root systemd service on the host, creating
+# the socket at /var/run/flexserver/host-files/files.sock with 0660 permissions
+# granted to the API runtime UID:GID.
+#
+# Neither the Docker daemon socket nor the host root filesystem is ever mounted.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.files.yml up -d
+#
+services:
+  api:
+    volumes:
+      - /var/run/flexserver/host-files:/var/run/flexserver/host-files
+    environment:
+      LOCAL_FILES_SOCKET_PATH: /var/run/flexserver/host-files/files.sock

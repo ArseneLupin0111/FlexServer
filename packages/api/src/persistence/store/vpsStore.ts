@@ -50,6 +50,7 @@ export function createVpsStore(filePath = "data/vps.json") {
         managedBy: "user",
         dockerMetricsEnabled: false,
         dockerManagementEnabled: false,
+        sftpEnabled: false,
         createdAt: timestamp,
         updatedAt: timestamp,
       };
@@ -145,6 +146,7 @@ export function createVpsStore(filePath = "data/vps.json") {
               managedBy: input.managedBy ?? "system",
               dockerMetricsEnabled: existing.dockerMetricsEnabled ?? false,
               dockerManagementEnabled: existing.dockerManagementEnabled ?? false,
+              sftpEnabled: existing.sftpEnabled ?? false,
               updatedAt: now(),
             };
           } else {
@@ -165,6 +167,7 @@ export function createVpsStore(filePath = "data/vps.json") {
               managedBy: input.managedBy ?? "system",
               dockerMetricsEnabled: false,
               dockerManagementEnabled: false,
+              sftpEnabled: false,
               createdAt: timestamp,
               updatedAt: timestamp,
             });

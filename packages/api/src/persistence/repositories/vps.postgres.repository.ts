@@ -34,6 +34,7 @@ type VpsRow = {
   managed_by: string | null;
   docker_metrics_enabled: boolean | null;
   docker_management_enabled: boolean | null;
+  sftp_enabled: boolean | null;
   city: string | null;
   country: string | null;
   location_detected_at: Date | string | null;
@@ -101,7 +102,7 @@ export function createPostgresVpsRepository(pool: DatabasePool): VpsRepository {
            SET name = $2, host = $3, port = $4, username = $5, provider = $6, region = $7,
                tags = $8, status = $9, notes = $10, display_name = $15,
                kind = $12, managed_by = $13,
-               docker_metrics_enabled = $14, docker_management_enabled = $16, updated_at = $11
+               docker_metrics_enabled = $14, docker_management_enabled = $16, sftp_enabled = $17, updated_at = $11
            WHERE id = $1
            RETURNING *`,
           [
@@ -121,6 +122,7 @@ export function createPostgresVpsRepository(pool: DatabasePool): VpsRepository {
             next.dockerMetricsEnabled ?? false,
             next.displayName ?? null,
             next.dockerManagementEnabled ?? false,
+            next.sftpEnabled ?? false,
           ],
         );
         return result.rows[0] ? rowToVps(result.rows[0]) : undefined;
@@ -217,6 +219,7 @@ function rowToVps(row: VpsRow): VpsRecord {
     managedBy: (row.managed_by as VpsRecord["managedBy"]) ?? undefined,
      dockerMetricsEnabled: row.docker_metrics_enabled ?? false,
      dockerManagementEnabled: row.docker_management_enabled ?? false,
+     sftpEnabled: row.sftp_enabled ?? false,
      city: row.city ?? undefined,
      country: row.country ?? undefined,
      locationDetectedAt: optionalIsoString(row.location_detected_at),

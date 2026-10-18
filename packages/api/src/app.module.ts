@@ -68,6 +68,9 @@ import type { DockerManagementRepository } from "./persistence/repositories/dock
 import type { LocalUpgradeRepository } from "./persistence/repositories/local-upgrade.repository.js";
 import { DashboardSettingsService } from "./dashboard/dashboard-settings.service.js";
 import { LocalTerminalService } from "./terminal/local-terminal.service.js";
+import { FilesController } from "./files/files.controller.js";
+import { FilesService } from "./files/files.service.js";
+import type { FilesTransport } from "./files/files.models.js";
 import type { SettingsRepository } from "./persistence/repositories/settings.repository.js";
 import {
   ADMIN_CREDENTIAL_REPOSITORY,
@@ -85,6 +88,8 @@ import {
   SESSION_REPOSITORY,
   VPS_REPOSITORY,
   SETTINGS_REPOSITORY,
+  LOCAL_FILES_TRANSPORT,
+  REMOTE_FILES_TRANSPORT,
 } from "./tokens.js";
 
 export {
@@ -122,6 +127,8 @@ export type AppDependencies = {
   dockerManagement?: DockerManagementRepository;
   localUpgrades?: LocalUpgradeRepository;
   settings?: SettingsRepository;
+  localFilesTransport?: FilesTransport;
+  remoteFilesTransport?: FilesTransport;
   /** Optional pre-created DB pool. Caller owns lifecycle unless ownsPool=true. */
   pool?: Pool;
   ownsPool?: boolean;
@@ -183,6 +190,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       DockerManagementController,
       LocalUpgradeController,
       LocalUpdaterController,
+      FilesController,
     ],
     providers: [
       { provide: APP_CONFIG, useValue: config },
@@ -225,6 +233,13 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
         useValue: deps.settings ?? repositories!.settings,
       },
       DashboardSettingsService,
+      FilesService,
+      ...(deps.localFilesTransport
+        ? [{ provide: LOCAL_FILES_TRANSPORT, useValue: deps.localFilesTransport }]
+        : []),
+      ...(deps.remoteFilesTransport
+        ? [{ provide: REMOTE_FILES_TRANSPORT, useValue: deps.remoteFilesTransport }]
+        : []),
       LocalTerminalService,
       DashboardSessionService,
       {
@@ -377,7 +392,8 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           DOCKER_MANAGEMENT_REPOSITORY, LOCAL_UPGRADE_REPOSITORY,
           HOST_KEY_PIN_REPOSITORY, TerminalSessionService, DockerLogsService,
           AgentLifecycleCoordinator,
-         ],
+          FilesService,
+        ],
         useFactory: (
           store: VpsRepository,
           keys: KeyService,
@@ -395,7 +411,8 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           management: DockerManagementRepository, upgrades: LocalUpgradeRepository,
           pins: HostKeyPinRepository, terminal: TerminalSessionService, logs: DockerLogsService,
           lifecycle: AgentLifecycleCoordinator,
-         ) =>
+          filesService: FilesService,
+        ) =>
           new VpsService(
             store,
             keys,
@@ -411,6 +428,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
              dockerMonitoringService,
              createVpsCleanup(agentRepo, jobs, metrics, docker, management, upgrades, pins, terminal, logs),
              lifecycle,
+             filesService,
            ),
       },
     ],

@@ -5,3 +5,5 @@ export { MetricsPanel } from "./metrics/MetricsPanel";
 export { AuditPanel } from "./audit/AuditPanel";
 export { TerminalPanel } from "./terminal/TerminalPanel";
 export { SettingsPanel } from "./settings/SettingsPanel";
+export { FilesPanel } from "./files/FilesPanel";
+export { SftpSettingsCard } from "./files/SftpSettingsCard";

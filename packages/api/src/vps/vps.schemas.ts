@@ -19,17 +19,19 @@ export const updateVpsSchema = createVpsSchema
   .extend({
     dockerMetricsEnabled: z.boolean().optional(),
     dockerManagementEnabled: z.boolean().optional(),
+    sftpEnabled: z.boolean().optional(),
   });
 
-/** Strict schema for local/system-managed VPS: only Docker toggles allowed. */
+/** Strict schema for local/system-managed VPS: only feature toggles allowed. */
 export const updateLocalVpsSchema = z
   .object({
     dockerMetricsEnabled: z.boolean().optional(),
     dockerManagementEnabled: z.boolean().optional(),
+    sftpEnabled: z.boolean().optional(),
   })
   .strict()
-  .refine((value) => value.dockerMetricsEnabled !== undefined || value.dockerManagementEnabled !== undefined, {
-    message: "At least one Docker toggle must be provided",
+  .refine((value) => value.dockerMetricsEnabled !== undefined || value.dockerManagementEnabled !== undefined || value.sftpEnabled !== undefined, {
+    message: "At least one feature toggle must be provided",
   });
 
 export const provisionKeySchema = z.object({

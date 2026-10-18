@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — Files transfer E2E fixes
+
+- Keep SFTP uploads alive after the HTTP request body completes; only incomplete request closure cancels the upload.
+- Encode Unicode download names with an ASCII fallback and RFC 5987 filename parameter.
+- Observe download pipeline rejection immediately so missing-file responses cannot terminate the API through an unhandled stream rejection.
+- Preserve accessible New Folder and Upload button names on mobile.
+
 ## Unreleased — descriptive local shell prompt
 
 - Give host PTY sessions using `sh` or `dash` a default `user@hostname:${PWD}` prompt, with `#` for root and `$` for other users. Preserve a non-empty inherited `PS1` and allow shell startup files to override the default; other shells are unchanged.

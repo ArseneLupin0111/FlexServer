@@ -33,6 +33,9 @@ import { DockerMonitoringService } from "../docker/docker-monitoring.service.js"
 import type { VpsCleanup } from "../persistence/vps-cleanup.js";
 import { AgentLifecycleCoordinator } from "../agents/agent-lifecycle-coordinator.js";
 
+export type VpsFilesCanceller = {
+  cancelOperationsForVps(vpsId: string, reason?: string): void;
+};
 @Injectable()
 export class VpsService {
   constructor(
@@ -50,6 +53,7 @@ export class VpsService {
     private readonly dockerMonitoring?: DockerMonitoringService,
     private readonly removalCleanup?: VpsCleanup,
     private readonly lifecycle?: AgentLifecycleCoordinator,
+    private readonly filesService?: VpsFilesCanceller,
   ) {}
 
   async list() {
@@ -145,13 +149,16 @@ export class VpsService {
     this.assertNotDemo();
     const vps = await this.get(id);
 
-    // For local/system-managed hosts: only the Docker toggles are allowed.
+    // For local/system-managed hosts: only feature toggles are allowed.
     // Each flag is persisted independently, so a management-only patch never
     // cleans up monitoring history and never flips dockerMetricsEnabled.
     if (this.isLocalSystemManaged(vps)) {
       const localPatch = updateLocalVpsSchema.parse(body);
       const oldMetrics = vps.dockerMetricsEnabled ?? false;
       const oldManagement = vps.dockerManagementEnabled ?? false;
+      const oldSftp = vps.sftpEnabled ?? false;
+      const newSftp = localPatch.sftpEnabled;
+      const sftpChanged = newSftp !== undefined && newSftp !== oldSftp;
       const newMetrics = localPatch.dockerMetricsEnabled;
       const newManagement = localPatch.dockerManagementEnabled;
       const metricsChanged =
@@ -159,7 +166,7 @@ export class VpsService {
       const managementChanged =
         newManagement !== undefined && newManagement !== oldManagement;
 
-      if (!metricsChanged && !managementChanged) {
+      if (!metricsChanged && !managementChanged && !sftpChanged) {
         // No change; just return current record
         return vps;
       }
@@ -170,6 +177,9 @@ export class VpsService {
       if (oldMetrics && newMetrics === false) {
         await this.dockerMonitoring?.cleanupForVps(id, "monitoring_disabled");
       }
+      if (oldSftp && newSftp === false) {
+        this.filesService?.cancelOperationsForVps(id);
+      }
 
       const updated = await this.store.update(id, {
         ...(newMetrics !== undefined
@@ -178,6 +188,7 @@ export class VpsService {
         ...(newManagement !== undefined
           ? { dockerManagementEnabled: newManagement }
           : {}),
+        ...(newSftp !== undefined ? { sftpEnabled: newSftp } : {}),
       });
       if (!updated) throw new VpsNotFoundError();
 
@@ -185,18 +196,20 @@ export class VpsService {
         actor: "system",
         action: metricsChanged
           ? "vps.docker_metrics.update"
-          : "vps.docker_management.update",
+          : managementChanged ? "vps.docker_management.update" : "vps.sftp.update",
         resourceType: "vps",
         resourceId: id,
         result: "success",
         metadata: {
           old: {
+            ...(sftpChanged ? { sftpEnabled: oldSftp } : {}),
             ...(metricsChanged ? { dockerMetricsEnabled: oldMetrics } : {}),
             ...(managementChanged
               ? { dockerManagementEnabled: oldManagement }
               : {}),
           },
           new: {
+            ...(sftpChanged ? { sftpEnabled: newSftp } : {}),
             ...(metricsChanged ? { dockerMetricsEnabled: newMetrics } : {}),
             ...(managementChanged
               ? { dockerManagementEnabled: newManagement }
@@ -207,7 +220,7 @@ export class VpsService {
       return updated;
     }
 
-    // For remote/user-managed hosts: normal update but also allow dockerMetricsEnabled
+    // Remote/user-managed hosts accept endpoint fields and independent toggles.
     const parsedBody = updateVpsSchema.parse(body);
     const hasDockerToggle = parsedBody && "dockerMetricsEnabled" in parsedBody;
     const oldEndpoint = { host: vps.host, port: vps.port };
@@ -235,6 +248,9 @@ export class VpsService {
       if (!updated) throw new VpsNotFoundError();
 
       if (endpointChanged) await this.hostKeyPin.revokeTrust(id);
+      if (endpointChanged || parsedBody.sftpEnabled === false) {
+        this.filesService?.cancelOperationsForVps(id);
+      }
 
        await this.audit.record({
         actor: "system",
@@ -246,8 +262,8 @@ export class VpsService {
          metadata: {
            ...(hasDockerToggle
              ? {
-                 old: { dockerMetricsEnabled: oldValue },
-                 new: { dockerMetricsEnabled: newValue },
+                 old: { dockerMetricsEnabled: oldValue, ...(parsedBody.sftpEnabled !== undefined ? { sftpEnabled: vps.sftpEnabled ?? false } : {}) },
+                 new: { dockerMetricsEnabled: newValue, ...(parsedBody.sftpEnabled !== undefined ? { sftpEnabled: parsedBody.sftpEnabled } : {}) },
                }
              : {}),
            ...(endpointAuditMetadata ?? {}),
@@ -259,18 +275,30 @@ export class VpsService {
     const updated = await this.store.update(id, parsedBody);
     if (!updated) throw new VpsNotFoundError();
     if (endpointChanged) await this.hostKeyPin.revokeTrust(id);
+    if (endpointChanged || parsedBody.sftpEnabled === false) {
+      this.filesService?.cancelOperationsForVps(id);
+    }
     await this.audit.record({
       actor: "system",
-      action: "vps.update",
+      action: Object.keys(parsedBody).length === 1 && parsedBody.sftpEnabled !== undefined
+        ? "vps.sftp.update" : "vps.update",
       resourceType: "vps",
       resourceId: id,
        result: "success",
-       metadata: endpointAuditMetadata,
+       metadata: {
+         ...endpointAuditMetadata,
+         ...(parsedBody.sftpEnabled !== undefined ? {
+           old: { sftpEnabled: vps.sftpEnabled ?? false },
+           new: { sftpEnabled: parsedBody.sftpEnabled },
+         } : {}),
+       },
      });
      return updated;
   }
 
   async delete(id: string) {
+    this.filesService?.cancelOperationsForVps(id);
+
     this.assertNotDemo();
     const record = await this.store.get(id);
     if (record) this.assertRemoteUserManaged(record);

@@ -1,0 +1,1 @@
+ALTER TABLE vps ADD COLUMN IF NOT EXISTS sftp_enabled boolean NOT NULL DEFAULT false;

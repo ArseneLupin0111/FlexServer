@@ -164,6 +164,33 @@ export async function openManagedSshShell(
   }
 }
 
+export type ManagedSftpConnection = { sftp: SFTPWrapper; close(): void };
+
+export async function openManagedSftp(
+  vps: VpsRecord,
+  auth: { privateKey: string },
+  security: SshSecurityOptions,
+): Promise<ManagedSftpConnection> {
+  if (!auth.privateKey.trim()) throw new SshOperationError("SFTP requires a private key.");
+  const client = await connect(
+    { host: vps.host, port: vps.port, username: vps.username, ...auth },
+    { ...security, requireHostKeyPin: true },
+  );
+  try {
+    const sftp = await openSftp(client);
+    let closed = false;
+    return { sftp, close() {
+      if (closed) return;
+      closed = true;
+      sftp.destroy();
+      client.destroy();
+    } };
+  } catch (error) {
+    client.destroy();
+    throw error;
+  }
+}
+
 function toSshOperationError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   const code =

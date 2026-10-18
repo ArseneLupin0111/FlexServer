@@ -13,6 +13,8 @@ import {
   OverviewPanel,
   SettingsPanel,
   TerminalPanel,
+  FilesPanel,
+  SftpSettingsCard,
 } from "../components/dashboard/DashboardPanels";
 import {
   getVpsDockerStorage,
@@ -89,6 +91,7 @@ const workspaceSubPages = [
   { label: "Jobs", to: "jobs", end: false },
   { label: "Audit", to: "audit", end: false },
   { label: "Terminal", to: "terminal", end: false },
+  { label: "Files", to: "files", end: false },
   { label: "Settings", to: "settings", end: false },
 ] as const;
 
@@ -848,6 +851,18 @@ export function VpsWorkspaceTerminalPage() {
   );
 }
 
+export function VpsWorkspaceFilesPage() {
+  const { vps } = useVpsWorkspace();
+  return (
+    <div className="space-y-2">
+      <h2 className="text-lg font-semibold tracking-tight text-text">
+        Files for {vpsDisplayName(vps)}
+      </h2>
+      <FilesPanel vps={vps} />
+    </div>
+  );
+}
+
 export function VpsWorkspaceSettingsPage() {
   const { vps, overview } = useVpsWorkspace();
   const dashboard = useDashboard();
@@ -877,6 +892,7 @@ export function VpsWorkspaceSettingsPage() {
         Settings for {vpsDisplayName(vps)}
       </h2>
       <SettingsPanel overview={overview}>
+      <SftpSettingsCard vps={vps} />
       <section aria-label="Docker management" className="mb-4 space-y-3 border border-line bg-panel p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-sm font-semibold text-text">Docker management</h3>

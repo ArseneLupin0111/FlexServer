@@ -12,6 +12,8 @@ import type { SshSecurityOptions } from "./sshService.js";
 import {
   execCommand,
   openManagedSshShell,
+  openManagedSftp,
+  type ManagedSftpConnection,
   type ManagedSshShell,
   type SshPtyDimensions,
   makeDirectory,
@@ -28,6 +30,11 @@ export class SshService {
     private readonly audit: AuditService,
     private readonly hostKeyPin: HostKeyPinService,
   ) {}
+
+  async openManagedSftp(vps: VpsRecord, auth: { privateKey: string }): Promise<ManagedSftpConnection> {
+    const security = await this.assertRealSshAllowed(vps, true);
+    return openManagedSftp(vps, auth, security);
+  }
 
   /**
    * Resolve the trusted host key fingerprints for a VPS.

@@ -12,6 +12,7 @@ import {
   VpsWorkspaceOverviewPage,
   VpsWorkspaceSettingsPage,
   VpsWorkspaceTerminalPage,
+  VpsWorkspaceFilesPage,
 } from "./context/VpsWorkspaceContext";
 import {
   DashboardLayout,
@@ -170,6 +171,7 @@ export default function DashboardApp() {
             <Route path="jobs" element={<VpsWorkspaceJobsPage />} />
             <Route path="audit" element={<VpsWorkspaceAuditPage />} />
             <Route path="terminal" element={<VpsWorkspaceTerminalPage />} />
+            <Route path="files" element={<VpsWorkspaceFilesPage />} />
             <Route path="settings" element={<VpsWorkspaceSettingsPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Route>

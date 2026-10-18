@@ -1714,55 +1714,22 @@ describe("React dashboard", () => {
     });
     it("renders workspace settings page and executes remote agent upgrade", async () => {
       const onlineServers = [{ ...twoServers[0], agentStatus: "online" as const }, twoServers[1]];
-      fetchMock
-        .mockResolvedValueOnce(authOk())
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: dashboardData }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: onlineServers }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: [] }),
-        })
-        // Scoped bootstrap calls
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: [] }),
-        })
-        // POST upgradeAgent
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: { jobId: "job-upgrade-1", state: { status: "queued" } } }),
-        });
+      fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (url === "/api/auth/me") return authOk();
+        if (url === "/api/vps/vps-1/upgrade-agent" && init?.method === "POST") {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ data: { jobId: "job-upgrade-1", state: { status: "queued" } } }),
+          };
+        }
+        const data = url === "/api/dashboard" ? dashboardData
+          : url === "/api/vps" ? onlineServers
+          : url === "/api/vps/vps-1/files/capabilities"
+            ? { enabled: false, available: false, transport: "sftp", reason: "disabled" }
+            : [];
+        return { ok: true, status: 200, json: async () => ({ data }) };
+      });
 
       const user = userEvent.setup();
       renderApp(["/vps/vps-1/settings"]);
@@ -1779,64 +1746,28 @@ describe("React dashboard", () => {
       await user.click(within(dialog).getByRole("button", { name: "Upgrade agent" }));
 
       await waitFor(() => {
-        const upgradeCall = fetchMock.mock.calls.find(
-          ([url, init]) => String(url).includes("/api/vps/vps-1/upgrade-agent") && (init as RequestInit | undefined)?.method === "POST",
-        );
-        expect(upgradeCall).toBeDefined();
+        expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
       });
     });
 
     it("retains confirmation dialog and displays error when remote agent upgrade fails in Settings", async () => {
       const onlineServers = [{ ...twoServers[0], agentStatus: "online" as const }, twoServers[1]];
-      fetchMock
-        .mockResolvedValueOnce(authOk())
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: dashboardData }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: onlineServers }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: [] }),
-        })
-        // Scoped bootstrap calls
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({ data: [] }),
-        })
-        // POST upgradeAgent failure
-        .mockResolvedValueOnce({
-          ok: false,
-          status: 500,
-          json: async () => ({ error: { code: "UPGRADE_FAILED", message: "SSH connection timed out" } }),
-        });
+      fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (url === "/api/auth/me") return authOk();
+        if (url === "/api/vps/vps-1/upgrade-agent" && init?.method === "POST") {
+          return {
+            ok: false,
+            status: 500,
+            json: async () => ({ error: { code: "UPGRADE_FAILED", message: "SSH connection timed out" } }),
+          };
+        }
+        const data = url === "/api/dashboard" ? dashboardData
+          : url === "/api/vps" ? onlineServers
+          : url === "/api/vps/vps-1/files/capabilities"
+            ? { enabled: false, available: false, transport: "sftp", reason: "disabled" }
+            : [];
+        return { ok: true, status: 200, json: async () => ({ data }) };
+      });
 
       const user = userEvent.setup();
       renderApp(["/vps/vps-1/settings"]);

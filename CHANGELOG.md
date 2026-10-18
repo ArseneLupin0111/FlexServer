@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — CI fixture fixes
+
+- Route Settings agent-upgrade test responses by endpoint so Files capability requests cannot consume upgrade success or failure responses; assert successful confirmation closes and failed confirmation retains the API error.
+- Keep the unchanged-endpoint host-key pin preservation check without coupling it to the incidental representation of empty audit metadata.
+
 ## Unreleased — Files transfer E2E fixes
 
 - Keep SFTP uploads alive after the HTTP request body completes; only incomplete request closure cancels the upload.

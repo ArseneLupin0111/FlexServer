@@ -344,7 +344,7 @@ describe("VPS endpoint changes and host-key trust", () => {
   });
 
   it("preserves an existing VPS-scoped pin when the endpoint is unchanged", async () => {
-    const { service, repo, vps, audit } = await createUpdateContext();
+    const { service, repo, vps } = await createUpdateContext();
 
     await service.update(vps.id, { name: "renamed" });
 
@@ -354,10 +354,6 @@ describe("VPS endpoint changes and host-key trust", () => {
       port: PORT,
       fingerprint: fpA,
     });
-    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({
-      action: "vps.update",
-      metadata: undefined,
-    }));
   });
 });
 

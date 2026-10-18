@@ -641,6 +641,8 @@ export function createJsonDockerMonitoringRepository(
           ...(s.state !== undefined ? { state: s.state } : {}),
           ...(s.image !== undefined ? { image: s.image } : {}),
           ...(s.status !== undefined ? { status: s.status } : {}),
+          collectedAt: s.collectedAt,
+          ...(s.details !== undefined ? { details: s.details } : {}),
           metrics: {
             cpuPercent: s.metrics.cpuPercent,
             memoryUsageBytes: s.metrics.memoryUsageBytes,

@@ -1,3 +1,5 @@
+import type { DockerContainerDetails } from "../docker/docker-container-details.js";
+
 export type AgentCredentialStatus = "pending" | "active" | "revoked";
 
 /**
@@ -98,6 +100,7 @@ export type AgentDockerContainerMetric = {
   blockReadBytes: number;
   blockWriteBytes: number;
   pids: number;
+  details?: DockerContainerDetails;
 };
 
 export type AgentDockerErrorCode =

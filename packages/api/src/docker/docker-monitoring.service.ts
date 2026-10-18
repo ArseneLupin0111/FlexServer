@@ -195,6 +195,7 @@ export class DockerMonitoringService {
         blockWriteBytes: c.blockWriteBytes,
         pids: c.pids,
       },
+      ...(c.details === undefined ? {} : { details: c.details }),
     }));
     const events = input.events?.map((e, i) => ({
       ...e.context,

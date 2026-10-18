@@ -704,7 +704,36 @@ export function listVpsDockerContainerHistory(id: string, params: DockerContaine
   const { agentInstanceId, containerKey, ...query } = params;
   return requestEnvelope<DockerPage<DockerHostSample>>(`${vpsPath(id)}/docker/instances/${encodeURIComponent(agentInstanceId)}/containers/${encodeURIComponent(containerKey)}/history${dockerQueryString(query)}`);
 }
-export type DockerCurrentContainer = { agentInstanceId: string; containerKey: string; name?: string; state?: string };
+export type DockerContainerDetails = {
+  collectedAt: string;
+} & ({
+  status: "unavailable";
+  reason: "timeout" | "not_found" | "permission_denied" | "daemon_unreachable" | "invalid_response" | "budget_exhausted";
+} | {
+  status: "available";
+  createdAt?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  exitCode?: number;
+  oomKilled?: boolean;
+  restartCount?: number;
+  restartPolicy?: { name: string; maximumRetryCount: number };
+  ports: { containerPort: number; protocol: string; hostIp?: string; hostPort?: number }[];
+  mounts: { type: string; source?: string; destination: string; readOnly: boolean }[];
+  networks: { name: string; ipv4?: string; ipv6?: string; gateway?: string }[];
+  healthcheck: { status: "healthy" | "unhealthy" | "starting" | "none"; failingStreak?: number; intervalMs?: number; timeoutMs?: number; startPeriodMs?: number; retries?: number };
+});
+export type DockerCurrentContainer = {
+  agentInstanceId: string;
+  containerKey: string;
+  name?: string;
+  state?: string;
+  image?: string;
+  status?: string;
+  metrics: { cpuPercent: number; memoryUsageBytes: number; pids: number };
+  collectedAt: string;
+  details?: DockerContainerDetails;
+};
 export function listVpsDockerCurrentContainers(id: string) { return request<DockerCurrentContainer[]>(`${vpsPath(id)}/docker/containers/current`); }
 export function listVpsDockerRollups(id: string, params: DockerHistoryQuery = {}) { return requestEnvelope<DockerPage<DockerMetricRollup>>(`${vpsPath(id)}/docker/rollups${dockerQueryString(params)}`); }
 export function listVpsDockerEvents(id: string, params: DockerEventsQuery = {}) { return requestEnvelope<DockerPage<DockerOperationalEvent>>(`${vpsPath(id)}/docker/events${dockerQueryString(params)}`); }

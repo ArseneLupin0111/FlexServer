@@ -435,7 +435,7 @@ func TestI2_ForbiddenFields(t *testing.T) {
 	}
 	out, _ := json.Marshal(m)
 	os := string(out)
-	for _, banned := range []string{`"env"`, `"Env"`, `"labels"`, `"Labels"`, `"mounts"`, `"Mounts"`, `"command"`, `"Command"`, `"args"`, `"Args"`, `"entrypoint"`, `"Entrypoint"`, `"secret"`, `"Secret"`, `"config"`, `"Config"`, `"inspect"`, `"Inspect"`, `"volumeName"`, `"mountPoint"`, `"layerId"`, `"cacheRecord"`, `"objectName"`, `"hunter2"`} {
+	for _, banned := range []string{`"env"`, `"Env"`, `"labels"`, `"Labels"`, `"command"`, `"Command"`, `"args"`, `"Args"`, `"entrypoint"`, `"Entrypoint"`, `"secret"`, `"Secret"`, `"config"`, `"Config"`, `"inspect"`, `"Inspect"`, `"volumeName"`, `"mountPoint"`, `"layerId"`, `"cacheRecord"`, `"objectName"`, `"hunter2"`} {
 		if strings.Contains(os, banned) {
 			t.Fatalf("docker payload must not contain %s: %s", banned, os)
 		}

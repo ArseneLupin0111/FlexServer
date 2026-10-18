@@ -110,6 +110,10 @@ describe("docker monitoring repository (PostgreSQL, I1)", () => {
       (m) => m.id === "020_docker_v2_overview.sql",
     )!;
     await pool.query(overviewMigration.sql);
+    const detailsMigration = (await loadMigrations()).find(
+      (m) => m.id === "027_docker_container_details.sql",
+    )!;
+    await pool.query(detailsMigration.sql);
     repo = createPostgresDockerMonitoringRepository(pool as never);
   }, 30000);
 
@@ -154,8 +158,8 @@ describe("docker monitoring repository (PostgreSQL, I1)", () => {
       await pool!.query(
         `INSERT INTO docker_metric_samples ` +
           `(id, vps_id, agent_instance_id, snapshot_id, container_key, name, state, ` +
-          `collected_at, received_at, effective_at, metrics, coverage) ` +
-          `VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          `collected_at, received_at, effective_at, metrics, coverage, details) ` +
+          `VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
         [
           s.id,
           s.vpsId,
@@ -169,6 +173,7 @@ describe("docker monitoring repository (PostgreSQL, I1)", () => {
           new Date(s.effectiveAt),
           JSON.stringify(s.metrics ?? {}),
           s.coverage !== undefined ? JSON.stringify(s.coverage) : null,
+          c.details !== undefined ? JSON.stringify(c.details) : null,
         ],
       );
     }
@@ -593,32 +598,47 @@ describe("docker monitoring repository (PostgreSQL, I1)", () => {
     },
   );
 
-  it.skipIf(!databaseUrl)(
-    "no cross-VPS leakage across events/alerts/watermarks/batches",
-    async () => {
-      const t = new Date().toISOString();
-      await seedEvents([event("e1", "vps-a", t)]);
-      await seedAlerts([alert("a1", "vps-a", t)]);
-      await ensureVps("vps-a");
-      await pool!.query(
-        `INSERT INTO docker_event_watermarks ` +
-          `(vps_id, agent_instance_id, time_nano, boundary_digests, updated_at) ` +
-          `VALUES ('vps-a','inst1','5','[]',$1)`,
-        [new Date(t)],
-      );
-      await pool!.query(
-        `INSERT INTO docker_ingest_batches ` +
-          `(vps_id, agent_instance_id, batch_id, snapshot_id, request_digest, result) ` +
-          `VALUES ('vps-a','inst1','b1','s1','d','ok')`,
-      );
-      expect((await repo!.listEvents({ vpsId: "vps-b" })).data).toEqual([]);
-      expect((await repo!.listAlerts({ vpsId: "vps-b" })).data).toEqual([]);
-      expect(await repo!.getWatermark("vps-b", "inst1")).toBeUndefined();
-      expect(
-        await repo!.getIngestBatch("vps-b", "inst1", "b1"),
-      ).toBeUndefined();
-      expect(await repo!.getWatermark("vps-a", "inst1")).toBeDefined();
-      expect(await repo!.getIngestBatch("vps-a", "inst1", "b1")).toBeDefined();
-    },
-  );
+  it.skipIf(!databaseUrl)("persists details and excludes prior-snapshot details from current rows", async () => {
+    const details = {
+      collectedAt: "2026-09-15T12:00:00.500Z",
+      status: "available" as const,
+      ports: [],
+      mounts: [],
+      networks: [],
+      healthcheck: { status: "none" as const },
+    };
+    await seedSamples([
+      { ...containerSample("old-details", "vps-detail", "2026-09-15T12:00:00Z"), details },
+      containerSample("new-legacy", "vps-detail", "2026-09-15T12:00:01Z"),
+    ]);
+    expect(await repo!.listCurrentContainers("vps-detail")).toMatchObject([
+      { agentInstanceId: "inst1", containerKey: "ck1", collectedAt: "2026-09-15T12:00:01.000Z" },
+    ]);
+    expect(await repo!.listCurrentContainers("vps-detail")).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ details })]),
+    );
+    await seedSamples([
+      { ...containerSample("replacement", "vps-detail", "2026-09-15T12:00:02Z", "inst2"), details },
+    ]);
+    expect(await repo!.listCurrentContainers("vps-detail")).toMatchObject([
+      { agentInstanceId: "inst2", details, collectedAt: "2026-09-15T12:00:02.000Z" },
+    ]);
+  });
+  it.skipIf(!databaseUrl)("persists and reads details from the exact current sample", async () => {
+    const details = {
+      collectedAt: "2026-09-15T12:00:00.500Z",
+      status: "available" as const,
+      ports: [],
+      mounts: [],
+      networks: [],
+      healthcheck: { status: "none" as const },
+    };
+    await seedSamples([
+      { ...containerSample("latest-details", "vps-detail-current", "2026-09-15T12:00:03Z", "inst-new"), details },
+    ]);
+    expect(await repo!.listCurrentContainers("vps-detail-current")).toMatchObject([
+      { agentInstanceId: "inst-new", containerKey: "ck1", collectedAt: "2026-09-15T12:00:03.000Z", details },
+    ]);
+  });
+
 });

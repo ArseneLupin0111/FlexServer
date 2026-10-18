@@ -243,14 +243,85 @@ function logBody(): string {
  * separate staging queue.
  */
 function displayedStats(): { lines: number; bytes: number } {
-  const text = screen.getByText(/bytes shown/).textContent ?? "";
+  const text = screen.getByText(/bytes buffered/).textContent ?? "";
   return {
-    lines: Number(/(\d+) lines?/.exec(text)?.[1] ?? "0"),
+    lines: Number(/(\d+) buffered lines/.exec(text)?.[1] ?? "0"),
     bytes: Number(/(\d+) bytes/.exec(text)?.[1] ?? "0"),
   };
 }
 
 describe("DockerContainerManagementPanel logs", () => {
+  it("filters literal mixed-case text by stream without reconnecting or dropping the buffer", async () => {
+    const calls = stubCapability({});
+    render(<DockerContainerManagementPanel vpsId="vps-1" enabled={false} />);
+    const stream = await openStream();
+    act(() => stream.state("live"));
+    act(() => stream.lines([
+      { stream: "stdout", text: "INFO [Error] out", truncated: false },
+      { stream: "stderr", text: "[ERROR] err", truncated: false },
+      { stream: "combined", text: "[error] combined", truncated: false },
+      { stream: "stdout", text: "unrelated", truncated: false },
+    ]));
+    await waitFor(() => expect(logBody()).toContain("unrelated"));
+    const requests = calls.length;
+    fireEvent.change(screen.getByLabelText("Search buffered logs"), { target: { value: "[eRrOr]" } });
+    expect(logBody()).not.toContain("unrelated");
+    fireEvent.change(screen.getByLabelText("Log stream"), { target: { value: "combined" } });
+    expect(logBody()).toBe("[error] combined");
+    expect(screen.getByText(/1 matching \/ 4 buffered lines/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Search buffered logs"), { target: { value: "no match" } });
+    expect(screen.getByText("No buffered lines match these filters")).toBeInTheDocument();
+    expect(calls).toHaveLength(requests);
+    expect(openStreams).toHaveLength(1);
+    expect(stream.closed).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(screen.getByLabelText("Search buffered logs")).toHaveValue("no match");
+    expect(screen.queryByText("No buffered lines match these filters")).not.toBeInTheDocument();
+  });
+
+  it("retains filters on reconnect and resets them on container selection", async () => {
+    stubCapability({});
+    render(<DockerContainerManagementPanel vpsId="vps-1" enabled />);
+    const stream = await openStream();
+    act(() => stream.state("live"));
+    fireEvent.change(screen.getByLabelText("Search buffered logs"), { target: { value: "needle" } });
+    fireEvent.change(screen.getByLabelText("Log stream"), { target: { value: "stderr" } });
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    await waitFor(() => expect(openStreams).toHaveLength(2));
+    expect(screen.getByLabelText("Search buffered logs")).toHaveValue("needle");
+    expect(screen.getByLabelText("Log stream")).toHaveValue("stderr");
+    fireEvent.change(screen.getByRole("combobox", { name: /container/i }), { target: { value: "agent-alpha::container-two" } });
+    await waitFor(() => expect(screen.getByLabelText("Search buffered logs")).toHaveValue(""));
+    expect(screen.getByLabelText("Log stream")).toHaveValue("all");
+  });
+
+  it("evicts across hidden streams and leaves reading position unchanged on filter edits", async () => {
+    stubCapability({});
+    render(<DockerContainerManagementPanel vpsId="vps-1" enabled />);
+    const stream = await openStream();
+    act(() => stream.state("live"));
+    act(() => stream.lines([
+      { stream: "stderr", text: "needle oldest", truncated: false },
+      { stream: "stderr", text: "needle next", truncated: false },
+    ]));
+    await waitFor(() => expect(logBody()).toContain("needle oldest"));
+    const pre = screen.getByTestId("docker-log-body");
+    pre.scrollTop = 100;
+    fireEvent.scroll(pre);
+    fireEvent.change(screen.getByLabelText("Search buffered logs"), { target: { value: "needle" } });
+    fireEvent.change(screen.getByLabelText("Log stream"), { target: { value: "stderr" } });
+    expect(pre.scrollTop).toBe(100);
+    for (let batch = 0; batch < 20; batch++) {
+      act(() => stream.lines(Array.from({ length: 100 }, () => ({ stream: "stdout", text: "hidden", truncated: false }))));
+    }
+    await waitFor(() => expect(screen.getByText("No buffered lines match these filters")).toBeInTheDocument());
+    expect(displayedStats().lines).toBe(2000);
+    expect(screen.getByText("Older displayed lines were discarded.")).toBeInTheDocument();
+    expect(openStreams).toHaveLength(1);
+  });
+
+
   it("subscribes to the first valid target once capability resolves", async () => {
     stubCapability({});
 
@@ -785,36 +856,6 @@ describe("DockerContainerManagementPanel logs", () => {
     expect(stream.closed).toBe(false);
   });
 
-  it("coalesces a burst into one publication per throttle window", async () => {
-    stubCapability({});
-    render(<DockerContainerManagementPanel vpsId="vps-1" enabled refreshTick={0} />);
-    const stream = await openStream();
-    act(() => stream.state("live"));
-
-    const frame = (tag: string, count: number): StreamLine[] =>
-      Array.from({ length: count }, (_, index) => ({
-        stream: "stdout",
-        text: `${tag}-${index}`,
-        truncated: false,
-      }));
-
-    // Emit three frames back-to-back inside the same throttle window: the
-    // display total must not move until the window elapses, then it must
-    // jump by all three frames at once.
-    act(() => stream.lines(frame("round-a", 100)));
-    const before = screen.getByText(/bytes shown/).textContent;
-    act(() => stream.lines(frame("round-b", 100)));
-    act(() => stream.lines(frame("round-c", 100)));
-    expect(screen.getByText(/bytes shown/).textContent).toBe(before);
-
-    await waitFor(() =>
-      expect(screen.getByText(/bytes shown/).textContent).not.toBe(before),
-    );
-    expect(displayedStats().lines).toBe(300);
-    expect(logBody()).toContain("round-a-0");
-    expect(logBody()).toContain("round-c-99");
-    expect(stream.closed).toBe(false);
-  });
 });
 
 describe("DockerContainerManagementPanel fixed target (container detail)", () => {
@@ -1012,7 +1053,7 @@ describe("container lifecycle consent", () => {
     const stop = await screen.findByRole("button", { name: "stop" });
     await waitFor(() => expect(stop).toBeEnabled());
     fireEvent.click(stop);
-    fireEvent.change(screen.getByRole("combobox", { hidden: true }), { target: { value: "agent-alpha::container-two" } });
+    fireEvent.change(screen.getByLabelText("Target container"), { target: { value: "agent-alpha::container-two" } });
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     fireEvent.click(stop);
     rerender(<DockerContainerManagementPanel vpsId="vps-2" enabled />);

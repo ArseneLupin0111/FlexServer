@@ -7,12 +7,13 @@ import {
   VpsWorkspaceContext,
   VpsWorkspaceTerminalPage,
   VpsWorkspaceDockerPage,
+  VpsWorkspaceDockerContainerPage,
   VpsWorkspaceSettingsPage,
 } from "./VpsWorkspaceContext";
 import type { DashboardOverview, VpsRecord } from "../lib/api";
 import * as api from "../lib/api";
 import { DashboardContext, type DashboardCtx } from "./DashboardContext";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Routes, Route } from "react-router-dom";
 
 vi.mock("../lib/live-api", () => ({ subscribeMonitoring: () => () => {} }));
 
@@ -263,5 +264,24 @@ describe("Docker management without monitoring", () => {
     fireEvent.click(screen.getByRole("switch", { name: "Enable Docker management" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Permission denied");
     expect(screen.getByRole("switch", { name: "Enable Docker management" })).toHaveAttribute("aria-checked", "false");
+  });
+});
+describe("Docker direct container route identity", () => {
+  it("resolves only the exact current identity and shares the investigation surface", async () => {
+    const target: api.DockerCurrentContainer = { agentInstanceId: "agent-exact", containerKey: "key-exact", name: "exact", image: "alpine", state: "running", collectedAt: "2026-10-19T10:00:00Z", metrics: { cpuPercent: 0, memoryUsageBytes: 0, pids: 1 }, details: { collectedAt: "2026-10-19T10:00:00Z", status: "unavailable", reason: "timeout" } };
+    vi.spyOn(api, "listVpsDockerCurrentContainers").mockResolvedValue([target]);
+    vi.spyOn(api, "listVpsDockerEvents").mockResolvedValue({ data: [], page: { limit: 25, hasMore: false } });
+    render(<MemoryRouter initialEntries={["/docker/agent-exact/key-exact"]}><Routes><Route path="/docker/:agentInstanceId/:containerKey" element={<VpsWorkspaceContext.Provider value={{ vps: localVps, overview: baseOverview }}><VpsWorkspaceDockerContainerPage /></VpsWorkspaceContext.Provider>} /></Routes></MemoryRouter>);
+    expect(await screen.findByText("exact")).toBeInTheDocument();
+    expect(await screen.findByText(/details were unavailable.*timeout/i)).toBeInTheDocument();
+    expect(screen.getByText("Container details")).toBeInTheDocument();
+  });
+
+  it("does not fall back when the route pair is missing from current inventory", async () => {
+    vi.spyOn(api, "listVpsDockerCurrentContainers").mockResolvedValue([{ agentInstanceId: "different", containerKey: "other", metrics: { cpuPercent: 0, memoryUsageBytes: 0, pids: 0 }, collectedAt: "2026-10-19T10:00:00Z" }]);
+    render(<MemoryRouter initialEntries={["/docker/missing/key"]}><Routes><Route path="/docker/:agentInstanceId/:containerKey" element={<VpsWorkspaceContext.Provider value={{ vps: localVps, overview: baseOverview }}><VpsWorkspaceDockerContainerPage /></VpsWorkspaceContext.Provider>} /></Routes></MemoryRouter>);
+    await waitFor(() => expect(screen.queryByText("Container details")).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /^start$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /container logs/i })).not.toBeInTheDocument();
   });
 });

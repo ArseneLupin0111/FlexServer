@@ -1163,10 +1163,11 @@ describe("Docker metrics ingestion", () => {
       architecture: "amd64",
     };
 
+    const dockerPayload = { ...validDockerPayload(), ...metadata };
     await request(app())
       .post("/api/agent/metrics")
       .set("Authorization", `Bearer ${validToken}`)
-      .send(validPayload({ docker: validDockerPayload(metadata) }))
+      .send(validPayload({ docker: dockerPayload }))
       .expect(201);
 
     const dockerRepo = createJsonDockerMonitoringRepository(
@@ -1181,6 +1182,7 @@ describe("Docker metrics ingestion", () => {
         agentInstanceId: "instance_abc123",
         containerKey: "container_abc123",
         name: "/web-nginx",
+        collectedAt: dockerPayload.collectedAt,
         image: "nginx:1.25",
         status: "Up 3 hours",
         state: "running",

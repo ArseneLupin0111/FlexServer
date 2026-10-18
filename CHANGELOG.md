@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — Docker container troubleshooting
+
+- Add bounded sanitized Docker inspect details to committed container snapshots: ports, mounts, networks, healthcheck status/timing, lifecycle, exit code, OOM flag, restart metadata. Details are optional for older agents and never carry raw inspect, health commands/output, labels, environment or daemon IDs.
+- Add read-only container details to the Docker tab and existing direct container route, alongside identity-scoped lifecycle events and local buffered-log search/stream filters. Logs remain in-memory and filter changes do not request daemon history.
+- Deploy API migration `027_docker_container_details.sql` before upgraded agents; old agents continue without details. Details are sampled snapshots, not on-demand inspect; refresh reloads committed data.
+
 ## Unreleased — reusable dashboard actions
 
 - Extract the shared row action trigger/menu into `RowActionsMenu` and reuse it in Files, server tables/cards, and Jobs while retaining each feature's permissions and confirmation flows.

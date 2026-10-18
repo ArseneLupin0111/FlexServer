@@ -49,6 +49,7 @@ import { DockerEventTimeline } from "../components/dashboard/docker/DockerEventT
 import { DockerAlertsPanel } from "../components/dashboard/docker/DockerAlertsPanel";
 import { DockerContainerManagementPanel } from "../components/dashboard/docker/DockerContainerManagementPanel";
 import { DockerStorageOverview } from "../components/dashboard/docker/DockerStorageOverview";
+import { DockerContainerInvestigationPanel } from "../components/dashboard/docker/DockerContainerInvestigationPanel";
 import { DockerWorkloads } from "../components/dashboard/docker/DockerWorkloads";
 import { LocalAgentUpdate } from "../components/dashboard/servers/LocalAgentUpdate";
 
@@ -719,11 +720,10 @@ export function VpsWorkspaceDockerPage() {
                   <Link className="text-xs text-info underline-offset-4 hover:underline focus-visible:outline-signal" to={`/vps/${encodeURIComponent(vps.id)}/docker/containers/${encodeURIComponent(selectedTarget.agentInstanceId)}/${encodeURIComponent(selectedTarget.containerKey)}`}>Open container</Link>
                 </div>
                 {monitoringEnabled && snapshot?.agentInstanceId === selectedTarget.agentInstanceId ? snapshot.containers.filter((item) => item.containerKey === selectedTarget.containerKey).map((item) => <dl key={item.containerKey} className="grid grid-cols-2 gap-4 border-y border-line py-4 text-xs sm:grid-cols-4">
-                  <div className="col-span-2 min-w-0"><dt className="text-dim">Image</dt><dd className="mt-1 break-all text-text">{item.image}</dd></div>
                   <div><dt className="text-dim">CPU · {snapshot.freshness === "fresh" ? "snapshot" : "saved snapshot"}</dt><dd className="tnum mt-1 text-text">{item.cpuPercent.toFixed(1)}%</dd></div>
                   <div><dt className="text-dim">Memory · PIDs</dt><dd className="tnum mt-1 text-text">{(item.memoryUsageBytes / 1048576).toFixed(1)} MiB · {item.pids}</dd></div>
                 </dl>) : null}
-                <DockerContainerManagementPanel key={`${vps.id}:${selectedTarget.agentInstanceId}:${selectedTarget.containerKey}`} vpsId={vps.id} enabled={managementEnabled} refreshTick={refreshTick} fixedTarget={{agentInstanceId:selectedTarget.agentInstanceId, containerKey:selectedTarget.containerKey}} />
+                <DockerContainerInvestigationPanel key={`${vps.id}:${selectedTarget.agentInstanceId}:${selectedTarget.containerKey}`} vpsId={vps.id} container={selectedTarget} managementEnabled={managementEnabled} monitoringEnabled={monitoringEnabled} refreshTick={refreshTick} />
                 {monitoringEnabled ? <details className="border border-line bg-panel"><summary className="cursor-pointer px-4 py-3 text-sm focus-visible:outline-signal">History</summary><DockerHistoryChart samples={containerHistory} retained={containerHistory.length} loading={containerHistoryLoading} error={containerHistoryError} /></details> : null}
               </> : <div className="flex min-h-48 items-center justify-center border border-dashed border-line p-6 text-sm text-dim">Select a container</div>}
             </div>
@@ -776,15 +776,9 @@ export function VpsWorkspaceDockerContainerPage() {
           Container logs and controls
         </h2>
       </div>
-      <DockerContainerManagementPanel
-        vpsId={vps.id}
-        enabled={vps.dockerManagementEnabled === true}
-        fixedTarget={
-          agentInstanceId && containerKey
-            ? { agentInstanceId, containerKey }
-            : null
-        }
-      />
+      <div className="space-y-4">
+        {agentInstanceId && containerKey ? <ContainerRouteInvestigation vpsId={vps.id} agentInstanceId={agentInstanceId} containerKey={containerKey} managementEnabled={vps.dockerManagementEnabled === true} monitoringEnabled={vps.dockerMetricsEnabled === true} /> : <p role="alert" className="text-sm text-crit">A complete container identity is required.</p>}
+      </div>
       {!overview.dockerMetrics[0]?.available ? (
         <DockerCapabilityNotice
           enabled={vps.dockerMetricsEnabled === true}
@@ -793,6 +787,22 @@ export function VpsWorkspaceDockerContainerPage() {
       ) : null}
     </section>
   );
+}
+function ContainerRouteInvestigation({ vpsId, agentInstanceId, containerKey, managementEnabled, monitoringEnabled }: { vpsId: string; agentInstanceId: string; containerKey: string; managementEnabled: boolean; monitoringEnabled: boolean }) {
+  const [containers, setContainers] = useState<DockerCurrentContainer[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setContainers(null); setError(null);
+    listVpsDockerCurrentContainers(vpsId).then((items) => { if (!cancelled) setContainers(items); }).catch((reason: unknown) => { if (!cancelled) setError(reason instanceof Error ? reason.message : "Current containers unavailable"); });
+    return () => { cancelled = true; };
+  }, [vpsId, refreshTick]);
+  const container = containers?.find((item) => item.agentInstanceId === agentInstanceId && item.containerKey === containerKey);
+  if (error) return <div role="alert" className="space-y-2 text-sm text-crit"><p>Could not load the current container inventory: {error}</p><Button type="button" variant="outline" size="sm" onClick={() => setRefreshTick((tick) => tick + 1)}>Retry</Button></div>;
+  if (!containers) return <p role="status" className="text-sm text-dim">Loading current container…</p>;
+  if (!container) return <p role="status" className="text-sm text-dim">This container is not reported in the server's current inventory. No logs or controls attach to another container.</p>;
+  return <div className="space-y-4"><div className="flex justify-end"><Button type="button" variant="outline" size="sm" onClick={() => setRefreshTick((tick) => tick + 1)}>Refresh container snapshot</Button></div><DockerContainerInvestigationPanel vpsId={vpsId} container={container} managementEnabled={managementEnabled} monitoringEnabled={monitoringEnabled} refreshTick={refreshTick} /></div>;
 }
 
 export function VpsWorkspaceMetricsPage() {

@@ -279,9 +279,16 @@ func (c *Collector) collectDockerSnapshot(ctx context.Context, collection *Docke
 	if out == nil {
 		return nil
 	}
-	// Existing legacy collection owns the global deadline; these optional
-	// calls share its context and are strictly budget/cadence gated.
-	c.collectDockerAPI(ctx, out, starts...)
+	// Reserve the final second for inspect; event/storage remain bounded by
+	// the existing outer collection context and never extend its deadline.
+	enrichmentDeadline := time.Now().Add(time.Second)
+	if len(starts) > 0 {
+		enrichmentDeadline = starts[0].Add(4 * time.Second)
+	}
+	enrichmentCtx, cancelEnrichment := context.WithDeadline(ctx, enrichmentDeadline)
+	c.collectDockerAPI(enrichmentCtx, out, starts...)
+	cancelEnrichment()
+	c.collectDockerInspect(ctx, collection, out, rotation)
 	if finalize != nil {
 		finalize(out)
 	}

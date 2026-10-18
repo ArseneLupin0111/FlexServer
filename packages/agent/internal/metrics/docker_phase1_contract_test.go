@@ -382,7 +382,7 @@ func TestPhase1_GoldenFlatJSON(t *testing.T) {
 		t.Fatalf("watermark/window binding broken: %+v", decoded)
 	}
 	assertJSONHasNoForbiddenKeys(t, raw,
-		"env", "Env", "ENV", "labels", "Labels", "mounts", "Mounts",
+		"env", "Env", "ENV", "labels", "Labels",
 		"command", "Command", "args", "Args", "entrypoint", "Entrypoint",
 		"log", "Log", "logs", "Logs", "secret", "Secret", "config", "Config",
 		"inspect", "Inspect", "volumeName", "mountPoint", "layerId", "cacheRecord",

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { dockerContainerDetailsSchema } from "../docker/docker-container-details.js";
 
 // ── Schema ──────────────────────────────────────────────────────────────
 
@@ -229,6 +230,7 @@ const agentDockerContainerMetricSchema = z
     blockReadBytes: z.number().int().finite().min(0).safe(),
     blockWriteBytes: z.number().int().finite().min(0).safe(),
     pids: z.number().int().finite().min(0).safe(),
+    details: dockerContainerDetailsSchema.optional(),
   })
   .strict();
 
@@ -274,6 +276,7 @@ const agentDockerMetricsBaseSchema = z
     blockReadBytes: nonNegative,
     blockWriteBytes: nonNegative,
     pids: nonNegative,
+    details: dockerContainerDetailsSchema.optional(),
     containers: z.array(agentDockerContainerMetricSchema).max(20),
     sampledContainerAggregate: dockerAggregateSchema.optional(),
     events: z.array(dockerEventSchema).max(100).optional(),

@@ -1,8 +1,10 @@
 package metrics
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Docker monitoring Phase 1 increment I0 — additive schema validation.
@@ -385,6 +387,148 @@ func validateDockerMonitoringMetadata(m *DockerMonitoringMetadata) error {
 	return nil
 }
 
+var dockerDetailsReasons = map[string]bool{
+	"timeout": true, "not_found": true, "permission_denied": true,
+	"daemon_unreachable": true, "invalid_response": true, "budget_exhausted": true,
+}
+
+var dockerDetailsHealthStatuses = map[string]bool{
+	"healthy": true, "unhealthy": true, "starting": true, "none": true,
+}
+
+// validateDetailTimestamp enforces the API `detailsTimestamp` contract: UTF-8,
+// 1..256 bytes, UTC ISO-8601 (`...Z`) with up to 9 fraction digits, and never
+// the Docker zero time `0001-01-01T00:00:00Z`.
+func validateDetailTimestamp(value string) error {
+	if !validDetailString(value, 256) {
+		return fmt.Errorf("invalid details timestamp")
+	}
+	t, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil || t.Location() != time.UTC || !strings.HasSuffix(value, "Z") || strings.Contains(value, "+") {
+		return fmt.Errorf("invalid details timestamp")
+	}
+	rest := value[1+strings.IndexByte(value, 'T'):]
+	if dot := strings.IndexByte(rest, '.'); dot >= 0 {
+		frac := rest[dot+1 : len(rest)-1]
+		if len(frac) < 1 || len(frac) > 9 {
+			return fmt.Errorf("invalid details timestamp")
+		}
+	}
+	if t.IsZero() {
+		return fmt.Errorf("invalid details timestamp")
+	}
+	return nil
+}
+
+func validateDetailNonNegativeSafeInt(v int64) error {
+	if v < 0 || v > 9007199254740991 {
+		return fmt.Errorf("details integer out of range")
+	}
+	return nil
+}
+
+func validateDockerContainerDetails(d *DockerContainerDetails) error {
+	if d == nil {
+		return nil
+	}
+	if d.Status != "available" && d.Status != "unavailable" {
+		return fmt.Errorf("invalid details status")
+	}
+	if err := validateDetailTimestamp(d.CollectedAt); err != nil {
+		return err
+	}
+	if d.Status == "unavailable" {
+		// Unavailable carries only collectedAt/status/reason: any scalar or
+		// collection payload besides the reason is rejected outright.
+		if !dockerDetailsReasons[d.Reason] {
+			return fmt.Errorf("invalid details reason")
+		}
+		if d.CreatedAt != "" || d.StartedAt != "" || d.FinishedAt != "" ||
+			d.ExitCode != nil || d.OOMKilled != nil || d.RestartCount != nil ||
+			d.RestartPolicy != nil || d.Ports != nil || d.Mounts != nil ||
+			d.Networks != nil || d.Healthcheck != nil {
+			return fmt.Errorf("unavailable details must not carry payload")
+		}
+		return nil
+	}
+	if d.Reason != "" {
+		return fmt.Errorf("available details must not carry reason")
+	}
+	for _, value := range []string{d.CreatedAt, d.StartedAt, d.FinishedAt} {
+		if value != "" {
+			if err := validateDetailTimestamp(value); err != nil {
+				return err
+			}
+		}
+	}
+	// Available: required arrays (non-nil) and healthcheck.
+	if d.Ports == nil || d.Mounts == nil || d.Networks == nil || d.Healthcheck == nil {
+		return fmt.Errorf("available details require ports/mounts/networks/healthcheck")
+	}
+	if len(d.Ports) > dockerDetailsPortsMax || len(d.Mounts) > dockerDetailsMountsMax ||
+		len(d.Networks) > dockerDetailsNetworksMax {
+		return fmt.Errorf("details collection overflow")
+	}
+	if !dockerDetailsHealthStatuses[d.Healthcheck.Status] {
+		return fmt.Errorf("invalid details health status")
+	}
+	checks := []*int{d.Healthcheck.FailingStreak, d.Healthcheck.Retries}
+	for _, v := range checks {
+		if v != nil {
+			if err := validateDetailNonNegativeSafeInt(int64(*v)); err != nil {
+				return err
+			}
+		}
+	}
+	for _, v := range []*int64{d.Healthcheck.IntervalMs, d.Healthcheck.TimeoutMs, d.Healthcheck.StartPeriodMs} {
+		if v != nil {
+			if err := validateDetailNonNegativeSafeInt(*v); err != nil {
+				return err
+			}
+		}
+	}
+	if d.RestartCount != nil {
+		if err := validateDetailNonNegativeSafeInt(int64(*d.RestartCount)); err != nil {
+			return err
+		}
+	}
+	if d.RestartPolicy != nil {
+		if d.RestartPolicy.Name == "" || !validDetailString(d.RestartPolicy.Name, 32) {
+			return fmt.Errorf("invalid restart policy details")
+		}
+		if err := validateDetailNonNegativeSafeInt(int64(d.RestartPolicy.MaximumRetryCount)); err != nil {
+			return err
+		}
+	}
+	if d.ExitCode != nil && (*d.ExitCode < 0 || *d.ExitCode > 255) {
+		return fmt.Errorf("invalid details exit code")
+	}
+	for _, v := range d.Ports {
+		if v.ContainerPort < 1 || v.ContainerPort > 65535 ||
+			v.Protocol == "" || !validDetailString(v.Protocol, 32) || v.HostPort < 0 || v.HostPort > 65535 ||
+			!validDetailString(v.HostIP, 256) {
+			return fmt.Errorf("invalid port details")
+		}
+	}
+	for _, v := range d.Mounts {
+		if v.Type == "" || v.Destination == "" || !validDetailString(v.Type, 32) || !validDetailString(v.Source, 1024) ||
+			!validDetailString(v.Destination, 1024) {
+			return fmt.Errorf("invalid mount details")
+		}
+	}
+	for _, v := range d.Networks {
+		if v.Name == "" || !validDetailString(v.Name, 256) || !validDetailString(v.IPv4, 256) ||
+			!validDetailString(v.IPv6, 256) || !validDetailString(v.Gateway, 256) {
+			return fmt.Errorf("invalid network details")
+		}
+	}
+	b, err := json.Marshal(d)
+	if err != nil || len(b) > dockerDetailsBytesMax {
+		return fmt.Errorf("details envelope exceeded")
+	}
+	return nil
+}
+
 func validateDockerMetrics(m DockerMetrics) error {
 	if m.SchemaVersion != DockerMetricsSchemaVersion {
 		return fmt.Errorf("schemaVersion %d, want %d", m.SchemaVersion, DockerMetricsSchemaVersion)
@@ -411,6 +555,9 @@ func validateDockerMetrics(m DockerMetrics) error {
 			return err
 		}
 		if err := validateDockerHealth(c.Health); err != nil {
+			return err
+		}
+		if err := validateDockerContainerDetails(c.Details); err != nil {
 			return err
 		}
 	}

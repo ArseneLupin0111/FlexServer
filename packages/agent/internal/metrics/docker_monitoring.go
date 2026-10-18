@@ -150,6 +150,7 @@ type DockerContainer struct {
 	NetworkTxBytes   float64 `json:"networkTxBytes"`
 	BlockReadBytes   float64 `json:"blockReadBytes"`
 	BlockWriteBytes  float64 `json:"blockWriteBytes"`
+	Details          *DockerContainerDetails `json:"details,omitempty"`
 	PIDs             int     `json:"pids"`
 }
 

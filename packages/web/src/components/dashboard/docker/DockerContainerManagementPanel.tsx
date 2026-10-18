@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../../ui/button";
+import { Input } from "../../ui/input";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -276,6 +277,8 @@ export function DockerContainerManagementPanel({
   const [reconnectCount, setReconnectCount] = useState(0);
   /** Stop keeps the buffer and closes the source; reconnect reopens it. */
   const [streamEnabled, setStreamEnabled] = useState(true);
+  const [logQuery, setLogQuery] = useState("");
+  const [logStream, setLogStream] = useState("all");
 
   const containers = capability?.targets ?? [];
   const selected = targetPair
@@ -287,6 +290,10 @@ export function DockerContainerManagementPanel({
     : null;
   const logsSupported = capability?.logsSupported === true;
   const canStream = logsSupported && streamEnabled && selected !== null;
+  useEffect(() => {
+    setLogQuery("");
+    setLogStream("all");
+  }, [vpsId, selected?.agentInstanceId, selected?.containerKey]);
 
   const preRef = useRef<HTMLPreElement | null>(null);
   /**
@@ -497,6 +504,13 @@ export function DockerContainerManagementPanel({
   }, [published]);
 
   const buffer = published ?? EMPTY_BUFFER;
+  const visibleLines = useMemo(() => {
+    const query = logQuery.toLowerCase();
+    return buffer.lines.filter((line) =>
+      (logStream === "all" || line.stream === logStream) &&
+      line.text.toLowerCase().includes(query),
+    );
+  }, [buffer.lines, logQuery, logStream]);
 
   const submitAction = async (action: DockerManagementAction, target: TargetPair): Promise<void> => {
     if (actionLock.current || !enabled || capabilityError || !capability?.supported || !selected || !samePair(target, scopedPair) || !capability.actions.includes(action)) return;
@@ -920,6 +934,21 @@ export function DockerContainerManagementPanel({
               ) : null}
             </div>
           </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
+            <label className="text-[12px] text-dim">
+              Search buffered logs
+              <Input value={logQuery} maxLength={256} onChange={(event) => setLogQuery(event.target.value)} className="mt-1" />
+            </label>
+            <label className="text-[12px] text-dim">
+              Log stream
+              <select value={logStream} onChange={(event) => setLogStream(event.target.value)} className="mt-1 block h-9 w-full border border-line bg-panel px-3 text-text">
+                <option value="all">All</option>
+                <option value="stdout">stdout</option>
+                <option value="stderr">stderr</option>
+                <option value="combined">combined</option>
+              </select>
+            </label>
+          </div>
 
           <div
             aria-live="polite"
@@ -944,9 +973,8 @@ export function DockerContainerManagementPanel({
             </p>
           ) : (
             <>
-              <p className="mt-2 text-[11px] text-dim">
-                {buffer.count} line{buffer.count === 1 ? "" : "s"} ·{" "}
-                {buffer.bytes} bytes shown
+              <p aria-live="polite" className="mt-2 text-[11px] text-dim">
+                {visibleLines.length} matching / {buffer.count} buffered lines · {buffer.bytes} bytes buffered
               </p>
               {buffer.discarded ? (
                 <p className="mt-1 text-[11px] text-dim">
@@ -967,7 +995,7 @@ export function DockerContainerManagementPanel({
                   This log window expired. Reconnect for a new one.
                 </p>
               ) : null}
-              {buffer.count > 0 ? (
+              {visibleLines.length > 0 ? (
                 <pre
                   ref={preRef}
                   data-testid="docker-log-body"
@@ -985,7 +1013,7 @@ export function DockerContainerManagementPanel({
                     if (nearTail !== atTail) setAtTail(nearTail);
                   }}
                 >
-                  {buffer.lines
+                  {visibleLines
                     .map((line) =>
                       line.truncated ? `${line.text} [line truncated]` : line.text,
                     )
@@ -993,7 +1021,9 @@ export function DockerContainerManagementPanel({
                 </pre>
               ) : (
                 <p className="mt-2 text-[11px] text-dim">
-                  {streamStatus === "waiting"
+                  {buffer.count > 0
+                    ? "No buffered lines match these filters"
+                    : streamStatus === "waiting"
                     ? "Waiting for the agent to claim this stream…"
                     : streamStatus === "live"
                       ? "No logs yet from this container."

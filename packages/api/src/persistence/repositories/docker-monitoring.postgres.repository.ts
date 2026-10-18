@@ -21,6 +21,7 @@ import {
   type DockerAlertRuleKind,
   type DockerTypedAlertState,
 } from "../../docker/docker-alert-evaluator.js";
+import type { DockerContainerDetails } from "../../docker/docker-container-details.js";
 import type {
   DockerAlert,
   DockerAlertResolutionReason,
@@ -70,6 +71,7 @@ type SampleRow = {
   effective_at: Date | string;
   metrics: Record<string, number>;
   coverage: Record<string, unknown> | null;
+  details: Record<string, unknown> | null;
 };
 
 type RollupRow = {
@@ -196,6 +198,7 @@ function rowToContainerSample(row: SampleRow): DockerContainerSample {
     containerKey: row.container_key!,
     ...(row.name != null ? { name: row.name } : {}),
     ...(row.state != null ? { state: row.state } : {}),
+    ...(row.details != null ? { details: row.details as DockerContainerDetails } : {}),
   };
 }
 
@@ -626,9 +629,11 @@ export function createPostgresDockerMonitoringRepository(
         state: string | null;
         image: string | null;
         status: string | null;
+        collected_at: Date | string;
         metrics: { cpuPercent: number; memoryUsageBytes: number; pids: number };
+        details: Record<string, unknown> | null;
       }>(
-        `SELECT agent_instance_id, container_key, name, state, image, status, metrics ` +
+        `SELECT agent_instance_id, container_key, name, state, image, status, collected_at, metrics, details ` +
           `FROM docker_metric_samples WHERE vps_id = $1 ` +
           `AND agent_instance_id = $2 AND snapshot_id = $3 ` +
           `AND container_key IS NOT NULL ORDER BY container_key ASC, id ASC`,
@@ -641,6 +646,8 @@ export function createPostgresDockerMonitoringRepository(
         ...(row.state != null ? { state: row.state } : {}),
         ...(row.image != null ? { image: row.image } : {}),
         ...(row.status != null ? { status: row.status } : {}),
+        collectedAt: requiredIsoString(row.collected_at),
+        ...(row.details != null ? { details: row.details as DockerContainerDetails } : {}),
         metrics: {
           cpuPercent: row.metrics.cpuPercent,
           memoryUsageBytes: row.metrics.memoryUsageBytes,
@@ -1376,7 +1383,7 @@ export function createPostgresDockerMonitoringRepository(
         );
         for (const sample of unit.containerSamples ?? [])
           await client.query(
-            `INSERT INTO docker_metric_samples (id,vps_id,agent_instance_id,snapshot_id,container_key,name,state,image,status,collected_at,received_at,effective_at,metrics,coverage) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT DO NOTHING`,
+            `INSERT INTO docker_metric_samples (id,vps_id,agent_instance_id,snapshot_id,container_key,name,state,image,status,collected_at,received_at,effective_at,metrics,coverage,details) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT DO NOTHING`,
             [
               sample.id,
               unit.vpsId,
@@ -1392,6 +1399,7 @@ export function createPostgresDockerMonitoringRepository(
               new Date(sample.effectiveAt),
               JSON.stringify(sample.metrics),
               sample.coverage == null ? null : JSON.stringify(sample.coverage),
+              sample.details == null ? null : JSON.stringify(sample.details),
             ],
           );
         if (unit.eventProtocol)

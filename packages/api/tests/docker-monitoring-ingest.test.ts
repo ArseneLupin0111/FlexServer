@@ -138,6 +138,7 @@ describe("Docker JSON I3 ingest", () => {
     expect(await repo.listCurrentContainers("v")).toEqual([
       {
         agentInstanceId: "i",
+        collectedAt: t(7),
         containerKey: "ck_7",
         name: "/web",
         state: "running",

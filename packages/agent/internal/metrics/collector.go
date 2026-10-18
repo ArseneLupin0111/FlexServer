@@ -146,7 +146,11 @@ func (c *Collector) Collect(ctx context.Context) (*SystemMetrics, error) {
 		collectionStart := time.Now()
 		dockerCtx, cancel := context.WithTimeout(ctx, DefaultDockerTimeoutSeconds*time.Second)
 		defer cancel()
-		legacy := c.collectDocker(dockerCtx)
+		// Leave time for event/storage and inspect enrichment within the same
+		// outer deadline even when sequential stats requests are slow.
+		baseCtx, cancelBase := context.WithDeadline(dockerCtx, collectionStart.Add(3*time.Second))
+		legacy := c.collectDocker(baseCtx)
+		cancelBase()
 		if legacy != nil {
 			metrics.Docker = c.collectDockerSnapshot(dockerCtx, legacy, collectionStart)
 		}

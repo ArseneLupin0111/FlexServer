@@ -1,3 +1,4 @@
+import type { DockerContainerDetails } from "./docker-container-details.js";
 import type { DockerTypedAlertState } from "./docker-alert-evaluator.js";
 
 export type DockerScope = "host" | "container" | "aggregate";
@@ -44,6 +45,7 @@ export type DockerContainerSample = DockerHostSample & {
   state?: string;
   image?: string;
   status?: string;
+  details?: DockerContainerDetails;
 };
 /** Canonical container identity rows of the latest committed snapshot. */
 export type DockerCurrentContainer = {
@@ -54,6 +56,8 @@ export type DockerCurrentContainer = {
   image?: string;
   status?: string;
   metrics: { cpuPercent: number; memoryUsageBytes: number; pids: number };
+  collectedAt: string;
+  details?: DockerContainerDetails;
 };
 export type DockerMetricSample = DockerHostSample | DockerContainerSample;
 export type DockerMetricRollup = {

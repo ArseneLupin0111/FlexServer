@@ -25,6 +25,7 @@ const (
 	dockerPathSystemDF     = "/system/df"
 	dockerStatsPathPrefix  = "/containers/"
 	dockerStatsPathSuffix  = "/stats"
+	dockerInspectPathSuffix = "/json"
 	dockerMaxContainerID64 = 64
 
 	// Fixed compile-time /events type filter (container scope only).
@@ -136,6 +137,19 @@ func dockerStatsRequest(ctx context.Context, baseURL, id string) (*http.Request,
 	q := url.Values{}
 	q.Set("stream", "false")
 	return dockerNewGET(ctx, base, dockerStatsPathPrefix+id+dockerStatsPathSuffix, q.Encode())
+}
+
+// dockerInspectRequest is the sole allowlisted inspect request. Only a full
+// daemon ID is accepted; keys, names, and truncated IDs cannot reach Docker.
+func dockerInspectRequest(ctx context.Context, baseURL, id string) (*http.Request, error) {
+	if !isDockerRawContainerID(id) {
+		return nil, fmt.Errorf("invalid container id")
+	}
+	base, err := dockerBase(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	return dockerNewGET(ctx, base, dockerStatsPathPrefix+id+dockerInspectPathSuffix, "")
 }
 
 // formatDockerEventTimestamp encodes canonical decimal-string nanoseconds

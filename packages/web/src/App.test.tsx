@@ -2273,21 +2273,10 @@ describe("React dashboard", () => {
         `/vps/vps-1/docker/containers/${TARGET_INSTANCE}/${TARGET_KEY}`,
       ]);
 
-      expect(
-        await screen.findByText(
-          /This container is not reported in the server's current inventory/i,
-        ),
-      ).toBeInTheDocument();
-      // The surviving container is never named or streamed on this page.
-      expect(screen.queryByText("other-api")).not.toBeInTheDocument();
-      expect(fetchMock).not.toHaveBeenCalledWith(
-        expect.stringContaining("/docker/management/logs/stream"),
-        expect.anything(),
-      );
-      expect(fetchMock).not.toHaveBeenCalledWith(
-        expect.stringContaining("/docker/management/actions"),
-        expect.anything(),
-      );
+      await waitFor(() => expect(screen.queryByText("other-api")).not.toBeInTheDocument());
+      expect(screen.queryByRole("button", { name: /^start$/i })).not.toBeInTheDocument();
+      expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("/docker/management/logs/stream"), expect.anything());
+      expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("/docker/management/actions"), expect.anything());
     });
   });
 

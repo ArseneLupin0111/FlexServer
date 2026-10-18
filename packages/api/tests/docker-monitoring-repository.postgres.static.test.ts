@@ -84,8 +84,8 @@ describe("docker monitoring postgres listCurrentContainers (static fake pool)", 
     const query = vi.fn()
       .mockResolvedValueOnce({ rowCount: 1, rows: [{ agent_instance_id: "inst1", snapshot_id: "snap_new" }] })
       .mockResolvedValueOnce({ rowCount: 2, rows: [
-        { agent_instance_id: "inst1", container_key: "ck_a", name: "alpha", state: "running", image: "nginx:1.25", status: "Up 1 hour", metrics: { cpuPercent: 1.5, memoryUsageBytes: 512, pids: 5 } },
-        { agent_instance_id: "inst1", container_key: "ck_b", name: "beta", state: "exited", image: null, status: null, metrics: { cpuPercent: 0.5, memoryUsageBytes: 128, pids: 10 } },
+        { agent_instance_id: "inst1", container_key: "ck_a", name: "alpha", state: "running", image: "nginx:1.25", status: "Up 1 hour", collected_at: "2026-09-20T00:00:00.000Z", details: null, metrics: { cpuPercent: 1.5, memoryUsageBytes: 512, pids: 5 } },
+        { agent_instance_id: "inst1", container_key: "ck_b", name: "beta", state: "exited", image: null, status: null, collected_at: "2026-09-20T00:00:00.000Z", details: null, metrics: { cpuPercent: 0.5, memoryUsageBytes: 128, pids: 10 } },
       ] });
     const repo = createPostgresDockerMonitoringRepository({ query } as never);
 
@@ -105,25 +105,26 @@ describe("docker monitoring postgres listCurrentContainers (static fake pool)", 
     expect(rowsValues).toEqual(["vps-a", "inst1", "snap_new"]);
 
     expect(data).toEqual([
-      { agentInstanceId: "inst1", containerKey: "ck_a", name: "alpha", state: "running", image: "nginx:1.25", status: "Up 1 hour", metrics: { cpuPercent: 1.5, memoryUsageBytes: 512, pids: 5 } },
-      { agentInstanceId: "inst1", containerKey: "ck_b", name: "beta", state: "exited", metrics: { cpuPercent: 0.5, memoryUsageBytes: 128, pids: 10 } },
+      { agentInstanceId: "inst1", containerKey: "ck_a", name: "alpha", state: "running", image: "nginx:1.25", status: "Up 1 hour", collectedAt: "2026-09-20T00:00:00.000Z", metrics: { cpuPercent: 1.5, memoryUsageBytes: 512, pids: 5 } },
+      { agentInstanceId: "inst1", containerKey: "ck_b", name: "beta", state: "exited", collectedAt: "2026-09-20T00:00:00.000Z", metrics: { cpuPercent: 0.5, memoryUsageBytes: 128, pids: 10 } },
     ]);
   });
 
-  it("omits name/state keys entirely when the stored columns are null", async () => {
+  it("omits optional keys when the stored columns are null", async () => {
     const query = vi.fn()
       .mockResolvedValueOnce({ rowCount: 1, rows: [{ agent_instance_id: "inst1", snapshot_id: "snap_new" }] })
       .mockResolvedValueOnce({ rowCount: 1, rows: [
-        { agent_instance_id: "inst1", container_key: "ck_a", name: null, state: null, image: null, status: null, metrics: { cpuPercent: 1, memoryUsageBytes: 2, pids: 3 } },
+        { agent_instance_id: "inst1", container_key: "ck_a", name: null, state: null, image: null, status: null, collected_at: "2026-09-20T00:00:00.000Z", details: null, metrics: { cpuPercent: 1, memoryUsageBytes: 2, pids: 3 } },
       ] });
     const repo = createPostgresDockerMonitoringRepository({ query } as never);
 
     const data = await repo.listCurrentContainers("vps-a");
     expect(data).toEqual([
-      { agentInstanceId: "inst1", containerKey: "ck_a", metrics: { cpuPercent: 1, memoryUsageBytes: 2, pids: 3 } },
+      { agentInstanceId: "inst1", containerKey: "ck_a", collectedAt: "2026-09-20T00:00:00.000Z", metrics: { cpuPercent: 1, memoryUsageBytes: 2, pids: 3 } },
     ]);
     expect(Object.keys(data[0]!).sort()).toEqual([
       "agentInstanceId",
+      "collectedAt",
       "containerKey",
       "metrics",
     ]);

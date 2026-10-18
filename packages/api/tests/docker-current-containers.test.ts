@@ -245,6 +245,7 @@ describe("GET /api/vps/:id/docker/containers/current", () => {
         {
           agentInstanceId: "inst1",
           containerKey: "ck_plain",
+          collectedAt: T_NEW,
           metrics: { cpuPercent: 1, memoryUsageBytes: 64, pids: 2 },
         },
         {
@@ -252,14 +253,13 @@ describe("GET /api/vps/:id/docker/containers/current", () => {
           containerKey: "ck_web",
           name: "web",
           state: "running",
+          collectedAt: T_NEW,
           metrics: { cpuPercent: 1, memoryUsageBytes: 64, pids: 2 },
         },
       ],
     });
     expect(Object.keys(res.body.data[0]).sort()).toEqual([
-      "agentInstanceId",
-      "containerKey",
-      "metrics",
+      "agentInstanceId", "collectedAt", "containerKey", "metrics",
     ]);
     expect(res.body.data.map((c: { containerKey: string }) => c.containerKey)).toEqual([
       "ck_plain",
@@ -298,6 +298,7 @@ describe("GET /api/vps/:id/docker/containers/current", () => {
           containerKey: "ck_b",
           name: "service-b",
           state: "running",
+          collectedAt: T_NEW,
           metrics: { cpuPercent: 1, memoryUsageBytes: 64, pids: 2 },
         },
       ],
@@ -570,6 +571,30 @@ describe("docker ingest container name persistence", () => {
     );
   });
 
+  it("includes details in request identity while absent details remain legacy-stable", async () => {
+    const { service, units } = capturingService();
+    await service.ingest("vps-golden", ingestFixture(), RECEIVED_AT);
+    const details = {
+      collectedAt: "2026-09-15T12:00:00.500Z",
+      status: "available",
+      ports: [],
+      mounts: [],
+      networks: [],
+      healthcheck: { status: "none" },
+    };
+    const withDetails = {
+      ...ingestFixture(),
+      containers: ingestFixture().containers.map((c) => ({
+        ...c,
+        ...(c.containerKey === "ck_alpha" ? { details } : {}),
+      })),
+    } as AgentDockerMetricsInput;
+    await service.ingest("vps-golden", withDetails, RECEIVED_AT);
+    expect(units[0]!.legacyRequestDigest?.(RECEIVED_AT)).toBe(GOLDEN_REQUEST_DIGEST);
+    expect(units[1]!.requestDigest).not.toBe(units[0]!.requestDigest);
+    expect(units[1]!.containerSamples.find((s) => s.containerKey === "ck_alpha")?.details).toEqual(details);
+  });
+
   it("round-trips persisted names through listCurrentContainers and dedupes replays", async () => {
     const dir = await mkdtemp(join(tmpdir(), "vps-manager-current-ingest-"));
     try {
@@ -581,11 +606,22 @@ describe("docker ingest container name persistence", () => {
         { get: vi.fn(async () => ({ id: "vps-golden" })) } as never,
       );
 
-      const first = await service.ingest(
-        "vps-golden",
-        ingestFixture(),
-        RECEIVED_AT,
-      );
+      const details = {
+        collectedAt: "2026-09-15T12:00:00.500Z",
+        status: "available" as const,
+        ports: [],
+        mounts: [],
+        networks: [],
+        healthcheck: { status: "none" as const },
+      };
+      const fixture = {
+        ...ingestFixture(),
+        containers: ingestFixture().containers.map((c) => ({
+          ...c,
+          ...(c.containerKey === "ck_alpha" ? { details } : {}),
+        })),
+      } as AgentDockerMetricsInput;
+      const first = await service.ingest("vps-golden", fixture, RECEIVED_AT);
       expect(first.ingestStatus).toBe("committed");
 
       // Ingested names flow through the store into the current read.
@@ -596,6 +632,8 @@ describe("docker ingest container name persistence", () => {
           name: "web",
           state: "running",
           image: "nginx:1.25",
+          collectedAt: "2026-09-15T12:00:00.000Z",
+          details,
           metrics: { cpuPercent: 1.5, memoryUsageBytes: 512, pids: 5 },
         },
         {
@@ -604,17 +642,24 @@ describe("docker ingest container name persistence", () => {
           name: "cache",
           state: "running",
           image: "redis:7",
+          collectedAt: "2026-09-15T12:00:00.000Z",
           metrics: { cpuPercent: 0.5, memoryUsageBytes: 128, pids: 10 },
         },
       ]);
 
-      // An identical retry replays (digest unchanged by name persistence).
-      const replay = await service.ingest(
-        "vps-golden",
-        ingestFixture(),
-        RECEIVED_AT,
-      );
+      // Identical detail replay is idempotent; changing details conflicts.
+      const replay = await service.ingest("vps-golden", fixture, RECEIVED_AT);
       expect(replay.ingestStatus).toBe("already_committed");
+      const changed = {
+        ...fixture,
+        containers: fixture.containers.map((c) => ({
+          ...c,
+          ...(c.containerKey === "ck_alpha" ? { details: { ...details, oomKilled: true } } : {}),
+        })),
+      } as AgentDockerMetricsInput;
+      await expect(service.ingest("vps-golden", changed, RECEIVED_AT)).rejects.toMatchObject({
+        response: expect.objectContaining({ error: expect.objectContaining({ code: "snapshot_conflict" }) }),
+      });
       expect(await service.currentContainers("vps-golden")).toHaveLength(2);
     } finally {
       await rm(dir, { recursive: true, force: true });

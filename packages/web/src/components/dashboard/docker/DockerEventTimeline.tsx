@@ -68,6 +68,9 @@ export function DockerEventTimeline({
                   {new Date(event.eventOccurredAt).toLocaleString()}
                   {event.containerKey ? ` · ${event.containerKey}` : ""}
                   {event.exitCode !== undefined ? ` · exit ${event.exitCode}` : ""}
+                  {event.signal !== undefined ? ` · signal ${event.signal}` : ""}
+                  {event.oomKilled !== undefined ? ` · OOM killed ${event.oomKilled ? "Yes" : "No"}` : ""}
+                  {event.healthStatus !== undefined ? ` · health ${event.healthStatus}` : ""}
                 </p>
               </div>
             </li>

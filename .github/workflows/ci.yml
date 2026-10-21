@@ -1175,6 +1175,7 @@ jobs:
           fi
           if ! $SSH "cd '$DEPLOY_PATH' && docker compose up -d --remove-orphans --force-recreate api web"; then
             $SSH "cd '$DEPLOY_PATH' && docker compose ps -a && docker compose logs --no-color --tail=100 api" || true
+            $SSH "cd '$DEPLOY_PATH' && docker compose exec -T api node -e \"fetch('http://127.0.0.1:3000/api/health').then(async r=>console.log(r.status,await r.text())).catch(e=>console.error(e))\"" || true
             exit 1
           fi
           $SSH "cd '$DEPLOY_PATH' && docker compose ps"

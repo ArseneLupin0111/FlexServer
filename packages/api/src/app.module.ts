@@ -242,6 +242,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       AiAgentService,
       AiReadToolsService,
       AiRetentionService,
+      { provide: DATABASE_POOL, useValue: pool }, 
       { provide: DATABASE_POOL_OWNS, useValue: ownsPool },
       DatabasePoolShutdown,
       { provide: APPLICATIONS_INVENTORY_REPOSITORY, useValue: deps.applicationsInventory ?? repositories?.applicationsInventory ?? (pool ? createPostgresApplicationsInventoryRepository(pool) : createJsonApplicationsInventoryRepository(join(config.dataDir, "applications-inventory.json"))) },

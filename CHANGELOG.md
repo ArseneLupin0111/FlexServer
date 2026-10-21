@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — PostgreSQL deployment health
+
+- Restore the shared `DATABASE_POOL` provider in application wiring so PostgreSQL health checks receive the initialized pool instead of returning HTTP 503 `Database pool not available`.
+- Capture API startup logs and the readiness response when container deployment fails.
+
 ## Unreleased — AI startup recovery and test lifecycle
 
 - Await the initial AI retention/recovery pass before application bootstrap completes, preventing requests from racing startup JSON writes and task recovery.

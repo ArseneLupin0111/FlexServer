@@ -29,6 +29,16 @@ export type DockerManagementRepository = {
    * claimed in one locked step. Returns undefined when nothing is claimable.
    */
   claimNextQueued(vpsId: string, agentInstanceId: string, now?: string): Promise<DockerManagementOperation | undefined>;
+  findByIdempotencyKey(vpsId: string, idempotencyKey: string): Promise<DockerManagementOperation | undefined>;
+  /**
+   * Read-only queue peek: returns the oldest claimable operation for this
+   * VPS/instance using claimNextQueued eligibility (queued, or claimed with
+   * an expired lease; optionally pre-targeted at agentInstanceId) WITHOUT
+   * claiming or mutating it. Pair with claim(id) for reserve-then-claim.
+   */
+  peekNextClaimable(vpsId: string, agentInstanceId: string, now?: string): Promise<DockerManagementOperation | undefined>;
+  /** Uncapped unresolved (queued, or claimed incl. expired lease) operations for a VPS, oldest first. */
+  listUnresolved(vpsId: string): Promise<DockerManagementOperation[]>;
   setResult(id: string, status: Extract<DockerManagementStatus, "succeeded" | "failed">, result: DockerManagementResult, now?: string): Promise<DockerManagementOperation | undefined>;
   status(id: string): Promise<DockerManagementOperation | undefined>;
   cancelByVps(vpsId: string, reason: DockerManagementCancelReason, now?: string): Promise<number>;
@@ -39,8 +49,9 @@ const empty = (): Store => ({ operations: [] });
 const cap = (n?: number) => Math.min(Math.max(n ?? DOCKER_MANAGEMENT_CAPS.listLimit, 1), DOCKER_MANAGEMENT_CAPS.listLimit);
 const order = (a: DockerManagementOperation, b: DockerManagementOperation) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id);
 function normalize(raw: unknown): Store { const s = raw as Partial<Store>; return { operations: Array.isArray(s?.operations) ? s.operations : [] }; }
-function trim(ops: DockerManagementOperation[]): DockerManagementOperation[] { const counts = new Map<string, number>(); return ops.sort(order).filter(o => { const n = counts.get(o.vpsId) ?? 0; if (n >= DOCKER_MANAGEMENT_CAPS.operationsPerVps) return false; counts.set(o.vpsId, n + 1); return true; }); }
+function trim(ops: DockerManagementOperation[]): DockerManagementOperation[] { const counts = new Map<string, number>(); return ops.sort(order).filter(o => { if (o.status === "queued" || o.status === "claimed") return true; const n = counts.get(o.vpsId) ?? 0; if (n >= DOCKER_MANAGEMENT_CAPS.operationsPerVps) return false; counts.set(o.vpsId, n + 1); return true; }); }
 function clone(o: DockerManagementOperation): DockerManagementOperation { return JSON.parse(JSON.stringify(o)) as DockerManagementOperation; }
+const claimableOperation = (o: DockerManagementOperation, vpsId: string, agentInstanceId: string, nowMs: number) => { if (o.vpsId !== vpsId) return false; if (o.action !== "start" && o.action !== "stop" && o.action !== "restart") return false; if (o.target.agentInstanceId && o.target.agentInstanceId !== agentInstanceId) return false; if (o.status === "queued") return true; if (o.status !== "claimed") return false; return (o.leaseExpiresAt ? Date.parse(o.leaseExpiresAt) : 0) <= nowMs; };
 
 export function createJsonDockerManagementRepository(filePath = "data/docker-management.json"): DockerManagementRepository {
   async function modify<T>(fn: (s: Store) => Promise<[Store, T]> | [Store, T]): Promise<T> {
@@ -52,22 +63,21 @@ export function createJsonDockerManagementRepository(filePath = "data/docker-man
   const claim = (id: string, claimedBy: string, now = new Date().toISOString()) => modify(s => { const o = s.operations.find(x => x.id === id); if (!o) return [s, undefined]; const lease = o.leaseExpiresAt ? Date.parse(o.leaseExpiresAt) : 0; if (o.status !== "queued" && !(o.status === "claimed" && lease <= Date.parse(now))) throw new DockerManagementConflict("not_claimable", id); Object.assign(o, { status: "claimed", claimedBy, leaseExpiresAt: new Date(Date.parse(now) + DOCKER_MANAGEMENT_CAPS.claimLeaseSeconds * 1000).toISOString(), updatedAt: now }); return [s, clone(o)]; });
   const claimNextQueued = (vpsId: string, agentInstanceId: string, now = new Date().toISOString()) => modify(s => {
     const nowMs = Date.parse(now);
-    const claimable = (o: DockerManagementOperation) => {
-      if (o.vpsId !== vpsId) return false;
-      if (o.action !== "start" && o.action !== "stop" && o.action !== "restart") return false;
-      if (o.target.agentInstanceId && o.target.agentInstanceId !== agentInstanceId) return false;
-      if (o.status === "queued") return true;
-      if (o.status !== "claimed") return false;
-      return (o.leaseExpiresAt ? Date.parse(o.leaseExpiresAt) : 0) <= nowMs;
-    };
-    const target = s.operations.filter(claimable).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0];
+    const target = s.operations.filter(o => claimableOperation(o, vpsId, agentInstanceId, nowMs)).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0];
     if (!target) return [s, undefined];
     Object.assign(target, { status: "claimed", claimedBy: agentInstanceId, leaseExpiresAt: new Date(nowMs + DOCKER_MANAGEMENT_CAPS.claimLeaseSeconds * 1000).toISOString(), updatedAt: now });
     return [s, clone(target)];
   });
+  const findByIdempotencyKey = async (vpsId: string, idempotencyKey: string) => (await getAll()).find(o => o.vpsId === vpsId && o.idempotencyKey === idempotencyKey);
+  const peekNextClaimable = async (vpsId: string, agentInstanceId: string, now = new Date().toISOString()) => {
+    const nowMs = Date.parse(now);
+    const target = (await getAll()).filter(o => claimableOperation(o, vpsId, agentInstanceId, nowMs)).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0];
+    return target && clone(target);
+  };
+  const listUnresolved = async (vpsId: string) => (await getAll()).filter(o => o.vpsId === vpsId && (o.status === "queued" || o.status === "claimed")).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
   const setResult = (id: string, status: "succeeded" | "failed", result: DockerManagementResult, now = new Date().toISOString()) => modify(s => { const o = s.operations.find(x => x.id === id); if (!o) return [s, undefined]; Object.assign(o, { status, result, leaseExpiresAt: undefined, updatedAt: now }); return [s, clone(o)]; });
   const cancelByVps = (vpsId: string, reason: DockerManagementCancelReason, now = new Date().toISOString()) => modify(s => { let n = 0; for (const o of s.operations) if (o.vpsId === vpsId && (o.status === "queued" || o.status === "claimed")) { Object.assign(o, { status: "cancelled", cancelReason: reason, leaseExpiresAt: undefined, updatedAt: now }); n++; } return [s, n]; });
-  return { deleteByVps, create, get, listByVps: async (v, l) => (await getAll()).filter(o => o.vpsId === v).sort(order).slice(0, cap(l)), claim, claimNextQueued, setResult, status: get, cancelByVps };
+  return { deleteByVps, create, get, listByVps: async (v, l) => (await getAll()).filter(o => o.vpsId === v).sort(order).slice(0, cap(l)), claim, claimNextQueued, findByIdempotencyKey, peekNextClaimable, listUnresolved, setResult, status: get, cancelByVps };
   async function getAll() { return normalize(await readJsonFile(filePath, empty())).operations; }
 }
 
@@ -75,7 +85,10 @@ type Row = { id:string; vps_id:string; idempotency_key:string; request_digest:st
 const rowToOperation = (r: Row): DockerManagementOperation => ({ id:r.id, vpsId:r.vps_id, idempotencyKey:r.idempotency_key, requestDigest:r.request_digest, action:r.action, target:r.target, status:r.status, claimedBy:r.claimed_by ?? undefined, leaseExpiresAt:r.lease_expires_at ? new Date(r.lease_expires_at).toISOString() : undefined, result:r.result ?? undefined, cancelReason:r.cancel_reason ?? undefined, createdAt:new Date(r.created_at).toISOString(), updatedAt:new Date(r.updated_at).toISOString() });
 export function createPostgresDockerManagementRepository(pool: DatabasePool): DockerManagementRepository {
   const get = async (id:string) => { const r = await pool.query<Row>("SELECT * FROM docker_management_operations WHERE id=$1", [id]); return r.rows[0] && rowToOperation(r.rows[0]); };
-  return { get, status:get,
+  const findByIdempotencyKey = async (vpsId: string, idempotencyKey: string) => { const r = await pool.query<Row>("SELECT * FROM docker_management_operations WHERE vps_id=$1 AND idempotency_key=$2", [vpsId, idempotencyKey]); return r.rows[0] && rowToOperation(r.rows[0]); };
+  const peekNextClaimable = async (vpsId: string, agentInstanceId: string, now = new Date().toISOString()) => { const r = await pool.query<Row>(`SELECT * FROM docker_management_operations WHERE vps_id=$1 AND action IN ('start','stop','restart') AND (target->>'agentInstanceId' IS NULL OR target->>'agentInstanceId'=$2) AND (status='queued' OR (status='claimed' AND lease_expires_at <= $3::timestamptz)) ORDER BY created_at ASC, id ASC LIMIT 1`, [vpsId, agentInstanceId, now]); return r.rows[0] && rowToOperation(r.rows[0]); };
+  const listUnresolved = async (vpsId: string) => { const r = await pool.query<Row>(`SELECT * FROM docker_management_operations WHERE vps_id=$1 AND status IN ('queued','claimed') ORDER BY created_at ASC, id ASC`, [vpsId]); return r.rows.map(rowToOperation); };
+  return { get, status:get, findByIdempotencyKey, peekNextClaimable, listUnresolved,
     async deleteByVps(vpsId) { await pool.query("DELETE FROM docker_management_operations WHERE vps_id=$1", [vpsId]); },
     async create(i) { const now=i.now ?? new Date().toISOString(); return withTransaction(pool, async c => { const old=(await c.query<Row>("SELECT * FROM docker_management_operations WHERE idempotency_key=$1 FOR UPDATE",[i.idempotencyKey])).rows[0]; if(old){if(old.vps_id!==i.vpsId)throw new DockerManagementConflict("vps_mismatch",old.id);if(old.request_digest!==i.requestDigest)throw new DockerManagementConflict("request_digest_mismatch",old.id);return {operation:rowToOperation(old),replay:true};} const r=await c.query<Row>("INSERT INTO docker_management_operations (id,vps_id,idempotency_key,request_digest,action,target,status,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,'queued',$7,$7) RETURNING *",[i.id??nanoid(),i.vpsId,i.idempotencyKey,i.requestDigest,i.action,i.target,now]); await c.query("DELETE FROM docker_management_operations WHERE vps_id=$1 AND id NOT IN (SELECT id FROM docker_management_operations WHERE vps_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2)",[i.vpsId,DOCKER_MANAGEMENT_CAPS.operationsPerVps]); return {operation:rowToOperation(r.rows[0]),replay:false}; }); },
     async listByVps(v,l){const r=await pool.query<Row>("SELECT * FROM docker_management_operations WHERE vps_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2",[v,cap(l)]);return r.rows.map(rowToOperation);},

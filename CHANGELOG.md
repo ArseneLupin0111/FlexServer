@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — Docker Compose applications (phase 2) packaging and security docs
+
+- Document the current Compose application security boundaries and rollout controls: separate per-VPS opt-in, external-source consent, no implicit start/deploy or runtime install, readiness and uncertain-operation handling, storage backup/recovery, and data-safe rollback guidance.
+- Document the packaged `node dist/scripts/manage-compose-keys.js` administration entry point and its init/check/rotate/rewrap procedures; add an opt-in read-only Compose keyring override and a separate stopped-API read-write override for one-shot administration. The standard stack and demo remain unchanged when overrides are omitted.
+- Add separately confirmed runtime preparation: reuse a trusted compatible Compose runtime without changes, or install the pinned official v2.40.3 executable with architecture-specific SHA-256 verification into an isolated FlexServer directory on supported root-run Linux agents. Missing/untrusted Docker CLI fails closed with manual installation guidance; GET, preview and deployment never install runtime.
+- Bind Compose inventory requests to their enrolled agent instance so the API can accept fresh inventory without weakening identity checks.
+- Bind removal approval to the complete daemon inventory while keeping deletion candidates scoped to the selected project; reject manifests that omit any owned container of a removed service before Compose mutation.
+- Read connected-agent freshness from persisted agent state when admitting Compose work; raw VPS records do not carry the dashboard's enriched agent status.
+- Encode registry credential identities as JSON tuples so PostgreSQL JSONB storage accepts them without embedded NUL characters.
+- Claim source verification and lifecycle work without requiring an unrelated managed revision; replay identical source requests before applying the active-operation guard.
+- Accept standard YAML node tags while retaining custom-tag/alias refusal, and accept previews with omitted optional variables.
+- Enforce the host exclusion-registry row cap on the proposed mutation before persistence, rejecting the first over-cap acquisition without corrupting the registry.
+- Fix managed Compose execution against direct plugin binaries, capture registry credential versions during preview, and commit preview results reported by operation ID.
+- Preserve exact terminal receipts across transport retries and clear acknowledged receipts; advance progress sequences monotonically so successful operations do not block subsequent revisions.
+- Align deployment authorization with the complete removal manifest, read ownership labels from Engine `Config.Labels`, and allow Docker stop grace to complete before the control transport times out.
+- Refuse explicit and implicit registry credential replacement while authorized, applying, or uncertain operations reference it, including preview-captured references; invalidate pending previews when credentials change before authorization.
+- Keep discovered application detail, operations and revision reads consistent with the listed identity; preserve freshness-based admission and VPS-scoped operation history.
+- Build lifecycle plans from verified dependency edges and observed one-shot completion, retain bounded per-service outcomes, and exclude private claim credentials from public operations.
+- Preserve allowlisted runtime-preparation evidence, including whether installation occurred, without returning raw agent observations or executable paths.
+- Unwrap Compose API response envelopes in the browser client so the Applications inventory renders against the live API.
+- Keep concurrent legacy Docker command claims silent when another agent holds the shared Compose reservation; retain errors for storage failures and preserve active reservations when direct claims are refused.
+- Accept the agent's explicit mutation-authorization and partial-result receipt flags while preserving strict request validation, allowing durable terminal receipts to settle instead of remaining claimed after HTTP 400.
+- Derive each Compose service's lifecycle readiness from its own one-shot/healthcheck facts, independently of dependency-edge conditions, so services without healthchecks do not wait indefinitely for a nonexistent healthy state.
+
 ## Unreleased — Docker container troubleshooting
 
 - Add bounded sanitized Docker inspect details to committed container snapshots: ports, mounts, networks, healthcheck status/timing, lifecycle, exit code, OOM flag, restart metadata. Details are optional for older agents and never carry raw inspect, health commands/output, labels, environment or daemon IDs.

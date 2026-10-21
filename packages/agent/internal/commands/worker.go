@@ -36,11 +36,21 @@ type Commander interface {
 	Report(ctx context.Context, r *Result) error
 }
 
+// MutationFence is the narrow shared host-local exclusion boundary. Scope
+// must identify the exact daemon resource (the full container ID), not a
+// display name or label. Acquisition is idempotent for ownerID so a pending
+// receipt can recover after restart. Release is called only after the
+// terminal report is acknowledged; uncertain receipts retain the fence.
+type MutationFence interface {
+	Acquire(ctx context.Context, scope, ownerID string) error
+	MarkMutating(ctx context.Context, scope, ownerID string) error
+	Release(ctx context.Context, scope, ownerID string) error
+}
+
 // Controller is the daemon POST surface (implemented by *DockerControl).
 type Controller interface {
 	Act(ctx context.Context, action, fullID string, tty bool) ActResult
 }
-
 // Worker executes at most one command at a time with report-only retry:
 // a receipt with Executed=true (including every uncertain receipt) is never
 // re-executed, only re-reported.
@@ -51,8 +61,12 @@ type Worker struct {
 	control    Controller
 	store      ReceiptStore
 	resolve    TargetResolver
+	fence      MutationFence
 	now        func() time.Time
 }
+
+// SetMutationFence installs the shared host-local exclusion adapter.
+func (w *Worker) SetMutationFence(f MutationFence) { w.fence = f }
 
 // NewWorker builds a worker. All deps required except now (defaults to time.Now).
 func NewWorker(instanceID, vpsID string, t Commander, c Controller, s ReceiptStore, r TargetResolver) (*Worker, error) {
@@ -186,14 +200,29 @@ func (w *Worker) execute(ctx context.Context, rec *Receipt) error {
 	if w.expired(rec.DeadlineNano) {
 		return w.failClosed(ctx, rec, ErrCodeDeadlineExceeded)
 	}
+	scope := "container:" + fullID
+	if w.fence != nil {
+		if err := w.fence.Acquire(ctx, scope, rec.CommandID); err != nil {
+			return w.failClosed(ctx, rec, ErrCodeTargetBusy)
+		}
+	}
 	execCtx, cancel := w.execContext(ctx, rec)
 	defer cancel()
-	// Mark executing before the daemon call (Executed=false: still safe to
-	// run once; crash here resumes into execute exactly once).
+	// Persist exact scope and the no-replay marker before daemon mutation;
+	// any crash from here reports uncertain and keeps the scope fenced.
 	mark := *rec
+	mark.FenceScope = scope
 	mark.State = ReceiptExecuting
+	mark.Executed = true
 	if err := w.store.PersistReceipt(mark); err != nil {
 		return fmt.Errorf("commands: persist executing: %w", err)
+	}
+	rec.FenceScope = scope
+	rec.Executed = true
+	if w.fence != nil {
+		if err := w.fence.MarkMutating(ctx, scope, rec.CommandID); err != nil {
+			return w.failClosed(ctx, rec, ErrCodeTargetBusy)
+		}
 	}
 	out := w.control.Act(execCtx, rec.Action, fullID, rec.TTY)
 	terminal := *rec
@@ -278,6 +307,11 @@ func (w *Worker) reportTerminal(ctx context.Context, rec *Receipt) error {
 	}
 	if err := w.store.CommitReceipt(rec.CommandID, rec.AgentInstanceID); err != nil {
 		return fmt.Errorf("commands: commit: %w", err)
+	}
+	if w.fence != nil && rec.FenceScope != "" && rec.State != ReceiptUncertain {
+		if err := w.fence.Release(ctx, rec.FenceScope, rec.CommandID); err != nil {
+			return fmt.Errorf("commands: release mutation fence: %w", err)
+		}
 	}
 	log.Printf("commands: reported %q state=%s", rec.CommandID, rec.State)
 	return nil

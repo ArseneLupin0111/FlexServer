@@ -7,6 +7,7 @@ import type { LocalUpgradeRepository } from "./repositories/local-upgrade.reposi
 import type { HostKeyPinRepository } from "../ssh/host-key-pin.repository.js";
 import type { TerminalSessionService } from "../terminal/terminal-session.service.js";
 import type { DockerLogsService } from "../docker/docker-logs.service.js";
+import type { ApplicationsService } from "../docker-applications/applications.service.js";
 
 export type VpsCleanup = {
   prepare(id: string): Promise<void>;
@@ -18,9 +19,11 @@ export function createVpsCleanup(
   docker: DockerMonitoringRepository, management: DockerManagementRepository,
   upgrades: LocalUpgradeRepository, pins: HostKeyPinRepository,
   terminal: TerminalSessionService, logs: DockerLogsService,
+  applications?: ApplicationsService,
 ): VpsCleanup {
   return {
     async prepare(id) {
+      await applications?.assertVpsRemovable(id);
       const active = await jobs.list();
       if (active.some(job => job.vpsId === id && (job.status === "queued" || job.status === "running"))) {
         throw new Error("Wait for active server jobs to finish before removing this server");
@@ -29,6 +32,7 @@ export function createVpsCleanup(
       logs.closeByVps(id);
     },
     async purge(id) {
+      await applications?.purgeVps(id);
       await jobs.deleteByVps(id);
       await metrics.deleteByVps(id);
       await docker.cleanupForVps({ vpsId: id, reason: "vps_deleted" });

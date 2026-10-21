@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vps-manager/agent/internal/applications"
 	"github.com/vps-manager/agent/internal/commands"
 	"github.com/vps-manager/agent/internal/config"
 	"github.com/vps-manager/agent/internal/geo"
@@ -167,29 +168,41 @@ func main() {
 	// never delay collection or create a second metrics owner.
 	if !*hostOnly {
 		if st, e := state.LoadStore(runtimeKeysFile, deliveryPath); e == nil {
+			if e := applications.StartInventory(ctx, cfg, st, func(err error) { log.Printf("%v", err) }); e != nil {
+				log.Printf("applications inventory unavailable: %v", e)
+			}
+			if worker, we := applications.NewWorker(cfg, st.InstanceID(), filepath.Join(base, "compose-receipt.json"), st.ContainerKey); we != nil {
+				log.Printf("applications worker unavailable: %v", we)
+			} else {
+				go func() {
+					ticker := time.NewTicker(time.Duration(cfg.IntervalSeconds) * time.Second)
+					defer ticker.Stop()
+					for {
+						cycleCtx, cycleCancel := context.WithTimeout(ctx, 45*time.Minute)
+						if err := worker.ProcessOne(cycleCtx); err != nil && ctx.Err() == nil { log.Printf("applications worker cycle failed: %v", err) }
+						cycleCancel()
+						select { case <-ctx.Done(): return; case <-ticker.C: }
+					}
+				}()
+			}
 			resolver, re := commands.NewDockerTargetResolver("", time.Duration(cfg.RequestTimeoutSeconds)*time.Second, st.ContainerKey)
 			control, ce := commands.DefaultDockerControl("", time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 			receipts, se := commands.NewFileReceiptStore(filepath.Join(base, "command-receipt.json"))
 			client := commands.NewClient(cfg)
 			if re != nil || ce != nil || se != nil {
 				log.Printf("command worker unavailable: resolver=%v controller=%v receipt=%v", re, ce, se)
-			} else if worker, we := commands.NewWorker(st.InstanceID(), cfg.VpsId, client, control, receipts, resolver); we != nil {
+			} else if commandWorker, we := commands.NewWorker(st.InstanceID(), cfg.VpsId, client, control, receipts, resolver); we != nil {
 				log.Printf("command worker unavailable: %v", we)
 			} else {
+				commandWorker.SetMutationFence(applicationCommandFence{})
 				go func() {
 					ticker := time.NewTicker(time.Duration(cfg.IntervalSeconds) * time.Second)
 					defer ticker.Stop()
 					for {
 						cycleCtx, cycleCancel := context.WithTimeout(ctx, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
-						if err := worker.ProcessOne(cycleCtx); err != nil && ctx.Err() == nil {
-							log.Printf("command cycle failed: %v", err)
-						}
+						if err := commandWorker.ProcessOne(cycleCtx); err != nil && ctx.Err() == nil { log.Printf("command cycle failed: %v", err) }
 						cycleCancel()
-						select {
-						case <-ctx.Done():
-							return
-						case <-ticker.C:
-						}
+						select { case <-ctx.Done(): return; case <-ticker.C: }
 					}
 				}()
 			}
@@ -242,4 +255,21 @@ func main() {
 		log.Fatalf("run loop failed: %v", err)
 	}
 	log.Println("agent stopped")
+}
+
+type applicationCommandFence struct{}
+
+func (applicationCommandFence) Acquire(ctx context.Context, scope, ownerID string) error {
+	if err := ctx.Err(); err != nil { return err }
+	return applications.AcquireHostScope(scope, "container-command", ownerID, true, 0)
+}
+
+func (applicationCommandFence) MarkMutating(ctx context.Context, scope, ownerID string) error {
+	if err := ctx.Err(); err != nil { return err }
+	return applications.MarkHostScopeMutating(scope, "container-command", ownerID)
+}
+
+func (applicationCommandFence) Release(ctx context.Context, scope, ownerID string) error {
+	if err := ctx.Err(); err != nil { return err }
+	return applications.ReleaseHostScope(scope, "container-command", ownerID)
 }

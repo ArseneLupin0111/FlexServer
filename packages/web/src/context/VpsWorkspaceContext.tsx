@@ -51,6 +51,7 @@ import { DockerContainerManagementPanel } from "../components/dashboard/docker/D
 import { DockerStorageOverview } from "../components/dashboard/docker/DockerStorageOverview";
 import { DockerContainerInvestigationPanel } from "../components/dashboard/docker/DockerContainerInvestigationPanel";
 import { DockerWorkloads } from "../components/dashboard/docker/DockerWorkloads";
+import { ComposeApplicationsPanel } from "../components/dashboard/docker/applications/ComposeApplicationsPanel";
 import { LocalAgentUpdate } from "../components/dashboard/servers/LocalAgentUpdate";
 
 // ── Context type ────────────────────────────────────────────────────
@@ -510,6 +511,7 @@ export function VpsWorkspaceDockerPage() {
   const snapshot = overview.dockerMetrics[0];
   const monitoringEnabled = vps.dockerMetricsEnabled === true;
   const managementEnabled = vps.dockerManagementEnabled === true;
+  const [dockerView, setDockerView] = useState<"containers" | "applications">("containers");
   const [history, setHistory] = useState<DockerHostSample[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [rollups, setRollups] = useState<DockerMetricRollup[]>([]);
@@ -683,6 +685,11 @@ export function VpsWorkspaceDockerPage() {
       <div className="mb-4 flex items-center justify-between gap-3">
         <h2 id="server-docker-heading" className="text-lg font-semibold text-text">Docker</h2>
       </div>
+      <div role="group" aria-label="Docker view" className="mb-4 flex gap-2">
+        <Button size="sm" variant={dockerView === "containers" ? "default" : "outline"} aria-pressed={dockerView === "containers"} onClick={() => setDockerView("containers")}>Containers</Button>
+        <Button size="sm" variant={dockerView === "applications" ? "default" : "outline"} aria-pressed={dockerView === "applications"} onClick={() => setDockerView("applications")}>Applications</Button>
+      </div>
+      {dockerView === "applications" ? <ComposeApplicationsPanel key={vps.id} vpsId={vps.id} refreshTick={refreshTick} /> : <>
       <Button type="button" size="sm" variant="outline" className="mb-4" disabled={currentContainersLoading} onClick={() => setRefreshTick((tick) => tick + 1)}>Refresh containers</Button>
       <details className="mb-4 border border-line bg-panel">
         <summary className="cursor-pointer px-4 py-3 text-sm text-dim focus-visible:outline-signal">Snapshot & monitoring</summary>
@@ -740,6 +747,7 @@ export function VpsWorkspaceDockerPage() {
           </>
         : null}
       </div>
+      </>}
     </section>
   );
 }
@@ -877,10 +885,14 @@ export function VpsWorkspaceSettingsPage() {
   const { vps, overview } = useVpsWorkspace();
   const dashboard = useDashboard();
   const managementEnabled = vps.dockerManagementEnabled === true;
+  const composeManagementEnabled = vps.composeManagementEnabled === true;
   const managementAllowed = vps.managedBy !== "system" || vps.kind === "local";
   const [managementBusy, setManagementBusy] = useState(false);
   const [managementError, setManagementError] = useState<string | null>(null);
   const managementLock = useRef(false);
+  const [composeManagementBusy, setComposeManagementBusy] = useState(false);
+  const [composeManagementError, setComposeManagementError] = useState<string | null>(null);
+  const composeManagementLock = useRef(false);
 
   async function handleToggleManagement(): Promise<void> {
     if (managementLock.current || dashboard.busy || dashboard.mode === "demo" || !managementAllowed) return;
@@ -894,6 +906,21 @@ export function VpsWorkspaceSettingsPage() {
     } finally {
       managementLock.current = false;
       setManagementBusy(false);
+    }
+  }
+
+  async function handleToggleComposeManagement(): Promise<void> {
+    if (composeManagementLock.current || dashboard.busy || dashboard.mode === "demo" || !managementAllowed) return;
+    composeManagementLock.current = true;
+    setComposeManagementBusy(true);
+    setComposeManagementError(null);
+    try {
+      await dashboard.onEdit(vps, { composeManagementEnabled: !composeManagementEnabled });
+    } catch (err) {
+      setComposeManagementError(err instanceof Error ? err.message : "Unable to update Compose management.");
+    } finally {
+      composeManagementLock.current = false;
+      setComposeManagementBusy(false);
     }
   }
   return (
@@ -910,6 +937,14 @@ export function VpsWorkspaceSettingsPage() {
         </div>
         <p className="text-xs text-dim">Docker controls can interrupt services, including this dashboard on the local host. Agent access to Docker is root-equivalent.</p>
         {managementError ? <p role="alert" className="text-xs text-crit">{managementError}</p> : null}
+      </section>
+      <section aria-label="Compose management" className="mb-4 space-y-3 border border-line bg-panel p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h3 className="text-sm font-semibold text-text">Compose management</h3>
+          <Switch checked={composeManagementEnabled} pending={composeManagementBusy} aria-label={`${composeManagementEnabled ? "Disable" : "Enable"} Compose management`} disabled={dashboard.busy || dashboard.mode === "demo" || !managementAllowed} onCheckedChange={() => void handleToggleComposeManagement()} />
+        </div>
+        <p className="text-xs text-dim">Enabling Compose management is a separate consent from Docker management. Compose agent access is root-equivalent, and deployments can interrupt services.</p>
+        {composeManagementError ? <p role="alert" className="text-xs text-crit">{composeManagementError}</p> : null}
       </section>
         <LocalAgentUpdate vps={vps} variant="workspace" jobs={overview.jobs} />
       </SettingsPanel>

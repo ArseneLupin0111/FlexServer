@@ -1,0 +1,17 @@
+# Opt-in override for encrypted Compose application configuration.
+# Initialize the external keyring first; the API user must be able to read it.
+# The source is mandatory and must be outside the project, DATA_DIR and PRIVATE_DIR.
+# No Docker socket or workload directories are mounted into the API.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.applications.yml up -d
+services:
+  api:
+    environment:
+      COMPOSE_KEYRING_FILE: /etc/flexserver/compose-keyring.json
+    volumes:
+      - type: bind
+        source: ${COMPOSE_KEYRING_HOST_FILE:?Set COMPOSE_KEYRING_HOST_FILE to an existing external keyring file}
+        target: /etc/flexserver/compose-keyring.json
+        read_only: true
+        bind:
+          create_host_path: false

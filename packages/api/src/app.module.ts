@@ -72,6 +72,13 @@ import { FilesController } from "./files/files.controller.js";
 import { FilesService } from "./files/files.service.js";
 import type { FilesTransport } from "./files/files.models.js";
 import type { SettingsRepository } from "./persistence/repositories/settings.repository.js";
+import { APPLICATIONS_INVENTORY_REPOSITORY, ApplicationsInventoryAgentController } from "./docker-applications/inventory.controller.js";
+import { createJsonApplicationsInventoryRepository, type ApplicationsInventoryRepository } from "./persistence/repositories/applications-inventory.repository.js";
+import { createPostgresApplicationsInventoryRepository } from "./persistence/repositories/applications-inventory.postgres.repository.js";
+import { ApplicationsService, APPLICATIONS_REPOSITORY } from "./docker-applications/applications.service.js";
+import { AgentApplicationsController } from "./docker-applications/agent.controller.js";
+import { ApplicationsController } from "./docker-applications/applications.controller.js";
+import { createJsonApplicationsRepository, createPostgresApplicationsRepository } from "./persistence/repositories/applications.repository.js";
 import {
   ADMIN_CREDENTIAL_REPOSITORY,
   AGENT_REPOSITORY,
@@ -127,6 +134,7 @@ export type AppDependencies = {
   dockerManagement?: DockerManagementRepository;
   localUpgrades?: LocalUpgradeRepository;
   settings?: SettingsRepository;
+  applicationsInventory?: ApplicationsInventoryRepository;
   localFilesTransport?: FilesTransport;
   remoteFilesTransport?: FilesTransport;
   /** Optional pre-created DB pool. Caller owns lifecycle unless ownsPool=true. */
@@ -191,12 +199,18 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       LocalUpgradeController,
       LocalUpdaterController,
       FilesController,
+      ApplicationsInventoryAgentController,
+      AgentApplicationsController,
+      ApplicationsController,
     ],
     providers: [
       { provide: APP_CONFIG, useValue: config },
       { provide: DATABASE_POOL, useValue: pool },
       { provide: DATABASE_POOL_OWNS, useValue: ownsPool },
       DatabasePoolShutdown,
+      { provide: APPLICATIONS_INVENTORY_REPOSITORY, useValue: deps.applicationsInventory ?? repositories?.applicationsInventory ?? (pool ? createPostgresApplicationsInventoryRepository(pool) : createJsonApplicationsInventoryRepository(join(config.dataDir, "applications-inventory.json"))) },
+      ApplicationsService,
+      { provide: APPLICATIONS_REPOSITORY, useValue: pool ? createPostgresApplicationsRepository(pool) : createJsonApplicationsRepository(config.dataDir) },
       { provide: VPS_REPOSITORY, useValue: deps.store ?? repositories!.vps },
       {
         provide: KEY_SERVICE,
@@ -393,6 +407,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           HOST_KEY_PIN_REPOSITORY, TerminalSessionService, DockerLogsService,
           AgentLifecycleCoordinator,
           FilesService,
+          ApplicationsService,
         ],
         useFactory: (
           store: VpsRepository,
@@ -412,6 +427,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           pins: HostKeyPinRepository, terminal: TerminalSessionService, logs: DockerLogsService,
           lifecycle: AgentLifecycleCoordinator,
           filesService: FilesService,
+          applications: ApplicationsService,
         ) =>
           new VpsService(
             store,
@@ -426,7 +442,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
              upgrader,
              restarter,
              dockerMonitoringService,
-             createVpsCleanup(agentRepo, jobs, metrics, docker, management, upgrades, pins, terminal, logs),
+             createVpsCleanup(agentRepo, jobs, metrics, docker, management, upgrades, pins, terminal, logs, applications),
              lifecycle,
              filesService,
            ),

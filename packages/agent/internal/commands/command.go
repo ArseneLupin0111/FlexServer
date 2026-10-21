@@ -63,6 +63,7 @@ const (
 // Bounded error codes the agent may report. Anything else fails closed.
 const (
 	ErrCodeContainerNotFound = "container_not_found"
+	ErrCodeTargetBusy        = "target_busy"
 	ErrCodeActionFailed      = "action_failed"
 	ErrCodeDeadlineExceeded  = "deadline_exceeded"
 	ErrCodeTargetMismatch    = "target_mismatch"
@@ -75,6 +76,7 @@ const (
 
 var commandErrorAllowlist = map[string]bool{
 	ErrCodeContainerNotFound: true,
+	ErrCodeTargetBusy:        true,
 	ErrCodeActionFailed:      true,
 	ErrCodeDeadlineExceeded:  true,
 	ErrCodeTargetMismatch:    true,
@@ -140,8 +142,9 @@ type Receipt struct {
 	TTY             bool   `json:"tty,omitempty"`
 	State           string `json:"state"`
 	Executed        bool   `json:"executed"`
-	ErrorCode       string `json:"errorCode,omitempty"`
 	OutputPreview   string `json:"outputPreview,omitempty"`
+	ErrorCode       string `json:"errorCode,omitempty"`
+	FenceScope      string `json:"fenceScope,omitempty"`
 }
 
 var (

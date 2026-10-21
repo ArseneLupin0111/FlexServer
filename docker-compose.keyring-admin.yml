@@ -1,0 +1,7 @@
+# One-shot Compose key administration only. Never use this override for the API service.
+# Mounts the host keyring directory read-write so atomic file replacement during
+# init/rotate is visible to the API's read-only directory mount after restart.
+services:
+  api:
+    volumes:
+      - /etc/flexserver:/etc/flexserver:rw

@@ -72,6 +72,11 @@ services:
       LOCAL_AGENT_ROTATION_HELPER: ${LOCAL_AGENT_ROTATION_HELPER:-/usr/local/bin/local-agent-rotation-client}
       LOCAL_AGENT_ROTATION_SOCKET: ${LOCAL_AGENT_ROTATION_SOCKET:-/var/run/flexserver/agent-rotation/agent-rotation.sock}
       SSH_KEY_ENCRYPTION_KEY_FILE: ${SSH_KEY_ENCRYPTION_KEY_FILE:-}
+      # Keyring is an external secret; mount its configured path read-only.
+      COMPOSE_KEYRING_FILE: ${COMPOSE_KEYRING_FILE:-/etc/flexserver/compose-keyring.json}
+      COMPOSE_CLAIM_LEASE_SECONDS: ${COMPOSE_CLAIM_LEASE_SECONDS:-120}
+      COMPOSE_INVENTORY_MAX_BYTES: ${COMPOSE_INVENTORY_MAX_BYTES:-524288}
+      COMPOSE_PREVIEW_TTL_SECONDS: ${COMPOSE_PREVIEW_TTL_SECONDS:-300}
     depends_on:
       migrate:
         condition: service_completed_successfully

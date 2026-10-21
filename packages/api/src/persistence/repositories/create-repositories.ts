@@ -60,6 +60,13 @@ import {
   type SettingsRepository,
 } from "./settings.repository.js";
 import { createPostgresSettingsRepository } from "./settings.postgres.repository.js";
+import { createJsonApplicationsInventoryRepository, type ApplicationsInventoryRepository } from "./applications-inventory.repository.js";
+import { createPostgresApplicationsInventoryRepository } from "./applications-inventory.postgres.repository.js";
+
+import { registerComposeAdminContextFactory } from "../../crypto/secret-envelope.js";
+import { createComposeAdminContext } from "./compose-admin-registry.js";
+
+registerComposeAdminContextFactory(createComposeAdminContext);
 
 export type RepositorySet = {
   vps: VpsRepository;
@@ -74,6 +81,7 @@ export type RepositorySet = {
   dockerManagement: DockerManagementRepository;
   localUpgrades: LocalUpgradeRepository;
   settings: SettingsRepository;
+  applicationsInventory: ApplicationsInventoryRepository;
   pool?: Pool;
 };
 
@@ -103,10 +111,12 @@ export function createRepositories(
       dockerManagement: createPostgresDockerManagementRepository(pool),
       localUpgrades: createPostgresLocalUpgradeRepository(pool),
       settings: createPostgresSettingsRepository(pool),
+      applicationsInventory: createPostgresApplicationsInventoryRepository(pool),
     };
   }
 
   return {
+    applicationsInventory: createJsonApplicationsInventoryRepository(join(config.dataDir, "applications-inventory.json")),
     vps: createVpsStore(join(config.dataDir, "vps.json")),
     audit: createJsonAuditRepository(join(config.dataDir, "audit.json")),
     jobs: createJsonJobRepository(join(config.dataDir, "jobs.json")),

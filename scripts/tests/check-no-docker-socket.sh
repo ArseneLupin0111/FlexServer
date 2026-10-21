@@ -93,6 +93,15 @@ else
   fail "docker-compose.yml not found"
 fi
 
+# Optional feature overrides must preserve the same API socket isolation.
+for override in docker-compose.applications.yml docker-compose.files.yml docker-compose.terminal.yml; do
+  if [[ -f "${REPO_ROOT}/${override}" ]]; then
+    fail_if_match "$override" <"${REPO_ROOT}/${override}"
+    fail_if_group_add "$override" <"${REPO_ROOT}/${override}"
+    fail_if_socket_mount_variant "$override" <"${REPO_ROOT}/${override}"
+  fi
+done
+
 # ── 2. Rendered `docker compose config` ───────────────────────────────────
 if command -v docker >/dev/null 2>&1; then
   RENDERED="$(POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-ci-compose-password}" \

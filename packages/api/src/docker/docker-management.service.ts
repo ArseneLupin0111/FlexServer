@@ -1,4 +1,4 @@
-import { Injectable, ForbiddenException, InternalServerErrorException, NotFoundException, UnauthorizedException, Inject } from "@nestjs/common";
+import { Injectable, ConflictException, ForbiddenException, InternalServerErrorException, NotFoundException, UnauthorizedException, Inject, Optional } from "@nestjs/common";
 import { VPS_REPOSITORY, DOCKER_MANAGEMENT_REPOSITORY, DOCKER_MONITORING_REPOSITORY, APP_CONFIG } from "../tokens.js";
 import { createHash } from "node:crypto";
 import type { VpsRepository } from "../persistence/repositories/vps.repository.js";
@@ -9,6 +9,7 @@ import type { DockerManagementAction, DockerManagementOperation, DockerManagemen
 import { DockerManagementConflict } from "./docker-management.models.js";
 import { agentCommandSchema, dockerManagementTargetSchema, type AgentCommand, type AgentCommandReport } from "./docker-management.schemas.js";
 import type { DockerCurrentContainer } from "./docker-monitoring.models.js";
+import { ApplicationsService } from "../docker-applications/applications.service.js";
 
 type AllowedDockerManagementAction = Extract<DockerManagementAction, "start" | "stop" | "restart">;
 const ACTIONS: Record<AllowedDockerManagementAction, true> = { start: true, stop: true, restart: true };
@@ -33,6 +34,7 @@ export class DockerManagementService {
     @Inject(DOCKER_MANAGEMENT_REPOSITORY) private readonly repository: DockerManagementRepository,
     @Inject(DOCKER_MONITORING_REPOSITORY) private readonly monitoring: DockerMonitoringRepository,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
+    @Optional() @Inject(ApplicationsService) private readonly applications?: ApplicationsService,
   ) {}
 
   private isManagementHostAllowed(record: { managedBy?: string; kind?: string }): boolean {
@@ -100,7 +102,18 @@ export class DockerManagementService {
     if (!(input.action in ACTIONS)) throw new ForbiddenException("Action is not allowed");
     if (input.confirmedAt && Math.abs(Date.now() - Date.parse(input.confirmedAt)) > TTL_MS) throw new ForbiddenException("Confirmation expired");
     const requestDigest = createHash("sha256").update(JSON.stringify({ action: input.action, target: input.target })).digest("hex");
-    return (await this.repository.create({ vpsId, idempotencyKey: input.idempotencyKey, requestDigest, action: input.action, target: input.target })).operation;
+    const previous = await this.repository.findByIdempotencyKey(vpsId, input.idempotencyKey);
+    if (previous && previous.requestDigest !== requestDigest) throw new DockerManagementConflict("request_digest_mismatch", previous.id);
+    // Stable reservation identity closes concurrent idempotent-create races.
+    // Reserve before the legacy write: a crash may leave a blocking reservation,
+    // never an executable operation that escaped Compose exclusion.
+    const operationId = previous?.id ?? createHash("sha256").update(JSON.stringify([vpsId, input.idempotencyKey])).digest("base64url").slice(0, 21);
+    const identity = input.target.agentInstanceId ?? (await this.listTargets(vpsId)).find((target) => target.containerKey === input.target.containerKey)?.agentInstanceId;
+    if (this.applications && !identity) throw new ForbiddenException("Container identity is unavailable");
+    if (identity && previous?.status !== "succeeded" && previous?.status !== "failed" && previous?.status !== "cancelled") {
+      await this.applications?.reserveContainer(vpsId, { containerKey: input.target.containerKey, agentInstanceId: identity }, operationId);
+    }
+    return (await this.repository.create({ id: operationId, vpsId, idempotencyKey: input.idempotencyKey, requestDigest, action: input.action, target: input.target })).operation;
   }
 
   async get(vpsId: string, id: string) {
@@ -110,7 +123,16 @@ export class DockerManagementService {
   }
 
   async claim(vpsId: string, id: string, claimedBy: string) {
-    await this.get(vpsId, id);
+    const record = await this.vps.get(vpsId);
+    if (!record || !this.isManagementHostAllowed(record) || record.dockerManagementEnabled !== true) {
+      throw new ForbiddenException("Docker management is unavailable");
+    }
+    const pending = await this.get(vpsId, id);
+    if (pending.status !== "queued" && !(pending.status === "claimed" && Date.parse(pending.leaseExpiresAt ?? "1970-01-01") <= Date.now())) {
+      throw new DockerManagementConflict("not_claimable", id);
+    }
+    if (pending.target.agentInstanceId && pending.target.agentInstanceId !== claimedBy) throw new UnauthorizedException();
+    await this.applications?.reserveContainer(vpsId, { containerKey: pending.target.containerKey, agentInstanceId: pending.target.agentInstanceId ?? claimedBy }, id);
     const op = await this.repository.claim(id, claimedBy);
     if (!op) throw new NotFoundException("Operation not found");
     return op;
@@ -118,9 +140,19 @@ export class DockerManagementService {
 
   async result(vpsId: string, id: string, claimedBy: string, result: DockerManagementResult) {
     const op = await this.get(vpsId, id);
-    if (op.claimedBy !== claimedBy || op.status !== "claimed") throw new DockerManagementConflict("not_claimable", id);
+    if (op.claimedBy !== claimedBy) throw new DockerManagementConflict("not_claimable", id);
+    if (op.status === "succeeded" || op.status === "failed") {
+      const stored = op.result;
+      if (!stored || stored.ok !== result.ok || stored.exitCode !== result.exitCode || stored.message !== result.message) {
+        throw new DockerManagementConflict("not_claimable", id);
+      }
+      await this.applications?.releaseContainer(vpsId, id);
+      return op;
+    }
+    if (op.status !== "claimed") throw new DockerManagementConflict("not_claimable", id);
     const updated = await this.repository.setResult(id, result.ok ? "succeeded" : "failed", result);
     if (!updated) throw new NotFoundException("Operation not found");
+    await this.applications?.releaseContainer(vpsId, id);
     return updated;
   }
 
@@ -134,7 +166,16 @@ export class DockerManagementService {
   async claimForAgent(vpsId: string, agentInstanceId: string): Promise<AgentCommand | null> {
     const record = await this.vps.get(vpsId);
     if (!record || !this.isManagementHostAllowed(record) || record.dockerManagementEnabled !== true) return null;
-    const op = await this.repository.claimNextQueued(vpsId, agentInstanceId);
+    const candidate = await this.repository.peekNextClaimable(vpsId, agentInstanceId);
+    // Claim only after the shared authority fences the exact target.
+    if (!candidate) return null;
+    try {
+      await this.applications?.reserveContainer(vpsId, { containerKey: candidate.target.containerKey, agentInstanceId }, candidate.id);
+    } catch (error) {
+      if (error instanceof ConflictException && ["operation_target_conflict", "container_busy"].includes(error.message)) return null;
+      throw error;
+    }
+    const op = await this.repository.claim(candidate.id, agentInstanceId);
     if (!op) return null;
     if (!op.leaseExpiresAt) throw new InternalServerErrorException("Claimed operation is missing its lease");
     const deadlineMs = Date.parse(op.leaseExpiresAt);
@@ -185,12 +226,16 @@ export class DockerManagementService {
         stored.ok === result.ok &&
         stored.exitCode === result.exitCode &&
         stored.message === result.message;
-      if (identical) return echo;
+      if (identical) {
+        await this.applications?.releaseContainer(vpsId, op.id);
+        return echo;
+      }
       throw new DockerManagementConflict("not_claimable", op.id);
     }
     if (op.status !== "claimed") throw new DockerManagementConflict("not_claimable", op.id);
     const updated = await this.repository.setResult(op.id, result.ok ? "succeeded" : "failed", result);
     if (!updated) throw new NotFoundException("Operation not found");
+    await this.applications?.releaseContainer(vpsId, op.id);
     return echo;
   }
 

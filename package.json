@@ -29,6 +29,8 @@
     "set-dashboard-password:prod": "node dist/scripts/set-dashboard-password.js",
     "manage-ssh-keys": "tsx scripts/admin/manage-ssh-keys.ts",
     "manage-ssh-keys:prod": "node dist/scripts/manage-ssh-keys.js",
+    "manage-compose-keys": "tsx scripts/admin/manage-compose-keys.ts",
+    "manage-compose-keys:prod": "node dist/scripts/manage-compose-keys.js",
     "revoke-agent-credentials": "tsx packages/api/src/scripts/revoke-agent-credentials.ts",
     "migrate:db": "tsx packages/api/src/db/migrate.ts"
   },

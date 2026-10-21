@@ -161,12 +161,15 @@ export class VpsService {
       const sftpChanged = newSftp !== undefined && newSftp !== oldSftp;
       const newMetrics = localPatch.dockerMetricsEnabled;
       const newManagement = localPatch.dockerManagementEnabled;
+      const newCompose = localPatch.composeManagementEnabled;
+      const oldCompose = vps.composeManagementEnabled ?? false;
+      const composeChanged = newCompose !== undefined && newCompose !== oldCompose;
       const metricsChanged =
         newMetrics !== undefined && newMetrics !== oldMetrics;
       const managementChanged =
         newManagement !== undefined && newManagement !== oldManagement;
 
-      if (!metricsChanged && !managementChanged && !sftpChanged) {
+      if (!metricsChanged && !managementChanged && !sftpChanged && !composeChanged) {
         // No change; just return current record
         return vps;
       }
@@ -189,6 +192,7 @@ export class VpsService {
           ? { dockerManagementEnabled: newManagement }
           : {}),
         ...(newSftp !== undefined ? { sftpEnabled: newSftp } : {}),
+        ...(newCompose !== undefined ? { composeManagementEnabled: newCompose } : {}),
       });
       if (!updated) throw new VpsNotFoundError();
 
@@ -196,13 +200,14 @@ export class VpsService {
         actor: "system",
         action: metricsChanged
           ? "vps.docker_metrics.update"
-          : managementChanged ? "vps.docker_management.update" : "vps.sftp.update",
+          : managementChanged ? "vps.docker_management.update" : composeChanged ? "vps.compose_management.update" : "vps.sftp.update",
         resourceType: "vps",
         resourceId: id,
         result: "success",
         metadata: {
           old: {
             ...(sftpChanged ? { sftpEnabled: oldSftp } : {}),
+            ...(composeChanged ? { composeManagementEnabled: oldCompose } : {}),
             ...(metricsChanged ? { dockerMetricsEnabled: oldMetrics } : {}),
             ...(managementChanged
               ? { dockerManagementEnabled: oldManagement }
@@ -210,6 +215,7 @@ export class VpsService {
           },
           new: {
             ...(sftpChanged ? { sftpEnabled: newSftp } : {}),
+            ...(composeChanged ? { composeManagementEnabled: newCompose } : {}),
             ...(metricsChanged ? { dockerMetricsEnabled: newMetrics } : {}),
             ...(managementChanged
               ? { dockerManagementEnabled: newManagement }

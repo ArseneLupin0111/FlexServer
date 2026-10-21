@@ -77,6 +77,12 @@ The public `/security` page follows the reference's shield hero, overview cards,
 
 Security refinements keep the shield hero and existing charcoal/lime surfaces. Below 48rem, overview cards pair the icon with a compact text column and the capability strip retains two columns. Below 64rem, topic anchors wrap into bordered 44px-minimum targets instead of a long vertical index. Detail copy uses 15px text with 1.75 line height; sidebar links retain explicit keyboard focus and card targets retain sticky-header clearance. The security-document CTA uses the book icon without a decorative eyebrow.
 
+## Docker Compose applications (phase 2)
+
+Compose applications live inside the Docker workspace alongside (not instead of) container investigation. Distinguish `detected_readonly`, `external_control`, `managed`, and `unmanaged` explicitly; labels or colors never imply control authorization. Preserve freshness/completeness, gate state, and runtime capability reasons as written statuses. Unknown desired replica counts and unverified container kinds stay unknown—never style them as zero or healthy.
+
+Use existing semantic status tokens and text labels; avoid color-only state. Lifecycle actions require their defined confirmation, and deploy previews must expose redacted configuration and downtime/resource warnings before confirmation. Operation views show actual stage/service outcomes and timestamps; never show fabricated percentages or imply an automatic rollback. Keep existing container links/log investigation available from application services.
+
 ## Reusable components
 
 - `components/dashboard/shared/RowActionsMenu.tsx`: shared `⋯` overflow button for file, server, and job rows/cards. Requires `label` (row identity) and `DropdownMenuItem` children; supports `disabled`, `triggerClassName`, and `contentClassName`. Defaults to an outline/small trigger and end-aligned `w-48` menu. Callers retain permissions, handlers, and confirmation dialogs outside the menu; do not use it for account/navigation menus.

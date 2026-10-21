@@ -1,3 +1,4 @@
+import type { Express } from "express";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,8 +65,10 @@ let vpsId: string;
 let token: string;
 let credentialId: string;
 let keySeq: number;
+let testApp: Express | undefined;
 
 beforeEach(async () => {
+  testApp = undefined;
   tempDir = await mkdtemp(join(tmpdir(), "vps-manager-agent-commands-"));
   vpsRepo = createVpsStore(join(tempDir, "data", "vps.json"));
   agentRepo = createJsonAgentRepository(join(tempDir, "data", "agents.json"));
@@ -334,7 +337,7 @@ describe("DockerManagementService capability gating", () => {
 });
 
 function app() {
-  return createApp({
+  return testApp ??= createApp({
     config: {
       ...demoConfig,
       dataDir: join(tempDir, "data"),

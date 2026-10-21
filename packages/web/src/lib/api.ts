@@ -21,6 +21,7 @@ export type VpsRecord = {
   managedBy?: "user" | "system";
   dockerMetricsEnabled?: boolean;
   dockerManagementEnabled?: boolean;
+  composeManagementEnabled?: boolean;
   sftpEnabled?: boolean;
   agentStatus?:
     "not_installed" | "installing" | "online" | "offline" | "failed";
@@ -300,7 +301,7 @@ export type AuthStatus = {
 
 type RequestOptions = RequestInit & { timeoutMs?: number };
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { timeoutMs, ...fetchOptions } = options;
   const headers = new Headers(fetchOptions.headers);
   if (fetchOptions.body && !headers.has("Content-Type")) {
@@ -416,6 +417,7 @@ export type UpdateVpsPayload = Partial<
     | "notes"
     | "dockerMetricsEnabled"
     | "dockerManagementEnabled"
+    | "composeManagementEnabled"
     | "sftpEnabled"
   >
 >;
@@ -799,9 +801,10 @@ export type DockerManagementOperation = {
  * `request`/`requestEnvelope` unwrap envelopes, so an endpoint whose body is
  * the resource itself (management capability) would resolve to `undefined`
  * there. Errors are still raised with the backend's message; the raw body is
- * only returned on success, and `null` for 204.
+ * only returned on success, and `null` for 204. Exported for sibling API
+ * client modules (Compose applications) that reuse this transport rule.
  */
-async function requestRaw<T>(path: string, options: RequestInit = {}): Promise<T> {
+export async function requestRaw<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");

@@ -4,6 +4,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { validateExternalSecretPath } from "../ssh/key-encryption.js";
+import type { ComposeCryptoConfig } from "../crypto/compose-crypto-config.js";
+import { resolveComposeKeyringFilePath } from "../crypto/compose-crypto-config.js";
 export type AppMode = "demo" | "local";
 export type StorageDriver = "json" | "postgres";
 
@@ -58,6 +60,12 @@ export type AppConfig = {
   terminal?: { global: number; perDashboard: number; perVps: number; openTimeoutMs: number; idleTimeoutMs: number; lifetimeMs: number; revocationPollMs: number; heartbeatMs: number; outputBufferBytes: number; inputBufferBytes: number; slowConsumerTimeoutMs: number; pendingLimit: number };
   sshKeyEncryptionKeyFile?: string;
   localFilesSocketPath?: string;
+  composeCrypto: ComposeCryptoConfig;
+  compose?: {
+    claimLeaseSeconds: number;
+    inventoryMaxBytes: number;
+    previewTtlSeconds: number;
+  };
 };
 
 const booleanSchema = z
@@ -166,6 +174,15 @@ const envSchema = z.object({
     (value) => (value === "" ? undefined : value),
     z.string().trim().optional(),
   ),
+
+  // Compose applications (phase 2) — external-only keyring material
+  COMPOSE_KEYRING_FILE: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().trim().optional(),
+  ),
+  COMPOSE_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(30).max(3_600).default(120),
+  COMPOSE_INVENTORY_MAX_BYTES: z.coerce.number().int().min(64 * 1024).max(8 * 1024 * 1024).default(512 * 1024),
+  COMPOSE_PREVIEW_TTL_SECONDS: z.coerce.number().int().min(60).max(3_600).default(300),
   LOCAL_FILES_SOCKET_PATH: z.string().trim().min(1).default("/var/run/flexserver/host-files/files.sock"),
   TERMINAL_GLOBAL_LIMIT: z.coerce.number().int().min(1).max(100).default(10),
   TERMINAL_DASHBOARD_LIMIT: z.coerce.number().int().min(1).max(20).default(3),
@@ -198,6 +215,12 @@ export function parseAppConfig(
       projectRoot,
     );
   }
+  const composeCrypto: ComposeCryptoConfig = {
+    keyringFile: resolveComposeKeyringFilePath(
+      parsed.COMPOSE_KEYRING_FILE,
+      { dataDir: parsed.DATA_DIR, privateDir: parsed.PRIVATE_DIR },
+    ),
+  };
   if (parsed.APP_MODE === "local") {
     if (!parsed.DASHBOARD_SESSION_SECRET) {
       throw new Error(
@@ -318,6 +341,12 @@ export function parseAppConfig(
       : {},
     sshHostKeyPolicy: parsed.SSH_HOST_KEY_POLICY,
     sshKeyEncryptionKeyFile,
+    composeCrypto,
+    compose: {
+      claimLeaseSeconds: parsed.COMPOSE_CLAIM_LEASE_SECONDS,
+      inventoryMaxBytes: parsed.COMPOSE_INVENTORY_MAX_BYTES,
+      previewTtlSeconds: parsed.COMPOSE_PREVIEW_TTL_SECONDS,
+    },
     localFilesSocketPath: parsed.LOCAL_FILES_SOCKET_PATH,
     terminal: {
       global: parsed.TERMINAL_GLOBAL_LIMIT,

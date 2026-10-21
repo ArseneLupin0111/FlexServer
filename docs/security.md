@@ -183,6 +183,43 @@ In containerized production deployments:
 - Permissions are strictly restricted: host directory `/etc/flexserver` has mode `0750` owned by the API runtime UID:GID (`100:101`), and `/etc/flexserver/ssh-keyring.json` has mode `0600` owned by the API runtime UID:GID.
 - An idempotent host bootstrapper script is provided at `scripts/install/bootstrap-ssh-keyring.sh`.
 - For standalone Docker Compose setups, the optional override `docker-compose.keyring.yml` mounts `/etc/flexserver` into the API container without breaking demo mode when unmounted.
+### Docker Compose applications (phase 2)
+
+Compose discovery is observational. Each VPS has a separate Compose-management gate, disabled by default; existing Docker-container management permission does not enable it. Enabling the gate and opting a detected stack into external control are explicit, authenticated actions. Specifying an external Compose source path is privileged and separately consented; the path remains externally owned and is treated as read-only. Managed configuration is a separate path. There is no implicit `up` or `start`, no runtime installation triggered by ordinary application operations, and no automatic rollback. Start operates only on existing captured containers; a missing container cannot be recreated by Start. Readiness is evaluated using configured checks and observed results; a readiness timeout is a failed outcome that leaves observed resources in place. An uncertain operation remains locked for reconciliation—never blindly retry or clear its lock.
+
+Runtime preparation requires separate confirmation with `pluginRequired: true`. Trusted compatible Compose builds are reused without installation; the compatibility matrix currently allows v2.39.4 and v2.40.3. Installation is Linux amd64/arm64 only and requires a root-run agent. The installer downloads the pinned official v2.40.3 artifact over HTTPS, verifies its architecture-specific SHA-256, and atomically installs `/usr/local/lib/flexserver/compose/docker-compose`; it does not overwrite the system plugin or upgrade Docker Engine. Missing or untrusted Docker CLI yields `docker_cli_missing` and manual official-package guidance rather than running a package manager. Non-Linux, unsupported architecture, insufficient privilege, download/hash and post-install verification failures remain explicit failures. GET, preview and deployment never install or upgrade runtime.
+
+Configuration validation accepts a deliberately restricted Compose subset; it rejects multiple YAML documents and bounds desired replicas to 1–100. Secret interpolation is permitted only in protected runtime fields, not public workload identity/configuration such as images, paths, ports, resources, or profiles. Preview/configuration responses redact secrets. Never treat a configuration as deployable merely because it parses as YAML.
+Managed deployments accept one Compose YAML document with prebuilt registry images and supported service, dependency, healthcheck, port, named-volume, and app-data-root bind settings; they do not accept Git/build contexts or multi-file overrides. The validator rejects privileged mode, host namespaces/network, devices, Docker socket mounts, and arbitrary host bind paths. Named volumes are retained and never deleted by service removal. Preview resolves image digests; failed registry resolution has no cache fallback. Removed-service cleanup is ownership-checked and requires explicit preview approval. Previews capture the complete daemon container inventory fingerprint, while deletion candidates remain scoped to the selected project. Any inventory drift between preview and mutation invalidates approval and fails closed. The approved removal manifest must cover every owned container of each removed service exactly; an omitted sibling fails deployment before Compose mutation or teardown. A deployment without configured healthchecks is reported as readiness-unverified rather than healthy. See the Compose compatibility notes in the implementation for exact field validation; unsupported configuration is rejected, not silently ignored.
+
+Registry credential replacement and deletion are refused while a referenced operation is authorized, applying, or uncertain, including references captured by its preview. Posting an existing host/username pair is a replacement, not a way around that fence. Replacing credentials before authorization invalidates pending previews; obtain and confirm a new preview rather than retrying an old approval.
+
+
+The keyring is loaded only when encrypted Compose data is needed. If it is absent, unreadable, or invalid, those operations fail closed with crypto unavailable; there is no plaintext fallback or silent key generation. Discovery/read-only inventory remains independent of keyring availability.
+
+For a source checkout, the commands are `npm run manage-compose-keys -- --help` and `npm run manage-compose-keys -- <init|rotate|rewrap|check>`. Use the same environment and storage configuration as the API. In the API image, the compiled entry point is `node dist/scripts/manage-compose-keys.js <command>`; do not invoke the source-only root `scripts/admin` wrapper in the image. The API image runs as its non-root `app` user, so the host keyring directory and file must permit that container UID/GID to read and, for one-shot init/rotation, write them. Stop API writers before administrative commands and restart the stack afterward.
+
+The Compose keyring override is opt-in and separate from demo defaults:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.keyring.yml up -d
+```
+
+This mounts `/etc/flexserver` read-only into the API container and sets `COMPOSE_KEYRING_FILE=/etc/flexserver/compose-keyring.json`. Provision the keyring separately; the override does not create it. For one-shot initialization or rotation only, stop the API and use the admin override to mount the same directory read-write:
+
+```bash
+docker compose stop api
+docker compose -f docker-compose.yml -f docker-compose.keyring.yml -f docker-compose.keyring-admin.yml run --rm --no-deps api node dist/scripts/manage-compose-keys.js init
+docker compose up -d
+```
+
+Replace `init` with `rotate`, `rewrap`, or `check` as appropriate. The read-write override is only for a stopped-API one-shot command; never start the normal API with it. Compose merges the additional mount with the base service mounts. After atomic keyring replacement, restart the API so its read-only bind sees the new file. For a standalone host, use the API runtime UID/GID; restrict the directory to `0750` and keyring file to `0600`, owned by the API runtime identity. Never mount the Docker socket or host root into the API. Registry credentials are stored encrypted at rest and scoped per VPS; use private registries with trusted TLS certificate verification. Never disable certificate verification or use plaintext registry connections.
+
+If removed-service teardown fails closed with `removed_service_inventory_changed`, the sampled container inventory drifted after preview approval; deploy a fresh preview instead of reusing the approval. `removed_service_manifest_incomplete` means the approved manifest missed an owned container of a removed service; the pre-apply recheck fails before any teardown. Both failures leave observed resources in place for reconciliation.
+
+The JSON adapter is a single-writer store: do not run multiple API processes against the same JSON state, and never manually remove a live writer lock. PostgreSQL provides transactional shared storage and contention control. On uncertain outcomes, inspect/reconcile the recorded operation and observed runtime before considering another action. Redeploying an earlier revision does not restore volume, database, or other application data; take workload-level backups before deployment and plan data recovery separately.
+
+
 ## Web terminal origin during domain changes
 
 `DASHBOARD_PUBLIC_ORIGIN` must match the browser dashboard origin exactly (scheme, hostname, and optional port). After changing the public dashboard domain, update both the deployment `.env` and the GitHub Actions repository variable `DASHBOARD_PUBLIC_ORIGIN`, then recreate the API container so it receives the new environment. Do not disable origin checks or add a permissive host fallback.

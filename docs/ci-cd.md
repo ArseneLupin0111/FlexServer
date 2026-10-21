@@ -156,6 +156,30 @@ printf 'New password: ' > /dev/tty && read -rs password && printf '%s\n' "$passw
 The `--skip-if-same` flag avoids unnecessary session revocations when the password hasn't changed (e.g., re-running the deploy CI without changing the secret).
 
 The database password is stored in the server-side `.env` file for this single-host deployment. To rotate it after the `vps-manager-postgres` volume exists, update the DB user password with `ALTER USER`, update the GitHub secret, then redeploy.
+### Compose application keyring operations
+
+Compose management is disabled per VPS until an operator opts in. API/web CI deployment alone does not opt in a VPS, install/upgrade Compose, or cause a stack start/deploy. Before enabling Compose secrets, provision a separate external keyring at `/etc/flexserver/compose-keyring.json`, distinct from the SSH keyring, and preserve it in a restricted offline backup separate from the encrypted JSON/PostgreSQL store backup. Without the original keyring, encrypted values cannot be recovered; do not run `init` over existing ciphertext.
+
+The API image includes the compiled CLI at `node dist/scripts/manage-compose-keys.js`; root `scripts/admin` TypeScript wrappers are for source installs and are not copied into the API image. Use the same `.env`/storage configuration as the API. Stop all API writers before administration because the CLI holds an exclusive administrative lock. Back up ciphertext and keyring before rotation; preserve old KEKs until all retained encrypted fields have been successfully rewrapped. Never remove a live lock to force progress.
+
+For a standalone deployment, the read-only keyring override keeps the normal API read-only:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.keyring.yml up -d
+```
+
+To initialize or rotate, stop all API writers, use the separate admin override for a one-shot command, then restart with the read-only configuration:
+
+```bash
+docker compose stop api
+docker compose -f docker-compose.yml -f docker-compose.keyring.yml -f docker-compose.keyring-admin.yml run --rm --no-deps api node dist/scripts/manage-compose-keys.js init
+docker compose up -d
+```
+
+Replace `init` with `check`, `rotate`, or `rewrap` as appropriate. The CLI never clears a live lock. After atomic keyring replacement, restarting the API ensures its read-only mount sees the replacement. Never leave the read-write admin override in normal service configuration.
+
+Use private registries only with trusted TLS certificate verification and scoped credentials; do not disable TLS checks. The API container has no Docker socket or host-root mount. Compose operation readiness timeout does not automatically stop or revert workloads. An uncertain result requires reconciliation before retry. Redeploying an earlier application revision does not roll back data volumes or database state; take workload-specific backups before changes and restore data separately if needed.
+
 
 ## Manual run
 

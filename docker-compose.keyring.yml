@@ -1,7 +1,8 @@
-# Opt-in Docker Compose override to mount the external SSH key encryption keyring.
-# Mounts the external keyring directory (/etc/flexserver) into the API container read-only.
-# The host directory should be owned by root:API_GID (0750) or API_UID:API_GID (0750),
-# and the keyring file owned by API_UID:API_GID (0600).
+# Opt-in Docker Compose override for the external Compose keyring. Demo defaults
+# remain unchanged when this file is omitted. The keyring is distinct from the
+# SSH keyring despite sharing the external /etc/flexserver directory.
+# Host directory: mode 0750, owned by the API runtime UID:GID; keyring file:
+# mode 0600, owned by the same UID:GID. Provision separately before enabling.
 #
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.keyring.yml up -d
@@ -11,4 +12,4 @@ services:
     volumes:
       - /etc/flexserver:/etc/flexserver:ro
     environment:
-      SSH_KEY_ENCRYPTION_KEY_FILE: /etc/flexserver/ssh-keyring.json
+      COMPOSE_KEYRING_FILE: /etc/flexserver/compose-keyring.json

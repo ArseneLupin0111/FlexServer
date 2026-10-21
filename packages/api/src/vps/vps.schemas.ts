@@ -19,6 +19,7 @@ export const updateVpsSchema = createVpsSchema
   .extend({
     dockerMetricsEnabled: z.boolean().optional(),
     dockerManagementEnabled: z.boolean().optional(),
+    composeManagementEnabled: z.boolean().optional(),
     sftpEnabled: z.boolean().optional(),
   });
 
@@ -27,10 +28,11 @@ export const updateLocalVpsSchema = z
   .object({
     dockerMetricsEnabled: z.boolean().optional(),
     dockerManagementEnabled: z.boolean().optional(),
+    composeManagementEnabled: z.boolean().optional(),
     sftpEnabled: z.boolean().optional(),
   })
   .strict()
-  .refine((value) => value.dockerMetricsEnabled !== undefined || value.dockerManagementEnabled !== undefined || value.sftpEnabled !== undefined, {
+  .refine((value) => value.dockerMetricsEnabled !== undefined || value.dockerManagementEnabled !== undefined || value.composeManagementEnabled !== undefined || value.sftpEnabled !== undefined, {
     message: "At least one feature toggle must be provided",
   });
 

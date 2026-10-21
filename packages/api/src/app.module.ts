@@ -98,10 +98,26 @@ import {
   LOCAL_FILES_TRANSPORT,
   REMOTE_FILES_TRANSPORT,
 } from "./tokens.js";
-
+import { AI_REPOSITORY } from "./tokens.js";
+import {
+  createJsonAiRepository,
+  createPostgresAiRepository,
+} from "./persistence/repositories/ai.repository.js";
+import type { AiRepository } from "./persistence/repositories/ai.persistence.js";
+import { AiRoutesService } from "./ai/ai-routes.service.js";
+import { AiSettingsController, AiPolicyController } from "./ai/ai.controller.js";
+import { AiPolicyService } from "./ai/ai-policy.service.js";
+import { AiTaskService } from "./ai/ai-task.service.js";
+import { AiHostPlanService } from "./ai/ai-host-plan.service.js";
+import { AiDockerBridgeService } from "./ai/ai-docker-bridge.service.js";
+import { AiAgentController } from "./ai/ai-agent.controller.js";
+import { AiAgentService } from "./ai/ai-agent.service.js";
+import { AiReadToolsService } from "./ai/ai-read-tools.service.js";
+import { AiRetentionService } from "./ai/ai-retention.service.js";
 export {
   ADMIN_CREDENTIAL_REPOSITORY,
   AGENT_REPOSITORY,
+  AI_REPOSITORY,
   APP_CONFIG,
   AUDIT_REPOSITORY,
   DATABASE_POOL,
@@ -135,6 +151,7 @@ export type AppDependencies = {
   localUpgrades?: LocalUpgradeRepository;
   settings?: SettingsRepository;
   applicationsInventory?: ApplicationsInventoryRepository;
+  ai?: AiRepository;
   localFilesTransport?: FilesTransport;
   remoteFilesTransport?: FilesTransport;
   /** Optional pre-created DB pool. Caller owns lifecycle unless ownsPool=true. */
@@ -202,10 +219,29 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       ApplicationsInventoryAgentController,
       AgentApplicationsController,
       ApplicationsController,
+      AiSettingsController,
+      AiPolicyController,
+      AiAgentController,
     ],
     providers: [
       { provide: APP_CONFIG, useValue: config },
-      { provide: DATABASE_POOL, useValue: pool },
+      {
+        provide: AI_REPOSITORY,
+        useValue:
+          deps.ai ??
+          repositories?.ai ??
+          (pool
+            ? createPostgresAiRepository(pool)
+            : createJsonAiRepository(join(config.dataDir, "ai.json"))),
+      },
+      AiRoutesService,
+      AiPolicyService,
+      AiHostPlanService,
+      AiDockerBridgeService,
+      AiTaskService,
+      AiAgentService,
+      AiReadToolsService,
+      AiRetentionService,
       { provide: DATABASE_POOL_OWNS, useValue: ownsPool },
       DatabasePoolShutdown,
       { provide: APPLICATIONS_INVENTORY_REPOSITORY, useValue: deps.applicationsInventory ?? repositories?.applicationsInventory ?? (pool ? createPostgresApplicationsInventoryRepository(pool) : createJsonApplicationsInventoryRepository(join(config.dataDir, "applications-inventory.json"))) },

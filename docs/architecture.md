@@ -91,3 +91,55 @@ To prevent duplicate concurrent instances from contending on metrics ingest or c
 4. **Provisioning (No RuntimeDirectory):** Provisioned via `/etc/tmpfiles.d/vps-manager-agent.conf` and `systemd-tmpfiles --create`. Systemd's `RuntimeDirectory=` directive is strictly prohibited in agent units because systemd would automatically chown `/run/vps-manager-agent` to the unprivileged service `User=`, breaking the trusted root-ownership invariant (`0755` root:root). Local installers also provision this tmpfiles configuration so `/run/vps-manager-agent` and the regular lock file persist across reboots.
 5. **Offline preflight (`-validate-config`):** Because `-once` mode contends for the singleton lock and will fail if the daemon is active, staged upgrade preflights use `<binary> -config <path> -validate-config` for offline validation of configuration syntax and required fields without lock contention, network calls, or state mutation.
 6. **Operational limits:** Production verification of systemd service management and singleton process locking has been confirmed on single host Azure VPS `vps_kUq9jDFzAtxY` running managed unit `vps-agent-e3d0757876c6e2baf8d0044daa30b1218070930aa38f83de4112794e7eceeb5a.service` (build `867941df81e769e07db86edcf9e4314101889735`), with verified lock contention rejection, stable lock inode retention across restarts, and offline `-validate-config`. Fleet-wide rollout across remaining remote nodes remains unverified pending individual staged upgrades.
+
+## AI Assistant Operational Safety, Retention, and Lifecycle Supervision
+
+### Retention and State Fencing
+
+1. **Dual-rate retention scheduler:** `AiRetentionService` runs on application bootstrap and on a periodic schedule with a 5-second session/lease reconciliation loop and a 300-second 30-day retention pruning pass. It executes maintenance covering terminal tasks and execution blobs without blocking HTTP request paths.
+2. **Terminal task retention:** Tasks in terminal states (`succeeded`, `failed`, `cancelled`, `expired`) older than the 30-day retention cutoff are pruned. Active tasks (`planning`, `awaiting_input`, `awaiting_approval`, `executing`, `verifying`, `cancel_requested`) and `uncertain` tasks are strictly preserved and never TTL-deleted.
+3. **Receipt and fence preservation:** Any task referencing active outbox commands (`pending` or `dispatched`) or `uncertain` execution receipts is protected from retention deletion. Terminal task pruning purges only resolved receipts and acknowledged outbox entries, keeping all fences intact.
+4. **Needed execution blob protection:** Encrypted execution blobs (`AiExecutionBlob`) are deleted on expiration only if not needed by an active or uncertain task, active outbox commands, or uncertain receipts. Needed blobs remain durable until their associated work settles.
+5. **Audit preservation on chat deletion:** Deleting a chat conversation (`deleteConversation`) deletes conversation metadata and messages but preserves all historical audit events (`state.auditEvents`) and records an immutable deletion audit event. Audit records are maintained under the 90-day retention baseline.
+
+### Startup Recovery and Session Revocation
+
+1. **Active task reconciliation:** At startup and during periodic maintenance, active tasks across all VPS instances are evaluated.
+2. **Awaiting task expiration:** Tasks remaining in `awaiting_approval`, `awaiting_input`, or `planning` past their `expiresAt` deadline are transitioned to `expired` with wire code `approval_expired`.
+3. **Owner lease expiration:** Tasks in `executing` or `verifying` whose runtime owner lease expires without fresh heartbeat/receipt are transitioned to `uncertain` with wire code `uncertain_outcome`, preventing duplicate execution while maintaining the active-slot fence.
+4. **Session logout and revocation:** If the initiating dashboard session or the approving session is revoked, logged out, or expired in `DashboardSessionService`:
+   - Pending tasks (`planning`, `awaiting_approval`, `awaiting_input`) are expired immediately (`session_revoked`).
+   - Executing or verifying tasks are transitioned to `cancel_requested` so the agent terminates execution on the next heartbeat, rather than running detached after logout.
+
+### Redaction and Bounded Output
+
+1. **Shared secret redaction:** All outgoing responses and provider communications pass through `packages/api/src/common/redaction.ts`. Redaction matches private key PEM blocks, SSH keys, passwords, bearer tokens, scoped `vma_` tokens, `sk-` provider keys, generic secret assignments, and `.env` variable assignments.
+2. **ANSI escape stripping:** Terminal and subprocess output undergoes ANSI sequence stripping before pattern matching to prevent escape code fragmentation from evading secret redaction.
+3. **Chunk boundary streaming redactor:** `ChunkRedactor` buffers stream chunks across packet boundaries to detect and redact split tokens or headers that cross chunk splits.
+4. **Operational limits:** Production deployment of AI assistant host execution and multi-node confinement has NOT been verified. Passing local unit tests and simulated adapter runs does not guarantee provider reliability, billing boundaries, or safe confinement on production Linux hosts.
+
+## AI Host Confinement Architecture (P3/P4)
+
+### Process topology
+
+1. **`vps-agent` (unprivileged, dedicated service user):** hosts the AI transport worker. It claims commands, streams bounded output, writes durable receipts, and never executes host-mutating work itself.
+2. **`ai-host-helper` (root, systemd unit `flexserver-ai-helper.service`):** a small Unix-domain-socket daemon that owns every privileged operation. Connection authorization uses `SO_PEERCRED`; the helper accepts only root, its own effective UID, explicitly configured `--socket-uid`/`--socket-gid`, and the pinned execution identity. Request payloads are a single bounded JSON line.
+3. **`ai-executor` (root bootstrap, drops privileges):** launched only by the helper, only from the pinned `--executor-binary` path. It enters fresh mount/PID/IPC/UTS namespaces, attaches to the task's pre-created cgroup v2 scope, sets `no_new_privs`, drops supplementary groups and capabilities, applies `PR_SET_NO_NEW_PRIVS`/`PR_CAPBSET_DROP`, `setgroups`/`setresgid`/`setresuid` to the pinned UID/GID, and only then execs the requested script inside the read-only rootfs. There is no setuid binary exposed to AI tooling and no root shell path.
+
+### Privileged operation routing
+
+| Operation | Owner | Validation |
+| --- | --- | --- |
+| `service_status` / `service_action` | helper | Profile membership, action allowlist (`status`, `start`, `restart`, `reload`); `stop`/`disable`/`mask` are refused by policy before `systemctl` runs |
+| `config_validate` / `config_apply` | helper | Profile config-path allowlist (wildcards expanded inside the registered root), protected-path denial, pre/post-image SHA-256 CAS, root-owned backup, atomic rename + directory fsync |
+| `cgroup_create` / `cgroup_kill` | helper | cgroup v2 unified hierarchy required; group-v2 scope per task with `cpu`/`memory`/`pids` controllers |
+| `task_execute` | helper → executor | Pinned execution UID/GID, pinned rootfs, namespace template, cgroup attachment before exec |
+
+The unprivileged worker reaches these only through `packages/agent/internal/ai/helper_client.go`, which validates every response shape and refuses to interpret an error response as success.
+
+### Failure semantics
+
+- Missing cgroup v2 → `cgroup_create` and `task_execute` fail closed; shell/file mutation stays unavailable, and no unconfined fallback exists.
+- Digest drift at apply time → rejected before any disk mutation, with the observed digest in the error.
+- Unauthorized peer credentials → connection refused before request parsing.
+- Helper socket absent → worker reports `ai host helper socket unavailable` rather than attempting privileged work locally.

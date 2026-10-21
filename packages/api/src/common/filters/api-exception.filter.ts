@@ -26,6 +26,11 @@ import {
 } from "../errors.js";
 import { safeErrorMessage } from "../redaction.js";
 import { FilesError } from "../../files/files-error.js";
+import { AiAssistantError, AiTaskNotFoundError } from "../../ai/ai-failures.js";
+import { AiPolicyError } from "../../ai/ai-policy.service.js";
+import { AiPersistenceConflictError } from "../../persistence/repositories/ai.persistence.js";
+import { ProviderProtocolError, ProviderTransportError, ProviderKeyRequiredError } from "../../ai/ai-provider.js";
+import { AiCryptoUnavailableError } from "../../ai/ai-crypto.js";
 
 function errorBody(
   message: string,
@@ -41,6 +46,18 @@ export class ApiExceptionFilter implements ExceptionFilter {
     const response = host.switchToHttp().getResponse<Response>();
     const requestId = request.requestId;
 
+    if (error instanceof AiAssistantError || error instanceof AiPolicyError) {
+      return response.status(error.status).json(errorBody(error.code, requestId, { code: error.code }));
+    }
+    if (error instanceof AiPersistenceConflictError) {
+      return response.status(409).json(errorBody("AI state conflict", requestId, { code: error.code }));
+    }
+    if (error instanceof AiTaskNotFoundError) {
+      return response.status(404).json(errorBody("AI task not found", requestId));
+    }
+    if (error instanceof ProviderProtocolError || error instanceof ProviderTransportError || error instanceof ProviderKeyRequiredError || error instanceof AiCryptoUnavailableError) {
+      return response.status(503).json(errorBody("AI provider unavailable", requestId, { code: error.code }));
+    }
     if (error instanceof ZodError) {
       return response.status(400).json(errorBody("Invalid request", requestId));
     }

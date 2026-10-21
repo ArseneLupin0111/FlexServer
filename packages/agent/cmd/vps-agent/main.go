@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vps-manager/agent/internal/applications"
+	"github.com/vps-manager/agent/internal/ai"
 	"github.com/vps-manager/agent/internal/commands"
 	"github.com/vps-manager/agent/internal/config"
 	"github.com/vps-manager/agent/internal/geo"
@@ -93,6 +94,10 @@ func main() {
 	}
 
 	if *validateConfig {
+		if cfg.AI.Enabled {
+			caps := ai.DetectCapabilities(cfg.AI.RootfsDirPath, cfg.AI.RootfsManifestPath, cfg.AI.ProfilesDirPath)
+			log.Printf("ai configuration validated (supported=%v, reason=%q)", caps.Supported, caps.UnsupportedReason)
+		}
 		return
 	}
 
@@ -229,6 +234,18 @@ func main() {
 					}()
 				}
 			}
+			if cfg.AI.Enabled {
+				aiLogger := log.New(os.Stderr, "[ai] ", log.LstdFlags)
+				if aiWorker, we := ai.NewWorker(cfg, st.InstanceID(), aiLogger); we != nil {
+					log.Printf("ai worker unavailable: %v", we)
+				} else {
+					go func() {
+						aiWorker.Run(ctx)
+					}()
+				}
+			}
+		} else if cfg.AI.Enabled {
+			log.Printf("ai worker unavailable: durable identity required: %v", e)
 		}
 	}
 

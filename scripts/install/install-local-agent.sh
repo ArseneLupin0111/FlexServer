@@ -19,6 +19,14 @@
 #                         else download from the pinned repository).
 #   --cli-dest <path>     CLI install path (default:
 #                         /usr/local/bin/flexserverctl).
+#   --install-ai          Install and enable isolated AI worker subsystem (default: off).
+#   --ai-executor-binary <path>  Path to ai-executor binary.
+#   --ai-host-helper-binary <path> Path to ai-host-helper binary.
+#   --ai-rootfs-tar <path>       Path to minimal rootfs tarball.
+#   --ai-rootfs-manifest <path>  Path to rootfs manifest JSON.
+#   --ai-profiles-dir <path>     Path to root-owned AI profiles directory.
+#   --ai-user <user>             Unprivileged AI execution user (default: flexserver-ai).
+#   --ai-group <group>           Unprivileged AI execution group (default: flexserver-ai).
 #   --help                Show this help.
 #
 # This script:
@@ -53,7 +61,7 @@ for arg in "$@"; do
       # $0 can be the interpreter path (a binary), which would dump garbage.
       installer_header=""
       if [[ -r "$0" ]] && IFS= read -r installer_header < "$0" && [[ "$installer_header" == "#!"* ]]; then
-        sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '4,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
       else
         echo "Usage: sudo install-local-agent.sh --binary <path> --config <path> [options]"
         echo "Run this script from a file (clone the repository) to see the full help."
@@ -148,6 +156,30 @@ LOCK_DIR="/run/vps-manager-agent"
 TMPFILES_DIR="/etc/tmpfiles.d"
 TMPFILES_FILE="${TMPFILES_DIR}/vps-manager-agent.conf"
 # ── Args ──────────────────────────────────────────────────────────────────
+# ── AI Subsystem Constants ───────────────────────────────────────────────
+AI_USER_DEFAULT="flexserver-ai"
+AI_GROUP_DEFAULT="flexserver-ai"
+AI_HELPER_SERVICE_NAME="flexserver-ai-helper"
+AI_HELPER_UNIT_FILE="/etc/systemd/system/${AI_HELPER_SERVICE_NAME}.service"
+AI_HELPER_DEST="/usr/local/sbin/ai-host-helper"
+AI_EXECUTOR_DEST="/usr/local/sbin/ai-executor"
+AI_RUN_DIR="/run/flexserver-ai"
+AI_HELPER_SOCKET="${AI_RUN_DIR}/helper.sock"
+AI_STATE_DIR="/var/lib/flexserver-ai"
+AI_STATE_FILE="${AI_STATE_DIR}/ai-state.json"
+AI_SCRATCH_DIR="${AI_STATE_DIR}/scratch"
+AI_PROFILES_DIR="/etc/flexserver-ai/profiles"
+AI_ROOTFS_DIR="/usr/local/share/flexserver-ai/rootfs"
+AI_ROOTFS_MANIFEST="/usr/local/share/flexserver-ai/rootfs.manifest.json"
+
+INSTALL_AI=false
+AI_EXECUTOR_SRC=""
+AI_HOST_HELPER_SRC=""
+AI_ROOTFS_TAR_SRC=""
+AI_ROOTFS_MANIFEST_SRC=""
+AI_PROFILES_DIR_SRC=""
+AI_USER="${AI_USER_DEFAULT}"
+AI_GROUP="${AI_GROUP_DEFAULT}"
 
 BINARY_SRC=""
 CONFIG_SRC=""
@@ -222,6 +254,22 @@ while [[ $# -gt 0 ]]; do
       HOST_PTY_SOCKET_UID="${2%%:*}"
       HOST_PTY_SOCKET_GID="${2##*:}"
       shift 2 ;;
+    --install-ai|--enable-ai)
+      INSTALL_AI=true; shift ;;
+    --ai-executor-binary)
+      AI_EXECUTOR_SRC="$2"; INSTALL_AI=true; shift 2 ;;
+    --ai-host-helper-binary)
+      AI_HOST_HELPER_SRC="$2"; INSTALL_AI=true; shift 2 ;;
+    --ai-rootfs-tar)
+      AI_ROOTFS_TAR_SRC="$2"; INSTALL_AI=true; shift 2 ;;
+    --ai-rootfs-manifest)
+      AI_ROOTFS_MANIFEST_SRC="$2"; INSTALL_AI=true; shift 2 ;;
+    --ai-profiles-dir)
+      AI_PROFILES_DIR_SRC="$2"; INSTALL_AI=true; shift 2 ;;
+    --ai-user)
+      AI_USER="$2"; shift 2 ;;
+    --ai-group)
+      AI_GROUP="$2"; shift 2 ;;
     --help)
       echo "Usage: sudo ./scripts/install/install-local-agent.sh --binary <path> --config <path> [options]"
       echo ""
@@ -241,6 +289,14 @@ while [[ $# -gt 0 ]]; do
       echo "  --skip-cli            Do not install the flexserverctl CLI."
       echo "  --cli-source <path>   Path to flexserverctl.py (default: sibling file, else download)."
       echo "  --cli-dest <path>     CLI install path (default: ${FLEXSERVERCTL_DEST_DEFAULT})."
+      echo "  --install-ai          Install and enable isolated AI worker subsystem (default: off)."
+      echo "  --ai-executor-binary <path>  Path to ai-executor binary."
+      echo "  --ai-host-helper-binary <path> Path to ai-host-helper binary."
+      echo "  --ai-rootfs-tar <path>       Path to minimal rootfs tarball."
+      echo "  --ai-rootfs-manifest <path>  Path to rootfs manifest JSON."
+      echo "  --ai-profiles-dir <path>     Path to root-owned AI profiles directory."
+      echo "  --ai-user <user>             Unprivileged AI execution user (default: ${AI_USER_DEFAULT})."
+      echo "  --ai-group <group>           Unprivileged AI execution group (default: ${AI_GROUP_DEFAULT})."
       echo "  --help                Show this help."
       exit 0 ;;
     *)
@@ -363,6 +419,71 @@ if [[ "$UNINSTALL" == "true" ]]; then
       echo "  [DRY-RUN] Would remove: ${TMPFILES_FILE}"
     else
       rm -f "$TMPFILES_FILE"
+    fi
+  fi
+  # AI Subsystem teardown
+  if systemctl is-enabled "${AI_HELPER_SERVICE_NAME}" &>/dev/null; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would run: systemctl stop ${AI_HELPER_SERVICE_NAME}"
+      echo "  [DRY-RUN] Would run: systemctl disable ${AI_HELPER_SERVICE_NAME}"
+    else
+      systemctl stop "${AI_HELPER_SERVICE_NAME}" 2>/dev/null || true
+      systemctl disable "${AI_HELPER_SERVICE_NAME}" 2>/dev/null || true
+    fi
+  fi
+  if [[ -f "$AI_HELPER_UNIT_FILE" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would remove: ${AI_HELPER_UNIT_FILE}"
+    else
+      rm -f "$AI_HELPER_UNIT_FILE"
+    fi
+  fi
+  for bin in "$AI_HELPER_DEST" "$AI_EXECUTOR_DEST"; do
+    if [[ -f "$bin" ]]; then
+      if [[ "$DRY_RUN" == "true" ]]; then
+        echo "  [DRY-RUN] Would remove: ${bin}"
+      else
+        rm -f "$bin"
+      fi
+    fi
+  done
+  # Preserve receipts if unresolved state or receipts exist
+  if [[ -d "$AI_STATE_DIR" ]]; then
+    if [[ -f "$AI_STATE_FILE" || -d "${AI_STATE_DIR}/receipts" ]]; then
+      PRESERVE_RECEIPTS_DIR="/var/lib/flexserver-ai-preserved-receipts-$(date +%s)"
+      if [[ "$DRY_RUN" == "true" ]]; then
+        echo "  [DRY-RUN] Would preserve receipts from ${AI_STATE_DIR} to ${PRESERVE_RECEIPTS_DIR}"
+      else
+        echo "  [Uninstall] Preserving unresolved AI receipts in ${PRESERVE_RECEIPTS_DIR}..."
+        mkdir -p "$PRESERVE_RECEIPTS_DIR"
+        cp -a "${AI_STATE_DIR}/." "$PRESERVE_RECEIPTS_DIR/" 2>/dev/null || true
+        rm -rf "$AI_STATE_DIR"
+      fi
+    elif [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would remove: ${AI_STATE_DIR}"
+    else
+      rm -rf "$AI_STATE_DIR"
+    fi
+  fi
+  if [[ -d "$AI_PROFILES_DIR" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would remove: ${AI_PROFILES_DIR}"
+    else
+      rm -rf "$AI_PROFILES_DIR"
+    fi
+  fi
+  if [[ -d "$AI_ROOTFS_DIR" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would remove: ${AI_ROOTFS_DIR}"
+    else
+      rm -rf "$AI_ROOTFS_DIR"
+    fi
+  fi
+  if [[ -f "$AI_ROOTFS_MANIFEST" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would remove: ${AI_ROOTFS_MANIFEST}"
+    else
+      rm -f "$AI_ROOTFS_MANIFEST"
     fi
   fi
 
@@ -650,12 +771,187 @@ else
   echo "  Provisioned singleton lock and tmpfiles: ${LOCK_PATH} (${TMPFILES_FILE})"
 fi
 
-# Write systemd unit (conditionally include SupplementaryGroups)
-SUPP_GROUPS_LINE=""
-if [[ -n "$DOCKER_SUPPLEMENTARY_GROUPS" ]]; then
-  SUPP_GROUPS_LINE="SupplementaryGroups=${DOCKER_SUPPLEMENTARY_GROUPS}"
+if [[ "$INSTALL_AI" == "true" ]]; then
+  echo "[AI] Installing isolated AI worker subsystem..."
+  cand_dir="$(dirname "$BINARY_SRC")"
+  if [[ -z "$AI_EXECUTOR_SRC" ]]; then
+    for cand in "${cand_dir}/ai-executor-linux-amd64" "${cand_dir}/ai-executor" "/app/agent/ai-executor-linux-amd64" "/opt/vps-manager/ai-executor-linux-amd64"; do
+      if [[ -f "$cand" ]]; then AI_EXECUTOR_SRC="$cand"; break; fi
+    done
+  fi
+  if [[ -z "$AI_HOST_HELPER_SRC" ]]; then
+    for cand in "${cand_dir}/ai-host-helper-linux-amd64" "${cand_dir}/ai-host-helper" "/app/agent/ai-host-helper-linux-amd64" "/opt/vps-manager/ai-host-helper-linux-amd64"; do
+      if [[ -f "$cand" ]]; then AI_HOST_HELPER_SRC="$cand"; break; fi
+    done
+  fi
+  if [[ -z "$AI_ROOTFS_TAR_SRC" ]]; then
+    for cand in "${cand_dir}/ai-rootfs-linux-amd64.tar.gz" "/app/agent/ai-rootfs-linux-amd64.tar.gz"; do
+      if [[ -f "$cand" ]]; then AI_ROOTFS_TAR_SRC="$cand"; break; fi
+    done
+  fi
+  if [[ -z "$AI_ROOTFS_MANIFEST_SRC" ]]; then
+    for cand in "${cand_dir}/ai-rootfs-linux-amd64.manifest.json" "/app/agent/ai-rootfs-linux-amd64.manifest.json"; do
+      if [[ -f "$cand" ]]; then AI_ROOTFS_MANIFEST_SRC="$cand"; break; fi
+    done
+  fi
+  if [[ -z "$AI_PROFILES_DIR_SRC" ]]; then
+    for cand in "${cand_dir}/ai-profiles" "/app/agent/ai-profiles" "${cand_dir}/../profiles"; do
+      if [[ -d "$cand" ]]; then AI_PROFILES_DIR_SRC="$cand"; break; fi
+    done
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "  [DRY-RUN] Would create dedicated AI system user ${AI_USER} and group ${AI_GROUP}"
+    echo "  [DRY-RUN] Would install helper: ${AI_HOST_HELPER_SRC:-<unknown>} -> ${AI_HELPER_DEST}"
+    echo "  [DRY-RUN] Would install executor: ${AI_EXECUTOR_SRC:-<unknown>} -> ${AI_EXECUTOR_DEST}"
+    echo "  [DRY-RUN] Would configure ${AI_HELPER_SERVICE_NAME}.service and start it"
+  else
+    # Create group and user (no shell, no home, no docker group, no sudo)
+    getent group "$AI_GROUP" &>/dev/null || groupadd -r "$AI_GROUP"
+    getent passwd "$AI_USER" &>/dev/null || useradd -r -g "$AI_GROUP" -s /usr/sbin/nologin -d /var/empty -M "$AI_USER"
+
+    # Create AI state, scratch, profiles, rootfs directories
+    mkdir -p "$AI_STATE_DIR" "$AI_SCRATCH_DIR"
+    chown -R "$AI_USER:$AI_GROUP" "$AI_STATE_DIR"
+    chmod 0750 "$AI_STATE_DIR"
+    chmod 0700 "$AI_SCRATCH_DIR"
+
+    mkdir -p "$AI_PROFILES_DIR" "$AI_ROOTFS_DIR"
+    chown root:root "$AI_PROFILES_DIR" "$AI_ROOTFS_DIR"
+    chmod 0755 "$AI_PROFILES_DIR" "$AI_ROOTFS_DIR"
+
+    # Install default profiles
+    if [[ -n "$AI_PROFILES_DIR_SRC" && -d "$AI_PROFILES_DIR_SRC" ]]; then
+      cp -a "$AI_PROFILES_DIR_SRC"/* "$AI_PROFILES_DIR/" 2>/dev/null || true
+    fi
+    if [[ ! -f "${AI_PROFILES_DIR}/nginx.json" ]]; then
+      cat << 'EOF_NGINX' > "${AI_PROFILES_DIR}/nginx.json"
+{
+  "id": "nginx",
+  "version": 1,
+  "serviceUnit": "nginx.service",
+  "allowedActions": ["status", "start", "restart", "reload"],
+  "allowedConfigPaths": [
+    "/etc/nginx/nginx.conf",
+    "/etc/nginx/conf.d/*.conf",
+    "/etc/nginx/sites-available/*",
+    "/etc/nginx/sites-enabled/*"
+  ],
+  "validatorExec": "/usr/sbin/nginx",
+  "validatorArgv": ["-t", "-c"],
+  "healthCheckCmd": ["/usr/sbin/nginx", "-t"],
+  "healthTimeoutSec": 10
+}
+EOF_NGINX
+      chmod 0644 "${AI_PROFILES_DIR}/nginx.json"
+      chown root:root "${AI_PROFILES_DIR}/nginx.json"
+    fi
+
+    # Unpack rootfs tarball if present
+    if [[ -n "$AI_ROOTFS_TAR_SRC" && -f "$AI_ROOTFS_TAR_SRC" ]]; then
+      tar -xzf "$AI_ROOTFS_TAR_SRC" -C "$AI_ROOTFS_DIR" 2>/dev/null || true
+    fi
+    if [[ -n "$AI_ROOTFS_MANIFEST_SRC" && -f "$AI_ROOTFS_MANIFEST_SRC" ]]; then
+      cp -f "$AI_ROOTFS_MANIFEST_SRC" "$AI_ROOTFS_MANIFEST"
+      chmod 0644 "$AI_ROOTFS_MANIFEST"
+      chown root:root "$AI_ROOTFS_MANIFEST"
+    fi
+
+    # Install binaries
+    if [[ -n "$AI_HOST_HELPER_SRC" && -f "$AI_HOST_HELPER_SRC" ]]; then
+      install -m 0755 "$AI_HOST_HELPER_SRC" "$AI_HELPER_DEST"
+    fi
+    if [[ -n "$AI_EXECUTOR_SRC" && -f "$AI_EXECUTOR_SRC" ]]; then
+      install -m 0755 "$AI_EXECUTOR_SRC" "$AI_EXECUTOR_DEST"
+    fi
+
+    # Resolve UID and GID for helper pinned identity and config injection
+    AI_UID_NUM=$(id -u "$AI_USER" 2>/dev/null || echo "1001")
+    AI_GID_NUM=$(getent group "$AI_GROUP" | cut -d: -f3 2>/dev/null || echo "1001")
+
+    mkdir -p "/var/lib/flexserver-ai/backups" "/var/lib/flexserver-ai/scratch"
+    chmod 0700 "/var/lib/flexserver-ai/backups"
+
+    # Write and start helper unit
+    cat << EOF_HELPER > "$AI_HELPER_UNIT_FILE"
+[Unit]
+Description=FlexServer AI Host Helper
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=${AI_GROUP}
+RuntimeDirectory=flexserver-ai
+RuntimeDirectoryMode=0770
+ExecStart=${AI_HELPER_DEST} --socket ${AI_HELPER_SOCKET} --socket-mode 0660 --socket-uid 0 --socket-gid %G --profiles-dir ${AI_PROFILES_DIR} --execution-uid ${AI_UID_NUM} --execution-gid ${AI_GID_NUM} --executor-binary ${AI_EXECUTOR_DEST} --rootfs-dir ${AI_ROOTFS_DIR} --backups-dir /var/lib/flexserver-ai/backups
+Restart=on-failure
+RestartSec=2
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SYS_CHROOT CAP_MKNOD CAP_SYS_ADMIN CAP_KILL CAP_DAC_OVERRIDE
+NoNewPrivileges=no
+PrivateTmp=yes
+PrivateDevices=no
+ProtectSystem=full
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=no
+ReadWritePaths=/etc /var/lib/flexserver-ai /run/flexserver-ai
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+EOF_HELPER
+    chmod 0644 "$AI_HELPER_UNIT_FILE"
+    systemctl daemon-reload
+    systemctl enable "${AI_HELPER_SERVICE_NAME}"
+    systemctl restart "${AI_HELPER_SERVICE_NAME}"
+    echo "  Started ${AI_HELPER_SERVICE_NAME}"
+    # Update config.json with AI block
+    if command -v node &>/dev/null; then
+      node -e "
+        const fs = require('fs');
+        const cfg = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+        cfg.ai = {
+          enabled: true,
+          executionUid: parseInt(process.argv[2], 10),
+          executionGid: parseInt(process.argv[3], 10),
+          helperSocketPath: process.argv[4],
+          executorPath: process.argv[5],
+          scratchRootPath: process.argv[6],
+          statePath: process.argv[7],
+          rootfsDirPath: process.argv[8],
+          rootfsManifestPath: process.argv[9],
+          profilesDirPath: process.argv[10],
+          maxConcurrentTasks: 1
+        };
+        fs.writeFileSync(process.argv[1], JSON.stringify(cfg, null, 2) + '\n');
+      " "$CONFIG_FILE" "$AI_UID_NUM" "$AI_GID_NUM" "$AI_HELPER_SOCKET" "$AI_EXECUTOR_DEST" "$AI_SCRATCH_DIR" "$AI_STATE_FILE" "$AI_ROOTFS_DIR" "$AI_ROOTFS_MANIFEST" "$AI_PROFILES_DIR"
+    fi
+  fi
 fi
 
+# Supplementary groups for the agent service
+SUPP_GROUPS=()
+if [[ -n "$DOCKER_SUPPLEMENTARY_GROUPS" ]]; then
+  SUPP_GROUPS+=("$DOCKER_SUPPLEMENTARY_GROUPS")
+fi
+if [[ "$INSTALL_AI" == "true" ]]; then
+  SUPP_GROUPS+=("$AI_GROUP")
+fi
+SUPP_GROUPS_LINE=""
+if [[ ${#SUPP_GROUPS[@]} -gt 0 ]]; then
+  SUPP_GROUPS_LINE="SupplementaryGroups=$(IFS=' '; echo "${SUPP_GROUPS[*]}")"
+fi
+RESTRICT_NAMESPACES_LINE="RestrictNamespaces=true"
+if [[ "$INSTALL_AI" == "true" ]]; then
+  RESTRICT_NAMESPACES_LINE="RestrictNamespaces=false"
+fi
+# Write systemd unit
 UNIT_CONTENT=$(
   cat <<UNIT
 [Unit]
@@ -692,7 +988,7 @@ ProtectControlGroups=true
 SystemCallFilter=@system-service
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictRealtime=true
-RestrictNamespaces=true
+${RESTRICT_NAMESPACES_LINE}
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RemoveIPC=true
@@ -712,6 +1008,15 @@ else
   chmod 0644 "$UNIT_FILE"
   echo "  Written systemd unit: ${UNIT_FILE}"
 fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "  [DRY-RUN] Would run offline config validation: ${BINARY_DEST} -config ${CONFIG_FILE} -validate-config"
+  else
+    echo "  Running offline config validation..."
+    "$BINARY_DEST" -config "$CONFIG_FILE" -validate-config || {
+      echo "Error: Agent offline config validation failed" >&2
+      exit 1
+    }
+  fi
 
 # Reload and start
 if [[ "$DRY_RUN" == "true" ]]; then

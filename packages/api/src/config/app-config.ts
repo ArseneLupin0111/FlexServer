@@ -6,6 +6,7 @@ import { z } from "zod";
 import { validateExternalSecretPath } from "../ssh/key-encryption.js";
 import type { ComposeCryptoConfig } from "../crypto/compose-crypto-config.js";
 import { resolveComposeKeyringFilePath } from "../crypto/compose-crypto-config.js";
+import { resolveAiKeyringFilePath } from "../ai/ai-crypto.js";
 export type AppMode = "demo" | "local";
 export type StorageDriver = "json" | "postgres";
 
@@ -66,6 +67,10 @@ export type AppConfig = {
     inventoryMaxBytes: number;
     previewTtlSeconds: number;
   };
+  ai: {
+    enabled: boolean;
+    keyringFile: string;
+  };
 };
 
 const booleanSchema = z
@@ -76,6 +81,7 @@ const booleanSchema = z
 const envSchema = z.object({
   APP_MODE: z.enum(["demo", "local"]).default("demo"),
   ENABLE_WEB_TERMINAL: booleanSchema.default("false"),
+  APP_AI_ENABLED: booleanSchema.default("false"),
   ALLOW_PRIVATE_NETWORK_TARGETS: booleanSchema.default("false"),
   DATA_DIR: z.string().trim().min(1).default("data"),
   PRIVATE_DIR: z.string().trim().min(1).default("private"),
@@ -180,6 +186,10 @@ const envSchema = z.object({
     (value) => (value === "" ? undefined : value),
     z.string().trim().optional(),
   ),
+  AI_KEYRING_FILE: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().trim().optional(),
+  ),
   COMPOSE_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(30).max(3_600).default(120),
   COMPOSE_INVENTORY_MAX_BYTES: z.coerce.number().int().min(64 * 1024).max(8 * 1024 * 1024).default(512 * 1024),
   COMPOSE_PREVIEW_TTL_SECONDS: z.coerce.number().int().min(60).max(3_600).default(300),
@@ -221,6 +231,10 @@ export function parseAppConfig(
       { dataDir: parsed.DATA_DIR, privateDir: parsed.PRIVATE_DIR },
     ),
   };
+  const aiKeyringFile = resolveAiKeyringFilePath(
+    parsed.AI_KEYRING_FILE,
+    { dataDir: parsed.DATA_DIR, privateDir: parsed.PRIVATE_DIR },
+  );
   if (parsed.APP_MODE === "local") {
     if (!parsed.DASHBOARD_SESSION_SECRET) {
       throw new Error(
@@ -346,6 +360,10 @@ export function parseAppConfig(
       claimLeaseSeconds: parsed.COMPOSE_CLAIM_LEASE_SECONDS,
       inventoryMaxBytes: parsed.COMPOSE_INVENTORY_MAX_BYTES,
       previewTtlSeconds: parsed.COMPOSE_PREVIEW_TTL_SECONDS,
+    },
+    ai: {
+      enabled: parsed.APP_AI_ENABLED,
+      keyringFile: aiKeyringFile,
     },
     localFilesSocketPath: parsed.LOCAL_FILES_SOCKET_PATH,
     terminal: {

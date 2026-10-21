@@ -8,6 +8,7 @@ import { cn } from "../lib/utils";
 import { formatThroughput } from "../components/dashboard/metrics/historySeries";
 import {
   AuditPanel,
+  AssistantPanel,
   JobsPanel,
   MetricsPanel,
   OverviewPanel,
@@ -88,6 +89,7 @@ const EMPTY_CURRENT_TARGETS: DockerCurrentContainer[] = [];
 
 const workspaceSubPages = [
   { label: "Overview", to: "", end: true },
+  { label: "Assistant", to: "assistant", end: false },
   { label: "Metrics", to: "metrics", end: false },
   { label: "Docker", to: "docker", end: false },
   { label: "Jobs", to: "jobs", end: false },
@@ -880,6 +882,11 @@ export function VpsWorkspaceFilesPage() {
     </div>
   );
 }
+export function VpsWorkspaceAssistantPage() {
+  const { vps } = useVpsWorkspace();
+  return <AssistantPanel vps={vps} />;
+}
+
 
 export function VpsWorkspaceSettingsPage() {
   const { vps, overview } = useVpsWorkspace();

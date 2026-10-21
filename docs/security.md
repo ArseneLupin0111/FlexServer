@@ -225,3 +225,47 @@ The JSON adapter is a single-writer store: do not run multiple API processes aga
 `DASHBOARD_PUBLIC_ORIGIN` must match the browser dashboard origin exactly (scheme, hostname, and optional port). After changing the public dashboard domain, update both the deployment `.env` and the GitHub Actions repository variable `DASHBOARD_PUBLIC_ORIGIN`, then recreate the API container so it receives the new environment. Do not disable origin checks or add a permissive host fallback.
 
 A rejected WebSocket upgrade can appear as a connection error before any SSH connection is attempted. An unauthenticated upgrade with the configured Origin reaches the authentication gate (`401`); a mismatched Origin is rejected with `403` while terminal access is enabled. Verify the authenticated terminal path as well, using a real command output rather than the shell's input echo.
+
+## AI provider transport and encryption
+
+The AI adapter uses an explicitly configured OpenAI-compatible endpoint. It sends non-streaming chat-completion requests with a 60-second deadline, a 1 MiB request/response limit, bounded tool calls, and strict response decoding. Returned tool calls are proposals, not execution permission. Redirects and automatic provider fallback are rejected. Every resolved address is checked before connecting to a pinned address; TLS verification and the original hostname/SNI remain enabled. Metadata/link-local targets are forbidden even with private-endpoint consent. Plain HTTP is limited to explicitly opted-in loopback development endpoints; remote providers require HTTPS.
+
+AI secrets use a separate external keyring and the authenticated namespace `flexserver:ai:v1`. Envelopes bind VPS, task, field and revision; changing any identity invalidates decryption. Wrapped-key rotation preserves the encrypted payload and requires retaining old keys until all retained envelopes are rewrapped. Missing or invalid key material fails closed; there is no plaintext fallback. Do not reuse Compose or SSH keyring files for AI, mount provider credentials into agents, or log provider request/response bodies. Provider failures expose fixed error messages, not remote error bodies.
+
+Transport verification uses a synthetic local endpoint and does not establish compatibility, privacy, tool-selection quality or billing accuracy of a real provider. Host confinement and mutation rollout require independent Linux staging evidence; passing adapter tests does not authorize VPS operations.
+
+## AI Assistant Operational Safety, Retention, and Secret Redaction
+
+### Retention semantics and state fences
+
+1. **Scheduled retention lifecycle:** `AiRetentionService` runs a lightweight 5-second session/lease reconciliation loop and a periodic 300-second retention pass.
+2. **Terminal task pruning:** Only tasks in terminal states (`succeeded`, `failed`, `cancelled`, `expired`) older than the 30-day cutoff are pruned. Active tasks (`planning`, `awaiting_input`, `awaiting_approval`, `executing`, `verifying`, `cancel_requested`) and `uncertain` tasks are strictly preserved and never TTL-deleted.
+3. **Durable fence and receipt preservation:** Any task associated with active outbox entries (`pending` or `dispatched`) or `uncertain` execution receipts is protected from retention deletion. Terminal task pruning purges only resolved receipts and acknowledged outbox entries, keeping all fences intact.
+4. **Needed execution blob protection:** Encrypted execution blobs (`AiExecutionBlob`) are deleted on expiration only if not needed by an active or uncertain task, active outbox commands, or uncertain receipts. Needed blobs remain durable until their associated work settles.
+5. **Audit preservation on chat deletion:** Deleting a chat conversation (`deleteConversation`) deletes conversation metadata and messages but preserves all historical audit events (`state.auditEvents`) and records an immutable deletion audit event. Audit records are maintained under the 90-day retention baseline.
+
+### Startup recovery and session revocation
+
+1. **Immediate session revocation enforcement:** When an initiating or approving dashboard session logs out or is revoked in `DashboardSessionService`:
+   - Tasks in `executing` or `verifying` are transitioned to `cancel_requested` with code `session_revoked`, instructing the agent to terminate execution on its next heartbeat rather than running detached.
+   - Tasks in `planning`, `awaiting_approval`, or `awaiting_input` are expired immediately with code `session_revoked`.
+2. **Owner lease expiration:** Tasks in `executing` or `verifying` whose runtime owner lease expires without fresh heartbeat/receipt are transitioned to `uncertain` with wire code `uncertain_outcome`, preserving the active-slot fence without duplicate execution. Stale `planning` leases expire to unblock VPS crashes.
+3. **Awaiting task expiration:** Tasks remaining in `awaiting_approval`, `awaiting_input`, or `planning` past their `expiresAt` deadline are transitioned to `expired` with wire code `approval_expired`.
+
+### Secret redaction and streaming boundaries
+
+1. **Shared secret redaction:** All outgoing responses and provider communications pass through `packages/api/src/common/redaction.ts`. Redaction matches private key PEM blocks, SSH keys, passwords, bearer tokens, scoped `vma_` tokens, `sk-` provider keys, generic secret assignments, and `.env` variable assignments.
+2. **ANSI escape stripping:** Terminal and subprocess output undergoes ANSI sequence stripping before pattern matching to prevent escape code fragmentation from evading secret redaction.
+3. **Chunk boundary streaming redactor:** `ChunkRedactor` buffers stream chunks across packet boundaries to detect and redact split tokens or headers that cross chunk splits, using line-oriented buffering and dedicated PEM block masking.
+4. **Exact preview byte preservation:** Authenticated execution preview payloads are exempted from output value mutation to guarantee that script/content byte digests match during subsequent approval verification.
+5. **Operational limits:** Production deployment of AI assistant host execution and multi-node confinement has NOT been verified. Passing local unit tests and simulated adapter runs does not guarantee provider reliability, billing boundaries, or safe confinement on production Linux hosts.
+
+### Host Confinement Runtime (ai-host-helper / ai-executor)
+
+1. **Privileged helper is a small socket daemon:** `ai-host-helper` runs as root, exposes a Unix domain socket, and authenticates every connection via `SO_PEERCRED`. Authorized peers are limited to root, the helper daemon's own effective UID, explicit `--socket-uid`/`--socket-gid` values, and the pinned execution UID/GID. All other peers are rejected.
+2. **Bounded RPC surface:** The helper implements only `service_status`, `service_action`, `config_validate`, `config_apply`, `cgroup_create`, `cgroup_kill`, and `task_execute`. Every RPC re-validates task IDs, profile membership, and pinned paths before acting.
+3. **Pinned execution identity:** `--execution-uid`, `--execution-gid`, `--executor-binary`, `--rootfs-dir`, `--cgroup-base`, and `--backups-dir` are set by the administrator at install time. Callers cannot arbitrate the execution UID/GID or the executor binary path; the helper launches `/usr/local/sbin/ai-executor` only inside fresh mount/PID/IPC/UTS namespaces and drops to the pinned UID/GID before exec.
+4. **cgroup v2 requirement:** `cgroup_create`, `task_execute`, and shell tooling fail closed with `cgroup v2 unavailable: unified cgroup hierarchy required` on hosts lacking `/sys/fs/cgroup/cgroup.controllers`. There is no cgroup v1 fallback and no unconfined execution fallback (verified on a cgroup v1 Docker Linux engine).
+5. **Config CAS mutations via helper:** `config_apply` enforces pre-image and post-image SHA-256 digests, writes 0640 root-owned backups under `--backups-dir`, and atomically replaces the candidate via temp file + rename with directory fsync. Digest drift is rejected without any disk mutation.
+6. **Profile installation is an administrator step:** Service profiles are root-owned JSON files under the root-owned `--profiles-dir` (binary default `/etc/vps-manager/ai-profiles.d`; the installer uses `/etc/flexserver-ai/profiles` and passes it explicitly), 0644 mode, UID 0, and not group/world writable. The profile registry rejects group/world-writable files and non-root ownership, and no default profile is seeded implicitly.
+7. **Installer surface (`scripts/install/install-local-agent.sh`):** The AI subsystem is installed only when the administrator passes `--install-ai` (or one of the AI component flags). The installer provisions the dedicated AI user/group, installs the helper/executor binaries to `/usr/local/sbin`, unpacks the rootfs tarball and manifest, and populates the profile directory; `--help` and `--dry-run` make zero filesystem writes and zero network calls.

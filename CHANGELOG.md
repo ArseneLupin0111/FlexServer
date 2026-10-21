@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased — AI Docker bridge approval digest consumption
+
+- Bridge `docker_action`/`compose_*` proposals now execute only through consume-once approval: the API CAS-approves the stored plan (matching `planVersion`/`planDigest`) to `consumed`, then re-reads it before transitioning the task to `executing` and verifies the re-read plan digest matches the approved digest; any mismatch or replay fails as `stale_plan` instead of proceeding.
+- Removed the bridge's executing-state fallback: `AiDockerBridgeService.execute` accepts only `approved`/`consumed` plans, so authorization can never be granted by task state alone.
+- Refusal smoke against real JSON persistence + real Nest HTTP wiring passed with exact target rejections: Docker/Compose opt-out via policy or per-VPS setting → `policy_denied`; protected container and protected compose application → `protected_target`; precondition drift (`running` → `exited`) on the exact target container → 409 `target_changed`; the operations queue remained empty, so no positive Docker action, cgroup v2 execution, or real nginx staging proof is claimed.
+- Stopped the task-owned `ai-api-browser-compiled` and `ai-isolated-styled-web` services and deleted the task-created throwaway smoke harness files and temporary keyring fixture. No other smoke artifacts or services were touched.
+
+## Unreleased — AI assistant operational safety, retention scheduling, and secret redaction
+
+- Add `AiRetentionService` with real periodic scheduling: 5-second active task reconciliation loop and 300-second retention pruning pass.
+- Prune terminal tasks older than 30 days while strictly preserving active and uncertain tasks, active outbox commands, and uncertain receipts.
+- Protect execution blobs from expiration deletion while referenced by active or uncertain tasks, active outbox commands, or uncertain receipts.
+- Preserve audit records across conversation deletion and record an immutable deletion audit event under the 90-day retention baseline.
+- Reconcile active tasks at startup and during periodic maintenance: expire stale planning leases and expired awaiting tasks, reconcile expired execution leases to `uncertain` to maintain fences without re-execution, and transition running tasks to `cancel_requested` upon session logout or revocation.
+- Centralize shared secret redaction in `common/redaction.ts` covering PEM private keys, SSH keys, passwords, bearer tokens, scoped `vma_` tokens, `sk-` provider keys, `.env` assignments, and ANSI sequence stripping to prevent escape-based bypass.
+- Add `ChunkRedactor` with line-oriented buffering and PEM block masking for multi-packet streaming secret detection without leaking token prefixes across chunk splits.
+- Redact provider responses and outgoing API endpoints via `AiResponseInterceptor`, exempting authenticated execution preview exact payloads to maintain byte digest verification.
+- Operational limitation: Production readiness of AI assistant orchestration, confinement, and real-provider execution remains unverified; local unit tests and simulated adapter runs do not constitute production readiness.
+
+## Unreleased — AI provider transport and encrypted payload primitives
+
+- Add a bounded OpenAI-compatible provider adapter with DNS-pinned endpoint validation, verified TLS, explicit private-endpoint consent, rejected redirects, strict tool-call decoding and fixed safe transport errors. Tool responses do not authorize execution.
+- Add separate AI-namespaced envelope encryption and wrapped-key rotation bound to VPS/task/field/revision. No plaintext fallback when external key material is unavailable.
+- Verify adapter behavior against a synthetic local HTTP endpoint; real-provider compatibility and Linux host mutation/confinement acceptance remain separate rollout gates.
+- Restore compilable AI repository source and a serialized JSON adapter; local runtime smoke verifies durable task admission, idempotent replay and active-task exclusion. End-to-end AI execution remains unavailable and unverified.
+- Route privileged AI host operations through the pinned root `ai-host-helper` (`SO_PEERCRED` auth, fixed RPC surface) and namespace-confine shell execution via `ai-executor` with cgroup v2 scopes; both fail closed without cgroup v2, and refused helper RPCs leave the caller's task state untouched.
+- Add installer wiring for the isolated AI subsystem (`--install-ai`, AI binary/rootfs/profile flags) to `install-local-agent.sh`; `--help`/`--dry-run` list and print the plan with zero writes and zero network, and group access is granted only via the generated systemd `SupplementaryGroups`, not shell `usermod`.
+- Fix Linux stat ownership checks in the AI profile registry and helper validator to handle `syscall.Stat_t` properly; smoke verified service-action safety policy, protected-path denial, atomic CAS with backup and drift rejection, and fail-closed cgroup/execution on a cgroup v1 Linux engine.
 ## Unreleased — Docker Compose applications (phase 2) packaging and security docs
 
 - Refine Docker investigation and Compose application layout for desktop and mobile; distinguish an absent Compose scan from confirmed runtime unavailability, disclose diagnostic codes separately, and explain freshness requirements before runtime preparation.

@@ -1,0 +1,27 @@
+{
+  "id": "nginx",
+  "version": 1,
+  "serviceUnit": "nginx.service",
+  "allowedActions": [
+    "status",
+    "start",
+    "restart",
+    "reload"
+  ],
+  "allowedConfigPaths": [
+    "/etc/nginx/nginx.conf",
+    "/etc/nginx/conf.d/*.conf",
+    "/etc/nginx/sites-available/*",
+    "/etc/nginx/sites-enabled/*"
+  ],
+  "validatorExec": "/usr/sbin/nginx",
+  "validatorArgv": [
+    "-t",
+    "-c"
+  ],
+  "healthCheckCmd": [
+    "/usr/sbin/nginx",
+    "-t"
+  ],
+  "healthTimeoutSec": 10
+}

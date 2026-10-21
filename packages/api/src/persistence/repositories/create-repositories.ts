@@ -62,6 +62,11 @@ import {
 import { createPostgresSettingsRepository } from "./settings.postgres.repository.js";
 import { createJsonApplicationsInventoryRepository, type ApplicationsInventoryRepository } from "./applications-inventory.repository.js";
 import { createPostgresApplicationsInventoryRepository } from "./applications-inventory.postgres.repository.js";
+import {
+  createJsonAiRepository,
+  createPostgresAiRepository,
+} from "./ai.repository.js";
+import type { AiRepository } from "./ai.persistence.js";
 
 import { registerComposeAdminContextFactory } from "../../crypto/secret-envelope.js";
 import { createComposeAdminContext } from "./compose-admin-registry.js";
@@ -82,6 +87,7 @@ export type RepositorySet = {
   localUpgrades: LocalUpgradeRepository;
   settings: SettingsRepository;
   applicationsInventory: ApplicationsInventoryRepository;
+  ai?: AiRepository;
   pool?: Pool;
 };
 
@@ -112,6 +118,7 @@ export function createRepositories(
       localUpgrades: createPostgresLocalUpgradeRepository(pool),
       settings: createPostgresSettingsRepository(pool),
       applicationsInventory: createPostgresApplicationsInventoryRepository(pool),
+      ai: createPostgresAiRepository(pool),
     };
   }
 
@@ -144,5 +151,6 @@ export function createRepositories(
     settings: createJsonSettingsRepository(
       join(config.dataDir, "settings.json"),
     ),
+    ai: createJsonAiRepository(join(config.dataDir, "ai.json")),
   };
 }

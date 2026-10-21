@@ -57,10 +57,9 @@ for arg in "$@"; do
       echo "Usage: sudo $0 [options]"
       echo ""
       echo "Options:"
-      echo "  --help                    Show this help."
-      echo "  --dry-run                 Print what would be done without making changes."
-      echo ""
-      echo "See the script header or '--help' after bootstrap for the full list."
+      echo "  --enable-ai               Install and enable isolated AI worker subsystem (default: off)."
+      echo "                            Full AI options are listed in the script header of"
+      echo "                            scripts/install/install-local-agent.sh."
       exit 0
       ;;
     --dry-run)
@@ -151,6 +150,7 @@ random_hex() {
 
 # ── Arg parsing ───────────────────────────────────────────────────────────
 ENABLE_LOCAL_TERMINAL=false
+ENABLE_AI=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -178,6 +178,7 @@ while [[ $# -gt 0 ]]; do
       echo "                            root-equivalent; only needed if Docker metrics are"
       echo "                            enabled via the dashboard."
       echo "  --enable-local-terminal   Enable local host web terminal daemon (host-pty) and compose mount."
+      echo "  --enable-ai               Install and enable isolated AI worker subsystem (default: off)."
       exit 0 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --app-dir) APP_DIR="$2"; shift 2 ;;
@@ -194,6 +195,7 @@ while [[ $# -gt 0 ]]; do
     --rotate-agent) ROTATE_AGENT=true; shift ;;
     --enable-docker-metrics-access) ENABLE_DOCKER_METRICS_ACCESS=true; shift ;;
     --enable-local-terminal) ENABLE_LOCAL_TERMINAL=true; shift ;;
+    --enable-ai|--install-ai) ENABLE_AI=true; shift ;;
     *)
       echo "Error: Unknown argument: $1"
       echo "Usage: sudo $0 [options]"
@@ -781,6 +783,48 @@ EOF
       fi
     fi
   fi
+  AI_EXECUTOR_TMP=""
+  AI_HELPER_TMP=""
+  AI_ROOTFS_TAR_TMP=""
+  AI_ROOTFS_MANIFEST_TMP=""
+  AI_PROFILES_TMP=""
+  if [[ "$ENABLE_AI" == "true" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would extract AI executor, helper, rootfs, manifest, profiles from API container..."
+    else
+      AI_EXECUTOR_TMP="$(mktemp)"
+      INSTALLER_TMP_FILES+=("$AI_EXECUTOR_TMP")
+      if docker cp "${API_CONTAINER}:/app/agent/ai-executor-linux-amd64" "$AI_EXECUTOR_TMP" &>/dev/null; then
+        chmod 0755 "$AI_EXECUTOR_TMP"
+      else
+        echo "Warning: Failed to extract /app/agent/ai-executor-linux-amd64 from container" >&2
+      fi
+
+      AI_HELPER_TMP="$(mktemp)"
+      INSTALLER_TMP_FILES+=("$AI_HELPER_TMP")
+      if docker cp "${API_CONTAINER}:/app/agent/ai-host-helper-linux-amd64" "$AI_HELPER_TMP" &>/dev/null; then
+        chmod 0755 "$AI_HELPER_TMP"
+      else
+        echo "Warning: Failed to extract /app/agent/ai-host-helper-linux-amd64 from container" >&2
+      fi
+
+      AI_ROOTFS_TAR_TMP="$(mktemp)"
+      INSTALLER_TMP_FILES+=("$AI_ROOTFS_TAR_TMP")
+      if ! docker cp "${API_CONTAINER}:/app/agent/ai-rootfs-linux-amd64.tar.gz" "$AI_ROOTFS_TAR_TMP" &>/dev/null; then
+        echo "Warning: Failed to extract /app/agent/ai-rootfs-linux-amd64.tar.gz from container" >&2
+      fi
+
+      AI_ROOTFS_MANIFEST_TMP="$(mktemp)"
+      INSTALLER_TMP_FILES+=("$AI_ROOTFS_MANIFEST_TMP")
+      if ! docker cp "${API_CONTAINER}:/app/agent/ai-rootfs-linux-amd64.manifest.json" "$AI_ROOTFS_MANIFEST_TMP" &>/dev/null; then
+        echo "Warning: Failed to extract /app/agent/ai-rootfs-linux-amd64.manifest.json from container" >&2
+      fi
+
+      AI_PROFILES_TMP="$(mktemp -d)"
+      INSTALLER_TMP_FILES+=("$AI_PROFILES_TMP")
+      docker cp "${API_CONTAINER}:/app/agent/ai-profiles/." "$AI_PROFILES_TMP/" 2>/dev/null || true
+    fi
+  fi
   # Run install-local-agent.sh
   if { [[ -n "$AGENT_BIN_TMP" ]] && [[ -n "$AGENT_CONFIG_TMP" ]]; } || [[ "$DRY_RUN" == "true" ]]; then
     INSTALL_SCRIPT="$(cd "$(dirname "$0")" && pwd)/install-local-agent.sh"
@@ -824,6 +868,24 @@ EOF
         fi
         if [[ -n "${API_UID_GID:-}" ]]; then
           AGENT_INSTALL_ARGS+=(--api-uid-gid "$API_UID_GID")
+        fi
+      fi
+      if [[ "$ENABLE_AI" == "true" ]]; then
+        AGENT_INSTALL_ARGS+=(--install-ai)
+        if [[ -n "$AI_EXECUTOR_TMP" ]]; then
+          AGENT_INSTALL_ARGS+=(--ai-executor-binary "$AI_EXECUTOR_TMP")
+        fi
+        if [[ -n "$AI_HELPER_TMP" ]]; then
+          AGENT_INSTALL_ARGS+=(--ai-host-helper-binary "$AI_HELPER_TMP")
+        fi
+        if [[ -n "$AI_ROOTFS_TAR_TMP" ]]; then
+          AGENT_INSTALL_ARGS+=(--ai-rootfs-tar "$AI_ROOTFS_TAR_TMP")
+        fi
+        if [[ -n "$AI_ROOTFS_MANIFEST_TMP" ]]; then
+          AGENT_INSTALL_ARGS+=(--ai-rootfs-manifest "$AI_ROOTFS_MANIFEST_TMP")
+        fi
+        if [[ -n "$AI_PROFILES_TMP" ]]; then
+          AGENT_INSTALL_ARGS+=(--ai-profiles-dir "$AI_PROFILES_TMP")
         fi
       fi
       if [[ "$DRY_RUN" == "true" ]]; then

@@ -7,3 +7,4 @@ export { TerminalPanel } from "./terminal/TerminalPanel";
 export { SettingsPanel } from "./settings/SettingsPanel";
 export { FilesPanel } from "./files/FilesPanel";
 export { SftpSettingsCard } from "./files/SftpSettingsCard";
+export { AssistantPanel } from "./assistant/AssistantPanel";

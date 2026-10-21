@@ -15,7 +15,25 @@ type Config struct {
 	Token                 string `json:"token"`
 	IntervalSeconds       int    `json:"intervalSeconds"`
 	RequestTimeoutSeconds int    `json:"requestTimeoutSeconds"`
-	StatePath             string `json:"statePath,omitempty"`
+	StatePath             string   `json:"statePath,omitempty"`
+	AI                    AIConfig `json:"ai"`
+}
+
+// AIConfig holds configuration for the isolated AI worker subsystem.
+// Zero-value means AI is disabled (default-off).
+type AIConfig struct {
+	Enabled            bool   `json:"enabled"`
+	ExecutionUID       int    `json:"executionUid"`
+	ExecutionGID       int    `json:"executionGid"`
+	HelperSocketPath   string `json:"helperSocketPath"`
+	ExecutorPath       string `json:"executorPath"`
+	ScratchRootPath    string `json:"scratchRootPath"`
+	StatePath          string `json:"statePath"`
+	RootfsDirPath      string `json:"rootfsDirPath"`
+	RootfsManifestPath string `json:"rootfsManifestPath"`
+	ProfilesDirPath    string `json:"profilesDirPath"`
+	MaxConcurrentTasks int    `json:"maxConcurrentTasks"`
+	ExecuteTokenFile   string `json:"executeTokenFile"`
 }
 
 // Load reads and validates a config file from the given path.
@@ -68,6 +86,38 @@ func (c *Config) Validate() error {
 
 	// Normalize: strip trailing slash so path joining is clean
 	c.BackendUrl = strings.TrimRight(c.BackendUrl, "/")
+	if c.AI.Enabled {
+		if c.AI.ExecutionUID <= 0 {
+			return fmt.Errorf("ai executionUid must be > 0")
+		}
+		if c.AI.ExecutionGID <= 0 {
+			return fmt.Errorf("ai executionGid must be > 0")
+		}
+		if c.AI.HelperSocketPath == "" {
+			return fmt.Errorf("ai helperSocketPath is required")
+		}
+		if c.AI.ExecutorPath == "" {
+			return fmt.Errorf("ai executorPath is required")
+		}
+		if c.AI.ScratchRootPath == "" {
+			return fmt.Errorf("ai scratchRootPath is required")
+		}
+		if c.AI.StatePath == "" {
+			return fmt.Errorf("ai statePath is required")
+		}
+		if c.AI.RootfsDirPath == "" {
+			return fmt.Errorf("ai rootfsDirPath is required")
+		}
+		if c.AI.RootfsManifestPath == "" {
+			return fmt.Errorf("ai rootfsManifestPath is required")
+		}
+		if c.AI.ProfilesDirPath == "" {
+			return fmt.Errorf("ai profilesDirPath is required")
+		}
+		if c.AI.MaxConcurrentTasks < 1 {
+			return fmt.Errorf("ai maxConcurrentTasks must be >= 1")
+		}
+	}
 
 	return nil
 }
@@ -86,7 +136,7 @@ func isLoopbackHost(host string) bool {
 // String returns a sanitized representation that never includes the token.
 func (c *Config) String() string {
 	return fmt.Sprintf(
-		"Config{BackendUrl: %s, VpsId: %s, Token: [redacted], IntervalSeconds: %d, RequestTimeoutSeconds: %d}",
-		c.BackendUrl, c.VpsId, c.IntervalSeconds, c.RequestTimeoutSeconds,
+		"Config{BackendUrl: %s, VpsId: %s, Token: [redacted], IntervalSeconds: %d, RequestTimeoutSeconds: %d, AIEnabled: %t}",
+		c.BackendUrl, c.VpsId, c.IntervalSeconds, c.RequestTimeoutSeconds, c.AI.Enabled,
 	)
 }

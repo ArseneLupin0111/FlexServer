@@ -4,6 +4,7 @@ import { Route, Routes } from "react-router-dom";
 import { DashboardProvider } from "./context/DashboardContext";
 import {
   VpsWorkspaceAuditPage,
+  VpsWorkspaceAssistantPage,
   VpsWorkspaceDockerContainerPage,
   VpsWorkspaceDockerPage,
   VpsWorkspaceJobsPage,
@@ -162,6 +163,7 @@ export default function DashboardApp() {
           <Route path="/vps/new" element={<VpsNewPage />} />
           <Route path="/vps/:vpsId" element={<VpsWorkspaceLayout />}>
             <Route index element={<VpsWorkspaceOverviewPage />} />
+            <Route path="assistant" element={<VpsWorkspaceAssistantPage />} />
             <Route path="metrics" element={<VpsWorkspaceMetricsPage />} />
             <Route path="docker" element={<VpsWorkspaceDockerPage />} />
             <Route

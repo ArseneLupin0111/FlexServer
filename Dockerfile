@@ -42,7 +42,31 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -o /out/local-agent-rotator-linux-amd64 ./cmd/local-agent-rotator && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -o /out/host-files-linux-amd64 ./cmd/host-files
+    -o /out/host-files-linux-amd64 ./cmd/host-files && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -o /out/ai-executor-linux-amd64 ./cmd/ai-executor && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -o /out/ai-host-helper-linux-amd64 ./cmd/ai-host-helper
+RUN mkdir -p /out/ai-rootfs/bin /out/ai-rootfs/usr/bin /out/ai-rootfs/dev /out/ai-rootfs/proc /out/ai-rootfs/sys /out/ai-rootfs/tmp /out/ai-rootfs/etc && \
+    chmod 1777 /out/ai-rootfs/tmp && \
+    cp /bin/busybox /out/ai-rootfs/bin/busybox && \
+    chmod 0755 /out/ai-rootfs/bin/busybox && \
+    for tool in sh ps cat ls sleep pwd echo wc head tail grep du stat dd md5sum sha256sum true false date env split uniq cut awk find sort tr yes readlink basename dirname mktemp bzip2 gzip mkdir touch rm cp mv ln chmod chown test "["; do \
+        ln -sf /bin/busybox /out/ai-rootfs/bin/$tool; \
+    done && \
+    tar -czf /out/ai-rootfs-linux-amd64.tar.gz -C /out/ai-rootfs . && \
+    ROOTFS_SHA=$(sha256sum /out/ai-rootfs-linux-amd64.tar.gz | awk '{print $1}') && \
+    echo "{\"version\":1,\"rootfsSha256\":\"$ROOTFS_SHA\",\"files\":[" > /out/ai-rootfs-linux-amd64.manifest.json && \
+    first=1; for f in /out/ai-rootfs/bin/*; do \
+        [ $first -eq 0 ] && echo "," >> /out/ai-rootfs-linux-amd64.manifest.json; \
+        first=0; \
+        rel="/bin/$(basename $f)"; \
+        fsha=$(sha256sum $f | awk '{print $1}'); \
+        echo "  {\"path\":\"$rel\",\"sha256\":\"$fsha\",\"mode\":493}" >> /out/ai-rootfs-linux-amd64.manifest.json; \
+    done && \
+    echo "]}" >> /out/ai-rootfs-linux-amd64.manifest.json && \
+    mkdir -p /out/ai-profiles && \
+    cp profiles/nginx.json /out/ai-profiles/nginx.json
 FROM node:24-alpine AS api-runtime
 ENV NODE_ENV=production \
     AGENT_BINARY_PATH=/app/agent/vps-agent-linux-amd64 \
@@ -61,6 +85,11 @@ COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-updater-linux-am
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-pty-linux-amd64 /app/agent/host-pty-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/local-agent-rotator-linux-amd64 /app/agent/local-agent-rotator-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-files-linux-amd64 /app/agent/host-files-linux-amd64
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-executor-linux-amd64 /app/agent/ai-executor-linux-amd64
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-host-helper-linux-amd64 /app/agent/ai-host-helper-linux-amd64
+COPY --from=agent-builder --chown=app:app --chmod=0644 /out/ai-rootfs-linux-amd64.tar.gz /app/agent/ai-rootfs-linux-amd64.tar.gz
+COPY --from=agent-builder --chown=app:app --chmod=0644 /out/ai-rootfs-linux-amd64.manifest.json /app/agent/ai-rootfs-linux-amd64.manifest.json
+COPY --from=agent-builder --chown=app:app /out/ai-profiles /app/agent/ai-profiles
 COPY scripts/install/install-host-files.sh /app/scripts/install-host-files.sh
 RUN ln -s /app/agent/local-agent-rotator-linux-amd64 /usr/local/bin/local-agent-rotation-client && \
     ln -s /app/agent/local-agent-rotator-linux-amd64 /usr/local/bin/flexserver-local-agent-rotator

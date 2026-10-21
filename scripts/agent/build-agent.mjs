@@ -28,11 +28,14 @@ const updaterOutputPath = join(outputDir, "vps-updater-linux-amd64");
 const hostPtyOutputPath = join(outputDir, "host-pty-linux-amd64");
 const hostFilesOutputPath = join(outputDir, "host-files-linux-amd64");
 const rotatorOutputPath = join(outputDir, "local-agent-rotator-linux-amd64");
+const aiExecutorOutputPath = join(outputDir, "ai-executor-linux-amd64");
+const aiHostHelperOutputPath = join(outputDir, "ai-host-helper-linux-amd64");
 const nativeExt = process.platform === "win32" ? ".exe" : "";
 const hostPtyNativePath = join(outputDir, `host-pty${nativeExt}`);
 const hostFilesNativePath = join(outputDir, `host-files${nativeExt}`);
 const rotatorNativePath = join(outputDir, `local-agent-rotator${nativeExt}`);
-
+const aiExecutorNativePath = join(outputDir, `ai-executor${nativeExt}`);
+const aiHostHelperNativePath = join(outputDir, `ai-host-helper${nativeExt}`);
 const GIT_SHA_RE = /^[0-9a-f]{40}$/;
 // The identity line printed by `-version` must stay inside the API upgrader's
 // VERSION_RE ([A-Za-z0-9][A-Za-z0-9._+-]{0,63}) or remote upgrades would
@@ -100,6 +103,8 @@ try {
     ["./cmd/host-pty", hostPtyOutputPath],
     ["./cmd/host-files", hostFilesOutputPath],
     ["./cmd/local-agent-rotator", rotatorOutputPath],
+    ["./cmd/ai-executor", aiExecutorOutputPath],
+    ["./cmd/ai-host-helper", aiHostHelperOutputPath],
   ]) {
     execSync('go build -ldflags "' + ldflags + '" -o "' + out + '" ' + pkg, {
       cwd: agentDir,
@@ -157,9 +162,39 @@ if (process.platform !== "linux" || process.arch !== "amd64") {
     console.warn("Native local-agent-rotator build skipped:", err.message);
   }
 }
+if (process.platform !== "linux" || process.arch !== "amd64") {
+  try {
+    execSync('go build -ldflags "' + ldflags + '" -o "' + aiExecutorNativePath + '" ./cmd/ai-executor', {
+      cwd: agentDir,
+      stdio: "inherit",
+      env: { ...process.env, CGO_ENABLED: "0" },
+    });
+  } catch (err) {
+    if (process.platform === "win32" || process.platform === "linux") {
+      console.error(`Native ai-executor build failed on ${process.platform}:`, err.message);
+      process.exit(1);
+    }
+    console.warn("Native ai-executor build skipped:", err.message);
+  }
+}
+if (process.platform !== "linux" || process.arch !== "amd64") {
+  try {
+    execSync('go build -ldflags "' + ldflags + '" -o "' + aiHostHelperNativePath + '" ./cmd/ai-host-helper', {
+      cwd: agentDir,
+      stdio: "inherit",
+      env: { ...process.env, CGO_ENABLED: "0" },
+    });
+  } catch (err) {
+    if (process.platform === "win32" || process.platform === "linux") {
+      console.error(`Native ai-host-helper build failed on ${process.platform}:`, err.message);
+      process.exit(1);
+    }
+    console.warn("Native ai-host-helper build skipped:", err.message);
+  }
+}
 
 
-for (const out of [agentOutputPath, updaterOutputPath, hostPtyOutputPath, hostPtyNativePath, hostFilesOutputPath, hostFilesNativePath, rotatorOutputPath, rotatorNativePath]) {
+for (const out of [agentOutputPath, updaterOutputPath, hostPtyOutputPath, hostPtyNativePath, hostFilesOutputPath, hostFilesNativePath, rotatorOutputPath, rotatorNativePath, aiExecutorOutputPath, aiExecutorNativePath, aiHostHelperOutputPath, aiHostHelperNativePath]) {
   if (existsSync(out)) {
     const stats = statSync(out);
     const sizeKB = (stats.size / 1024).toFixed(1);
@@ -181,4 +216,37 @@ if (existsSync(agentOutputPath)) {
   };
   writeFileSync(`${agentOutputPath}.json`, JSON.stringify(agentMeta, null, 2));
 }
+for (const [binPath, componentName] of [
+  [updaterOutputPath, "updater"],
+  [aiExecutorOutputPath, "ai-executor"],
+  [aiHostHelperOutputPath, "ai-host-helper"],
+]) {
+  if (existsSync(binPath)) {
+    const buf = readFileSync(binPath);
+    const sha = createHash("sha256").update(buf).digest("hex");
+    const meta = {
+      component: componentName,
+      os: "linux",
+      arch: "amd64",
+      version: agentVersion,
+      buildId: buildId,
+      sha256: sha,
+      size: buf.length,
+      publishedAt: new Date().toISOString(),
+    };
+    writeFileSync(`${binPath}.json`, JSON.stringify(meta, null, 2));
+  }
+}
+
+import("./build-rootfs.mjs")
+  .then(({ buildRootfs }) => {
+    try {
+      buildRootfs(outputDir);
+    } catch (err) {
+      console.warn("Rootfs build warning:", err.message);
+    }
+  })
+  .catch((err) => {
+    console.warn("Rootfs builder import warning:", err.message);
+  });
 console.log(`  identity: ${identity}`);

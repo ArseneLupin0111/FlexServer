@@ -2,6 +2,7 @@
 
 ## Unreleased — Docker Compose applications (phase 2) packaging and security docs
 
+- Refine Docker investigation and Compose application layout for desktop and mobile; distinguish an absent Compose scan from confirmed runtime unavailability, disclose diagnostic codes separately, and explain freshness requirements before runtime preparation.
 - Document the current Compose application security boundaries and rollout controls: separate per-VPS opt-in, external-source consent, no implicit start/deploy or runtime install, readiness and uncertain-operation handling, storage backup/recovery, and data-safe rollback guidance.
 - Document the packaged `node dist/scripts/manage-compose-keys.js` administration entry point and its init/check/rotate/rewrap procedures; add an opt-in read-only Compose keyring override and a separate stopped-API read-write override for one-shot administration. The standard stack and demo remain unchanged when overrides are omitted.
 - Add separately confirmed runtime preparation: reuse a trusted compatible Compose runtime without changes, or install the pinned official v2.40.3 executable with architecture-specific SHA-256 verification into an isolated FlexServer directory on supported root-run Linux agents. Missing/untrusted Docker CLI fails closed with manual installation guidance; GET, preview and deployment never install runtime.

@@ -170,19 +170,33 @@ export function ComposeCapabilityNotice({
     reasonText.includes("runtime") ||
     reasonText.includes("compose") ||
     reasonText.includes("docker");
+  const hasInventory = capability.inventory.ageSeconds !== undefined;
+  const awaitingInventory = !hasInventory || capability.admission.reasons.includes("fresh_connected_inventory_required");
+
+  if (!hasInventory) {
+    return (
+      <div className="space-y-3 border border-line bg-ink/40 p-4 sm:p-5" role="status">
+        <div>
+          <h4 className="text-[14px] font-semibold text-text">Waiting for Compose inventory</h4>
+          <p className="mt-1 max-w-prose text-[13px] leading-relaxed text-dim">The agent has not reported a Compose scan yet. Docker and Compose availability are unverified, not confirmed missing.</p>
+        </div>
+        <p className="max-w-prose text-[12px] leading-relaxed text-dim">Check that this host is using an up-to-date, connected agent with Docker access. Runtime preparation requires a fresh, complete scan.</p>
+        <Button size="sm" variant="outline" onClick={onRetry}>Refresh capability</Button>
+        {capability.reason ? <details className="text-[12px] text-dim"><summary className="cursor-pointer py-1 focus-visible:outline-signal">Diagnostic details</summary><p className="mt-2 break-words font-mono">{capability.reason}</p></details> : null}
+      </div>
+    );
+  }
 
   if (!capability.supported) {
     return (
       <div className="space-y-3">
         <EmptyState>
-          <p className="font-medium text-text">Compose applications are unavailable.</p>
-          {capability.reason ? (
-            <p className="mt-1 text-[12px]">{capability.reason}</p>
-          ) : null}
-          <p className="mt-1 text-[12px]">
-            Runtime: {capability.runtime.dockerPresent ? "Docker present" : "Docker not reported"}
-            {capability.runtime.composeVersion ? ` · Compose ${capability.runtime.composeVersion}` : " · Compose v2 plugin not installed"}.
+          <p className="font-medium text-text">Compose runtime needs attention</p>
+          <p className="mt-1 text-[12px] leading-relaxed">
+            Last reported runtime: {capability.runtime.dockerPresent ? "Docker available" : "Docker unavailable"}
+            {capability.runtime.composeVersion ? ` · Compose ${capability.runtime.composeVersion}` : " · Compatible Compose v2 runtime not reported"}.
           </p>
+          {capability.reason ? <details className="mt-3 text-left text-[12px]"><summary className="cursor-pointer py-1">Diagnostic details</summary><p className="mt-1 break-words font-mono">{capability.reason}</p></details> : null}
           {capability.inventory.completeness === false && capability.inventory.reason ? (
             <p className="mt-1 text-[12px]">Inventory: {capability.inventory.reason}</p>
           ) : null}
@@ -194,6 +208,7 @@ export function ComposeCapabilityNotice({
             <p className="text-[12px] text-dim">
               The official Docker Compose v2 plugin can be installed or prepared into an isolated FlexServer directory on the host without modifying system packages.
             </p>
+            {awaitingInventory ? <p className="text-[12px] leading-relaxed text-warn">Preparation is blocked until the agent is connected and reports a fresh, complete inventory.</p> : null}
             {prepResult ? (
               <p role="status" className="text-[12px] text-signal font-medium">{prepResult}</p>
             ) : null}
@@ -205,7 +220,7 @@ export function ComposeCapabilityNotice({
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={prepBusy}
+                  disabled={prepBusy || awaitingInventory}
                 >
                   {prepBusy ? "Preparing runtime…" : "Prepare Docker Compose runtime"}
                 </Button>
@@ -274,7 +289,7 @@ export function ComposeInventoryIncompleteNote({
 }: {
   capability: ComposeCapability | null;
 }) {
-  if (!capability || capability.inventory.completeness !== false) return null;
+  if (!capability || capability.inventory.ageSeconds === undefined || capability.inventory.completeness !== false) return null;
   return (
     <p className="text-[11px] text-warn">
       Inventory incomplete: {capability.inventory.reason ?? "the agent could not read every project"}.

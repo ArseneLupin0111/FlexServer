@@ -55,9 +55,9 @@ export function ComposeApplicationsPanel({
   return (
     <section aria-label="Compose applications" className="min-w-0 border border-line bg-panel">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
-        <div>
-          <h3 className="text-[14px] font-semibold">Applications</h3>
-          <p className="mt-0.5 text-[12px] text-dim">
+        <div className="min-w-0 flex-1 sm:pr-6">
+          <h3 className="text-[15px] font-semibold">Compose applications</h3>
+          <p className="mt-1 max-w-prose text-[12px] leading-relaxed text-dim">
             Compose projects reported by the agent's inventory. Discovered
             stacks are read-only until source verification and explicit control opt-in.
           </p>
@@ -81,16 +81,16 @@ export function ComposeApplicationsPanel({
           />
           <ComposeInventoryIncompleteNote capability={data.capability} />
 
-          {!data.loading && data.applications.length === 0 && !data.error ? (
+          {!data.loading && data.applications.length === 0 && !data.error && data.capability?.supported && !data.capability.demoDisabled && data.capability.inventory.ageSeconds !== undefined ? (
             <EmptyState>
-              No Compose applications reported yet. The inventory appears once
-              the agent reports its first Compose project scan.
+              <p className="font-medium text-text">No Compose projects in this scan</p>
+              <p className="mt-1 text-[12px] leading-relaxed">Projects appear here when the agent discovers containers belonging to a Docker Compose stack.</p>
             </EmptyState>
           ) : null}
 
           {!data.loading && data.applications.length > 0 ? (
-            <label className="flex items-center gap-2 text-[12px] text-dim" htmlFor={`compose-app-filter-${vpsId}`}>
-              Filter by management mode
+            <label className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3 text-[12px] text-dim" htmlFor={`compose-app-filter-${vpsId}`}>
+              <span>{data.applications.length} applications · management mode</span>
               <select
                 id={`compose-app-filter-${vpsId}`}
                 value={modeFilter}
@@ -106,6 +106,7 @@ export function ComposeApplicationsPanel({
             </label>
           ) : null}
 
+          {data.applications.length > 0 && filtered.length === 0 ? <EmptyState>No applications match this management mode.</EmptyState> : null}
           {filtered.map((app) => (
             <ComposeApplicationRow
               key={app.appId}
@@ -154,14 +155,14 @@ function ComposeApplicationRow({
     .length;
 
   return (
-    <article className="border border-line bg-raised">
-      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-line px-4 py-3">
+    <article className="min-w-0 border border-line bg-ink/30">
+      <header className="flex items-start justify-between gap-3 border-b border-line px-3 py-3 sm:px-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={onOpen}
-              className="text-[13px] font-semibold text-text underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
+              className="break-all text-left text-[14px] font-semibold text-text underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
             >
               {app.displayName}
             </button>
@@ -184,7 +185,7 @@ function ComposeApplicationRow({
         </RowActionsMenu>
       </header>
 
-      <div className="space-y-3 p-4">
+      <div className="space-y-3 p-3 sm:p-4">
         {app.capabilityReason ? (
           <p className="text-[11px] text-warn">{app.capabilityReason}</p>
         ) : null}
@@ -196,9 +197,9 @@ function ComposeApplicationRow({
         ) : (
           <ul className="space-y-2">
             {app.observed.services.map((service) => (
-              <li key={service.service} className="text-[12px]">
+              <li key={service.service} className="min-w-0 border-b border-line pb-3 text-[12px] last:border-0 last:pb-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium text-text">{service.service}</span>
+                  <span className="break-all font-medium text-text">{service.service}</span>
                   <span className="text-[11px] text-dim">
                     {service.kind === "oneshot" ? "one-shot job" : "service"}
                   </span>

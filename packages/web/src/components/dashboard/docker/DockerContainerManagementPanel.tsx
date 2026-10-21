@@ -705,16 +705,16 @@ export function DockerContainerManagementPanel({
           ? "Docker container detail"
           : "Docker container management"
       }
-      className="border border-line bg-panel"
+      className="min-w-0 border border-line bg-panel"
     >
-      <header className="border-b border-line px-4 py-3">
-        <h3 className="text-[14px] font-semibold">
-          {fixedTarget ? "Container detail" : "Container management"}
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-3">
+        <h3 className="text-[15px] font-semibold">
+          {fixedTarget ? "Container detail" : "Container investigation"}
         </h3>
-        <p className="mt-1 text-xs text-dim">Logs: {logsSupported ? `${BACKEND_TAIL_LINES} lines + live` : "unavailable"}{!enabled || !capability.supported ? " · Controls disabled" : ""}</p>
+        <p className="text-[12px] text-dim">Logs: {logsSupported ? `${BACKEND_TAIL_LINES} lines + live` : "unavailable"}{!enabled || !capability.supported ? " · Controls disabled" : ""}</p>
       </header>
 
-      <div className="p-4">
+      <div className="min-w-0 p-3 sm:p-4">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
           <div className="min-w-0">
             {fixedTarget ? (
@@ -752,7 +752,7 @@ export function DockerContainerManagementPanel({
                 const next = parsePairValue(event.target.value);
                 setTargetPair(next);
               }}
-              className="h-8 w-full border border-line bg-ink px-2 text-[12px] text-text transition-colors duration-160 ease-out focus:border-signal focus:outline-none"
+              className="h-10 w-full min-w-0 border border-line bg-ink px-3 text-[13px] text-text transition-colors duration-160 ease-out focus:border-signal focus:outline-none"
             >
               {targetPair === null ? (
                 <option value="">No container reported…</option>
@@ -781,7 +781,7 @@ export function DockerContainerManagementPanel({
               })()}
             </select>
             {selected ? (
-              <p className="mt-1 truncate text-[11px] text-dim">
+              <p className="mt-2 break-words text-[12px] leading-relaxed text-dim">
                 Target: {selected.name} · key {selected.containerKey} ·{" "}
                 {selected.image} · <span data-container-state={selected.state} className="docker-container-state">{selected.state}</span>
               </p>
@@ -883,7 +883,7 @@ export function DockerContainerManagementPanel({
         {/* ── Realtime log viewer ──────────────────────────────────── */}
         <div className="mt-3 border-t border-line pt-3">
           <div className="flex flex-wrap items-center gap-2">
-            <h4 className="text-[11px] font-medium text-text">
+            <h4 className="text-[13px] font-semibold text-text">
               Container logs
             </h4>
             <span
@@ -892,7 +892,7 @@ export function DockerContainerManagementPanel({
             >
               {logsSupported ? streamLabel : "Not supported"}
             </span>
-            <div className="ml-auto flex flex-wrap gap-2">
+            <div className="flex w-full flex-wrap gap-2 sm:ml-auto sm:w-auto">
               {streamOpen ? (
                 <Button
                   type="button"
@@ -934,10 +934,10 @@ export function DockerContainerManagementPanel({
               ) : null}
             </div>
           </div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
+          <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem]">
             <label className="text-[12px] text-dim">
               Search buffered logs
-              <Input value={logQuery} maxLength={256} onChange={(event) => setLogQuery(event.target.value)} className="mt-1" />
+              <Input value={logQuery} maxLength={256} placeholder="Find text in buffered lines…" onChange={(event) => setLogQuery(event.target.value)} className="mt-1" />
             </label>
             <label className="text-[12px] text-dim">
               Log stream
@@ -999,7 +999,7 @@ export function DockerContainerManagementPanel({
                 <pre
                   ref={preRef}
                   data-testid="docker-log-body"
-                  className="tnum mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words border border-line bg-ink p-4 font-mono text-[12px] leading-5 text-text"
+                  className="tnum mt-2 min-h-40 max-h-96 overflow-auto whitespace-pre-wrap break-words border border-line bg-ink p-3 font-mono text-[12px] leading-6 text-text sm:p-4"
                   onScroll={(event) => {
                     const element = event.currentTarget;
                     // Auto-scroll only holds while the reader stayed at the

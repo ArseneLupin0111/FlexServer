@@ -1,7 +1,53 @@
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
+import express, { type Express } from "express";
+import type { NestExpressApplication } from "@nestjs/platform-express";
+import { createNestApp, type Dependencies } from "../src/app.js";
 import { createJsonSessionRepository } from "../src/persistence/repositories/session.repository.js";
 import { SESSION_COOKIE_NAME } from "../src/auth/cookies.js";
+const trackedInits = new Set<Promise<NestExpressApplication>>();
+
+export function createApp(deps: Dependencies = {}): Express {
+  const server = express();
+  let ready = false;
+  let initError: unknown;
+  const init = createNestApp(deps, server);
+  trackedInits.add(init);
+
+  init
+    .then(() => {
+      ready = true;
+    })
+    .catch((error: unknown) => {
+      initError = error;
+    });
+
+  server.use(async (_req, _res, next) => {
+    if (!ready && !initError) {
+      try {
+        await init;
+      } catch {
+        // initError is preserved by the catch handler above
+      }
+    }
+    if (initError) return next(initError);
+    next();
+  });
+
+  return server;
+}
+
+export async function closeTestApps(): Promise<void> {
+  const inits = Array.from(trackedInits);
+  trackedInits.clear();
+  const initialized = await Promise.allSettled(inits);
+  await Promise.all(initialized.map(result =>
+    result.status === "fulfilled" ? result.value.close() : undefined,
+  ));
+  const failed = initialized.find(result => result.status === "rejected");
+  if (failed?.status === "rejected") throw failed.reason;
+}
+
 
 /**
  * Create a dashboard session in the JSON store directly (bypasses login)

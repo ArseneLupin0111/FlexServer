@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createApp } from "../src/app.js";
+import { createApp, closeTestApps } from "./test-helpers.js";
 import type { AppConfig } from "../src/config/app-config.js";
 import type { VpsRepository } from "../src/persistence/repositories/vps.repository.js";
 import { createJsonAgentRepository } from "../src/persistence/repositories/agent.repository.js";
@@ -65,6 +65,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await closeTestApps();
   for (let attempt = 0; attempt < 200; attempt++) {
     let jobs: CommandJob[];
     try {

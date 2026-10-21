@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { Express, Response } from "express";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createApp } from "../src/app.js";
+import { createApp, closeTestApps } from "./test-helpers.js";
 import type { AppConfig } from "../src/config/app-config.js";
 import { DockerLogsService, type DockerLogsPolicySnapshot } from "../src/docker/docker-logs.service.js";
 import { DockerManagementService } from "../src/docker/docker-management.service.js";
@@ -160,6 +160,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await closeTestApps();
   // Each test drives its own real HTTP servers; a stream the test never
   // awaited to completion must not outlive the test.
   for (const server of openServers) {

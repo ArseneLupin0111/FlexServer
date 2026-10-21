@@ -47,11 +47,12 @@ export class AiRetentionService implements OnApplicationBootstrap, OnApplication
     return { ...this.healthState };
   }
 
-  onApplicationBootstrap(): void {
+  async onApplicationBootstrap(): Promise<void> {
     if (this.config.mode === "demo") return;
     this.stopping = false;
     if (this.intervalTimer) return;
-    void this.runOnce();
+    // Complete startup recovery before accepting requests against task state.
+    await this.runOnce();
     // 5-second interval ensures rapid session revocation and stale planning unblock
     const intervalSeconds = 5;
     this.intervalTimer = setInterval(() => {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createApp } from "../src/app.js";
+import { createApp, closeTestApps } from "./test-helpers.js";
 import type { AppConfig } from "../src/config/app-config.js";
 import type { VpsRepository } from "../src/persistence/repositories/vps.repository.js";
 import type { AgentRepository } from "../src/persistence/repositories/agent.repository.js";
@@ -110,6 +110,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await closeTestApps();
   await rm(tempDir, { recursive: true, force: true });
 });
 

@@ -6,34 +6,7 @@ import {
   createInMemoryRateLimitStore,
   createPostgresRateLimitStore,
 } from "../src/common/rate-limit-store.js";
-import { createAppModule, DATABASE_POOL } from "../src/app.module.js";
-import type { AppConfig } from "../src/config/app-config.js";
 
-const pgConfig: AppConfig = {
-  mode: "local",
-  enableWebTerminal: false,
-  allowPrivateNetworkTargets: false,
-  dataDir: "data",
-  privateDir: "private",
-  rateLimitWindowMs: 60_000,
-  rateLimitMax: 120,
-  agentInstallIntervalSeconds: 1,
-  allowInsecureAgentHttp: false,
-  storageDriver: "postgres",
-  databaseUrl: "postgres://user:pass@localhost:5432/vps_manager",
-  dbSsl: false,
-  dbPoolMax: 10,
-  dashboardSessionSecret: "rate-limit-test-secret-32+chars!!",
-  dashboardSessionTtlSeconds: 86_400,
-  dashboardCookieSecure: false,
-  dashboardCookieSameSite: "lax",
-  trustProxyHops: 0,
-  jobHistoryLimit: 1000,
-  auditHistoryLimit: 5000,
-  metricWindowLimit: 120,
-  sshHostKeyPins: {},
-  sshHostKeyPolicy: "strict",
-};
 
 describe("InMemoryRateLimitStore", () => {
   it("first consume returns count 1 within window", async () => {
@@ -152,27 +125,3 @@ describe("rate limit middleware fail-closed behavior", () => {
   });
 });
 
-describe("Postgres pool wiring", () => {
-  it("provides a caller-supplied pool through DATABASE_POOL", () => {
-    const suppliedPool = {
-      query: async () => ({ rows: [] }),
-      connect: async () => ({
-        query: async () => ({ rows: [] }),
-        release: () => {},
-      }),
-      end: async () => {},
-    } as never;
-
-    const module = createAppModule({ config: pgConfig, pool: suppliedPool });
-    const providers = module.providers ?? [];
-    const databasePoolProvider = providers.find(
-      (provider): provider is { provide: symbol; useValue: unknown } =>
-        typeof provider === "object" &&
-        provider !== null &&
-        "provide" in provider &&
-        provider.provide === DATABASE_POOL,
-    );
-
-    expect(databasePoolProvider?.useValue).toBe(suppliedPool);
-  });
-});

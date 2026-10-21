@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConflictException } from "@nestjs/common";
-import { createApp } from "../src/app.js";
+import { createApp, closeTestApps } from "./test-helpers.js";
 import type { AppConfig } from "../src/config/app-config.js";
 import type { VpsRepository } from "../src/persistence/repositories/vps.repository.js";
 import { createJsonAgentRepository } from "../src/persistence/repositories/agent.repository.js";
@@ -54,6 +54,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await closeTestApps();
   await rm(tempDir, { recursive: true, force: true });
 });
 

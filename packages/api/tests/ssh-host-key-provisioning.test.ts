@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createApp } from "../src/app.js";
+import { createApp, closeTestApps } from "./test-helpers.js";
 import type { AppConfig } from "../src/config/app-config.js";
 import {
   SshHostKeyScanFailedError,
@@ -128,6 +128,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await closeTestApps();
   await rm(tempDir, { recursive: true, force: true });
 });
 
@@ -721,6 +722,7 @@ describe("SSH host key scan failure — HTTP response mapping", () => {
         );
         expect(JSON.stringify(response.body)).not.toContain("255");
       } finally {
+        await closeTestApps();
         await rm(httpTempDir, { recursive: true, force: true });
       }
     },
@@ -782,6 +784,7 @@ describe("SSH host key scan failure — HTTP response mapping", () => {
         // ssh-keyscan must never have been spawned for a blocked target.
         expect(spawnMock).not.toHaveBeenCalled();
       } finally {
+        await closeTestApps();
         await rm(httpTempDir, { recursive: true, force: true });
       }
     },

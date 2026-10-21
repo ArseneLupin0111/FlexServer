@@ -4,11 +4,10 @@ import { join } from "node:path";
 import type { Express } from "express";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createApp } from "../src/app.js";
 import type { AppConfig } from "../src/config/app-config.js";
 import { createVpsStore } from "../src/persistence/store/vpsStore.js";
 import { seedDockerMonitoringForTests } from "../src/persistence/repositories/docker-monitoring.repository.js";
-import { createSessionCookie } from "./test-helpers.js";
+import { createApp, closeTestApps, createSessionCookie } from "./test-helpers.js";
 
 // ── Docker Monitoring I1 REST/DI lane (JSON backend) ──────────────────────
 // Focused API coverage: local session auth, empty reads + shapes, VPS 404
@@ -175,6 +174,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await closeTestApps();
   await rm(tempDir, { recursive: true, force: true });
 });
 

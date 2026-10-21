@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — AI startup recovery and test lifecycle
+
+- Await the initial AI retention/recovery pass before application bootstrap completes, preventing requests from racing startup JSON writes and task recovery.
+- Close test-owned Nest applications before deleting their temporary storage so retention timers and in-flight maintenance cannot recreate removed files.
+- Remove the obsolete PostgreSQL provider-shape assertion; retain rate-limit behavior and fail-closed coverage.
+
 ## Unreleased — AI Docker bridge approval digest consumption
 
 - Bridge `docker_action`/`compose_*` proposals now execute only through consume-once approval: the API CAS-approves the stored plan (matching `planVersion`/`planDigest`) to `consumed`, then re-reads it before transitioning the task to `executing` and verifies the re-read plan digest matches the approved digest; any mismatch or replay fails as `stale_plan` instead of proceeding.

@@ -4,7 +4,6 @@ import { join } from "node:path";
 import type { Express } from "express";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createApp } from "../src/app.js";
 import type { AppConfig } from "../src/config/app-config.js";
 import { createVpsStore } from "../src/persistence/store/vpsStore.js";
 import {
@@ -17,7 +16,7 @@ import {
   MAX_QUERY_RANGE_MS,
 } from "../src/docker/docker-monitoring.schemas.js";
 import type { DockerMetricRollup } from "../src/docker/docker-monitoring.models.js";
-import { createSessionCookie } from "./test-helpers.js";
+import { createApp, closeTestApps, createSessionCookie } from "./test-helpers.js";
 
 // ── Docker Monitoring rollup query API (bounded REST over existing storage) ─
 // Focused slice: strict from/to validation + 30d max range (shared policy),
@@ -91,7 +90,7 @@ describe("dockerRollupsQuerySchema validation", () => {
 describe("JSON listRollups query parity (from/to, filters, stable pagination)", () => {
   let dir = "";
   beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), "docker-rollups-q-")); });
-  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+  afterEach(async () => { await closeTestApps(); await rm(dir, { recursive: true, force: true }); });
 
   function repo() {
     const file = join(dir, `docker-monitoring-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
@@ -195,7 +194,7 @@ describe("GET /api/vps/:id/docker/rollups", () => {
     server = createApp({ config: { ...baseConfig, dataDir, privateDir: join(tempDir, "private") } });
   });
 
-  afterEach(async () => { await rm(tempDir, { recursive: true, force: true }); });
+  afterEach(async () => { await closeTestApps(); await rm(tempDir, { recursive: true, force: true }); });
 
   function authed(req: request.Test) { return req.set("Cookie", sessionCookie); }
 

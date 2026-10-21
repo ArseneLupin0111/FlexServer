@@ -4,7 +4,7 @@ import { join } from "node:path";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Pool } from "pg";
-import { createApp } from "../src/app.js";
+import { createApp, closeTestApps } from "./test-helpers.js";
 import type { AppConfig } from "../src/config/app-config.js";
 import { createJsonAuditRepository } from "../src/persistence/repositories/audit.repository.js";
 import { createKeyService } from "../src/ssh/keyService.js";
@@ -104,6 +104,7 @@ describe("Files API", () => {
   });
 
   afterEach(async () => {
+    await closeTestApps();
     await rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 

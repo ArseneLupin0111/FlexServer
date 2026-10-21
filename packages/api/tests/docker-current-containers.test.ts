@@ -4,7 +4,8 @@ import { join } from "node:path";
 import type { Express } from "express";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createApp } from "../src/app.js";
+import { createNestApp } from "../src/app.js";
+import type { NestExpressApplication } from "@nestjs/platform-express";
 import type { AppConfig } from "../src/config/app-config.js";
 import { ConflictException } from "@nestjs/common";
 import { DockerMonitoringService } from "../src/docker/docker-monitoring.service.js";
@@ -65,6 +66,7 @@ const T_NEW = "2026-09-12T00:00:00.000Z";
 
 let tempDir: string;
 let server: Express;
+let app: NestExpressApplication;
 let sessionCookie: string;
 let vpsA = "";
 let vpsB = "";
@@ -214,16 +216,18 @@ beforeEach(async () => {
   );
 
   sessionCookie = await createSessionCookie(tempDir, SESSION_SECRET);
-  server = createApp({
+  app = await createNestApp({
     config: {
       ...baseConfig,
       dataDir,
       privateDir: join(tempDir, "private"),
     },
   });
+  server = app.getHttpAdapter().getInstance();
 });
 
 afterEach(async () => {
+  await app?.close();
   await rm(tempDir, { recursive: true, force: true });
 });
 

@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Express } from "express";
 import request from "supertest";
-import { createApp } from "../src/app.js";
+import { createApp, closeTestApps } from "./test-helpers.js";
 import type { AppConfig } from "../src/config/app-config.js";
 
 const demoConfig: AppConfig = {
@@ -28,6 +28,10 @@ let app: Express;
 
 beforeAll(async () => {
   app = createApp({ config: demoConfig });
+});
+
+afterAll(async () => {
+  await closeTestApps();
 });
 
 describe("SSE monitoring stream", () => {

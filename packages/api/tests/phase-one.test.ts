@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createApp } from "../src/app.js";
+import { createApp, closeTestApps } from "./test-helpers.js";
 import type { AppConfig } from "../src/config/app-config.js";
 import { parseAppConfig } from "../src/config/app-config.js";
 import { redactString, redactValue } from "../src/common/redaction.js";
@@ -1035,6 +1035,7 @@ describe("phase one route security", () => {
         "Mutations are disabled in demo mode",
       );
     } finally {
+      await closeTestApps();
       await rm(tempDir, { recursive: true, force: true });
     }
   });
@@ -1073,6 +1074,7 @@ describe("phase one route security", () => {
         })
         .expect(201);
     } finally {
+      await closeTestApps();
       await rm(tempDir, { recursive: true, force: true });
     }
   });
@@ -1099,6 +1101,7 @@ describe("phase one route security", () => {
         .expect(403);
       expect(JSON.stringify(blocked.body)).not.toContain("super-secret");
     } finally {
+      await closeTestApps();
       await rm(tempDir, { recursive: true, force: true });
     }
   });

@@ -1173,7 +1173,10 @@ jobs:
           else
             echo "DASHBOARD_ADMIN_PASSWORD secret not set — dashboard password must be set manually via SSH after deploy."
           fi
-          $SSH "cd '$DEPLOY_PATH' && docker compose up -d --remove-orphans --force-recreate api web"
+          if ! $SSH "cd '$DEPLOY_PATH' && docker compose up -d --remove-orphans --force-recreate api web"; then
+            $SSH "cd '$DEPLOY_PATH' && docker compose ps -a && docker compose logs --no-color --tail=100 api" || true
+            exit 1
+          fi
           $SSH "cd '$DEPLOY_PATH' && docker compose ps"
           $SSH "for i in \$(seq 1 30); do curl -fsS http://127.0.0.1:3000/api/health && exit 0; sleep 2; done; docker compose -f '$DEPLOY_PATH/docker-compose.yml' logs --tail=80; exit 1"
           # Refresh or bootstrap local updater on the host using the bundled binary from API image

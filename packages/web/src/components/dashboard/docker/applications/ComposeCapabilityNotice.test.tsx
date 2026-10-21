@@ -26,13 +26,39 @@ describe("ComposeCapabilityNotice runtime preparation", () => {
     vi.resetAllMocks();
   });
 
+  it("does not offer host runtime preparation before an inventory scan arrives", () => {
+    render(
+      <ComposeCapabilityNotice
+        vpsId="vps-1"
+        capability={{
+          supported: false,
+          demoDisabled: false,
+          reason: "compose_runtime_unverified",
+          runtime: { dockerPresent: false },
+          agent: {},
+          inventory: { completeness: false },
+          admission: { ready: false, reasons: ["fresh_connected_inventory_required"] },
+        }}
+        loading={false}
+        error={null}
+        onRetry={onRetry}
+      />,
+    );
+
+    expect(screen.getByRole("status").textContent).toMatch(/availability are unverified/i);
+    expect(screen.queryByRole("button", { name: "Prepare Docker Compose runtime" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh capability" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(api.requestComposeRuntimePreparation).not.toHaveBeenCalled();
+  });
+
   it("shows runtime preparation button when compose v2 plugin is missing", async () => {
     const capability: ComposeCapability = {
       supported: false,
       reason: "Compose v2 plugin is not installed on the remote host",
       runtime: { dockerPresent: true, composeVersion: undefined },
       agent: {},
-      inventory: { completeness: true },
+      inventory: { ageSeconds: 5, completeness: true },
       admission: { ready: false, reasons: ["Compose missing"] },
       demoDisabled: false,
     };
@@ -67,7 +93,7 @@ describe("ComposeCapabilityNotice runtime preparation", () => {
       reason: "Compose plugin missing",
       runtime: { dockerPresent: true },
       agent: {},
-      inventory: { completeness: true },
+      inventory: { ageSeconds: 5, completeness: true },
       admission: { ready: false, reasons: [] },
       demoDisabled: false,
     };
@@ -111,7 +137,7 @@ describe("ComposeCapabilityNotice runtime preparation", () => {
       reason: "Docker missing",
       runtime: { dockerPresent: false },
       agent: {},
-      inventory: { completeness: true },
+      inventory: { ageSeconds: 5, completeness: true },
       admission: { ready: false, reasons: [] },
       demoDisabled: false,
     };

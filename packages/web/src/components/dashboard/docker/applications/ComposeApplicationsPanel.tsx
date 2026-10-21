@@ -90,7 +90,7 @@ export function ComposeApplicationsPanel({
 
           {!data.loading && data.applications.length > 0 ? (
             <label className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3 text-[12px] text-dim" htmlFor={`compose-app-filter-${vpsId}`}>
-              <span>{data.applications.length} applications · management mode</span>
+              <span>{data.applications.length} applications · Filter by management mode</span>
               <select
                 id={`compose-app-filter-${vpsId}`}
                 value={modeFilter}

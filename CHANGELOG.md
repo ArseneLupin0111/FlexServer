@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — PostgreSQL AI keyring deployment fix
+
+- Run AI key initialization, checks and rotation under the PostgreSQL journal row lock instead of rejecting non-JSON storage. Preserve encrypted-data initialization refusal, active-task rotation guards and transactional rollback; close the CLI-owned database pool.
+- Gate deployment with PostgreSQL key initialization, secret rotation/decryption and orphaned-ciphertext protection regressions on both PostgreSQL CI jobs.
+
 ## Unreleased — Provider-first AI onboarding
 
 - Connect endpoint, model and API key to use cached metrics/inventory without per-VPS setup. Absent policies allow observation and approval-gated Docker/Compose proposals; persisted opt-outs remain authoritative and can be explicitly re-enabled with one action.

@@ -710,7 +710,7 @@ jobs:
       - name: Run PostgreSQL migration tests
         env:
           VPS_MANAGER_TEST_POSTGRES_URL: postgres://vps_manager:vps_manager@localhost:5432/vps_manager
-        run: npx vitest run packages/api/tests/docker-migration-009.postgres.test.ts packages/api/tests/docker-migration-013.postgres.test.ts packages/api/tests/docker-migration-014.postgres.test.ts packages/api/tests/docker-monitoring-repository.postgres.test.ts packages/api/tests/docker-monitoring-maintenance.postgres.test.ts
+        run: npx vitest run packages/api/tests/docker-migration-009.postgres.test.ts packages/api/tests/docker-migration-013.postgres.test.ts packages/api/tests/docker-migration-014.postgres.test.ts packages/api/tests/docker-monitoring-repository.postgres.test.ts packages/api/tests/docker-monitoring-maintenance.postgres.test.ts packages/api/tests/ai-key-admin.postgres.test.ts
 
   docker-monitoring-postgres16:
     name: Docker monitoring PostgreSQL 16
@@ -742,7 +742,7 @@ jobs:
       - name: Run Docker monitoring PostgreSQL 16 tests
         env:
           VPS_MANAGER_TEST_POSTGRES_URL: postgres://vps_manager:vps_manager@localhost:5432/vps_manager
-        run: npx vitest run packages/api/tests/docker-migration-009.postgres.test.ts packages/api/tests/docker-migration-013.postgres.test.ts packages/api/tests/docker-migration-014.postgres.test.ts packages/api/tests/docker-monitoring-repository.postgres.test.ts packages/api/tests/docker-monitoring-maintenance.postgres.test.ts
+        run: npx vitest run packages/api/tests/docker-migration-009.postgres.test.ts packages/api/tests/docker-migration-013.postgres.test.ts packages/api/tests/docker-migration-014.postgres.test.ts packages/api/tests/docker-monitoring-repository.postgres.test.ts packages/api/tests/docker-monitoring-maintenance.postgres.test.ts packages/api/tests/ai-key-admin.postgres.test.ts
 
   deploy:
     name: Deploy over SSH

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { join } from "node:path";
+import { createDatabasePool } from "../../db/pool.js";
 import type { Pool, PoolClient } from "pg";
 import { loadAiKeyring, rewrapAiEnvelope } from "../../ai/ai-crypto.js";
 import {
@@ -974,7 +976,10 @@ export function createJsonAiRepository(filePath: string): AiRepository {
 }
 
 export function createPostgresAiRepository(pool: Pool): AiRepository {
-  return createAiRepositoryCore(async (mutate) => {
+  return createAiRepositoryCore((mutate) => withPostgresAiState(pool, mutate));
+}
+
+async function withPostgresAiState<T>(pool: Pool, mutate: (state: StoredAiState) => T | Promise<T>): Promise<T> {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -994,7 +999,7 @@ export function createPostgresAiRepository(pool: Pool): AiRepository {
         ...emptyAiState(),
         ...loaded,
       };
-      const result = mutate(state);
+      const result = await mutate(state);
       await client.query(
         "UPDATE ai_state_journal SET state = $1::jsonb, updated_at = NOW() WHERE id = 1",
         [JSON.stringify(state)],
@@ -1007,7 +1012,6 @@ export function createPostgresAiRepository(pool: Pool): AiRepository {
     } finally {
       client.release();
     }
-  });
 }
 
 export async function withAiAdminLock<T>(
@@ -1017,10 +1021,7 @@ export async function withAiAdminLock<T>(
     rotateEncryptedFields(options?: { dryRun?: boolean }): Promise<{ rewrapped: number; kekIds: string[]; refusedTaskIds: string[]; conflictCode?: string }>;
   }) => Promise<T>,
 ): Promise<T> {
-  if (config.storageDriver !== "json") throw new Error("AI PostgreSQL administration is not available");
-  const filePath = (await import("node:path")).join(config.dataDir, "ai.json");
-  return withFileLock(filePath, async () => {
-    const state = await readJsonFile(filePath, emptyAiState());
+  const administer = async (state: StoredAiState) => {
     return action({
       async hasEncryptedFields() { return Boolean(state.settings?.encryptedApiKey || state.blobs.length); },
       async rotateEncryptedFields(options) {
@@ -1060,9 +1061,23 @@ export async function withAiAdminLock<T>(
           }
         }
 
-        if (!options?.dryRun) await writeJsonFile(filePath, state);
         return result;
       },
     });
+  };
+  if (config.storageDriver === "postgres") {
+    const pool = createDatabasePool(config);
+    try {
+      return await withPostgresAiState(pool, administer);
+    } finally {
+      await pool.end();
+    }
+  }
+  const filePath = join(config.dataDir, "ai.json");
+  return withFileLock(filePath, async () => {
+    const state = await readJsonFile(filePath, emptyAiState());
+    const result = await administer(state);
+    await writeJsonFile(filePath, state);
+    return result;
   });
 }

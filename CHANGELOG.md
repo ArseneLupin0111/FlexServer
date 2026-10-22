@@ -4,6 +4,7 @@
 
 - Run AI key initialization, checks and rotation under the PostgreSQL journal row lock instead of rejecting non-JSON storage. Preserve encrypted-data initialization refusal, active-task rotation guards and transactional rollback; close the CLI-owned database pool.
 - Gate deployment with PostgreSQL key initialization, secret rotation/decryption and orphaned-ciphertext protection regressions on both PostgreSQL CI jobs.
+- Initialize through a separate writable administration mount so the API service's read-only keyring mount cannot cause `EROFS`; retain read-only runtime mounts in CI and both installer paths.
 
 ## Unreleased — Provider-first AI onboarding
 

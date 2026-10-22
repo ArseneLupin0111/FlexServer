@@ -578,8 +578,8 @@ else
     # Stopping API first because the CLI guards JSON storage with a writer lock.
     docker compose -f "$COMPOSE_FILE" rm -sf api >/dev/null 2>&1 || true
     docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
-      -v "${AI_KEYRING_DIR}:${AI_KEYRING_DIR}:rw" \
-      -e AI_KEYRING_FILE="$AI_KEYRING_FILE" \
+      -v "${AI_KEYRING_DIR}:/run/flexserver-ai-admin:rw" \
+      -e AI_KEYRING_FILE="/run/flexserver-ai-admin/$(basename "$AI_KEYRING_FILE")" \
       api node dist/scripts/manage-ai-keys.js init
     chown "$API_UID_GID" "$AI_KEYRING_FILE"
     chmod 0600 "$AI_KEYRING_FILE"

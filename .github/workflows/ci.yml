@@ -1193,7 +1193,7 @@ jobs:
               sudo chmod 0600 \"\$AI_KEYRING_FILE\"
             else
               echo \"Initializing external AI key encryption keyring...\"
-              cd '$DEPLOY_PATH' && docker compose run --rm --no-deps -v \"\${KEYRING_DIR}:\${KEYRING_DIR}:rw\" -e AI_KEYRING_FILE=\"\$AI_KEYRING_FILE\" api node dist/scripts/manage-ai-keys.js init
+              cd '$DEPLOY_PATH' && docker compose run --rm --no-deps -v \"\${KEYRING_DIR}:/run/flexserver-ai-admin:rw\" -e AI_KEYRING_FILE=/run/flexserver-ai-admin/ai-keyring.json api node dist/scripts/manage-ai-keys.js init
               sudo chown \"\${API_UID}:\${API_GID}\" \"\$AI_KEYRING_FILE\"
               sudo chmod 0600 \"\$AI_KEYRING_FILE\"
             fi

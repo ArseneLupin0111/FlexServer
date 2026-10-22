@@ -531,8 +531,8 @@ else
   $SUDO chmod 0750 "$AI_KEYRING_DIR"
 
   docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
-    -v "${AI_KEYRING_DIR}:${AI_KEYRING_DIR}:rw" \
-    -e AI_KEYRING_FILE="$AI_KEYRING_FILE" \
+    -v "${AI_KEYRING_DIR}:/run/flexserver-ai-admin:rw" \
+    -e AI_KEYRING_FILE="/run/flexserver-ai-admin/$(basename "$AI_KEYRING_FILE")" \
     api node dist/scripts/manage-ai-keys.js init
 
   if ! file_exists "$AI_KEYRING_FILE"; then

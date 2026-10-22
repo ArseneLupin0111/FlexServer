@@ -47,7 +47,6 @@ function arrangeService(record: VpsRecord = localVps) {
     agentRepository,
     {} as never,
     undefined,
-    undefined,
     { cleanupForVps } as never,
   );
 

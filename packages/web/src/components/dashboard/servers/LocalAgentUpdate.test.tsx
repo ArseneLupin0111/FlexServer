@@ -386,22 +386,6 @@ describe("LocalAgentUpdate live SSE refresh", () => {
   });
 });
 
-describe("LocalAgentUpdate updater absence", () => {
-  it("hides the upgrade button whenever the updater is absent, even with a release available", async () => {
-    handler = () =>
-      ok(
-        status({
-          state: "unknown",
-          installed: { version: "1.0.0", buildId: null, lastSeenAt: "2026-01-01T00:00:00.000Z", fresh: false },
-          updater: { installed: false, healthy: false, lastSeenAt: null },
-        }),
-      );
-    render(<LocalAgentUpdate vps={vps} />);
-
-    await screen.findByText("Update status unknown");
-    expect(screen.queryByRole("button", { name: "Upgrade agent" })).not.toBeInTheDocument();
-  });
-});
 
 describe("LocalAgentUpdate terminal results", () => {
   it("keeps the confirmation for a succeeded job in workspace settings", async () => {

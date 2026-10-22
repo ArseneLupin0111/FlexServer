@@ -10,6 +10,7 @@
 - Remove dead agent enrollment and policy schemas (`enrollHostsSchema`, `updatePoliciesSchema`) and obsolete tests.
 - Coordinate automatic deployment convergence via `AgentConvergenceService` using content-derived build identities (`internal/buildidentity`); busy hosts (active shells, AI tasks, Compose operations) and offline hosts defer safely without deployment failure or spurious timeouts; failed targets are suppressed per host until manually retried.
 - Document deployment automation via `scripts/deploy.sh` and `scripts/install/prepare-agent-updater.sh`, missing-access remediation (`needs_access`) with asynchronous retry; note that arm64 cross-build ELF headers and scoped download authorization are verified, while native arm64 restart and full live multi-host E2E scenarios (wrapper with saved-SSH bootstrap, unchanged-PID / no-job on README/web-only deploys, and offline sequencing) were not verified in this run (waived due to Windows environment).
+- Fix clean-checkout CI fixtures for updater binaries and VPS service dependencies; remove obsolete legacy upgrade UI assertions. Run convergence PostgreSQL coverage only with an explicit test database URL and include it in both database CI jobs. Mark deployment/bootstrap entrypoints executable in Git.
 
 ## Unreleased — Fleet CI regression fixes
 

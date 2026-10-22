@@ -24,10 +24,7 @@ import { AgentLifecycleCoordinator } from "../src/agents/agent-lifecycle-coordin
 import { loadMigrations } from "../src/db/migrations.js";
 import type { LocalUpgradeJob } from "../src/local-upgrade/local-upgrade.models.js";
 import type { AgentSystemInfo } from "../src/agents/agent.models.js";
-const databaseUrl =
-  process.env.VPS_MANAGER_TEST_POSTGRES_URL ??
-  process.env.DATABASE_URL ??
-  "postgres://postgres:disposable-smoke-only@127.0.0.1:55439/agent_deploy_smoke";
+const databaseUrl = process.env.VPS_MANAGER_TEST_POSTGRES_URL;
 const BUILD_ID_OLD = "1111111111111111111111111111111111111111";
 const BUILD_ID_V1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const BUILD_ID_V2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1020,9 +1017,11 @@ describe.skipIf(!databaseUrl)("AgentConvergenceService (Postgres Repository)", (
   });
 
   afterEach(async () => {
-    await pool.end();
-    await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    await admin.end();
+    await pool?.end();
+    if (admin) {
+      await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await admin.end();
+    }
   });
 
   it("two concurrent claims => exactly one executing (Postgres adapter)", async () => {

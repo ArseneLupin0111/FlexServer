@@ -61,7 +61,7 @@ function createHarness(options: HarnessOptions) {
   const audit = { record: async () => { calls.push("audit:vps.delete"); } };
   const lifecycle = new AgentLifecycleCoordinator();
   const uninstaller = new AgentUninstallerService(...([{}, ssh, {}, agent, store, keys, audit, {}, {}, lifecycle] as unknown as ConstructorParameters<typeof AgentUninstallerService>));
-  const service = new VpsService(...([store, keys, ssh, audit, { mode: "local" }, {}, uninstaller, agent, {}, undefined, undefined, undefined, cleanup, lifecycle] as unknown as ConstructorParameters<typeof VpsService>));
+  const service = new VpsService(...([store, keys, ssh, audit, { mode: "local" }, {}, uninstaller, agent, {}, undefined, undefined, cleanup, lifecycle] as unknown as ConstructorParameters<typeof VpsService>));
   return {
     service,
     calls,

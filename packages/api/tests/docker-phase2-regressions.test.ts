@@ -104,7 +104,6 @@ function arrangeRemoteVpsService(
     agentRepository,
     hostKeyPin as never,
     undefined,
-    undefined,
     dockerMonitoring as never,
   );
   return {

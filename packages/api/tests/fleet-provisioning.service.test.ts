@@ -57,9 +57,6 @@ describe("FleetProvisioningService", () => {
     await writeFile(dummyUpdaterArm64, Buffer.from("mock-updater-arm64-binary"));
     await writeFile(dummyScript, "#!/bin/sh\necho mock installer");
 
-    process.env.UPDATER_BINARY_PATH_AMD64 = dummyUpdaterAmd64;
-    process.env.UPDATER_BINARY_PATH_ARM64 = dummyUpdaterArm64;
-    process.env.FLEET_INSTALLER_SCRIPT_PATH = dummyScript;
 
     config = {
       mode: "local",
@@ -211,12 +208,12 @@ describe("FleetProvisioningService", () => {
 
     // Override resolveInstallerScriptPath to use our dummy script
     vi.spyOn(service, "resolveInstallerScriptPath").mockReturnValue(dummyScript);
+    vi.spyOn(service, "resolveUpdaterBinaryPath").mockImplementation((arch) =>
+      arch === "arm64" ? dummyUpdaterArm64 : dummyUpdaterAmd64,
+    );
   });
 
   afterEach(async () => {
-    delete process.env.UPDATER_BINARY_PATH_AMD64;
-    delete process.env.UPDATER_BINARY_PATH_ARM64;
-    delete process.env.FLEET_INSTALLER_SCRIPT_PATH;
     await rm(tempDir, { recursive: true, force: true });
   });
 

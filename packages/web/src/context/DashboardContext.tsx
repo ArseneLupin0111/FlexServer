@@ -35,7 +35,6 @@ import {
   rotateAgent,
   trustSshHostKey,
   uninstallAgent,
-  upgradeAgent,
   updateDashboardSettings,
   updateVps,
   verifyKey,
@@ -71,7 +70,6 @@ const initialCreateForm = {
   port: "22",
   username: "",
   password: "",
-  fleetAutoUpdate: true,
 };
 
 export type DashboardCtx = {
@@ -108,7 +106,6 @@ export type DashboardCtx = {
   onVerify: (vps: VpsRecord) => void;
   onInstallAgent: (vps: VpsRecord) => void;
   onUninstallAgent: (vps: VpsRecord) => void;
-  onUpgradeAgent: (vps: VpsRecord) => Promise<{ jobId: string } | void>;
   onRestartAgent: (vps: VpsRecord) => void;
   onRotateAgent: (vps: VpsRecord) => void;
   onToggleDockerMetrics: (vps: VpsRecord) => void;
@@ -130,12 +127,14 @@ export function useDashboard(): DashboardCtx {
 // ── Helpers ──────────────────────────────────────────────────────────
 
 function mergeMetrics<T extends { vpsId: string }>(
-  existing: T[],
-  updated: T[],
+  existing: T[] = [],
+  updated: T[] = [],
 ): T[] {
-  const updatedMap = new Map(updated.map((m) => [m.vpsId, m]));
+  const safeExisting = Array.isArray(existing) ? existing : [];
+  const safeUpdated = Array.isArray(updated) ? updated : [];
+  const updatedMap = new Map(safeUpdated.map((m) => [m.vpsId, m]));
   const seen = new Set<string>();
-  const merged = existing.map((m) => {
+  const merged = safeExisting.map((m) => {
     const replacement = updatedMap.get(m.vpsId);
     if (replacement) {
       seen.add(m.vpsId);
@@ -153,11 +152,13 @@ function mergeMetrics<T extends { vpsId: string }>(
 }
 
 function mergeJobs(
-  existing: DashboardOverview["jobs"],
-  updated: DashboardOverview["jobs"],
+  existing: DashboardOverview["jobs"] = [],
+  updated: DashboardOverview["jobs"] = [],
 ) {
-  const byId = new Map(existing.map((job) => [job.id, job]));
-  for (const job of updated) byId.set(job.id, job);
+  const safeExisting = Array.isArray(existing) ? existing : [];
+  const safeUpdated = Array.isArray(updated) ? updated : [];
+  const byId = new Map(safeExisting.map((job) => [job.id, job]));
+  for (const job of safeUpdated) byId.set(job.id, job);
   return [...byId.values()];
 }
 
@@ -544,7 +545,6 @@ export function DashboardProvider({
       host: createForm.host.trim(),
       port: Number(createForm.port || 22),
       username: createForm.username.trim(),
-      fleetAutoUpdate: createForm.fleetAutoUpdate ?? true,
     };
 
     const created = await runAction("Creating VPS...", async () => {
@@ -756,54 +756,6 @@ export function DashboardProvider({
     });
   }
 
-  async function handleUpgradeAgent(vps: VpsRecord) {
-    const label = vpsDisplayName(vps);
-    if (isLocalHost(vps)) {
-      setStatus({
-        message: `Local upgrades for ${label} use the Update controls on its Settings page.`,
-        kind: "default",
-      });
-      return;
-    }
-    return await runAction(
-      `Starting agent upgrade for ${label}...`,
-      async () => {
-        const result = await upgradeAgent(vps.id);
-        setOverview((current) => ({
-          ...current,
-          jobs: mergeJobs(current.jobs, [
-            {
-              id: result.jobId,
-              vpsId: vps.id,
-              type: "upgrade-agent",
-              status: "queued",
-              step: "queued",
-              progress: 0,
-            },
-          ]),
-        }));
-        setRecords((current) =>
-          current.map((record) =>
-            record.id === vps.id
-              ? {
-                  ...record,
-                  agentStatus: "installing",
-                  lastAgentInstallJobId: result.jobId,
-                }
-              : record,
-          ),
-        );
-        setStatus({
-          message: `Agent upgrade queued for ${label}. Job ${result.jobId} is running in the background.`,
-          kind: "success",
-        });
-        return result;
-      },
-      { rethrow: true },
-    );
-  }
-
-
   async function handleRestartAgent(vps: VpsRecord) {
     const label = vpsDisplayName(vps);
     await runAction(`Starting agent restart for ${label}...`, async () => {
@@ -1007,7 +959,6 @@ export function DashboardProvider({
     onVerify: handleVerify,
     onInstallAgent: handleInstallAgent,
     onUninstallAgent: handleUninstallAgent,
-    onUpgradeAgent: handleUpgradeAgent,
     onRestartAgent: handleRestartAgent,
     onRotateAgent: handleRotateAgent,
     onToggleDockerMetrics: handleToggleDockerMetrics,

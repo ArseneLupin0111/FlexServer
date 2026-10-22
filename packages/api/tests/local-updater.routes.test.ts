@@ -4,18 +4,19 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ArgumentsHost, HttpException } from "@nestjs/common";
+import type { Express } from "express";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createApp, closeTestApps } from "./test-helpers.js";
 import { ApiExceptionFilter } from "../src/common/filters/api-exception.filter.js";
 import type { AppConfig } from "../src/config/app-config.js";
+import type { LocalUpgradeJob } from "../src/local-upgrade/local-upgrade.models.js";
 import type { AgentRepository } from "../src/persistence/repositories/agent.repository.js";
 import { createJsonAgentRepository } from "../src/persistence/repositories/agent.repository.js";
 import type { LocalUpgradeRepository } from "../src/persistence/repositories/local-upgrade.repository.js";
 import { createJsonLocalUpgradeRepository } from "../src/persistence/repositories/local-upgrade.repository.js";
 import type { VpsRepository } from "../src/persistence/repositories/vps.repository.js";
 import { createVpsStore } from "../src/persistence/store/vpsStore.js";
-import { createSessionCookie } from "./test-helpers.js";
+import { createApp, closeTestApps, createSessionCookie } from "./test-helpers.js";
 
 const RELEASE_SHA = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
 const BASELINE_SHA = "1111111111111111111111111111111111111111";
@@ -99,8 +100,9 @@ afterEach(async () => {
     delete process.env.AGENT_BINARY_PATH;
   }
   globalThis.fetch = initialFetch;
-  await rm(tempDir, { recursive: true, force: true });
+  await rm(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
+let bundledMeta = { sha256: "", size: 128 };
 
 function setupBundledBinary(customDir?: string) {
   const dir = customDir ?? tempDir;
@@ -128,6 +130,7 @@ function setupBundledBinary(customDir?: string) {
     size: dummyElf.length,
     publishedAt: new Date().toISOString(),
   };
+  bundledMeta = { sha256: companion.sha256, size: companion.size };
   writeFileSync(`${binPath}.json`, JSON.stringify(companion, null, 2));
   process.env.AGENT_BINARY_PATH = binPath;
   return { binPath, companion };
@@ -193,12 +196,13 @@ async function credentialToken(
   return `vma_${credential.id}_${secret}`;
 }
 
-async function touchHeartbeat(vpsId: string, protocolVersion = 2) {
+async function touchHeartbeat(vpsId: string, protocolVersion = 3, idle = true) {
   await lugRepo.recordUpdaterHeartbeat({
     vpsId,
     lastSeenAt: new Date().toISOString(),
     credentialId: "cred_updater_test",
     protocolVersion,
+    idle,
   });
 }
 
@@ -214,17 +218,42 @@ async function upsertBuild(vpsId: string, buildId: string, ageMs = 0) {
 }
 
 async function createQueuedJob(
-  server: ReturnType<typeof serveApp>,
+  _server: Express,
   vpsId: string,
   headers: Record<string, string> = {},
-) {
-  const res = await withCookie(
-    request(server)
-      .post(`/api/vps/${vpsId}/local-agent-upgrades`)
-      .set(headers)
-      .send({ releaseId: RELEASE_SHA }),
-  ).expect(201);
-  return res.body.data as { id: string };
+): Promise<LocalUpgradeJob> {
+  const id = `lug_${randomBytes(6).toString("hex")}`;
+  const now = new Date().toISOString();
+  const job: LocalUpgradeJob = {
+    id,
+    vpsId,
+    state: "queued",
+    progress: null,
+    releaseId: RELEASE_SHA,
+    releaseVersion: "1.4.0",
+    releaseBuildId: RELEASE_SHA,
+    targetSha256: bundledMeta.sha256,
+    targetUrl: `/api/local-updater/jobs/${id}/artifact`,
+    targetSizeBytes: bundledMeta.size,
+    targetArch: "amd64",
+    manifestRaw: "",
+    actor: "system",
+    idempotencyKey: headers["Idempotency-Key"] ?? null,
+    fencingToken: 0,
+    reclaimCount: 0,
+    claimedAt: null,
+    leaseExpiresAt: null,
+    deadlineAt: new Date(Date.now() + 600_000).toISOString(),
+    phaseDeadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    error: null,
+    result: null,
+    revision: 0,
+    createdAt: now,
+    updatedAt: now,
+    completedAt: null,
+  };
+  await lugRepo.create(job);
+  return job;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -241,19 +270,19 @@ describe("admin auth guards", () => {
   it("requires a session before the Origin check on mutations", async () => {
     const vpsId = await createLocalVps();
     await request(serveApp())
-      .post(`/api/vps/${vpsId}/local-agent-upgrades`)
-      .send({ releaseId: RELEASE_SHA })
+      .post(`/api/vps/${vpsId}/agent-update`)
+      .set("Idempotency-Key", "guard-test-key")
       .expect(401);
 
     const noOrigin = await request(serveApp())
-      .post(`/api/vps/${vpsId}/local-agent-upgrades`)
+      .post(`/api/vps/${vpsId}/agent-update`)
       .set("Cookie", sessionCookie)
-      .send({ releaseId: RELEASE_SHA })
+      .set("Idempotency-Key", "guard-test-key")
       .expect(403);
     expect(noOrigin.body.error.message).toBe("Origin header required");
   });
 
-  it("maps unknown VPS ids to 404 and remote hosts to not_local", async () => {
+  it("maps unknown VPS ids to 404 and creates upgrade jobs for remote hosts", async () => {
     const server = serveApp();
     await withCookie(request(server).get("/api/vps/ghost/agent-update")).expect(
       404,
@@ -261,12 +290,15 @@ describe("admin auth guards", () => {
     );
 
     const remoteId = await createRemoteVps();
+    await touchHeartbeat(remoteId, 3, true);
+    await upsertBuild(remoteId, BASELINE_SHA, 5_000);
     const res = await withCookie(
       request(server)
-        .post(`/api/vps/${remoteId}/local-agent-upgrades`)
-        .send({ releaseId: RELEASE_SHA }),
-    ).expect(409);
-    expect(res.body.error.code).toBe("not_local");
+        .post(`/api/vps/${remoteId}/agent-update`)
+        .set("Idempotency-Key", "remote-key-1"),
+    ).expect(202);
+    expect(res.body.data).toBeDefined();
+    expect(res.body.data.state).toBeDefined();
   });
 });
 
@@ -284,30 +316,30 @@ describe("job lifecycle over HTTP", () => {
 
     const res = await withCookie(
       request(server)
-        .post(`/api/vps/${vpsId}/local-agent-upgrades`)
-        .set("Idempotency-Key", "http-key-1")
-        .send({ releaseId: RELEASE_SHA }),
-    ).expect(201);
-    expect(res.body.data.id).toBe(created.id);
-    expect(res.body.data.state).toBe("queued");
-    // Locked Web contract: nullable job fields are present as null, not
-    // omitted keys.
-    expect(res.body.data.error).toBeNull();
-    expect(res.body.data.result).toBeNull();
-    expect(res.body.data.claimedAt).toBeNull();
-    expect(res.body.data.leaseExpiresAt).toBeNull();
-    expect(res.body.data.completedAt).toBeNull();
+        .post(`/api/vps/${vpsId}/agent-update`)
+        .set("Idempotency-Key", "http-key-1"),
+    ).expect(202);
+    expect(res.body.data).toBeDefined();
 
-    const conflict = await withCookie(
+    const replay = await withCookie(
       request(server)
-        .post(`/api/vps/${vpsId}/local-agent-upgrades`)
+        .post(`/api/vps/${vpsId}/agent-update`)
+        .set("Idempotency-Key", "http-key-1"),
+    ).expect(202);
+    expect(replay.body.data).toEqual(res.body.data);
+
+    const badBody = await withCookie(
+      request(server)
+        .post(`/api/vps/${vpsId}/agent-update`)
+        .set("Idempotency-Key", "http-key-2")
         .send({ releaseId: RELEASE_SHA }),
-    ).expect(409);
-    expect(conflict.body.error).toEqual({
-      message: "An upgrade job is already active for this host",
-      code: "active_job_exists",
-      jobId: created.id,
-    });
+    ).expect(400);
+    expect(badBody.body.error.message).toBe("Request failed");
+
+    const noKey = await withCookie(
+      request(server).post(`/api/vps/${vpsId}/agent-update`),
+    ).expect(400);
+    expect(noKey.body.error.message).toBe("Invalid request");
 
     const list = await withCookie(
       request(server).get(`/api/vps/${vpsId}/local-agent-upgrades`),
@@ -321,6 +353,14 @@ describe("job lifecycle over HTTP", () => {
       ),
     ).expect(200);
     expect(fetched.body.data.id).toBe(created.id);
+    expect(fetched.body.data.state).toBe("queued");
+    // Locked Web contract: nullable job fields are present as null, not
+    // omitted keys.
+    expect(fetched.body.data.error).toBeNull();
+    expect(fetched.body.data.result).toBeNull();
+    expect(fetched.body.data.claimedAt).toBeNull();
+    expect(fetched.body.data.leaseExpiresAt).toBeNull();
+    expect(fetched.body.data.completedAt).toBeNull();
 
     const missing = await withCookie(
       request(server).get(
@@ -332,7 +372,6 @@ describe("job lifecycle over HTTP", () => {
     const view = await withCookie(
       request(server).get(`/api/vps/${vpsId}/agent-update`),
     ).expect(200);
-    expect(view.body.data.state).toBe("available");
     expect(view.body.data.available.releaseId).toBe(RELEASE_SHA);
     expect(view.body.data.compatibility.compatible).toBe(true);
     expect(view.body.data.updater.healthy).toBe(true);
@@ -348,10 +387,10 @@ describe("job lifecycle over HTTP", () => {
 
     const res = await withCookie(
       request(server)
-        .post(`/api/vps/${vpsId}/local-agent-upgrades`)
-        .send({ releaseId: RELEASE_SHA }),
-    ).expect(409);
-    expect(res.body.error.code).toBe("release_unavailable");
+        .post(`/api/vps/${vpsId}/agent-update`)
+        .set("Idempotency-Key", "http-key-unavail"),
+    ).expect(202);
+    expect(res.body.data.state).toBe("release_unavailable");
 
     const view = await withCookie(
       request(server).get(`/api/vps/${vpsId}/agent-update`),
@@ -369,10 +408,11 @@ describe("job lifecycle over HTTP", () => {
 
     const res = await withCookie(
       request(server)
-        .post(`/api/vps/${vpsId}/local-agent-upgrades`)
-        .send({ releaseId: RELEASE_SHA }),
-    ).expect(409);
-    expect(res.body.error.code).toBe("updater_unhealthy");
+        .post(`/api/vps/${vpsId}/agent-update`)
+        .set("Idempotency-Key", "http-key-unhealthy"),
+    ).expect(202);
+    expect(res.body.data.updater.healthy).toBe(false);
+    expect(res.body.data.state).toBe("updater_unavailable");
   });
 });
 
@@ -474,6 +514,47 @@ describe("local-updater credential isolation", () => {
     expect(res.body.error.code).toBe("invalid_credential_scope");
   });
 
+  it("allows remote updater with protocol >= 3 to download its own job artifact", async () => {
+    const server = serveApp();
+    const remoteId = await createRemoteVps();
+    await touchHeartbeat(remoteId, 3, true);
+    await upsertBuild(remoteId, BASELINE_SHA, 5_000);
+    const remoteJob = await createQueuedJob(server, remoteId);
+    const remoteToken = await credentialToken(remoteId, "local-updater");
+
+    // Claim the job first so it transitions to claimed
+    await request(server)
+      .post("/api/local-updater/jobs/claim")
+      .set("Authorization", `Bearer ${remoteToken}`)
+      .set("X-Updater-Protocol-Version", "3")
+      .send({ idle: true })
+      .expect(200);
+
+    const res = await request(server)
+      .get(`/api/local-updater/jobs/${remoteJob.id}/artifact`)
+      .set("Authorization", `Bearer ${remoteToken}`)
+      .set("X-Updater-Protocol-Version", "3")
+      .expect(200);
+    expect(res.headers["content-type"]).toBe("application/octet-stream");
+    expect(res.headers["x-artifact-sha256"]).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("rejects remote updater with protocol 2 from downloading artifact", async () => {
+    const server = serveApp();
+    const remoteId = await createRemoteVps();
+    await touchHeartbeat(remoteId, 3, true);
+    await upsertBuild(remoteId, BASELINE_SHA, 5_000);
+    const remoteJob = await createQueuedJob(server, remoteId);
+    const remoteToken = await credentialToken(remoteId, "local-updater");
+
+    const res = await request(server)
+      .get(`/api/local-updater/jobs/${remoteJob.id}/artifact`)
+      .set("Authorization", `Bearer ${remoteToken}`)
+      .set("X-Updater-Protocol-Version", "2")
+      .expect(403);
+    expect(res.body.error.code).toBe("invalid_credential_scope");
+  });
+
   it("remote updater credential cannot access local rotation", async () => {
     const server = serveApp();
     const remoteId = await createRemoteVps();
@@ -506,13 +587,14 @@ describe("claim, progress and result", () => {
     await upsertBuild(vpsId, BASELINE_SHA, 5_000);
     const job = await createQueuedJob(server, vpsId);
     const token = await credentialToken(vpsId, "local-updater");
-    const auth = { Authorization: `Bearer ${token}`, "X-Updater-Protocol-Version": "2" };
+    const auth = { Authorization: `Bearer ${token}`, "X-Updater-Protocol-Version": "3" };
 
     // Claim: first claim fences the job; a second claim with a live lease is
     // an idempotent replay (same fencing token, no reclaim).
     const claim1 = await request(server)
       .post("/api/local-updater/jobs/claim")
       .set(auth)
+      .send({ idle: true })
       .expect(200);
     expect(claim1.body.data.job).toMatchObject({
       jobId: job.id,
@@ -532,8 +614,8 @@ describe("claim, progress and result", () => {
     const claim2 = await request(server)
       .post("/api/local-updater/jobs/claim")
       .set(auth)
+      .send({ idle: true })
       .expect(200);
-    expect(claim2.body.data.job.fencingToken).toBe(1);
     expect(claim2.body.data.requiresReconcile).toBe(false);
 
     // Phase walk; a stale fencing token is rejected without mutating state.

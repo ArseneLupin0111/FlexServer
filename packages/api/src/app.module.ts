@@ -41,13 +41,13 @@ import type { HostKeyPinRepository } from "./ssh/host-key-pin.repository.js";
 import { AgentInstallerService } from "./agents/agent-installer.service.js";
 import { AgentUninstallerService } from "./agents/agent-uninstaller.service.js";
 import { AgentLifecycleCoordinator } from "./agents/agent-lifecycle-coordinator.js";
-import { AgentUpgraderService } from "./agents/agent-upgrader.service.js";
 import { AgentRestartService } from "./agents/agent-restart.service.js";
 import { AgentRotationService } from "./agents/agent-rotation.service.js";
 import { LocalAgentRotationHelper } from "./agents/local-agent-rotation-helper.service.js";
 import { AgentService } from "./agents/agent.service.js";
 import { LocalUpgradeController } from "./local-upgrade/local-upgrade.controller.js";
 import { LocalUpgradeService } from "./local-upgrade/local-upgrade.service.js";
+import { AgentConvergenceService } from "./local-upgrade/agent-convergence.service.js";
 import { LocalUpdaterController } from "./local-upgrade/local-updater.controller.js";
 import { BundledAgentService } from "./local-upgrade/bundled-agent.service.js";
 import { JobActivityService } from "./jobs/job-activity.service.js";
@@ -310,6 +310,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           KEY_SERVICE,
           SshService,
           DashboardSessionService,
+          AgentLifecycleCoordinator,
           AuditService,
           DashboardSettingsService,
           LocalTerminalService,
@@ -320,6 +321,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           keys: KeyService,
           ssh: SshService,
           sessions: DashboardSessionService,
+          coordinator: AgentLifecycleCoordinator,
           audit: AuditService,
           settings: DashboardSettingsService,
           localTerminal: LocalTerminalService,
@@ -330,6 +332,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
             keys,
             ssh,
             sessions,
+            coordinator,
             audit,
             settings,
             localTerminal,
@@ -340,7 +343,6 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       AgentLifecycleCoordinator,
       AgentInstallerService,
       AgentUninstallerService,
-      AgentUpgraderService,
       AgentRestartService,
       LocalAgentRotationHelper,
       AgentRotationService,
@@ -427,6 +429,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       },
       BundledAgentService,
       LocalUpgradeService,
+      AgentConvergenceService,
       {
         provide: FLEET_REPOSITORY,
         useValue: deps.fleet ?? repositories!.fleet,
@@ -532,7 +535,6 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           AgentUninstallerService,
           AGENT_REPOSITORY,
           HostKeyPinService,
-          AgentUpgraderService,
            AgentRestartService,
            DockerMonitoringService,
           JOB_REPOSITORY, METRIC_REPOSITORY, DOCKER_MONITORING_REPOSITORY,
@@ -554,7 +556,6 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           uninstaller: AgentUninstallerService,
           agentRepo: AgentRepository,
           hostKeyPin: HostKeyPinService,
-          upgrader: AgentUpgraderService,
           restarter: AgentRestartService,
           dockerMonitoringService: DockerMonitoringService,
           jobs: JobRepository, metrics: MetricRepository, docker: DockerMonitoringRepository,
@@ -576,7 +577,6 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
             uninstaller,
             agentRepo,
              hostKeyPin,
-             upgrader,
              restarter,
              dockerMonitoringService,
              createVpsCleanup(agentRepo, jobs, metrics, docker, management, upgrades, pins, terminal, logs, applications, fleet),

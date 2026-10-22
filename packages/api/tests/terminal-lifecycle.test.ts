@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { TerminalSessionService, type TerminalSocket } from "../src/terminal/terminal-session.service.js";
 import type { AppConfig } from "../src/config/app-config.js";
+import { AgentLifecycleCoordinator } from "../src/agents/agent-lifecycle-coordinator.js";
 
 class FakeSocket implements TerminalSocket {
   messages: string[] = []; closes: [number | undefined, string | undefined][] = [];
@@ -23,7 +24,8 @@ function setup() {
   const vps = { get: vi.fn(async () => ({ id: "v", host: "h", port: 22, username: "u", kind: "remote" })) };
   const keys = { readPrivateKey: vi.fn(async () => "PRIVATE") }; const ssh = { openManagedShell: vi.fn(async () => shell) };
   const config = { enableWebTerminal: true, mode: "local", terminal: { global: 10, perDashboard: 3, perVps: 2, openTimeoutMs: 100, idleTimeoutMs: 50, lifetimeMs: 200, revocationPollMs: 25, heartbeatMs: 1000, outputBufferBytes: 1, inputBufferBytes: 1, slowConsumerTimeoutMs: 1 } } as unknown as AppConfig;
-  const audit = { record: vi.fn(async () => {}) }; const service = new TerminalSessionService(config, vps as any, keys as any, ssh as any, sessions as any, audit as any);
+  const coordinator = new AgentLifecycleCoordinator();
+  const audit = { record: vi.fn(async () => {}) }; const service = new TerminalSessionService(config, vps as any, keys as any, ssh as any, sessions as any, coordinator, audit as any);
   return { service, socket, channel, client, shell, sessions, ssh, keys, audit, config };
 }
 const open = { type: "open", version: 1, vpsId: "v", cols: 80, rows: 24 } as const;

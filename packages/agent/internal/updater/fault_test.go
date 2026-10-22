@@ -1534,3 +1534,154 @@ func TestHelperBundledUpdate(t *testing.T) {
 		t.Fatalf("expected binary content %q, got %q", string(content), string(gotNew))
 	}
 }
+
+func TestDaemonDeferredOutcomePreSwap(t *testing.T) {
+	rel := newRelease(t, []byte("deferred-test-binary"), "https://example.com/agent")
+	cfg := testConfig(t, rel)
+	events := &eventLog{}
+	installSeams(t, events, rel.buildID)
+
+	oldContent := []byte("old-binary-content")
+	writeFile(t, cfg.AgentBinary, oldContent, 0o755)
+
+	job := &ClaimedJob{
+		JobID:           faultJobID,
+		Phase:           "downloading",
+		FencingToken:    1,
+		TargetSha256:    rel.sha,
+		TargetSizeBytes: int64(len(rel.content)),
+		Release: ReleaseInfo{
+			ReleaseID:    rel.releaseID,
+			BuildID:      rel.buildID,
+			TargetSha256: rel.sha,
+		},
+		ManifestRaw: string(rel.manifestRaw),
+	}
+	api := newFakeAPI(job, events)
+	d := NewDaemon(cfg, api)
+	if err := os.MkdirAll(resultsDir(cfg.StateDir), 0o770); err != nil {
+		t.Fatalf("mkdir results: %v", err)
+	}
+
+	// Write a helper result simulating deferred apply (host became busy before swap)
+	helperRes := &HelperResult{
+		JobID:   faultJobID,
+		Action:  actionApply,
+		Outcome: "deferred",
+		Detail:  "host busy before swap: active terminal sessions (1)",
+		At:      time.Now().UTC(),
+	}
+	if err := writeResult(cfg.StateDir, helperRes); err != nil {
+		t.Fatalf("writeResult: %v", err)
+	}
+
+	// Seed helper cleanup result so consume succeeds
+	cleanupRes := &HelperResult{
+		JobID:   faultJobID,
+		Action:  actionCleanup,
+		Outcome: "cleaned",
+		At:      time.Now().UTC(),
+	}
+	if err := writeResult(cfg.StateDir, cleanupRes); err != nil {
+		t.Fatalf("write cleanup result: %v", err)
+	}
+
+	j := &Journal{
+		JobID:        faultJobID,
+		Phase:        PhaseRestarting,
+		FencingToken: 1,
+		BuildID:      rel.buildID,
+	}
+	if err := d.journal.Save(j); err != nil {
+		t.Fatalf("save journal: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := d.runRestarting(ctx, j); err != nil {
+		t.Fatalf("runRestarting: %v", err)
+	}
+
+	// Verify outcome "deferred" reported to API
+	results := api.resultList()
+	if len(results) != 1 || !strings.HasPrefix(results[0], "deferred|") {
+		t.Fatalf("api results = %v, want deferred", results)
+	}
+
+	// Verify pre-swap cleanup: journal consumed, no hold
+	loaded, err := d.journal.Load()
+	if err != nil || loaded != nil {
+		t.Fatalf("journal should be consumed after deferred pre-swap, got %v / %v", loaded, err)
+	}
+}
+
+func TestDaemonSupersededPreSwapCleansUp(t *testing.T) {
+	cfg := testConfig(t, nil)
+	events := &eventLog{}
+	api := newFakeAPI(nil, events)
+	d := NewDaemon(cfg, api)
+	if err := os.MkdirAll(resultsDir(cfg.StateDir), 0o770); err != nil {
+		t.Fatalf("mkdir results: %v", err)
+	}
+
+	// Seed cleanup result
+	if err := writeResult(cfg.StateDir, &HelperResult{
+		JobID:   faultJobID,
+		Action:  actionCleanup,
+		Outcome: "cleaned",
+	}); err != nil {
+		t.Fatalf("write cleanup result: %v", err)
+	}
+
+	j := &Journal{
+		JobID:        faultJobID,
+		Phase:        PhaseDownloading,
+		PostSwap:     false,
+		FencingToken: 1,
+	}
+	if err := d.journal.Save(j); err != nil {
+		t.Fatalf("save journal: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := d.consumeWithRuling(ctx, j, "superseded"); err != nil {
+		t.Fatalf("consumeWithRuling superseded: %v", err)
+	}
+
+	loaded, err := d.journal.Load()
+	if err != nil || loaded != nil {
+		t.Fatalf("journal should be consumed, got %v / %v", loaded, err)
+	}
+}
+
+func TestDaemonSupersededPostSwapMaintainsRecovery(t *testing.T) {
+	cfg := testConfig(t, nil)
+	events := &eventLog{}
+	api := newFakeAPI(nil, events)
+	d := NewDaemon(cfg, api)
+
+	j := &Journal{
+		JobID:        faultJobID,
+		Phase:        PhaseAwaitingHB,
+		PostSwap:     true, // swap already occurred
+		FencingToken: 1,
+	}
+	if err := d.journal.Save(j); err != nil {
+		t.Fatalf("save journal: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := d.consumeWithRuling(ctx, j, "superseded"); err != nil {
+		t.Fatalf("consumeWithRuling: %v", err)
+	}
+
+	// Post-swap must hold and retain journal for recovery
+	loaded, err := d.journal.Load()
+	if err != nil || loaded == nil {
+		t.Fatalf("journal must NOT be consumed post-swap: %v", err)
+	}
+	if !loaded.Hold {
+		t.Fatalf("journal must be placed on hold, got Hold=false")
+	}
+}

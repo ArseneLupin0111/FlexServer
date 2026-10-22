@@ -61,6 +61,8 @@ type Config struct {
 	FleetReleasePublicKeyFile string `json:"fleetReleasePublicKeyFile,omitempty"`
 	// StateDir holds journal, staging, pending, results, backups and the lock.
 	StateDir string `json:"stateDir"`
+	// AgentStateDir is the host agent's state directory (holds docker-applications/exclusion.json).
+	AgentStateDir string `json:"agentStateDir,omitempty"`
 	// MaxArtifactBytes caps a single artifact download (default 128 MiB).
 	MaxArtifactBytes int64 `json:"maxArtifactBytes,omitempty"`
 	// HTTPTimeout bounds every API/download request.
@@ -74,13 +76,15 @@ type Config struct {
 	AwaitHeartbeatGrace time.Duration `json:"-"`
 	// HelperTimeout bounds one privileged helper invocation.
 	HelperTimeout time.Duration `json:"-"`
+	// CurrentJobID is set in-process by the helper during active execution so
+	// idle inspection ignores its own upgrade fence.
+	CurrentJobID string `json:"-"`
 
 	HTTPTimeoutSec         int `json:"httpTimeoutSec,omitempty"`
 	ClaimIntervalSec       int `json:"claimIntervalSec,omitempty"`
 	HeartbeatIntervalSec   int `json:"heartbeatIntervalSec,omitempty"`
 	AwaitHeartbeatGraceSec int `json:"awaitHeartbeatGraceSec,omitempty"`
 	HelperTimeoutSec       int `json:"helperTimeoutSec,omitempty"`
-
 	// testMode opts out of the fixed production invariants. It is unexported
 	// so no config file can ever enable it; only in-process test harnesses
 	// call EnableTestOverrides.

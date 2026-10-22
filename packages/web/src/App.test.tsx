@@ -461,7 +461,6 @@ describe("React dashboard", () => {
           host: "203.0.113.20",
           port: 22,
           username: "root",
-          fleetAutoUpdate: true,
         }),
       }),
     );
@@ -1716,14 +1715,34 @@ describe("React dashboard", () => {
     });
     it("renders workspace settings page and executes remote agent upgrade", async () => {
       const onlineServers = [{ ...twoServers[0], agentStatus: "online" as const }, twoServers[1]];
+      const mockAgentUpdate = {
+        installed: { version: "0.9.0", buildId: "aaaa", lastSeenAt: new Date().toISOString(), fresh: true },
+        available: { releaseId: "rel-1", version: "1.0.0", buildId: "bbbb", publishedAt: new Date().toISOString(), artifacts: [] },
+        compatibility: { compatible: true, apiContractVersion: 3, reason: "ok" },
+        updater: { installed: true, healthy: true, lastSeenAt: new Date().toISOString() },
+        state: "available",
+        job: null,
+        automation: { state: "pending", reason: null, targetBuildId: "bbbb", retryAllowed: true },
+      };
+      let postReceived = false;
       fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
         if (url === "/api/auth/me") return authOk();
-        if (url === "/api/vps/vps-1/upgrade-agent" && init?.method === "POST") {
+        if (url === "/api/vps/vps-1/agent-update" && init?.method === "POST") {
+          postReceived = true;
           return {
             ok: true,
-            status: 200,
-            json: async () => ({ data: { jobId: "job-upgrade-1", state: { status: "queued" } } }),
+            status: 202,
+            json: async () => ({
+              data: {
+                ...mockAgentUpdate,
+                automation: { state: "updating", reason: "queued", targetBuildId: "bbbb", retryAllowed: false },
+                job: { id: "job-upgrade-1", state: "queued" },
+              },
+            }),
           };
+        }
+        if (url === "/api/vps/vps-1/agent-update") {
+          return { ok: true, status: 200, json: async () => ({ data: mockAgentUpdate }) };
         }
         const data = url === "/api/dashboard" ? dashboardData
           : url === "/api/vps" ? onlineServers
@@ -1739,29 +1758,38 @@ describe("React dashboard", () => {
       expect(await screen.findByRole("heading", { name: "Settings for web-01" })).toBeInTheDocument();
       expect(screen.getByText("Agent updates")).toBeInTheDocument();
 
-      const upgradeButton = screen.getByRole("button", { name: "Upgrade agent" });
+      const upgradeButton = await screen.findByRole("button", { name: "Upgrade agent" });
       expect(upgradeButton).toBeEnabled();
       await user.click(upgradeButton);
 
-      const dialog = await screen.findByRole("alertdialog");
-      expect(within(dialog).getByText(/Upgrade agent on web-01\?/)).toBeInTheDocument();
-      await user.click(within(dialog).getByRole("button", { name: "Upgrade agent" }));
-
       await waitFor(() => {
-        expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+        expect(postReceived).toBe(true);
       });
+      expect(await screen.findByText("Queued")).toBeInTheDocument();
     });
 
-    it("retains confirmation dialog and displays error when remote agent upgrade fails in Settings", async () => {
+    it("displays error when remote agent upgrade fails in Settings", async () => {
       const onlineServers = [{ ...twoServers[0], agentStatus: "online" as const }, twoServers[1]];
+      const mockAgentUpdate = {
+        installed: { version: "0.9.0", buildId: "aaaa", lastSeenAt: new Date().toISOString(), fresh: true },
+        available: { releaseId: "rel-1", version: "1.0.0", buildId: "bbbb", publishedAt: new Date().toISOString(), artifacts: [] },
+        compatibility: { compatible: true, apiContractVersion: 3, reason: "ok" },
+        updater: { installed: true, healthy: true, lastSeenAt: new Date().toISOString() },
+        state: "available",
+        job: null,
+        automation: { state: "pending", reason: null, targetBuildId: "bbbb", retryAllowed: true },
+      };
       fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
         if (url === "/api/auth/me") return authOk();
-        if (url === "/api/vps/vps-1/upgrade-agent" && init?.method === "POST") {
+        if (url === "/api/vps/vps-1/agent-update" && init?.method === "POST") {
           return {
             ok: false,
             status: 500,
             json: async () => ({ error: { code: "UPGRADE_FAILED", message: "SSH connection timed out" } }),
           };
+        }
+        if (url === "/api/vps/vps-1/agent-update") {
+          return { ok: true, status: 200, json: async () => ({ data: mockAgentUpdate }) };
         }
         const data = url === "/api/dashboard" ? dashboardData
           : url === "/api/vps" ? onlineServers
@@ -1775,15 +1803,10 @@ describe("React dashboard", () => {
       renderApp(["/vps/vps-1/settings"]);
 
       expect(await screen.findByRole("heading", { name: "Settings for web-01" })).toBeInTheDocument();
-      const upgradeButton = screen.getByRole("button", { name: "Upgrade agent" });
+      const upgradeButton = await screen.findByRole("button", { name: "Upgrade agent" });
       await user.click(upgradeButton);
 
-      const dialog = await screen.findByRole("alertdialog");
-      expect(within(dialog).getByText(/Upgrade agent on web-01\?/)).toBeInTheDocument();
-      await user.click(within(dialog).getByRole("button", { name: "Upgrade agent" }));
-
-      expect(await within(dialog).findByRole("alert")).toHaveTextContent("SSH connection timed out");
-      expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+      expect(await screen.findByRole("alert")).toHaveTextContent("SSH connection timed out");
     });
 
     it("disables remote agent upgrade in Settings when a lifecycle job is active", async () => {

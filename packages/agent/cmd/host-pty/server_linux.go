@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/signal"
@@ -14,8 +15,7 @@ import (
 	"syscall"
 )
 
-func runUnixSocketServer(socketPath, shell string, defaultRows, defaultCols uint16, socketMode os.FileMode, socketUid, socketGid int) error {
-	_ = os.Remove(socketPath)
+func runUnixSocketServer(socketPath, shell, stateDir string, defaultRows, defaultCols uint16, socketMode os.FileMode, socketUid, socketGid int) error {
 
 	dir := filepath.Dir(socketPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -43,14 +43,24 @@ func runUnixSocketServer(socketPath, shell string, defaultRows, defaultCols uint
 
 	var shuttingDown atomic.Bool
 	var activeSessions atomic.Int32
+	var markerMu sync.Mutex
 	activeMarkerPath := filepath.Join(dir, "active_sessions")
 	updateMarker := func(delta int32) {
+		markerMu.Lock()
+		defer markerMu.Unlock()
 		n := activeSessions.Add(delta)
 		if n < 0 {
 			n = 0
 			activeSessions.Store(0)
 		}
-		_ = os.WriteFile(activeMarkerPath, []byte(fmt.Sprintf("%d\n", n)), 0o644)
+		tmpPath := fmt.Sprintf("%s.tmp.%d", activeMarkerPath, os.Getpid())
+		if err := os.WriteFile(tmpPath, []byte(fmt.Sprintf("%d\n", n)), 0o644); err != nil {
+			log.Printf("host-pty: failed to write active_sessions marker: %v", err)
+			return
+		}
+		if err := os.Rename(tmpPath, activeMarkerPath); err != nil {
+			log.Printf("host-pty: failed to atomically update active_sessions marker: %v", err)
+		}
 	}
 	updateMarker(0)
 	defer os.Remove(activeMarkerPath)
@@ -79,7 +89,7 @@ func runUnixSocketServer(socketPath, shell string, defaultRows, defaultCols uint
 			defer sessionWg.Done()
 			defer updateMarker(-1)
 			defer c.Close()
-			_ = runSession(c, c, shell, defaultRows, defaultCols)
+			_ = runSession(c, c, shell, stateDir, defaultRows, defaultCols)
 		}(conn)
 	}
 	closeAllSessions()

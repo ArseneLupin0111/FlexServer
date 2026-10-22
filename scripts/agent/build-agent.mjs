@@ -5,12 +5,10 @@
  * Sets GOOS=linux GOARCH=amd64 to produce Linux binaries on any host.
  *
  * Build identity (parity with the Dockerfile agent-builder stage):
- *   -X ...version.Value=<semver>          display version (AGENT_VERSION or package.json)
- *   -X ...version.Build=<40-hex git SHA>  immutable build identity (AGENT_BUILD_ID or git HEAD)
- * `-version` prints "<Value>+<Build>" ("<Value>" alone when Build is unknown),
- * so a release build can always be cross-checked against its manifest.
- * Both binaries share one identity: the signed release manifest pins each
- * under its own artifacts[] entry (component "agent" / "updater").
+ *   -X ...version.Value=<semver>          display version (AGENT_VERSION, defaults to dev)
+ *   -X ...version.Build=<40-hex content ID>  deterministic content identity via agent-build-id CLI
+ * `-version` prints "<Value>+<Build>" ("<Value>" alone when Build is unknown).
+ * Both binaries share one identity.
  */
 
 import { execSync } from "child_process";
@@ -50,38 +48,34 @@ if (!existsSync(agentDir)) {
 console.log("Building vps-agent and vps-updater for linux/amd64...");
 mkdirSync(outputDir, { recursive: true });
 
-const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-const agentVersion = process.env.AGENT_VERSION || packageJson.version || "dev";
+const agentVersion = process.env.AGENT_VERSION || "dev";
 
-// Immutable build identity: explicit AGENT_BUILD_ID (CI release builds) wins;
-// otherwise derive from the checked-out commit. Anything non-canonical is a
-// misconfiguration and fails hard rather than silently building a "dev" identity.
-let buildId = process.env.AGENT_BUILD_ID;
-if (buildId === undefined || buildId === "") {
-  try {
-    buildId = execSync("git rev-parse HEAD", {
-      cwd: root,
-      stdio: ["ignore", "pipe", "ignore"],
-    })
-      .toString()
-      .trim();
-  } catch {
-    buildId = "";
-  }
-} else if (!GIT_SHA_RE.test(buildId)) {
-  console.error(
-    `Error: AGENT_BUILD_ID must be a full 40-hex git SHA (got "${buildId}")`,
-  );
+// Immutable content identity: computed deterministically from agent package
+// sources and toolchain using agent-build-id CLI. Deployment ignores AGENT_BUILD_ID
+// overrides and always uses content identity.
+let buildId;
+try {
+  buildId = execSync("go run ./cmd/agent-build-id --root .", {
+    cwd: agentDir,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, CGO_ENABLED: "0" },
+  })
+    .toString()
+    .trim();
+} catch (err) {
+  const errMsg = err.stderr ? err.stderr.toString() : err.message;
+  console.error(`Failed to compute agent build identity: ${errMsg}`);
   process.exit(1);
 }
-if (buildId !== "" && !GIT_SHA_RE.test(buildId)) {
+
+if (!GIT_SHA_RE.test(buildId)) {
   console.error(
-    `Error: git rev-parse HEAD returned a non-SHA value ("${buildId}"); set AGENT_BUILD_ID explicitly`,
+    `Error: agent-build-id returned non-canonical identity ("${buildId}")`,
   );
   process.exit(1);
 }
 
-const identity = buildId === "" ? agentVersion : `${agentVersion}+${buildId}`;
+const identity = `${agentVersion}+${buildId}`;
 if (!VERSION_LINE_RE.test(identity)) {
   console.error(
     `Error: build identity "${identity}" does not match VERSION_RE ` +
@@ -106,7 +100,7 @@ try {
     ["./cmd/ai-executor", aiExecutorOutputPath],
     ["./cmd/ai-host-helper", aiHostHelperOutputPath],
   ]) {
-    execSync('go build -ldflags "' + ldflags + '" -o "' + out + '" ' + pkg, {
+    execSync('go build -trimpath -buildvcs=false -ldflags "' + ldflags + '" -o "' + out + '" ' + pkg, {
       cwd: agentDir,
       stdio: "inherit",
       env: { ...process.env, GOOS: "linux", GOARCH: "amd64", CGO_ENABLED: "0" },
@@ -119,7 +113,7 @@ try {
 
 if (process.platform !== "linux" || process.arch !== "amd64") {
   try {
-    execSync('go build -ldflags "' + ldflags + '" -o "' + hostPtyNativePath + '" ./cmd/host-pty', {
+    execSync('go build -trimpath -buildvcs=false -ldflags "' + ldflags + '" -o "' + hostPtyNativePath + '" ./cmd/host-pty', {
       cwd: agentDir,
       stdio: "inherit",
       env: { ...process.env, CGO_ENABLED: "0" },
@@ -134,7 +128,7 @@ if (process.platform !== "linux" || process.arch !== "amd64") {
 }
 if (process.platform !== "linux" || process.arch !== "amd64") {
   try {
-    execSync('go build -ldflags "' + ldflags + '" -o "' + hostFilesNativePath + '" ./cmd/host-files', {
+    execSync('go build -trimpath -buildvcs=false -ldflags "' + ldflags + '" -o "' + hostFilesNativePath + '" ./cmd/host-files', {
       cwd: agentDir,
       stdio: "inherit",
       env: { ...process.env, CGO_ENABLED: "0" },
@@ -149,7 +143,7 @@ if (process.platform !== "linux" || process.arch !== "amd64") {
 }
 if (process.platform !== "linux" || process.arch !== "amd64") {
   try {
-    execSync('go build -ldflags "' + ldflags + '" -o "' + rotatorNativePath + '" ./cmd/local-agent-rotator', {
+    execSync('go build -trimpath -buildvcs=false -ldflags "' + ldflags + '" -o "' + rotatorNativePath + '" ./cmd/local-agent-rotator', {
       cwd: agentDir,
       stdio: "inherit",
       env: { ...process.env, CGO_ENABLED: "0" },
@@ -164,7 +158,7 @@ if (process.platform !== "linux" || process.arch !== "amd64") {
 }
 if (process.platform !== "linux" || process.arch !== "amd64") {
   try {
-    execSync('go build -ldflags "' + ldflags + '" -o "' + aiExecutorNativePath + '" ./cmd/ai-executor', {
+    execSync('go build -trimpath -buildvcs=false -ldflags "' + ldflags + '" -o "' + aiExecutorNativePath + '" ./cmd/ai-executor', {
       cwd: agentDir,
       stdio: "inherit",
       env: { ...process.env, CGO_ENABLED: "0" },
@@ -179,7 +173,7 @@ if (process.platform !== "linux" || process.arch !== "amd64") {
 }
 if (process.platform !== "linux" || process.arch !== "amd64") {
   try {
-    execSync('go build -ldflags "' + ldflags + '" -o "' + aiHostHelperNativePath + '" ./cmd/ai-host-helper', {
+    execSync('go build -trimpath -buildvcs=false -ldflags "' + ldflags + '" -o "' + aiHostHelperNativePath + '" ./cmd/ai-host-helper', {
       cwd: agentDir,
       stdio: "inherit",
       env: { ...process.env, CGO_ENABLED: "0" },

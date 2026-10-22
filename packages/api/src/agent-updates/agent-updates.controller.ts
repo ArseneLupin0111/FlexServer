@@ -6,68 +6,34 @@ import {
   HttpCode,
   Inject,
   Param,
-  Patch,
   Post,
   UseGuards,
 } from "@nestjs/common";
 import { DashboardSessionGuard } from "../auth/dashboard-session.guard.js";
 import { OriginGuard } from "../auth/origin-guard.js";
 import { FleetService } from "./fleet.service.js";
+import { AgentConvergenceService } from "../local-upgrade/agent-convergence.service.js";
 import type { FleetManifestEnvelope } from "./fleet.models.js";
 import {
   controlRolloutSchema,
   createRolloutSchema,
-  enrollSchema,
-  updatePoliciesSchema,
 } from "./fleet.schemas.js";
 
 @UseGuards(DashboardSessionGuard, OriginGuard)
 @Controller("api/agent-updates")
 export class AgentUpdatesController {
   constructor(
+    @Inject(AgentConvergenceService)
+    private readonly convergence: AgentConvergenceService,
     @Inject(FleetService)
     private readonly service: FleetService,
   ) {}
 
   @Get()
   async getOverview() {
-    const data = await this.service.getOverview();
-    return { data };
+    const hosts = await this.convergence.listAgentUpdates();
+    return { data: { hosts } };
   }
-
-  @Post("enroll")
-  @HttpCode(200)
-  async enroll(@Body() rawBody: unknown) {
-    const parse = enrollSchema.safeParse(rawBody);
-    if (!parse.success) {
-      throw new BadRequestException({
-        error: "Invalid enrollment request",
-        details: parse.error.issues,
-      });
-    }
-    const data = await this.service.enrollHosts(
-      parse.data.vpsIds,
-      parse.data.policy,
-    );
-    return { data };
-  }
-
-  @Patch("policies")
-  async updatePolicies(@Body() rawBody: unknown) {
-    const parse = updatePoliciesSchema.safeParse(rawBody);
-    if (!parse.success) {
-      throw new BadRequestException({
-        error: "Invalid policy update request",
-        details: parse.error.issues,
-      });
-    }
-    const data = await this.service.updatePolicies(
-      parse.data.vpsIds,
-      parse.data.policy,
-    );
-    return { data };
-  }
-
   @Post("rollouts")
   async createRollout(@Body() rawBody: unknown) {
     const parse = createRolloutSchema.safeParse(rawBody);

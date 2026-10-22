@@ -12,10 +12,12 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/vps-manager/agent/internal/applications"
 	"github.com/vps-manager/agent/internal/pty"
+	"github.com/vps-manager/agent/internal/version"
 )
-
 func defaultShell() string {
 	if runtime.GOOS == "windows" {
 		if p, err := exec.LookPath("powershell.exe"); err == nil {
@@ -77,10 +79,16 @@ func main() {
 	socketModeFlag := flag.String("socket-mode", "0660", "File mode for unix domain socket in octal (default: 0660)")
 	socketUidFlag := flag.Int("socket-uid", -1, "Socket owner UID (-1 keeps daemon UID)")
 	socketGidFlag := flag.Int("socket-gid", -1, "Socket owner GID (-1 keeps daemon GID)")
+	stateDirFlag := flag.String("agent-state-dir", "", "Agent state directory (default: /var/lib/vps-manager-agent or FLEXSERVER_AGENT_STATE_DIR)")
+	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
-	cols := uint16(*colsFlag)
+	if *versionFlag {
+		fmt.Println(version.Identity())
+		return
+	}
 	rows := uint16(*rowsFlag)
+	cols := uint16(*colsFlag)
 	if cols == 0 {
 		cols = 80
 	}
@@ -103,21 +111,32 @@ func main() {
 			fmt.Fprintf(os.Stderr, "invalid socket-mode %q: %v\n", *socketModeFlag, err)
 			os.Exit(1)
 		}
-		if err := runUnixSocketServer(*socketFlag, shell, rows, cols, os.FileMode(modeVal), *socketUidFlag, *socketGidFlag); err != nil {
+		if err := runUnixSocketServer(*socketFlag, shell, *stateDirFlag, rows, cols, os.FileMode(modeVal), *socketUidFlag, *socketGidFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "host-pty socket error: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	if err := runSession(os.Stdin, os.Stdout, shell, rows, cols); err != nil {
+	if err := runSession(os.Stdin, os.Stdout, shell, *stateDirFlag, rows, cols); err != nil {
 		fmt.Fprintf(os.Stderr, "host-pty session error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 
-func runSession(in io.Reader, out io.Writer, shell string, rows, cols uint16) error {
+func runSession(in io.Reader, out io.Writer, shell, stateDir string, rows, cols uint16) error {
+	sessionID := fmt.Sprintf("pty-%d-%d", os.Getpid(), time.Now().UnixNano())
+	if err := applications.AcquireHostScopeAt(stateDir, "terminal:"+sessionID, "host-pty", sessionID, true, 0); err != nil {
+		_ = pty.WriteFrame(out, pty.Frame{
+			Type:    pty.MsgTypeError,
+			Payload: []byte(fmt.Sprintf("terminal admission blocked: %v", err)),
+		})
+		return err
+	}
+	defer func() {
+		_ = applications.ReleaseHostScopeAt(stateDir, "terminal:"+sessionID, "host-pty", sessionID)
+	}()
 	cmd := exec.Command(shell)
 	// Minimal POSIX shells do not normally load a descriptive prompt. Preserve
 	// an explicitly configured PS1; shell startup files can override this default.

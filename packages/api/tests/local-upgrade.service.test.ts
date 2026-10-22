@@ -97,17 +97,17 @@ function makeService(
     getReleaseById: vi.fn(),
   };
   const bundledAgent = {
-    getMetadata: vi.fn().mockReturnValue({
-      filePath: "/app/agent/vps-agent-linux-amd64",
+    getMetadata: vi.fn().mockImplementation((arch?: "amd64" | "arm64") => ({
+      filePath: `/app/agent/vps-agent-linux-${arch ?? "amd64"}`,
       os: "linux",
-      arch: "amd64",
+      arch: arch ?? "amd64",
       version: "1.4.0",
       buildId: RELEASE_SHA,
       sha256: TARGET_SHA256,
       size: 1024,
       publishedAt: "2026-09-01T00:00:00Z",
-    }),
-    resolveBinaryPath: vi.fn().mockReturnValue("/app/agent/vps-agent-linux-amd64"),
+    })),
+    resolveBinaryPath: vi.fn().mockImplementation((arch?: "amd64" | "arm64") => `/app/agent/vps-agent-linux-${arch ?? "amd64"}`),
     ...bundledOverrides,
   } as unknown as BundledAgentService;
   const service = new LocalUpgradeService(
@@ -201,12 +201,19 @@ function credential(vpsId = LOCAL_VPS_ID): Promise<AgentCredential> {
   });
 }
 
-async function touchHeartbeat(vpsId = LOCAL_VPS_ID, protocolVersion = 2) {
+async function touchHeartbeat(
+  vpsId = LOCAL_VPS_ID,
+  protocolVersion = 3,
+  idle = true,
+  busyReason?: string,
+) {
   await lugRepo.recordUpdaterHeartbeat({
     vpsId,
     lastSeenAt: new Date().toISOString(),
     credentialId: "cred_updater_test",
     protocolVersion,
+    idle,
+    ...(busyReason ? { busyReason } : {}),
   });
 }
 
@@ -303,14 +310,49 @@ describe("createJob validation", () => {
     ).rejects.toThrow("VPS not found");
   });
 
-  it("rejects non-local hosts with not_local", async () => {
+  it("allows managed remote hosts with fresh updater and idle evidence", async () => {
     const remote = await remoteVps();
     const { service } = makeService();
+    await touchHeartbeat(remote.id, 3, true);
+    await agentRepo.upsertState({
+      vpsId: remote.id,
+      status: "online",
+      version: "1.3.0",
+      buildId: BASELINE_SHA,
+      lastSeenAt: new Date().toISOString(),
+    });
+    await agentRepo.upsertSystemInfo({
+      vpsId: remote.id,
+      kernel: { arch: "x86_64" } as never,
+    });
+    const { job } = await service.createJob(remote.id, { releaseId: RELEASE_SHA });
+    expect(job.vpsId).toBe(remote.id);
+    expect(job.state).toBe("queued");
+  });
+
+  it("rejects when the updater runs an outdated protocol < 3", async () => {
+    await localVps();
+    const { service } = makeService();
+    await touchHeartbeat(LOCAL_VPS_ID, 2, true);
+    await upsertBuild(BASELINE_SHA);
     await expectHttpError(
-      service.createJob(remote.id, { releaseId: RELEASE_SHA }),
+      service.createJob(LOCAL_VPS_ID, { releaseId: RELEASE_SHA }),
       409,
-      "not_local",
+      "updater_incompatible",
     );
+  });
+
+  it("rejects when the host is busy with ongoing work", async () => {
+    await localVps();
+    const { service } = makeService();
+    await touchHeartbeat(LOCAL_VPS_ID, 3, false, "deploy_running");
+    await upsertBuild(BASELINE_SHA);
+    const err = await expectHttpError(
+      service.createJob(LOCAL_VPS_ID, { releaseId: RELEASE_SHA }),
+      409,
+      "host_busy",
+    );
+    expect(err.message).toMatch(/deploy_running/);
   });
 
   it("rejects when the updater is not reporting", async () => {
@@ -421,6 +463,64 @@ describe("createJob validation", () => {
     );
     expect(error.reason).toBe("unsupported_architecture");
   });
+  it("rejects when agent system info and updater heartbeat architectures conflict", async () => {
+    await localVps();
+    const { service } = makeService();
+    await touchHeartbeat(LOCAL_VPS_ID, 2);
+    await lugRepo.recordUpdaterHeartbeat({
+      vpsId: LOCAL_VPS_ID,
+      lastSeenAt: new Date().toISOString(),
+      credentialId: "cred_updater_test",
+      protocolVersion: 3,
+      idle: true,
+      platform: { os: "linux", arch: "aarch64" },
+    });
+    await upsertBuild(BASELINE_SHA);
+    await agentRepo.upsertSystemInfo({
+      vpsId: LOCAL_VPS_ID,
+      kernel: { arch: "x86_64" },
+    });
+
+    const error = await expectHttpError(
+      service.createJob(LOCAL_VPS_ID, { releaseId: RELEASE_SHA }),
+      400,
+      "release_incompatible",
+    );
+    expect(error.reason).toBe("unsupported_architecture");
+  });
+
+  it("creates job with arm64 targetArch for arm64 host", async () => {
+    await localVps();
+    const { service, bundledAgent } = makeService();
+    await touchHeartbeat(LOCAL_VPS_ID, 2);
+    await lugRepo.recordUpdaterHeartbeat({
+      vpsId: LOCAL_VPS_ID,
+      lastSeenAt: new Date().toISOString(),
+      credentialId: "cred_updater_test",
+      protocolVersion: 3,
+      idle: true,
+      platform: { os: "linux", arch: "arm64" },
+    });
+    await upsertBuild(BASELINE_SHA);
+    await agentRepo.upsertSystemInfo({
+      vpsId: LOCAL_VPS_ID,
+      kernel: { arch: "aarch64" },
+    });
+    vi.mocked(bundledAgent.getMetadata).mockReturnValue({
+      filePath: "/app/agent/vps-agent-linux-arm64",
+      os: "linux",
+      arch: "arm64",
+      version: "1.4.0",
+      buildId: RELEASE_SHA,
+      sha256: TARGET_SHA256,
+      size: 1024,
+      publishedAt: "2026-09-01T00:00:00Z",
+    });
+
+    await service.createJob(LOCAL_VPS_ID, { releaseId: RELEASE_SHA });
+    const jobs = await lugRepo.listByVps(LOCAL_VPS_ID, { limit: 1 });
+    expect(jobs[0].targetArch).toBe("arm64");
+  });
   it("rejects when the agent already runs this release", async () => {
     await localVps();
     const { service, catalog } = makeService();
@@ -457,6 +557,7 @@ describe("createJob persistence", () => {
     expect(job.vpsId).toBe(LOCAL_VPS_ID);
     expect(job.state).toBe("queued");
     expect(job.progress).toBeNull();
+    expect(job.targetArch).toBe("amd64");
     expect(job.fencingToken).toBe(0);
     expect(job.reclaimCount).toBe(0);
     expect(job.revision).toBe(0);
@@ -518,7 +619,7 @@ describe("claim", () => {
     await localVps();
     const cred = await credential();
     const { service } = makeService();
-    expect(await service.claim(cred)).toBeNull();
+    expect(await service.claim(cred, 3, { idle: true })).toBeNull();
   });
 
   it("claims a queued job once with a fencing token and a 60s lease", async () => {
@@ -529,9 +630,8 @@ describe("claim", () => {
     const { job } = await createJob(service);
 
     const before = Date.now();
-    const claimed = await service.claim(cred);
+    const claimed = await service.claim(cred, 3, { idle: true });
     const after = Date.now();
-
     expect(claimed).not.toBeNull();
     expect(claimed!.requiresReconcile).toBe(false);
     const claimedJob = claimed!.job;
@@ -545,7 +645,7 @@ describe("claim", () => {
     expect(lease).toBeLessThanOrEqual(after + LOCAL_UPGRADE_LEASE_TTL_MS + 50);
 
     // A second claim within the lease is an idempotent replay.
-    const replay = await service.claim(cred);
+    const replay = await service.claim(cred, 3, { idle: true });
     expect(replay!.job.fencingToken).toBe(1);
     expect(replay!.job.reclaimCount).toBe(0);
   });
@@ -557,7 +657,10 @@ describe("claim", () => {
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     await createJob(service);
 
-    const [a, b] = await Promise.all([service.claim(cred), service.claim(cred)]);
+    const [a, b] = await Promise.all([
+      service.claim(cred, 3, { idle: true }),
+      service.claim(cred, 3, { idle: true }),
+    ]);
     expect(a).not.toBeNull();
     expect(b).not.toBeNull();
     expect(a!.job.id).toBe(b!.job.id);
@@ -573,7 +676,7 @@ describe("claim", () => {
     const { service, catalog } = makeService();
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     const { job } = await createJob(service);
-    const claimed = await service.claim(cred);
+    const claimed = await service.claim(cred, 3, { idle: true });
     expect(claimed!.job.fencingToken).toBe(1);
 
     // Expire the lease out-of-band.
@@ -582,7 +685,7 @@ describe("claim", () => {
       leaseExpiresAt: new Date(Date.now() - 1_000).toISOString(),
     });
 
-    const reclaimed = await service.claim(cred);
+    const reclaimed = await service.claim(cred, 3, { idle: true });
     expect(reclaimed!.job.fencingToken).toBe(2);
     expect(reclaimed!.job.reclaimCount).toBe(1);
 
@@ -597,6 +700,52 @@ describe("claim", () => {
       "stale_lease",
     );
   });
+
+  it("rejects bundled job claims when updater protocol is < 3", async () => {
+    await localVps();
+    const cred = await credential();
+    const { service, catalog } = makeService();
+    vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
+    await createJob(service);
+
+    const claimed = await service.claim(cred, 2, { idle: true });
+    expect(claimed).toBeNull();
+  });
+
+  it("defers a queued bundled job when the updater reports idle === false", async () => {
+    await localVps();
+    const cred = await credential();
+    const { service, catalog } = makeService();
+    vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
+    const { job } = await createJob(service);
+
+    const claimed = await service.claim(cred, 3, {
+      idle: false,
+      busyReason: "deploy_running",
+    });
+    expect(claimed).toBeNull();
+
+    const deferred = await lugRepo.get(job.id);
+    expect(deferred?.state).toBe("deferred");
+    expect(deferred?.result?.outcome).toBe("deferred");
+  });
+
+  it("defers queued bundled job when claim omits idle evidence (fail-closed)", async () => {
+    await localVps();
+    const cred = await credential();
+    const { service, catalog } = makeService();
+    vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
+    await touchHeartbeat();
+    await upsertBuild(BASELINE_SHA);
+    const { job } = await service.createJob(LOCAL_VPS_ID, { releaseId: RELEASE_SHA });
+
+    // Claim without explicit idle evidence defers the queued bundled job
+    const claimed = await service.claim(cred, 3);
+    expect(claimed).toBeNull();
+    const deferred = await lugRepo.get(job.id);
+    expect(deferred?.state).toBe("deferred");
+    expect(deferred?.result?.outcome).toBe("deferred");
+  });
 });
 
 // ── progress ────────────────────────────────────────────────────────────
@@ -609,8 +758,7 @@ describe("progress", () => {
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     await upsertBuild(BASELINE_SHA);
     const { job } = await createJob(service);
-    const claimed = (await service.claim(cred))!;
-
+    const claimed = (await service.claim(cred, 3, { idle: true }))!;
     let current: LocalUpgradeJob = claimed.job;
     for (const [phase, progress] of [
       ["downloading", 20],
@@ -646,8 +794,7 @@ describe("progress", () => {
     const { service, catalog } = makeService();
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     const { job } = await createJob(service);
-    await service.claim(cred);
-
+    await service.claim(cred, 3, { idle: true });
     await expectHttpError(
       service.progress(cred, job.id, {
         fencingToken: 99,
@@ -665,7 +812,7 @@ describe("progress", () => {
     const { service, catalog } = makeService();
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     const { job } = await createJob(service);
-    await service.claim(cred);
+    await service.claim(cred, 3, { idle: true });
     await service.result(cred, job.id, { fencingToken: 1, outcome: "failed", reason: "boom" });
 
     await expectHttpError(
@@ -690,7 +837,7 @@ describe("result", () => {
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     await upsertBuild(BASELINE_SHA);
     const { job } = await createJob(service);
-    const claimed = (await service.claim(cred))!;
+    const claimed = (await service.claim(cred, 3, { idle: true }))!;
     let current = await progressTo(claimed.job, cred, service, "restarting", 80);
     current = await progressTo(current, cred, service, "awaiting_heartbeat", 90);
 
@@ -728,7 +875,7 @@ describe("result", () => {
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     await upsertBuild(BASELINE_SHA);
     const { job } = await createJob(service);
-    const claimed = (await service.claim(cred))!;
+    const claimed = (await service.claim(cred, 3, { idle: true }))!;
     const restarting = await progressTo(claimed.job, cred, service, "restarting", 80);
 
     // Baseline build reporting again, fresh and after the swap point.
@@ -753,7 +900,7 @@ describe("result", () => {
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     await upsertBuild(BASELINE_SHA);
     const { job } = await createJob(service);
-    const claimed = (await service.claim(cred))!;
+    const claimed = (await service.claim(cred, 3, { idle: true }))!;
     await progressTo(claimed.job, cred, service, "restarting", 80);
 
     // Baseline heartbeat never advanced past the swap point → unverified.
@@ -826,7 +973,7 @@ describe("reconciliation", () => {
     const { service, catalog } = makeService();
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     const { job } = await createJob(service);
-    const claimed = (await service.claim(cred))!;
+    const claimed = (await service.claim(cred, 3, { idle: true }))!;
     const downloading = await progressTo(claimed.job, cred, service, "downloading", 20);
 
     await lugRepo.compareAndSet(job.id, downloading.revision, {
@@ -846,7 +993,7 @@ describe("reconciliation", () => {
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     await upsertBuild(BASELINE_SHA);
     const { job } = await createJob(service);
-    const claimed = (await service.claim(cred))!;
+    const claimed = (await service.claim(cred, 3, { idle: true }))!;
     let current = await progressTo(claimed.job, cred, service, "restarting", 80);
     current = await progressTo(current, cred, service, "awaiting_heartbeat", 90);
 
@@ -867,7 +1014,7 @@ describe("reconciliation", () => {
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     await upsertBuild(BASELINE_SHA);
     const { job } = await createJob(service);
-    const claimed = (await service.claim(cred))!;
+    const claimed = (await service.claim(cred, 3, { idle: true }))!;
     let current = await progressTo(claimed.job, cred, service, "restarting", 80);
     current = await progressTo(current, cred, service, "awaiting_heartbeat", 90);
     expect(current.state).toBe("awaiting_heartbeat");
@@ -881,6 +1028,36 @@ describe("reconciliation", () => {
       outcome: "succeeded",
       heartbeatBuildId: RELEASE_SHA,
     });
+  });
+
+  it("supersedes an unclaimed queued job when bundled deployment target changes", async () => {
+    await localVps();
+    const { service, catalog, bundledAgent } = makeService();
+    vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
+    const { job } = await createJob(service);
+    expect(job.state).toBe("queued");
+
+    // Deployment changes to a new target
+    const NEW_SHA = "b".repeat(64);
+    const NEW_BUILD = "2".repeat(40);
+    vi.mocked(bundledAgent.getMetadata).mockReturnValue({
+      filePath: "/app/agent/vps-agent-linux-amd64",
+      os: "linux",
+      arch: "amd64",
+      version: "1.5.0",
+      buildId: NEW_BUILD,
+      sha256: NEW_SHA,
+      size: 15_000_000,
+      publishedAt: new Date().toISOString(),
+    });
+
+    // Reconcile via admin read
+    const updated = await service.getJob(LOCAL_VPS_ID, job.id);
+    expect(updated.state).toBe("superseded");
+    expect(updated.result?.outcome).toBe("superseded");
+    // Immutable provenance remains unchanged
+    expect(updated.releaseBuildId).toBe(job.releaseBuildId);
+    expect(updated.targetSha256).toBe(job.targetSha256);
   });
 });
 
@@ -944,6 +1121,29 @@ describe("getAgentUpdate", () => {
     expect(view.available).toBeNull();
     expect(catalog.getCompatibleRelease).not.toHaveBeenCalled();
   });
+  it("reports incompatible when updater platform and agent arch conflict", async () => {
+    await localVps();
+    const { service } = makeService();
+    await upsertBuild(BASELINE_SHA);
+    await touchHeartbeat(LOCAL_VPS_ID, 2);
+    await lugRepo.recordUpdaterHeartbeat({
+      vpsId: LOCAL_VPS_ID,
+      lastSeenAt: new Date().toISOString(),
+      credentialId: "cred_updater_test",
+      protocolVersion: 3,
+      idle: true,
+      platform: { os: "linux", arch: "arm64" },
+    });
+    await agentRepo.upsertSystemInfo({
+      vpsId: LOCAL_VPS_ID,
+      kernel: { arch: "x86_64" },
+    });
+
+    const view = await service.getAgentUpdate(LOCAL_VPS_ID);
+    expect(view.state).toBe("incompatible");
+    expect(view.compatibility.compatible).toBe(false);
+    expect(view.compatibility.reason).toBe("unsupported_architecture");
+  });
 
   it("reports updater_unavailable without a fresh updater heartbeat", async () => {
     await localVps();
@@ -990,7 +1190,7 @@ describe("admin reads", () => {
     const { service, catalog } = makeService();
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     const { job } = await createJob(service);
-    await service.claim(cred);
+    await service.claim(cred, 3, { idle: true });
 
     const listed = await service.listJobs(LOCAL_VPS_ID);
     expect(listed).toHaveLength(1);
@@ -1038,7 +1238,7 @@ describe("claim auditing", () => {
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     const { job } = await createJob(service);
 
-    const claimed = (await service.claim(cred))!;
+    const claimed = (await service.claim(cred, 3, { idle: true }))!;
     expect(claimed.job.fencingToken).toBe(1);
 
     const events = await readAudit("local_agent_upgrade.claim");
@@ -1071,8 +1271,8 @@ describe("claim auditing", () => {
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     await createJob(service);
 
-    await service.claim(cred);
-    await service.claim(cred);
+    await service.claim(cred, 3, { idle: true });
+    await service.claim(cred, 3, { idle: true });
     expect(await readAudit("local_agent_upgrade.claim")).toHaveLength(1);
   });
 });
@@ -1127,7 +1327,7 @@ describe("result replay", () => {
     const { service, catalog } = makeService();
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     const { job } = await createJob(service);
-    await service.claim(cred);
+    await service.claim(cred, 3, { idle: true });
 
     const first = await service.result(cred, job.id, {
       fencingToken: 1,
@@ -1154,7 +1354,7 @@ describe("result replay", () => {
     const { service, catalog } = makeService();
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     const { job } = await createJob(service);
-    await service.claim(cred);
+    await service.claim(cred, 3, { idle: true });
     await service.result(cred, job.id, {
       fencingToken: 1,
       outcome: "failed",
@@ -1186,7 +1386,7 @@ describe("post-swap failure safety", () => {
     const { service, catalog } = makeService();
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     const { job } = await createJob(service);
-    await service.claim(cred);
+    await service.claim(cred, 3, { idle: true });
 
     const outcome = await service.result(cred, job.id, {
       fencingToken: 1,
@@ -1206,7 +1406,7 @@ describe("post-swap failure safety", () => {
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     await upsertBuild(BASELINE_SHA);
     const { job } = await createJob(service);
-    const claimed = (await service.claim(cred))!;
+    const claimed = (await service.claim(cred, 3, { idle: true }))!;
     await progressTo(claimed.job, cred, service, "restarting", 80);
 
     // Updater-visible contract: still 200 with the settled job — never an
@@ -1247,7 +1447,7 @@ describe("post-swap failure safety", () => {
     vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
     await upsertBuild(BASELINE_SHA);
     const { job } = await createJob(service);
-    const claimed = (await service.claim(cred))!;
+    const claimed = (await service.claim(cred, 3, { idle: true }))!;
     const restarting = await progressTo(
       claimed.job,
       cred,
@@ -1271,10 +1471,206 @@ describe("post-swap failure safety", () => {
     expect(outcome.job.error?.code).toBe("post_swap_failed");
     expect(outcome.job.result?.outcome).toBe("rollback_unverified");
   });
+
+  it("keeps a pre-swap deferred report as deferred", async () => {
+    await localVps();
+    const cred = await credential();
+    const { service, catalog } = makeService();
+    vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
+    const { job } = await createJob(service);
+    const claimed = (await service.claim(cred, 3, { idle: true }))!;
+    const staged = await progressTo(claimed.job, cred, service, "staging", 50);
+
+    const settled = await service.result(cred, staged.id, {
+      fencingToken: staged.fencingToken,
+      outcome: "deferred",
+      reason: "busy_before_swap",
+    });
+    expect(settled.job.state).toBe("deferred");
+    expect(settled.job.result?.outcome).toBe("deferred");
+  });
+
+  it("settles a post-swap deferred report as rollback_unverified", async () => {
+    await localVps();
+    const cred = await credential();
+    const { service, catalog } = makeService();
+    vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
+    const { job } = await createJob(service);
+    const claimed = (await service.claim(cred, 3, { idle: true }))!;
+    const restarting = await progressTo(
+      claimed.job,
+      cred,
+      service,
+      "restarting",
+      80,
+    );
+
+    const settled = await service.result(cred, restarting.id, {
+      fencingToken: restarting.fencingToken,
+      outcome: "deferred",
+      reason: "activity_during_restart",
+    });
+    expect(settled.job.state).toBe("rollback_unverified");
+    expect(settled.job.result?.outcome).toBe("rollback_unverified");
+    expect(settled.job.error?.code).toBe("post_swap_failed");
+  });
+});
+// ── getJobArtifact ────────────────────────────────────────────────────────
+
+describe("getJobArtifact", () => {
+  it("resolves artifact matching job.targetArch", async () => {
+    await localVps();
+    const cred = await credential();
+    const { service, catalog, bundledAgent } = makeService();
+    vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
+    await upsertBuild(BASELINE_SHA);
+    const { job } = await createJob(service);
+    await service.claim(cred, 3, { idle: true });
+
+    const artifact = await service.getJobArtifact(cred, job.id);
+    expect(artifact.filePath).toBe("/app/agent/vps-agent-linux-amd64");
+    expect(artifact.sha256).toBe(TARGET_SHA256);
+    expect(bundledAgent.getMetadata).toHaveBeenCalledWith("amd64");
+  });
+
+  it("derives architecture for legacy job without targetArch from pinned artifact SHA", async () => {
+    await localVps();
+    const cred = await credential();
+    const { service, catalog, bundledAgent } = makeService();
+    vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
+
+    const legacyJob: LocalUpgradeJob = {
+      id: "lug_legacy_001",
+      vpsId: LOCAL_VPS_ID,
+      state: "claimed",
+      progress: null,
+      releaseId: RELEASE_SHA,
+      releaseVersion: "1.4.0",
+      releaseBuildId: RELEASE_SHA,
+      targetSha256: TARGET_SHA256,
+      targetUrl: "/api/local-updater/jobs/lug_legacy_001/artifact",
+      targetSizeBytes: 1024,
+      manifestRaw: "",
+      actor: "test",
+      fencingToken: 1,
+      reclaimCount: 0,
+      claimedAt: new Date().toISOString(),
+      leaseExpiresAt: new Date(Date.now() + 60000).toISOString(),
+      deadlineAt: new Date(Date.now() + 600000).toISOString(),
+      phaseDeadlineAt: new Date(Date.now() + 60000).toISOString(),
+      error: null,
+      result: null,
+      revision: 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      completedAt: null,
+    };
+    await lugRepo.create(legacyJob);
+
+    const artifact = await service.getJobArtifact(cred, legacyJob.id);
+    expect(artifact.filePath).toBe("/app/agent/vps-agent-linux-amd64");
+    expect(artifact.sha256).toBe(TARGET_SHA256);
+  });
+
+  it("fails with artifact_missing when architecture cannot be derived (never guessing amd64)", async () => {
+    await localVps();
+    const cred = await credential();
+    const { service, bundledAgent } = makeService();
+    // Bundled agent metadata does not match the legacy job's pinned targetSha256
+    vi.mocked(bundledAgent.getMetadata).mockReturnValue(null);
+
+    const legacyJob: LocalUpgradeJob = {
+      id: "lug_legacy_002",
+      vpsId: LOCAL_VPS_ID,
+      state: "claimed",
+      progress: null,
+      releaseId: RELEASE_SHA,
+      releaseVersion: "1.4.0",
+      releaseBuildId: RELEASE_SHA,
+      targetSha256: "unknown_sha_that_does_not_match_any_pinned_binary".padEnd(64, "0"),
+      targetUrl: "/api/local-updater/jobs/lug_legacy_002/artifact",
+      targetSizeBytes: 1024,
+      manifestRaw: "",
+      actor: "test",
+      fencingToken: 1,
+      reclaimCount: 0,
+      claimedAt: new Date().toISOString(),
+      leaseExpiresAt: new Date(Date.now() + 60000).toISOString(),
+      deadlineAt: new Date(Date.now() + 600000).toISOString(),
+      phaseDeadlineAt: new Date(Date.now() + 60000).toISOString(),
+      error: null,
+      result: null,
+      revision: 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      completedAt: null,
+    };
+    await lugRepo.create(legacyJob);
+
+    await expectHttpError(
+      service.getJobArtifact(cred, legacyJob.id),
+      404,
+      "artifact_missing",
+    );
+  });
+
+  it("rejects with artifact_mismatch when deployed binary does not match pinned job SHA", async () => {
+    await localVps();
+    const cred = await credential();
+    const { service, catalog, bundledAgent } = makeService();
+    vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
+    await upsertBuild(BASELINE_SHA);
+    const { job } = await createJob(service);
+    await service.claim(cred, 3, { idle: true });
+
+    // Deployed binary changed: different sha256
+    vi.mocked(bundledAgent.getMetadata).mockReturnValue({
+      filePath: "/app/agent/vps-agent-linux-amd64",
+      os: "linux",
+      arch: "amd64",
+      version: "1.4.0",
+      buildId: RELEASE_SHA,
+      sha256: "changed_sha256_value".padEnd(64, "a"),
+      size: 1024,
+      publishedAt: "2026-09-01T00:00:00Z",
+    });
+
+    await expectHttpError(
+      service.getJobArtifact(cred, job.id),
+      409,
+      "artifact_mismatch",
+    );
+  });
+
+  it("rejects with artifact_mismatch when deployed binary size differs from pinned targetSizeBytes", async () => {
+    await localVps();
+    const cred = await credential();
+    const { service, catalog, bundledAgent } = makeService();
+    vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
+    const { job } = await createJob(service);
+    const claimed = (await service.claim(cred, 3, { idle: true }))!;
+    await progressTo(claimed.job, cred, service, "downloading", 10);
+
+    vi.mocked(bundledAgent.getMetadata).mockReturnValue({
+      filePath: "/app/agent/vps-agent-linux-amd64",
+      os: "linux",
+      arch: "amd64",
+      version: "1.4.0",
+      buildId: RELEASE_SHA,
+      sha256: RELEASE_SHA,
+      size: (job.targetSizeBytes ?? 10_000_000) + 1234,
+      publishedAt: new Date().toISOString(),
+    });
+
+    await expectHttpError(
+      service.getJobArtifact(cred, job.id),
+      409,
+      "artifact_mismatch",
+    );
+  });
 });
 
 // ── restart / multi-instance ────────────────────────────────────────────
-
 describe("restart resilience", () => {
   it("a fresh service instance continues the durable job", async () => {
     await localVps();
@@ -1305,7 +1701,7 @@ describe("restart resilience", () => {
       ),
     );
 
-    const claimed = await restarted.claim(cred);
+    const claimed = await restarted.claim(cred, 3, { idle: true });
     expect(claimed?.job.id).toBe(job.id);
     expect(claimed?.job.fencingToken).toBe(1);
     expect(claimed?.requiresReconcile).toBe(false);

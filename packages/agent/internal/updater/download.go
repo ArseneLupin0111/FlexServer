@@ -50,8 +50,8 @@ func DownloadBundledArtifact(ctx context.Context, cfg *Config, client *http.Clie
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.Credential)
-	req.Header.Set("User-Agent", "vps-updater/2")
-	req.Header.Set("X-Updater-Protocol-Version", "2")
+	req.Header.Set("User-Agent", "vps-updater/3")
+	req.Header.Set("X-Updater-Protocol-Version", "3")
 
 	dlClient := client
 	if dlClient == nil {

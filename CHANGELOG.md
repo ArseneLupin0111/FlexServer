@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — Automatic agent deployment convergence and legacy upgrader cutover
+
+- Remove legacy SSH-push `AgentUpgraderService` and `POST /api/vps/:id/upgrade-agent` endpoint in favor of unified pull-only updater convergence for all managed hosts (local and remote).
+- Discontinue external agent release manifest polling and channel imports in `FleetService`; remove legacy agent enrollment, cohort assignment, and manual rollout dispatch paths.
+- Preserve signed Ed25519 manifests and verifier for AI runtime components (`ai-executor`, `ai-host-helper`, `ai-rootfs`, `ai-profiles`); reject new signed rollout requests containing `agent` or `updater` artifacts with `400 Bad Request`.
+- Let in-flight legacy agent rollout jobs drain through their existing state machines without modification; historical database and audit records are preserved.
+- Remove dead agent-only configuration flags (`AGENT_RELEASE_PUBLIC_KEY`, `AGENT_RELEASE_MANIFEST_URL`, `AGENT_POLL_INTERVAL_SECONDS`, `FLEET_AUTO_UPDATE_DEFAULT`) from `AppConfig` and schemas.
+- Remove dead agent enrollment and policy schemas (`enrollHostsSchema`, `updatePoliciesSchema`) and obsolete tests.
+- Coordinate automatic deployment convergence via `AgentConvergenceService` using content-derived build identities (`internal/buildidentity`); busy hosts (active shells, AI tasks, Compose operations) and offline hosts defer safely without deployment failure or spurious timeouts; failed targets are suppressed per host until manually retried.
+- Document deployment automation via `scripts/deploy.sh` and `scripts/install/prepare-agent-updater.sh`, missing-access remediation (`needs_access`) with asynchronous retry; note that arm64 cross-build ELF headers and scoped download authorization are verified, while native arm64 restart and full live multi-host E2E scenarios (wrapper with saved-SSH bootstrap, unchanged-PID / no-job on README/web-only deploys, and offline sequencing) were not verified in this run (waived due to Windows environment).
+
 ## Unreleased — Fleet CI regression fixes
 
 - Keep permanent updater security tests independent of deleted disposable smoke helpers.

@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Pool } from "pg";
 import type { AppConfig } from "../config/app-config.js";
@@ -19,8 +18,6 @@ import type { SshService } from "../ssh/ssh.service.js";
 import type { KeyService } from "../ssh/keyService.js";
 import { withFileLock } from "../persistence/repositories/json-file.js";
 import type {
-  FleetEnrollmentItem,
-  FleetEnrollmentResult,
   FleetGroup,
   FleetHost,
   FleetHostStatus,
@@ -29,7 +26,6 @@ import type {
   FleetNotification,
   FleetOverviewResponse,
   FleetPolicy,
-  FleetPolicyUpdateResult,
   FleetRelease,
   FleetRollout,
   FleetRolloutHost,
@@ -93,7 +89,6 @@ export class FleetService {
   private readonly keyService?: KeyService;
   private readonly pool?: Pool;
   private readonly getNow: () => number;
-  private lastPollMs = 0;
 
   constructor(deps: FleetServiceDependencies) {
     this.config = deps.config;
@@ -231,109 +226,6 @@ export class FleetService {
     };
   }
 
-  async enrollHosts(
-    vpsIds: string[],
-    policy?: Partial<FleetPolicy>,
-  ): Promise<FleetEnrollmentResult> {
-    const results: FleetEnrollmentItem[] = [];
-
-    for (const vpsId of vpsIds) {
-      const vps = await this.vpsRepo.get(vpsId);
-      if (!vps) {
-        results.push({
-          vpsId,
-          status: "failed",
-          message: "VPS not found",
-        });
-        continue;
-      }
-
-      await this.fleetRepo.setEnrolled(vpsId, true);
-
-      if (policy) {
-        const existing = await this.fleetRepo.getPolicy(vpsId);
-        await this.fleetRepo.upsertPolicy(vpsId, {
-          mode: policy.mode ?? existing?.mode ?? "auto",
-          group: policy.group ?? existing?.group ?? "Default",
-          pinnedReleaseId: policy.pinnedReleaseId ?? existing?.pinnedReleaseId,
-          canary: policy.canary ?? existing?.canary,
-          maintenanceWindow: policy.maintenanceWindow ?? existing?.maintenanceWindow,
-        });
-      } else {
-        const existing = await this.fleetRepo.getPolicy(vpsId);
-        if (!existing) {
-          await this.fleetRepo.upsertPolicy(vpsId, {
-            mode: "auto",
-            group: "Default",
-          });
-        }
-      }
-
-      const heartbeat = await this.localUpgradeRepo.getUpdaterHeartbeat(vpsId);
-      const setupRequired = !heartbeat;
-
-      results.push({
-        vpsId,
-        status: setupRequired ? "needs_setup" : "enrolled",
-        message: setupRequired ? "Updater not yet reporting heartbeats" : undefined,
-      });
-    }
-
-    await this.fleetRepo.addNotification({
-      kind: "info",
-      message: `Enrolled ${results.filter((r) => r.status !== "failed").length} hosts`,
-    });
-
-    await this.tick(this.getNow());
-    return { results };
-  }
-
-  async updatePolicies(
-    vpsIds: string[],
-    policy: Partial<FleetPolicy>,
-  ): Promise<FleetPolicyUpdateResult> {
-    const updatedHosts: string[] = [];
-
-    for (const vpsId of vpsIds) {
-      const vps = await this.vpsRepo.get(vpsId);
-      if (!vps) continue;
-
-      const existing = (await this.fleetRepo.getPolicy(vpsId)) ?? {
-        mode: "auto",
-        group: "Default",
-      };
-
-      const merged: FleetPolicy = {
-        mode: policy.mode ?? existing.mode,
-        group: policy.group ?? existing.group,
-        pinnedReleaseId: policy.pinnedReleaseId ?? existing.pinnedReleaseId,
-        canary: policy.canary !== undefined ? policy.canary : existing.canary,
-        maintenanceWindow:
-          policy.maintenanceWindow !== undefined
-            ? policy.maintenanceWindow
-            : existing.maintenanceWindow,
-      };
-
-      if (merged.mode === "pinned" && !merged.pinnedReleaseId) {
-        throw new BadRequestException("pinnedReleaseId is required when mode is 'pinned'");
-      }
-
-      await this.fleetRepo.upsertPolicy(vpsId, merged);
-      updatedHosts.push(vpsId);
-    }
-
-    await this.fleetRepo.addNotification({
-      kind: "info",
-      message: `Updated update policies for ${updatedHosts.length} hosts`,
-    });
-
-    await this.tick(this.getNow());
-
-    return {
-      updated: updatedHosts.length,
-      hosts: updatedHosts,
-    };
-  }
 
   async createRollout(params: {
     releaseId: string;
@@ -345,6 +237,17 @@ export class FleetService {
     const release = await this.fleetRepo.getRelease(params.releaseId);
     if (!release) {
       throw new NotFoundException(`Release not found: ${params.releaseId}`);
+    }
+
+    const hasAgentOrUpdater =
+      release.components?.some((c) => c === "agent" || c === "updater") ||
+      release.artifacts?.some(
+        (a) => a.component === "agent" || a.component === "updater",
+      );
+    if (hasAgentOrUpdater) {
+      throw new BadRequestException(
+        "Rollouts for agent or updater components are rejected; agent updates are managed automatically by deployment convergence.",
+      );
     }
 
     if (release.rollbackSafe === false && !params.irreversibleConsent) {
@@ -455,6 +358,13 @@ export class FleetService {
       this.config.fleet?.publicKeyFile ?? "",
     );
 
+    const hasAi = verified.artifacts.some((a) => a.component.startsWith("ai-"));
+    if (!hasAi) {
+      throw new BadRequestException(
+        "External agent target manifests are no longer imported. Agent updates are managed automatically by deployment convergence. Only signed AI runtime manifests are supported.",
+      );
+    }
+
     const existing = await this.fleetRepo.getRelease(verified.releaseId);
     if (existing) {
       return existing;
@@ -488,96 +398,11 @@ export class FleetService {
     return release;
   }
 
-  async onAgentInstallSuccess(
-    vpsId: string,
-    sshAuth?: { password?: string; privateKey?: string },
-    options?: { isNewHost?: boolean; fleetAutoUpdate?: boolean },
-  ): Promise<void> {
-    if (options?.fleetAutoUpdate === false) {
-      return;
-    }
-
-    const alreadyEnrolled = await this.fleetRepo.isEnrolled(vpsId);
-    if (!alreadyEnrolled) {
-      const agentState = await this.agentRepo.getState(vpsId);
-      const isReinstall = Boolean(agentState?.installedAt && options?.isNewHost === false);
-      if (isReinstall) {
-        return;
-      }
-
-      await this.fleetRepo.setEnrolled(vpsId, true);
-      await this.fleetRepo.upsertPolicy(vpsId, {
-        mode: "auto",
-        group: "Default",
-      });
-      await this.fleetRepo.addNotification({
-        kind: "info",
-        message: `New host ${vpsId} auto-enrolled with default policy`,
-      });
-    }
-
-    await this.tick(this.getNow());
-  }
-
-  async pollStableManifest(now: number): Promise<void> {
-    const manifestUrl = this.config.fleet?.manifestUrl;
-    if (!manifestUrl) return;
-    if (now - this.lastPollMs < 60_000) return;
-    this.lastPollMs = now;
-
-    try {
-      let rawText: string;
-      if (manifestUrl.startsWith("http://") || manifestUrl.startsWith("https://")) {
-        const res = await fetch(manifestUrl, { signal: AbortSignal.timeout(10_000) });
-        if (!res.ok) return;
-        rawText = await res.text();
-      } else if (existsSync(manifestUrl)) {
-        rawText = readFileSync(manifestUrl, "utf8");
-      } else {
-        return;
-      }
-      const envelope = JSON.parse(rawText) as FleetManifestEnvelope;
-      if (envelope?.payload && envelope?.signature) {
-        const verified = verifyFleetManifest(
-          envelope,
-          this.config.fleet?.publicKeyFile ?? "",
-        );
-        const existing = await this.fleetRepo.getRelease(verified.releaseId);
-        if (!existing) {
-          const release: FleetRelease = {
-            id: verified.releaseId,
-            version: verified.version,
-            buildId: verified.buildId,
-            publishedAt: verified.publishedAt,
-            channel: verified.channel,
-            rollbackSafe: verified.rollbackSafe,
-            minUpdaterVersion: verified.minUpdaterVersion,
-            upgradeFrom: verified.upgradeFrom,
-            components: Array.from(new Set(verified.artifacts.map((a) => a.component))),
-            artifacts: verified.artifacts,
-            ai: verified.ai,
-            rawPayload: envelope.payload,
-            signature: envelope.signature,
-            keyId: envelope.keyId,
-            createdAt: new Date(now).toISOString(),
-          };
-          await this.fleetRepo.upsertRelease(release);
-          await this.fleetRepo.addNotification({
-            kind: "info",
-            message: `Signed release ${release.version} (${release.id.slice(0, 8)}) imported from manifest`,
-          });
-        }
-      }
-    } catch {
-      // Non-fatal poll failure
-    }
-  }
 
   async tick(nowMs?: number): Promise<void> {
     const now = nowMs ?? this.getNow();
 
     await this.withTickLock(async () => {
-      await this.pollStableManifest(now);
       await this.executeTick(now);
     });
   }
@@ -628,9 +453,6 @@ export class FleetService {
       return;
     }
 
-    if (!activeRollout) {
-      await this.checkAutoRollout(now);
-    }
   }
 
   private async reconcileRollout(
@@ -747,6 +569,7 @@ export class FleetService {
               error: { code: "rollout_paused", message: `Rollout paused: ${failureReason}` },
               completedAt: new Date(now).toISOString(),
             });
+            this.localUpgradeService?.releaseUpdateFence(job.vpsId);
             h.state = "failed";
             h.reason = `Paused: ${failureReason}`;
             h.updatedAt = new Date(now).toISOString();
@@ -1208,32 +1031,4 @@ export class FleetService {
     return false;
   }
 
-  private async checkAutoRollout(now: number): Promise<void> {
-    const releases = await this.fleetRepo.listReleases();
-    const promoted = releases.find((r) => r.channel === "stable");
-    if (!promoted) return;
-
-    const policies = await this.fleetRepo.listPolicies();
-    const enrolledIds = await this.fleetRepo.listEnrolledVpsIds();
-
-    const eligibleHosts: string[] = [];
-    for (const vpsId of enrolledIds) {
-      const pol = lookupPolicy(policies, vpsId);
-      if (pol && pol.mode === "auto") {
-        const state = await this.agentRepo.getState(vpsId);
-        if (state?.buildId !== promoted.buildId) {
-          eligibleHosts.push(vpsId);
-        }
-      }
-    }
-
-    if (eligibleHosts.length > 0) {
-      await this.createRollout({
-        releaseId: promoted.id,
-        group: "Default",
-        vpsIds: eligibleHosts,
-        confirmed: true,
-      });
-    }
-  }
 }

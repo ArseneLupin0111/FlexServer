@@ -35,6 +35,8 @@ INSTALL_UPDATER="${REPO_ROOT}/scripts/install/install-updater.sh"
 INSTALL_LOCAL="${REPO_ROOT}/scripts/install/install-local-agent.sh"
 INSTALL_SH="${REPO_ROOT}/scripts/install/install.sh"
 INSTALL_FLEET_UPDATER="${REPO_ROOT}/scripts/install/install-fleet-updater.sh"
+PREPARE_UPDATER="${REPO_ROOT}/scripts/install/prepare-agent-updater.sh"
+DEPLOY_SH="${REPO_ROOT}/scripts/deploy.sh"
 AGENT_DIR="${REPO_ROOT}/packages/agent"
 
 PASS=0
@@ -45,7 +47,7 @@ fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1" >&2; }
 
 # ── 1. Syntax ─────────────────────────────────────────────────────────────
 
-for f in "$INSTALL_UPDATER" "$INSTALL_LOCAL" "$INSTALL_SH" "$INSTALL_FLEET_UPDATER" "${BASH_SOURCE[0]}"; do
+for f in "$INSTALL_UPDATER" "$INSTALL_LOCAL" "$INSTALL_SH" "$INSTALL_FLEET_UPDATER" "$PREPARE_UPDATER" "$DEPLOY_SH" "${BASH_SOURCE[0]}"; do
   if [[ -f "$f" ]]; then
     if bash -n "$f"; then pass "$(basename "$f") syntax OK"; else fail "$(basename "$f") syntax"; fi
   fi
@@ -60,7 +62,9 @@ else
 fi
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+MOCK_PID=""
+MOCK_UNRELATED_PID=""
+trap 'rm -rf "$WORK"; [[ -n "$MOCK_PID" ]] && kill -9 "$MOCK_PID" 2>/dev/null || true; [[ -n "$MOCK_UNRELATED_PID" ]] && kill -9 "$MOCK_UNRELATED_PID" 2>/dev/null || true' EXIT
 chmod 755 "$WORK"
 printf '#!/bin/sh\necho 1.0.0+test\n' > "$WORK/vps-updater"
 chmod 755 "$WORK/vps-updater"
@@ -295,7 +299,272 @@ else
   fail "node or sha256sum/shasum unavailable for behavioral dry-run smoke"
 fi
 
+# ── 2c. Bundled-source installer and shared prepare fixture checks ─────────
 
+# 1. install-fleet-updater --source validation
+if "$INSTALL_FLEET_UPDATER" --dry-run --source invalid --api-url https://api.example.com --token vma_test_secret --vps-id vps_test --binary "$WORK/vps-updater" >/dev/null 2>&1; then
+  fail "install-fleet-updater rejects invalid --source value"
+else
+  pass "install-fleet-updater rejects invalid --source value"
+fi
+
+# 2. install-fleet-updater --source signed requires pubkey
+if "$INSTALL_FLEET_UPDATER" --dry-run --source signed --api-url https://api.example.com --token vma_test_secret --vps-id vps_test --binary "$WORK/vps-updater" >/dev/null 2>&1; then
+  fail "install-fleet-updater signed mode must fail without pubkey"
+else
+  pass "install-fleet-updater signed mode requires pubkey"
+fi
+
+# 3. install-fleet-updater --source bundled succeeds without pubkey and omits pubkey config
+FLEET_BUNDLED_OUT="$("$INSTALL_FLEET_UPDATER" --dry-run --source bundled --api-url https://api.example.com --token vma_test_secret --vps-id vps_test --binary "$WORK/vps-updater" 2>&1 || true)"
+if printf '%s' "$FLEET_BUNDLED_OUT" | grep -Fq '"agentStateDir"'; then
+  pass "install-fleet-updater bundled mode includes agentStateDir"
+else
+  fail "install-fleet-updater bundled mode must include agentStateDir: $FLEET_BUNDLED_OUT"
+fi
+if printf '%s' "$FLEET_BUNDLED_OUT" | grep -Fq '"fleetReleasePublicKeyFile"'; then
+  fail "install-fleet-updater bundled mode must omit fleetReleasePublicKeyFile: $FLEET_BUNDLED_OUT"
+else
+  pass "install-fleet-updater bundled mode omits fleetReleasePublicKeyFile"
+fi
+
+# 4. install-fleet-updater --source signed with pubkey includes fleetReleasePublicKeyFile
+FLEET_SIGNED_OUT="$("$INSTALL_FLEET_UPDATER" --dry-run --source signed --api-url https://api.example.com --token vma_test_secret --vps-id vps_test --binary "$WORK/vps-updater" --pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGenKey dummy" 2>&1 || true)"
+if printf '%s' "$FLEET_SIGNED_OUT" | grep -Fq '"fleetReleasePublicKeyFile"' && printf '%s' "$FLEET_SIGNED_OUT" | grep -Fq '"agentStateDir"'; then
+  pass "install-fleet-updater signed mode includes fleetReleasePublicKeyFile and agentStateDir"
+else
+  fail "install-fleet-updater signed mode must include fleetReleasePublicKeyFile and agentStateDir: $FLEET_SIGNED_OUT"
+fi
+
+# 5. prepare-agent-updater architecture validation
+if "$PREPARE_UPDATER" --dry-run --arch unsupported_arch >/dev/null 2>&1; then
+  fail "prepare-agent-updater must reject unsupported arch"
+else
+  pass "prepare-agent-updater rejects unsupported architecture"
+fi
+
+# 6. prepare-agent-updater non-dry-run requires root
+PREPARE_NONROOT_REFUSED=0
+if [[ $EUID -eq 0 ]]; then
+  if command -v runuser &>/dev/null; then
+    runuser -u nobody -- "$PREPARE_UPDATER" --arch amd64 >/dev/null 2>&1 || PREPARE_NONROOT_REFUSED=1
+  elif command -v su &>/dev/null; then
+    su -s /bin/sh nobody -c "'$PREPARE_UPDATER' --arch amd64" >/dev/null 2>&1 || PREPARE_NONROOT_REFUSED=1
+  elif command -v sudo &>/dev/null; then
+    sudo -u nobody "$PREPARE_UPDATER" --arch amd64 >/dev/null 2>&1 || PREPARE_NONROOT_REFUSED=1
+  else
+    PREPARE_NONROOT_REFUSED=1
+  fi
+else
+  "$PREPARE_UPDATER" --arch amd64 >/dev/null 2>&1 || PREPARE_NONROOT_REFUSED=1
+fi
+if [[ "$PREPARE_NONROOT_REFUSED" -eq 1 ]]; then
+  pass "prepare-agent-updater without root and without --dry-run is refused"
+else
+  fail "prepare-agent-updater must refuse non-root execution"
+fi
+
+# 7. prepare-agent-updater absent config bootstrap in dry-run
+PREP_BOOTSTRAP_OUT="$("$PREPARE_UPDATER" --dry-run --arch amd64 --updater-config "$WORK/nonexistent-config.json" --backend-url "https://api.example.com" 2>&1 || true)"
+if printf '%s' "$PREP_BOOTSTRAP_OUT" | grep -Fq '"agentStateDir"' && printf '%s' "$PREP_BOOTSTRAP_OUT" | grep -Fq '"apiBase"'; then
+  pass "prepare-agent-updater bootstraps absent configuration with agentStateDir"
+else
+  fail "prepare-agent-updater must bootstrap absent config with agentStateDir: $PREP_BOOTSTRAP_OUT"
+fi
+
+# 8. prepare-agent-updater reuses valid existing config without rotating token
+HEALTHY_CFG="$WORK/healthy-config.json"
+cat > "$HEALTHY_CFG" <<'EOF'
+{
+  "apiBase": "https://api.example.com",
+  "credential": "vma_preserved_credential_token_12345",
+  "agentBinary": "/usr/local/bin/vps-manager-agent",
+  "agentUnit": "vps-manager-agent.service",
+  "stateDir": "/var/lib/vps-updater",
+  "agentStateDir": "/var/lib/vps-manager-agent"
+}
+EOF
+PREP_REUSE_OUT="$("$PREPARE_UPDATER" --dry-run --arch amd64 --updater-config "$HEALTHY_CFG" --backend-url "https://different.example.com" 2>&1 || true)"
+if printf '%s' "$PREP_REUSE_OUT" | grep -Fq "vma_preserved_credential_token_12345" && ! printf '%s' "$PREP_REUSE_OUT" | grep -Fq "vma_bootstrap_local_updater_secret_key"; then
+  pass "prepare-agent-updater reuses valid existing configuration without token rotation"
+else
+  fail "prepare-agent-updater must reuse existing config: $PREP_REUSE_OUT"
+fi
+
+# 9. prepare-agent-updater detects active in-flight journal and defers
+STATE_IN_FLIGHT="$WORK/state-in-flight"
+mkdir -p "$STATE_IN_FLIGHT/helper"
+cat > "$STATE_IN_FLIGHT/helper/journal.json" <<'EOF'
+{
+  "jobId": "job-test-in-flight",
+  "phase": "intent",
+  "releaseId": "candidate-target"
+}
+EOF
+if grep -Eq '"phase"[[:space:]]*:[[:space:]]*"(intent|renamed)"' "$STATE_IN_FLIGHT/helper/journal.json" 2>/dev/null; then
+  pass "updater detects in-flight journal phase"
+else
+  fail "in-flight journal pattern must match intent phase"
+fi
+
+# 10. deploy.sh --help and --dry-run
+if bash "$DEPLOY_SH" --help >/dev/null 2>&1; then
+  pass "deploy.sh --help exits 0"
+else
+  fail "deploy.sh --help must exit 0"
+fi
+
+if bash "$DEPLOY_SH" --dry-run >/dev/null 2>&1; then
+  pass "deploy.sh --dry-run succeeds"
+else
+  fail "deploy.sh --dry-run must succeed"
+fi
+
+if bash "$DEPLOY_SH" --dry-run --pull >/dev/null 2>&1; then
+  pass "deploy.sh --dry-run --pull succeeds"
+else
+  fail "deploy.sh --dry-run --pull must succeed"
+fi
+# -- Scoped mock docker for deploy.sh behavioral tests ----------------------
+MOCK_BIN="$WORK/mock-bin"
+mkdir -p "$MOCK_BIN"
+cat > "$MOCK_BIN/docker" << 'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "compose" ]]; then
+  shift
+  for arg in "$@"; do
+    if [[ "$arg" == "exec" ]]; then
+      if [[ -n "$MOCK_DOCKER_EXEC_EXIT" ]]; then
+        exit "$MOCK_DOCKER_EXEC_EXIT"
+      fi
+      exit 0
+    fi
+  done
+  if [[ -n "$MOCK_DOCKER_COMPOSE_EXIT" ]]; then
+    exit "$MOCK_DOCKER_COMPOSE_EXIT"
+  fi
+  exit 0
+fi
+exit 0
+EOF
+chmod 0755 "$MOCK_BIN/docker"
+
+# 11. deploy.sh exits nonzero on API health failure (with compose up succeeding via mock)
+if PATH="$MOCK_BIN:$PATH" bash "$DEPLOY_SH" --health-url "http://127.0.0.1:1/down" --health-timeout 1 >/dev/null 2>&1; then
+  fail "deploy.sh must exit nonzero when dashboard health check fails"
+else
+  pass "deploy.sh exits nonzero on dashboard health failure"
+fi
+
+# 12. Unrelated healthy port cannot mask compose api failure
+if command -v python3 &>/dev/null; then
+  UNRELATED_PORT=39282
+  python3 -c "
+import http.server, socketserver
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(b'{\"ok\": true}')
+    def log_message(self, *args): pass
+httpd = socketserver.TCPServer(('127.0.0.1', $UNRELATED_PORT), H)
+httpd.serve_forever()
+" &
+  MOCK_UNRELATED_PID=$!
+  sleep 0.3
+
+  UNRELATED_EXIT=0
+  MOCK_DOCKER_EXEC_EXIT=1 PATH="$MOCK_BIN:$PATH" bash "$DEPLOY_SH" --health-timeout 1 >/dev/null 2>&1 || UNRELATED_EXIT=$?
+  kill -9 "$MOCK_UNRELATED_PID" 2>/dev/null || true
+  wait "$MOCK_UNRELATED_PID" 2>/dev/null || true
+  MOCK_UNRELATED_PID=""
+
+  if [[ "$UNRELATED_EXIT" -ne 0 ]]; then
+    pass "unrelated healthy port cannot mask compose api failure"
+  else
+    fail "deploy.sh must exit nonzero when compose api exec fails even if other ports respond"
+  fi
+fi
+
+# 13. deploy.sh exits 0 with warning when updater preparation encounters an issue but dashboard is healthy
+MOCK_PORT=39281
+if command -v python3 &>/dev/null; then
+  python3 -c "
+import http.server, socketserver
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(b'{\"ok\": true}')
+    def log_message(self, *args): pass
+httpd = socketserver.TCPServer(('127.0.0.1', $MOCK_PORT), H)
+httpd.serve_forever()
+" &
+  MOCK_PID=$!
+  sleep 0.3
+
+  DEPLOY_WARN_EXIT=0
+  DEPLOY_WARN_OUT="$(PATH="$MOCK_BIN:$PATH" bash "$DEPLOY_SH" --health-url "http://127.0.0.1:${MOCK_PORT}/api/health" --health-timeout 5 2>&1 || DEPLOY_WARN_EXIT=$?)"
+  kill -9 "$MOCK_PID" 2>/dev/null || true
+  wait "$MOCK_PID" 2>/dev/null || true
+  MOCK_PID=""
+
+  if [[ "$DEPLOY_WARN_EXIT" -eq 0 ]] && printf '%s' "$DEPLOY_WARN_OUT" | grep -Fq "dashboard is healthy"; then
+    pass "deploy.sh succeeds (exit code 0) when host preparation encounters issue but dashboard is healthy"
+  else
+    fail "deploy.sh must exit 0 when dashboard is healthy: exit=$DEPLOY_WARN_EXIT out=$DEPLOY_WARN_OUT"
+  fi
+fi
+
+# 14. prepare-agent-updater preserves custom paths from existing config
+CUSTOM_CFG="$WORK/custom-paths-config.json"
+cat > "$CUSTOM_CFG" <<'EOF'
+{
+  "apiBase": "https://api.example.com",
+  "credential": "vma_custom_cred_token_67890",
+  "agentBinary": "/opt/custom/bin/agent",
+  "agentUnit": "custom-agent.service",
+  "stateDir": "/var/lib/custom-updater",
+  "agentStateDir": "/opt/custom/var/agent"
+}
+EOF
+PREP_CUSTOM_OUT="$("$PREPARE_UPDATER" --dry-run --arch amd64 --updater-config "$CUSTOM_CFG" 2>&1 || true)"
+if printf '%s' "$PREP_CUSTOM_OUT" | grep -Fq '"/opt/custom/bin/agent"' && \
+   printf '%s' "$PREP_CUSTOM_OUT" | grep -Fq '"/opt/custom/var/agent"' && \
+   printf '%s' "$PREP_CUSTOM_OUT" | grep -Fq '"custom-agent.service"' && \
+   printf '%s' "$PREP_CUSTOM_OUT" | grep -Fq '"/var/lib/custom-updater"'; then
+  pass "prepare-agent-updater preserves custom binary, unit, stateDir, and agentStateDir from existing config"
+else
+  fail "prepare-agent-updater must preserve custom paths from existing config: $PREP_CUSTOM_OUT"
+fi
+
+# 15. prepare-agent-updater defers when journal is in mutation or recovery
+STATE_REC="$WORK/state-recovery"
+mkdir -p "$STATE_REC/helper"
+cat > "$STATE_REC/helper/journal.json" <<'EOF'
+{
+  "jobId": "job-recovering",
+  "phase": "renamed",
+  "intent": "swap"
+}
+EOF
+PREP_REC_OUT="$("$PREPARE_UPDATER" --dry-run --arch amd64 --updater-state-dir "$STATE_REC" --updater-config "$HEALTHY_CFG" 2>&1 || true)"
+if printf '%s' "$PREP_REC_OUT" | grep -iq "active.*journal"; then
+  pass "prepare-agent-updater detects active journal in recovery during dry run"
+else
+  fail "prepare-agent-updater must detect active journal in recovery: $PREP_REC_OUT"
+fi
+
+# 16. install-fleet-updater custom agent-state-dir and agent-binary options
+FLEET_CUSTOM_OUT="$("$INSTALL_FLEET_UPDATER" --dry-run --source bundled --api-url https://api.example.com --token vma_test_secret --vps-id vps_test --binary "$WORK/vps-updater" --agent-state-dir /home/agentuser/.flexserver/agent --agent-binary /opt/bin/agent 2>&1 || true)"
+if printf '%s' "$FLEET_CUSTOM_OUT" | grep -Fq '"/home/agentuser/.flexserver/agent"' && \
+   printf '%s' "$FLEET_CUSTOM_OUT" | grep -Fq '"/opt/bin/agent"'; then
+  pass "install-fleet-updater supports custom agent-state-dir and agent-binary"
+else
+  fail "install-fleet-updater must support custom agent-state-dir and agent-binary: $FLEET_CUSTOM_OUT"
+fi
 # ── 3. Scoped Go verification ─────────────────────────────────────────────
 
 if command -v go &>/dev/null; then

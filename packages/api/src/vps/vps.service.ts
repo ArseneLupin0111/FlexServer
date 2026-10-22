@@ -22,7 +22,6 @@ import {
 } from "./vps.schemas.js";
 import { AgentInstallerService } from "../agents/agent-installer.service.js";
 import { AgentUninstallerService } from "../agents/agent-uninstaller.service.js";
-import { AgentUpgraderService } from "../agents/agent-upgrader.service.js";
 import { AgentRestartService } from "../agents/agent-restart.service.js";
 import { AGENT_REPOSITORY, FLEET_PROVISIONING_SERVICE } from "../tokens.js";
 import { FleetProvisioningService } from "../agents/fleet-provisioning.service.js";
@@ -49,7 +48,6 @@ export class VpsService {
     private readonly agentUninstaller: AgentUninstallerService,
     @Inject(AGENT_REPOSITORY) private readonly agentRepository: AgentRepository,
     private readonly hostKeyPin: HostKeyPinService,
-    private readonly agentUpgrader?: AgentUpgraderService,
     private readonly agentRestarter?: AgentRestartService,
     private readonly dockerMonitoring?: DockerMonitoringService,
     private readonly removalCleanup?: VpsCleanup,
@@ -113,19 +111,13 @@ export class VpsService {
     this.assertNotDemo();
     const parsed = createVpsSchema.parse(body);
     const record = await this.store.create(parsed);
-    const fleetAutoUpdate = parsed.fleetAutoUpdate !== false;
-    if (this.fleetProvisioning) {
-      await this.fleetProvisioning
-        .recordNewHostPreference(record.id, fleetAutoUpdate)
-        .catch(() => undefined);
-    }
     await this.audit.record({
       actor: "system",
       action: "vps.create",
       resourceType: "vps",
       resourceId: record.id,
       result: "success",
-      metadata: { host: record.host, fleetAutoUpdate },
+      metadata: { host: record.host },
     });
     return record;
   }
@@ -447,13 +439,12 @@ export class VpsService {
     this.assertNotDemo();
     const vps = await this.get(id);
     this.assertRemoteUserManaged(vps);
-    const { password, fleetAutoUpdate } = installAgentSchema.parse(body);
+    const { password } = installAgentSchema.parse(body);
     try {
       const result = await this.agentInstaller.install(
         vps.id,
         password,
         requestHost,
-        fleetAutoUpdate,
       );
       await this.audit.record({
         actor: "system",
@@ -486,13 +477,6 @@ export class VpsService {
     return this.agentUninstaller.uninstall(vps.id);
   }
 
-  async upgradeAgent(id: string) {
-    this.assertNotDemo();
-    const vps = await this.get(id);
-    this.assertRemoteUserManaged(vps);
-    if (!this.agentUpgrader) throw new Error("Agent upgrade service is unavailable");
-    return this.agentUpgrader.upgrade(vps.id);
-  }
 
   async restartAgent(id: string) {
     this.assertNotDemo();

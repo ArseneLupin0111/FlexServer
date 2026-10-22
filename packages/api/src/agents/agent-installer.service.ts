@@ -129,7 +129,7 @@ export class AgentInstallerService {
     @Optional()
     @Inject(FLEET_PROVISIONING_SERVICE)
     private readonly fleetProvisioning?: FleetProvisioningService,
-    @Optional() @Inject(FLEET_SERVICE) private readonly fleetService?: FleetService,
+    @Optional() @Inject(FLEET_SERVICE) private readonly _fleetService?: FleetService,
   ) {}
 
   /**
@@ -142,7 +142,6 @@ export class AgentInstallerService {
     vpsId: string,
     password: string | undefined,
     _requestHost: string | undefined,
-    fleetAutoUpdate?: boolean,
   ): Promise<{ jobId: string; state: AgentState }> {
     const releaseLifecycle = await this.lifecycle.tryAcquire(vpsId, "install");
     let handedOff = false;
@@ -468,26 +467,10 @@ export class AgentInstallerService {
           await ctx.succeed("complete");
           try {
             if (this.fleetProvisioning) {
-              if (isReinstall) {
-                await this.fleetProvisioning.onAgentReinstalled(vpsId, sshAuth);
-              } else {
-                const autoUpdate = fleetAutoUpdate !== false;
-                if (autoUpdate) {
-                  await this.fleetProvisioning.provisionHost(vpsId, sshAuth, {
-                    isNewHost: true,
-                    fleetAutoUpdate: true,
-                  });
-                } else {
-                  await this.fleetProvisioning.recordNewHostPreference(vpsId, false);
-                }
-              }
-            } else if (this.fleetService) {
-              await this.fleetService
-                .onAgentInstallSuccess(vpsId, sshAuth, {
-                  isNewHost: !isReinstall,
-                  fleetAutoUpdate: fleetAutoUpdate !== false,
-                })
-                .catch(() => undefined);
+              await this.fleetProvisioning.provisionHost(vpsId, sshAuth, {
+                source: "bundled",
+                isNewHost: !isReinstall,
+              });
             }
           } catch (provisionError) {
             await this.audit

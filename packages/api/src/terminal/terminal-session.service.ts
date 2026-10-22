@@ -16,13 +16,17 @@ import { DashboardSessionService } from "../auth/dashboard-session.service.js";
 import type { ManagedTerminalShell } from "./local-terminal.service.js";
 import { LocalTerminalService } from "./local-terminal.service.js";
 import { DashboardSettingsService } from "../dashboard/dashboard-settings.service.js";
-import { TerminalSessionRegistry } from "./terminal-registry.js";
+import {
+  type TerminalRegistration,
+  TerminalSessionRegistry,
+} from "./terminal-registry.js";
 import {
   encodeTerminalMessage,
   parseTerminalMessage,
   type TerminalClientMessage,
 } from "./terminal-protocol.js";
 import { TerminalError, terminalError } from "./terminal-error.js";
+import { AgentLifecycleCoordinator } from "../agents/agent-lifecycle-coordinator.js";
 
 export interface TerminalSocket {
   send(data: string, callback?: (error?: Error) => void): void;
@@ -64,6 +68,8 @@ export class TerminalSessionService implements OnApplicationShutdown {
     @Inject(SshService) private readonly ssh: SshService,
     @Inject(DashboardSessionService)
     private readonly sessions: DashboardSessionService,
+    @Inject(AgentLifecycleCoordinator)
+    private readonly coordinator: AgentLifecycleCoordinator,
     @Optional() @Inject(AuditService) private readonly audit?: AuditService,
     @Optional()
     @Inject(DashboardSettingsService)
@@ -109,7 +115,8 @@ export class TerminalSessionService implements OnApplicationShutdown {
     if (first.type !== "open") throw terminalError("PROTOCOL_ERROR");
     let state: State = "opening";
     let shell: ManagedSshShell | ManagedTerminalShell | undefined;
-    let registration: ReturnType<TerminalSessionRegistry["admit"]> | undefined;
+    let registration: TerminalRegistration | undefined;
+    let releaseActivity: (() => void) | undefined;
     let shellDisposed = false;
     let outcomeDone = false;
     let onPong: (() => void) | undefined;
@@ -180,6 +187,9 @@ export class TerminalSessionService implements OnApplicationShutdown {
       channelCleanup?.();
       disposeShell();
       if (registration) this.registry.release(registration.id);
+      try {
+        releaseActivity?.();
+      } catch {}
       try {
         if (wasReady)
           socket.send(encodeTerminalMessage({ type: "closed", reason }));
@@ -259,11 +269,18 @@ export class TerminalSessionService implements OnApplicationShutdown {
       await audit("blocked", "session_expired");
       throw terminalError("SESSION_EXPIRED");
     }
+    releaseActivity = this.coordinator.tryAcquireActivity(
+      first.vpsId,
+      "terminal",
+    );
     try {
       registration = this.registry.admit(dashboardId, first.vpsId, (reason) =>
         cleanup(reason),
       );
     } catch {
+      try {
+        releaseActivity?.();
+      } catch {}
       await audit("limit_exceeded", "limit");
       throw terminalError("LIMIT_EXCEEDED");
     }
@@ -572,6 +589,14 @@ export class TerminalSessionService implements OnApplicationShutdown {
         shell?.channel.off?.("drain", onDrain);
       };
     } catch (cause) {
+      timers.forEach(clearTimeout);
+      intervals.forEach(clearInterval);
+      disposeShell();
+      if (registration) this.registry.release(registration.id);
+      try {
+        releaseActivity?.();
+      } catch {}
+      state = "closed";
       if (cause instanceof TerminalError) {
         await audit("failed", cause.code);
         throw cause;

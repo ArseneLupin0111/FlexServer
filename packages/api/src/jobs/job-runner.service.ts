@@ -1,4 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
+import { AgentLifecycleCoordinator } from "../agents/agent-lifecycle-coordinator.js";
 import type { CommandJob } from "../jobs/jobs.models.js";
 import type { JobRepository } from "../persistence/repositories/job.repository.js";
 import { JOB_REPOSITORY } from "../tokens.js";
@@ -81,6 +82,8 @@ export class JobRunnerService {
   constructor(
     @Inject(JOB_REPOSITORY) private readonly jobRepository: JobRepository,
     @Inject(JobActivityService) private readonly activity: JobActivityService,
+    @Inject(AgentLifecycleCoordinator)
+    private readonly coordinator: AgentLifecycleCoordinator,
   ) {}
 
   /**
@@ -90,9 +93,27 @@ export class JobRunnerService {
    * @param task  Async function that performs the actual work.
    */
   start(job: CommandJob, task: (ctx: JobTaskContext) => Promise<void>): void {
-    // Fire-and-forget: we do not return a promise to the caller.
-    // The caller receives the jobId synchronously and can poll.
-    this.run(job, task).catch(() => {
+    // Synchronous activity admission gate:
+    // Rejects newly submitted work with a retriable update-in-progress conflict
+    // before marking status running or running the background task.
+    let releaseActivity: () => void;
+    try {
+      releaseActivity = this.coordinator.tryAcquireActivity(job.vpsId, "job");
+    } catch (conflict) {
+      void this.jobRepository
+        .update(job.id, {
+          status: "cancelled",
+          step: "admission_rejected",
+          errorMessage: sanitiseError(conflict),
+        })
+        .then((updated) => {
+          if (updated) this.activity.publish(updated);
+        })
+        .catch(() => {});
+      throw conflict;
+    }
+
+    this.run(job, task, releaseActivity).catch(() => {
       // Top-level errors are handled inside run() by the fail() path.
     });
   }
@@ -100,6 +121,7 @@ export class JobRunnerService {
   private async run(
     job: CommandJob,
     task: (ctx: JobTaskContext) => Promise<void>,
+    releaseActivity: () => void,
   ): Promise<void> {
     const ctx: JobTaskContext = {
       jobId: job.id,
@@ -141,20 +163,24 @@ export class JobRunnerService {
       },
     };
 
-    // Mark as running
-    const started = await this.jobRepository.update(job.id, {
-      status: "running",
-      step: "started",
-      startedAt: new Date().toISOString(),
-      progress: 0,
-    });
-    if (started) this.activity.publish(started);
-
     try {
-      await task(ctx);
-    } catch (error: unknown) {
-      // ctx.fail calls sanitiseError internally — pass raw error, not pre-sanitized
-      await ctx.fail("error", error);
+      // Mark as running
+      const started = await this.jobRepository.update(job.id, {
+        status: "running",
+        step: "started",
+        startedAt: new Date().toISOString(),
+        progress: 0,
+      });
+      if (started) this.activity.publish(started);
+
+      try {
+        await task(ctx);
+      } catch (error: unknown) {
+        // ctx.fail calls sanitiseError internally — pass raw error, not pre-sanitized
+        await ctx.fail("error", error);
+      }
+    } finally {
+      releaseActivity();
     }
   }
 }

@@ -19,41 +19,53 @@ FROM deps AS prod-deps
 RUN npm prune --omit=dev
 
 FROM golang:1.25.13-alpine AS agent-builder
-# Immutable build identity, injected by CI (--build-arg AGENT_VERSION=...
-# --build-arg AGENT_BUILD_ID=<full git SHA>); defaults mark unknown identity
-# so a local unparameterized build never advertises a release as current.
+# Display version defaults to 'dev' unless an explicit AGENT_VERSION is supplied.
+# Deployment builds compute content identity using the Go CLI and ignore any
+# AGENT_BUILD_ID override.
 ARG AGENT_VERSION=dev
 ARG AGENT_BUILD_ID
 WORKDIR /src
-COPY packages/agent/go.mod ./
+COPY packages/agent/go.mod packages/agent/go.sum* ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 COPY packages/agent/ .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /usr/local/bin/agent-build-id ./cmd/agent-build-id && \
+    BUILD_ID=$(/usr/local/bin/agent-build-id --root .) && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${AGENT_BUILD_ID}" \
+    -trimpath -buildvcs=false \
+    -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${BUILD_ID}" \
     -o /out/vps-agent-linux-amd64 ./cmd/vps-agent && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${AGENT_BUILD_ID}" \
+    -trimpath -buildvcs=false \
+    -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${BUILD_ID}" \
     -o /out/vps-updater-linux-amd64 ./cmd/vps-updater && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -trimpath -buildvcs=false \
     -o /out/host-pty-linux-amd64 ./cmd/host-pty && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -trimpath -buildvcs=false \
     -o /out/local-agent-rotator-linux-amd64 ./cmd/local-agent-rotator && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -trimpath -buildvcs=false \
     -o /out/host-files-linux-amd64 ./cmd/host-files && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -trimpath -buildvcs=false \
     -o /out/ai-executor-linux-amd64 ./cmd/ai-executor && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -trimpath -buildvcs=false \
     -o /out/ai-host-helper-linux-amd64 ./cmd/ai-host-helper
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
+    BUILD_ID=$(/usr/local/bin/agent-build-id --root .) && \
     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
-    -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${AGENT_BUILD_ID}" \
+    -trimpath -buildvcs=false \
+    -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${BUILD_ID}" \
     -o /out/vps-agent-linux-arm64 ./cmd/vps-agent && \
     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
-    -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${AGENT_BUILD_ID}" \
+    -trimpath -buildvcs=false \
+    -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${BUILD_ID}" \
     -o /out/vps-updater-linux-arm64 ./cmd/vps-updater
 RUN mkdir -p /out/ai-rootfs/bin /out/ai-rootfs/usr/bin /out/ai-rootfs/dev /out/ai-rootfs/proc /out/ai-rootfs/sys /out/ai-rootfs/tmp /out/ai-rootfs/etc && \
     chmod 1777 /out/ai-rootfs/tmp && \

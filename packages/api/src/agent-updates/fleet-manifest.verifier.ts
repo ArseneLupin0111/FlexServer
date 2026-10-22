@@ -111,10 +111,12 @@ export function validateFleetPayload(raw: unknown): FleetManifestPayload {
       seen.has(`${component}/linux/${arch}`);
     const artifacts = payload.artifacts as FleetArtifact[];
     if (artifacts.some((a) => a.arch === arch)) {
-      requireValue(
-        has("agent") && has("updater"),
-        `Missing agent/updater pair for ${arch}`,
-      );
+      if (has("agent") || has("updater")) {
+        requireValue(
+          has("agent") && has("updater"),
+          `Missing agent/updater pair for ${arch}`,
+        );
+      }
       const ai: FleetArtifactComponent[] = [
         "ai-executor",
         "ai-host-helper",
@@ -124,6 +126,10 @@ export function validateFleetPayload(raw: unknown): FleetManifestPayload {
       if (ai.some(has)) {
         requireValue(ai.every(has), `Incomplete AI runtime for ${arch}`);
       }
+      requireValue(
+        (has("agent") && has("updater")) || ai.every(has),
+        `Missing required component set for ${arch}`,
+      );
     }
   }
 

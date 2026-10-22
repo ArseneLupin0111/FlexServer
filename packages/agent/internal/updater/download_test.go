@@ -22,7 +22,7 @@ func TestDownloadBundledArtifactSuccess(t *testing.T) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if r.Header.Get("X-Updater-Protocol-Version") != "2" {
+		if r.Header.Get("X-Updater-Protocol-Version") != "3" {
 			http.Error(w, "bad protocol", http.StatusBadRequest)
 			return
 		}

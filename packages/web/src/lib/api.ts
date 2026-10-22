@@ -250,7 +250,6 @@ export type CreateVpsPayload = {
   host: string;
   port: number;
   username: string;
-  fleetAutoUpdate?: boolean;
 };
 
 type ApiResponse<T> = {
@@ -473,13 +472,6 @@ export function uninstallAgent(id: string) {
     state: { status: string; lastInstallJobId?: string };
   }>(`${vpsPath(id)}/uninstall-agent`, { method: "POST" });
 }
-export function upgradeAgent(id: string) {
-  return request<{
-    jobId: string;
-    state: { status: string; lastInstallJobId?: string };
-  }>(`${vpsPath(id)}/upgrade-agent`, { method: "POST" });
-}
-
 
 export function restartAgent(id: string) {
   return request<{
@@ -504,15 +496,11 @@ export function deleteVps(id: string) {
   });
 }
 
-// ── Local agent updates (local hosts only; remote upgrades stay SSH) ─
+// ── Agent updates (deployment convergence) ───────────────────────────
 //   GET  /api/vps/:id/agent-update
-//   POST /api/vps/:id/local-agent-upgrades  { releaseId }  (+ Idempotency-Key)
+//   POST /api/vps/:id/agent-update  (+ Idempotency-Key)
 //   GET  /api/vps/:id/local-agent-upgrades/:jobId
-// The browser never sends a URL, path, command or token; the server pins the
-// bundled agent binary and the host updater performs the swap. Local upgrade jobs
-// live in a separate durable store (never in the dashboard jobs feed/SSE), so
-// progress is read back from the persisted job endpoint.
-
+//   GET  /api/agent-updates
 export type AgentUpdateInstalled = {
   version: string | null;
   buildId: string | null;
@@ -567,7 +555,9 @@ export type LocalAgentUpgradeState =
   | "succeeded"
   | "rolled_back"
   | "rollback_unverified"
-  | "failed";
+  | "failed"
+  | "deferred"
+  | "superseded";
 
 export function isTerminalLocalUpgrade(
   state: LocalAgentUpgradeState | undefined | null,
@@ -576,7 +566,9 @@ export function isTerminalLocalUpgrade(
     state === "succeeded" ||
     state === "rolled_back" ||
     state === "rollback_unverified" ||
-    state === "failed"
+    state === "failed" ||
+    state === "deferred" ||
+    state === "superseded"
   );
 }
 
@@ -599,11 +591,30 @@ export type LocalAgentUpgradeJob = {
     outcome: string;
     reportedBuildId?: string;
     heartbeatBuildId?: string;
+    reason?: string;
     completedAt?: string;
   } | null;
 };
 
-export type AgentUpdateStatus = {
+export type AgentUpdateAutomationState =
+  | "current"
+  | "pending"
+  | "waiting_busy"
+  | "waiting_connection"
+  | "updating"
+  | "needs_access"
+  | "failed"
+  | "incompatible"
+  | "release_unavailable";
+
+export type AgentUpdateAutomation = {
+  state: AgentUpdateAutomationState;
+  reason: string | null;
+  targetBuildId: string | null;
+  retryAllowed: boolean;
+};
+
+export type AgentUpdateView = {
   installed: AgentUpdateInstalled;
   available: AgentUpdateAvailable;
   compatibility: AgentUpdateCompatibility;
@@ -614,24 +625,25 @@ export type AgentUpdateStatus = {
    * null. Lets the UI resume persisted progress and results after a reload.
    */
   job: LocalAgentUpgradeJob | null;
+  automation?: AgentUpdateAutomation;
 };
 
+export type AgentUpdateStatus = AgentUpdateView;
+
 export function getVpsAgentUpdate(id: string, signal?: AbortSignal) {
-  return request<AgentUpdateStatus>(`${vpsPath(id)}/agent-update`, { signal });
+  return request<AgentUpdateView>(`${vpsPath(id)}/agent-update`, { signal });
 }
 
-export function createLocalAgentUpgrade(
+export function requestVpsAgentUpdate(
   id: string,
-  payload: { releaseId: string; idempotencyKey: string },
+  idempotencyKey: string,
+  signal?: AbortSignal,
 ) {
-  return request<LocalAgentUpgradeJob>(
-    `${vpsPath(id)}/local-agent-upgrades`,
-    {
-      method: "POST",
-      body: JSON.stringify({ releaseId: payload.releaseId }),
-      headers: { "Idempotency-Key": payload.idempotencyKey },
-    },
-  );
+  return request<AgentUpdateView>(`${vpsPath(id)}/agent-update`, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+    signal,
+  });
 }
 
 export function getLocalAgentUpgrade(
@@ -915,168 +927,18 @@ export function listVpsAuditEvents(
   return request<AuditEvent[]>(`${vpsPath(id)}/audit${query}`);
 }
 
-// ── Fleet Agent Updates (Phase 5 / Fleet Orchestrator) ──────────────
+// ── Fleet Agent Updates (Deployment Convergence) ──────────────────────
 
-export type FleetPolicyMode = "auto" | "manual" | "pinned";
-
-export type FleetMaintenanceWindow = {
-  timezone: string;
-  start: string; // HH:mm
-  end: string;   // HH:mm
-  days: number[]; // 0=Sun .. 6=Sat
-};
-
-export type FleetPolicy = {
-  mode: FleetPolicyMode;
-  group: string;
-  pinnedReleaseId?: string;
-  canary?: boolean;
-  maintenanceWindow?: FleetMaintenanceWindow;
-};
-
-export type FleetHostState =
-  | "needs_setup"
-  | "idle"
-  | "queued"
-  | "updating"
-  | "observing"
-  | "succeeded"
-  | "failed"
-  | "rolled_back"
-  | "waiting_verification"
-  | "offline"
-  | "busy"
-  | "pinned"
-  | string;
-
-export type FleetHost = {
+export type FleetAgentUpdateHost = {
   vpsId: string;
   name: string;
-  online: boolean;
-  installedBuildId: string | null;
-  targetReleaseId: string | null;
-  policy: FleetPolicy;
-  enrolled: boolean;
-  setupRequired: boolean;
-  status: FleetHostState;
-  reason?: string;
-  updaterVersion?: string;
+  update: AgentUpdateView;
 };
 
-export type FleetGroup = {
-  name: string;
-};
-
-export type FleetRelease = {
-  id: string;
-  version: string;
-  buildId: string;
-  publishedAt: string;
-  components: string[];
-  rollbackSafe: boolean;
-};
-
-export type FleetRolloutHost = {
-  vpsId: string;
-  state: string;
-  jobId?: string;
-  reason?: string;
-};
-
-export type FleetRollout = {
-  id: string;
-  releaseId: string;
-  state:
-    | "pending"
-    | "running"
-    | "paused"
-    | "completed"
-    | "failed"
-    | "canceled"
-    | string;
-  group: string;
-  createdAt: string;
-  updatedAt: string;
-  hosts: FleetRolloutHost[];
-  reason?: string;
-};
-
-export type FleetNotification = {
-  id: string;
-  createdAt: string;
-  message: string;
-  kind: "info" | "warning" | "error" | "success" | string;
-};
-
-export type FleetUpdatesDashboardData = {
-  hosts: FleetHost[];
-  groups: FleetGroup[];
-  releases: FleetRelease[];
-  rollouts: FleetRollout[];
-  notifications: FleetNotification[];
-};
-
-export type FleetEnrollResult = {
-  vpsId: string;
-  status: "enrolled" | "needs_setup" | "failed";
-  message?: string;
-};
-
-export type FleetPolicyUpdateResult = {
-  vpsId: string;
-  status: "updated" | "failed";
-  message?: string;
+export type FleetAgentUpdatesData = {
+  hosts: FleetAgentUpdateHost[];
 };
 
 export function getFleetAgentUpdates(signal?: AbortSignal) {
-  return request<FleetUpdatesDashboardData>("/api/agent-updates", { signal });
-}
-
-export function enrollFleetHosts(payload: {
-  vpsIds: string[];
-  confirmed: true;
-  policy?: FleetPolicy;
-}) {
-  return request<{ results: FleetEnrollResult[] }>("/api/agent-updates/enroll", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export function updateFleetPolicies(payload: {
-  vpsIds: string[];
-  policy: FleetPolicy;
-}) {
-  return request<{ results: FleetPolicyUpdateResult[] }>(
-    "/api/agent-updates/policies",
-    {
-      method: "PATCH",
-      body: JSON.stringify(payload),
-    },
-  );
-}
-
-export function createFleetRollout(payload: {
-  vpsIds: string[];
-  releaseId: string;
-  confirmed: true;
-  irreversibleConsent?: boolean;
-}) {
-  return request<FleetRollout>("/api/agent-updates/rollouts", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export function controlFleetRollout(
-  id: string,
-  action: "pause" | "resume" | "retry",
-) {
-  return request<FleetRollout>(
-    `/api/agent-updates/rollouts/${encodeURIComponent(id)}/control`,
-    {
-      method: "POST",
-      body: JSON.stringify({ action }),
-    },
-  );
+  return request<FleetAgentUpdatesData>("/api/agent-updates", { signal });
 }

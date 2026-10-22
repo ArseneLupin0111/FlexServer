@@ -6,19 +6,12 @@ export const fullGitShaSchema = z
   .string()
   .regex(/^[0-9a-f]{40}$/, "must be a full 40-char git SHA");
 
-/**
- * POST /api/vps/:id/local-agent-upgrades.
- * Non-strict on purpose: unknown client keys are stripped, never rejected —
- * confirmation is a UX dialog plus session/Origin guards, not a token field.
- */
-export const localAgentUpgradeCreateSchema = z.object({
-  releaseId: fullGitShaSchema,
-});
-
-export type LocalAgentUpgradeCreateInput = z.infer<
-  typeof localAgentUpgradeCreateSchema
->;
-
+/** Required Idempotency-Key header on agent-update trigger. */
+export const requiredIdempotencyKeySchema = z
+  .string({ required_error: "Idempotency-Key header is required" })
+  .trim()
+  .min(1, "Idempotency-Key must not be empty")
+  .max(200);
 /** POST /api/local-updater/jobs/:jobId/progress */
 export const localUpdaterProgressSchema = z
   .object({
@@ -42,6 +35,8 @@ export const localUpdaterResultSchema = z
       "rolled_back",
       "rollback_unverified",
       "failed",
+      "deferred",
+      "superseded",
     ]),
     reportedBuildId: fullGitShaSchema.optional(),
     reason: z.string().trim().max(160).optional(),

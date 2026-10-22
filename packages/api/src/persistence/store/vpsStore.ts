@@ -52,7 +52,6 @@ export function createVpsStore(filePath = "data/vps.json") {
         dockerManagementEnabled: false,
         composeManagementEnabled: false,
         sftpEnabled: false,
-        fleetAutoUpdate: input.fleetAutoUpdate !== false,
         createdAt: timestamp,
         updatedAt: timestamp,
       };

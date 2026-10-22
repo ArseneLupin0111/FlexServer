@@ -44,4 +44,19 @@ describe("fleet signed releases", () => {
       expect(() => signFleetManifest({ ...payload, artifacts: payload.artifacts.map(a => ({ ...a, url })) }, privateKey, "test-key")).toThrow(/HTTPS/);
     }
   });
+
+  it("signs and verifies AI-only releases without requiring agent/updater artifacts", () => {
+    const { privateKey, publicKey } = fixture();
+    const aiComponents = ["ai-executor", "ai-host-helper", "ai-rootfs", "ai-profiles"];
+    const aiPayload = {
+      schemaVersion: 1, channel: "stable", releaseId: "c".repeat(40), buildId: "c".repeat(40),
+      version: "2.0.0", minUpdaterVersion: "1.0.0", publishedAt: "2026-10-22T00:00:00Z", rollbackSafe: true,
+      artifacts: aiComponents.map(component => ({
+        component, os: "linux", arch: "amd64", url: `https://example.com/${component}`,
+        sha256: "d".repeat(64), size: 1024, version: "2.0.0"
+      })),
+    };
+    const envelope = signFleetManifest(aiPayload, privateKey, "ai-key");
+    expect(verifyFleetManifest(envelope, publicKey)).toEqual(aiPayload);
+  });
 });

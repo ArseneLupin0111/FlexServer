@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vps-manager/agent/internal/applications"
 	"github.com/vps-manager/agent/internal/lock"
 )
 
@@ -57,6 +58,27 @@ type HelperJournal struct {
 	BackupPath       string            `json:"backupPath"`
 	ComponentBackups []ComponentBackup `json:"componentBackups,omitempty"`
 	UpdatedAt        time.Time         `json:"updatedAt"`
+	FenceOwner       string            `json:"fenceOwner,omitempty"`
+}
+
+func agentLockDir(cfg *Config) string {
+	if cfg != nil && cfg.AgentStateDir != "" {
+		return cfg.AgentStateDir
+	}
+	if cfg != nil && cfg.StateDir != "" {
+		return cfg.StateDir
+	}
+	return ""
+}
+
+func acquireUpgradeFence(cfg *Config, jobID string) error {
+	dir := agentLockDir(cfg)
+	return applications.AcquireHostScopeAt(dir, applications.LockScopeUpgrade, "updater-helper", jobID, true, 0)
+}
+
+func releaseUpgradeFence(cfg *Config, jobID string) error {
+	dir := agentLockDir(cfg)
+	return applications.ReleaseHostScopeAt(dir, applications.LockScopeUpgrade, "updater-helper", jobID)
 }
 // HelperResult is what the helper writes back for the daemon to consume.
 type HelperResult struct {
@@ -485,10 +507,26 @@ func handleApply(ctx context.Context, cfg *Config, auth JobAuthorizer, jobID str
 		}
 		return res
 	}
+	// Acquire upgrade fence before final idle check:
+	cfg.CurrentJobID = jobID
+	if err := acquireUpgradeFence(cfg, jobID); err != nil {
+		res.Outcome = "deferred"
+		res.Detail = "host busy before swap: acquire upgrade fence: " + err.Error()
+		return res
+	}
+
+	// Final idle check before swap: safely abandon pre-swap if host activity began.
+	if idle, reason := DetectHostIdle(cfg); !idle {
+		_ = releaseUpgradeFence(cfg, jobID)
+		res.Outcome = "deferred"
+		res.Detail = "host busy before swap: " + reason
+		return res
+	}
 
 	// Backups and the helper journal live under the helper root: fail closed
 	// if it was swapped for a symlink since the entry check.
 	if err := requireSecureDir(helperRoot(cfg.StateDir)); err != nil {
+		_ = releaseUpgradeFence(cfg, jobID)
 		res.Outcome, res.Detail = "verify_failed", err.Error()
 		return res
 	}
@@ -496,6 +534,7 @@ func handleApply(ctx context.Context, cfg *Config, auth JobAuthorizer, jobID str
 	// updater) before any mutation.
 	bdir := backupDir(cfg.StateDir, jobID)
 	if err := os.MkdirAll(bdir, 0o755); err != nil {
+		_ = releaseUpgradeFence(cfg, jobID)
 		res.Outcome, res.Detail = "verify_failed", "backup dir: "+err.Error()
 		return res
 	}
@@ -504,6 +543,7 @@ func handleApply(ctx context.Context, cfg *Config, auth JobAuthorizer, jobID str
 	if _, statErr := os.Stat(cfg.AgentBinary); statErr == nil {
 		oldSha, err = copyHashed(cfg.AgentBinary, backupPath, "", 0)
 		if err != nil {
+			_ = releaseUpgradeFence(cfg, jobID)
 			res.Outcome, res.Detail = "verify_failed", "backup: "+err.Error()
 			return res
 		}
@@ -514,8 +554,10 @@ func handleApply(ctx context.Context, cfg *Config, auth JobAuthorizer, jobID str
 	hj = &HelperJournal{
 		JobID: jobID, Phase: hjIntent,
 		OldSha256: oldSha, NewSha256: newSha, BackupPath: backupPath,
+		FenceOwner: jobID,
 	}
 	if err := saveHelperJournal(cfg.StateDir, hj); err != nil {
+		_ = releaseUpgradeFence(cfg, jobID)
 		res.Outcome, res.Detail = "verify_failed", "helper journal: "+err.Error()
 		return res
 	}
@@ -523,6 +565,7 @@ func handleApply(ctx context.Context, cfg *Config, auth JobAuthorizer, jobID str
 	// Provision lock and reboot persistence before binary swap so the new agent
 	// can acquire its singleton lock immediately on restart.
 	if err := provisionLockForUpgrade(cfg); err != nil {
+		_ = releaseUpgradeFence(cfg, jobID)
 		res.Outcome, res.Detail = "verify_failed", "provision lock: "+err.Error()
 		return res
 	}
@@ -704,6 +747,10 @@ func restoreBackup(cfg *Config, hj *HelperJournal) (string, error) {
 // reconcileApply completes or aborts a previously initiated mutation based on
 // what is actually on disk — it never re-swaps a mutation of unclear outcome.
 func reconcileApply(ctx context.Context, cfg *Config, hj *HelperJournal, res *HelperResult) *HelperResult {
+	if hj != nil && hj.JobID != "" {
+		cfg.CurrentJobID = hj.JobID
+		_ = acquireUpgradeFence(cfg, hj.JobID)
+	}
 	hasAgent := hj.NewSha256 != "" || hj.OldSha256 != "" || hj.BackupPath != ""
 	if !hasAgent {
 		for _, cb := range hj.ComponentBackups {
@@ -807,6 +854,8 @@ func reconcileApply(ctx context.Context, cfg *Config, hj *HelperJournal, res *He
 // handleRollback restores the pre-upgrade binary for jobID.
 func handleRollback(ctx context.Context, cfg *Config, jobID string) *HelperResult {
 	res := &HelperResult{JobID: jobID, Action: actionRollback}
+	cfg.CurrentJobID = jobID
+	_ = acquireUpgradeFence(cfg, jobID)
 	hj, err := LoadHelperJournal(cfg.StateDir)
 	if err != nil || hj == nil || hj.JobID != jobID || (hj.BackupPath == "" && len(hj.ComponentBackups) == 0) {
 		res.Outcome, res.Detail = "rollback_failed", "no helper journal with backup for this job"
@@ -921,6 +970,8 @@ func handleCleanup(_ context.Context, cfg *Config, jobID string) *HelperResult {
 		_ = os.Remove(helperJournalPath(cfg.StateDir))
 		_ = fsyncDir(helperRoot(cfg.StateDir))
 	}
+	// Release only own terminal recovery fence:
+	_ = releaseUpgradeFence(cfg, jobID)
 	res.Outcome = "cleaned"
 	return res
 }
@@ -1232,23 +1283,40 @@ func handleApplyFleet(ctx context.Context, cfg *Config, auth JobAuthorizer, apiJ
 		}
 	}
 
+	// Acquire upgrade fence before final idle check:
+	cfg.CurrentJobID = jobID
+	if err := acquireUpgradeFence(cfg, jobID); err != nil {
+		res.Outcome = "deferred"
+		res.Detail = "host busy before swap: acquire upgrade fence: " + err.Error()
+		return res
+	}
+
+	// Final idle check before swap: safely abandon pre-swap if host activity began.
+	if idle, reason := DetectHostIdle(cfg); !idle {
+		_ = releaseUpgradeFence(cfg, jobID)
+		res.Outcome = "deferred"
+		res.Detail = "host busy before swap: " + reason
+		return res
+	}
+
 	if err := requireSecureDir(helperRoot(cfg.StateDir)); err != nil {
+		_ = releaseUpgradeFence(cfg, jobID)
 		res.Outcome, res.Detail = "verify_failed", err.Error()
 		return res
 	}
 
 	bdir := backupDir(cfg.StateDir, jobID)
 	if err := os.MkdirAll(bdir, 0o755); err != nil {
+		_ = releaseUpgradeFence(cfg, jobID)
 		res.Outcome, res.Detail = "verify_failed", "backup dir: "+err.Error()
 		return res
 	}
 
 	hj := &HelperJournal{
-		JobID: jobID,
-		Phase: hjIntent,
+		JobID:      jobID,
+		Phase:      hjIntent,
+		FenceOwner: jobID,
 	}
-
-	// 1. Take backups
 	for _, c := range spec.Components {
 		if fi, err := os.Lstat(c.TargetPath); err == nil {
 			backupPath := filepath.Join(bdir, c.Component)
@@ -1297,11 +1365,13 @@ func handleApplyFleet(ctx context.Context, cfg *Config, auth JobAuthorizer, apiJ
 	}
 
 	if err := saveHelperJournal(cfg.StateDir, hj); err != nil {
+		_ = releaseUpgradeFence(cfg, jobID)
 		res.Outcome, res.Detail = "verify_failed", "save helper journal: "+err.Error()
 		return res
 	}
 
 	if err := provisionLockForUpgrade(cfg); err != nil {
+		_ = releaseUpgradeFence(cfg, jobID)
 		res.Outcome, res.Detail = "verify_failed", "provision lock: "+err.Error()
 		return res
 	}

@@ -88,7 +88,7 @@ func (j *ClaimedJob) EffectivePhase() string {
 
 func (j *ClaimedJob) terminal() (string, bool) {
 	switch p := j.EffectivePhase(); p {
-	case "succeeded", "rolled_back", "rollback_unverified", "failed":
+	case "succeeded", "rolled_back", "rollback_unverified", "failed", "superseded", "deferred":
 		return p, true
 	}
 	return "", false

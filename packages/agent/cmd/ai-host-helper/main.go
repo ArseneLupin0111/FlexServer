@@ -21,6 +21,7 @@ type ServerConfig struct {
 	RootfsDir      string
 	CgroupBase     string
 	BackupsDir     string
+	AgentStateDir  string
 }
 
 func main() {
@@ -35,6 +36,7 @@ func main() {
 	rootfsDir := flag.String("rootfs-dir", "/usr/local/share/flexserver-ai/rootfs", "Pinned minimal rootfs directory")
 	cgroupBase := flag.String("cgroup-base", "/sys/fs/cgroup/flexserver-ai", "Base cgroup v2 directory")
 	backupsDir := flag.String("backups-dir", "/var/lib/flexserver-ai/backups", "Root-owned backups directory for config CAS")
+	agentStateDir := flag.String("agent-state-dir", "", "Agent state directory (default: /var/lib/vps-manager-agent or FLEXSERVER_AGENT_STATE_DIR)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -56,6 +58,7 @@ func main() {
 			RootfsDir:      *rootfsDir,
 			CgroupBase:     *cgroupBase,
 			BackupsDir:     *backupsDir,
+			AgentStateDir:  *agentStateDir,
 		}
 		err = run(cfg)
 	}

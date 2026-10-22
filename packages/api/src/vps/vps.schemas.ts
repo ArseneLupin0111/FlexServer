@@ -11,7 +11,6 @@ export const createVpsSchema = z.object({
   status: z.enum(["unknown", "healthy", "warning", "unreachable"]).optional(),
   notes: z.string().trim().max(1000).optional(),
   password: z.string().min(1).max(4096).optional(),
-  fleetAutoUpdate: z.boolean().optional(),
 }).strict();
 
 export const updateVpsSchema = createVpsSchema
@@ -43,5 +42,4 @@ export const provisionKeySchema = z.object({
 
 export const installAgentSchema = z.object({
   password: z.string().min(1).max(4096).optional(),
-  fleetAutoUpdate: z.boolean().optional(),
 });

@@ -26,9 +26,16 @@ export function validateFleetPayload(payload) {
   }
   for (const arch of ['amd64', 'arm64']) {
     const has = component => seen.has(`${component}/linux/${arch}`);
-    if (payload.artifacts.some(a => a.arch === arch)) requireValue(has('agent') && has('updater'), `Missing agent/updater pair for ${arch}`);
-    const ai = ['ai-executor', 'ai-host-helper', 'ai-rootfs', 'ai-profiles'];
-    if (ai.some(has)) requireValue(ai.every(has), `Incomplete AI runtime for ${arch}`);
+    if (payload.artifacts.some(a => a.arch === arch)) {
+      if (has('agent') || has('updater')) {
+        requireValue(has('agent') && has('updater'), `Missing agent/updater pair for ${arch}`);
+      }
+      const ai = ['ai-executor', 'ai-host-helper', 'ai-rootfs', 'ai-profiles'];
+      if (ai.some(has)) {
+        requireValue(ai.every(has), `Incomplete AI runtime for ${arch}`);
+      }
+      requireValue((has('agent') && has('updater')) || ai.every(has), `Missing required component set for ${arch}`);
+    }
   }
   if (payload.ai) requireValue(version.test(payload.ai.version) && Array.isArray(payload.ai.components) && ['ai-executor', 'ai-host-helper', 'ai-rootfs', 'ai-profiles'].every(c => payload.ai.components.includes(c)), 'Invalid AI compatibility metadata');
   return payload;

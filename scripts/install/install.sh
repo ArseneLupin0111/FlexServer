@@ -711,22 +711,27 @@ else
     fi
   fi
 
-  # Extract bundled updater binary from API container
-  UPDATER_BIN_TMP=""
-  if [[ "$DRY_RUN" == "true" ]]; then
-    echo "  [DRY-RUN] Would extract updater binary from API container..."
-  else
-    UPDATER_BIN_TMP="$(mktemp)"
-    INSTALLER_TMP_FILES+=("$UPDATER_BIN_TMP")
-    if ! docker cp "${API_CONTAINER}:/app/agent/vps-updater-linux-amd64" "$UPDATER_BIN_TMP" &>/dev/null; then
-      echo "Warning: Failed to extract updater binary from API container (/app/agent/vps-updater-linux-amd64)." >&2
-      rm -f "$UPDATER_BIN_TMP"
-      UPDATER_BIN_TMP=""
-    else
-      chmod 0755 "$UPDATER_BIN_TMP"
-      echo "  Extracted bundled updater binary."
+  # Prepare local agent updater using shared helper
+  PREPARE_UPDATER_SCRIPT=""
+  if [[ -f "$(dirname "$0")/prepare-agent-updater.sh" ]]; then
+    PREPARE_UPDATER_SCRIPT="$(dirname "$0")/prepare-agent-updater.sh"
+  elif [[ -f "$(dirname "$0")/scripts/install/prepare-agent-updater.sh" ]]; then
+    PREPARE_UPDATER_SCRIPT="$(dirname "$0")/scripts/install/prepare-agent-updater.sh"
+  elif [[ -f "./scripts/install/prepare-agent-updater.sh" ]]; then
+    PREPARE_UPDATER_SCRIPT="./scripts/install/prepare-agent-updater.sh"
+  fi
+
+  if [[ -n "$PREPARE_UPDATER_SCRIPT" ]]; then
+    echo "  Running shared prepare-agent-updater helper..."
+    PREP_ARGS=(--compose-file "$COMPOSE_FILE" --agent-state-dir "/var/lib/vps-manager-agent")
+    if [[ -n "$API_CONTAINER" ]]; then PREP_ARGS+=(--container "$API_CONTAINER"); fi
+    if [[ -n "$BACKEND_URL" ]]; then PREP_ARGS+=(--backend-url "$BACKEND_URL"); fi
+    if [[ "$DRY_RUN" == "true" ]]; then PREP_ARGS+=(--dry-run); fi
+    if ! bash "$PREPARE_UPDATER_SCRIPT" "${PREP_ARGS[@]}"; then
+      echo "Warning: Shared local updater preparation failed; continuing agent install." >&2
     fi
   fi
+  UPDATER_BIN_TMP=""
 
   # Extract bundled host-pty binary from API container
   HOST_PTY_BIN_TMP=""
@@ -786,39 +791,19 @@ else
     fi
   fi
 
-  # Bootstrap absent updater through existing provisioning if supported without secrets exposed
-  UPDATER_CONFIG_TMP=""
-  if [[ -n "$UPDATER_BIN_TMP" ]] || [[ "$DRY_RUN" == "true" ]]; then
-    if [[ ! -x /usr/local/lib/vps-manager-agent/vps-updater && ! -f /etc/vps-updater/config.json ]]; then
-      if [[ "$BACKEND_URL" == https://* ]]; then
-        echo "  Bootstrapping absent local updater credential..."
-        if [[ "$DRY_RUN" == "true" ]]; then
-          echo "  [DRY-RUN] Would run bootstrap-local-updater inside API container..."
-        else
-          UPDATER_BOOTSTRAP_OUT="$(docker compose -f "$COMPOSE_FILE" exec -T api node dist/scripts/bootstrap-local-updater.js --backend-url "$BACKEND_URL" --rotate 2>/dev/null || true)"
-          UPDATER_TOKEN="$(printf '%s' "$UPDATER_BOOTSTRAP_OUT" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-          if [[ -n "$UPDATER_TOKEN" ]]; then
-            UPDATER_CONFIG_TMP="$(mktemp)"
-            INSTALLER_TMP_FILES+=("$UPDATER_CONFIG_TMP")
-            chmod 0600 "$UPDATER_CONFIG_TMP"
-            cat > "$UPDATER_CONFIG_TMP" <<EOF
-{
-  "apiBase": "$BACKEND_URL",
-  "credential": "$UPDATER_TOKEN",
-  "agentBinary": "/usr/local/bin/vps-manager-agent",
-  "agentUnit": "vps-manager-agent.service",
-  "stateDir": "/var/lib/vps-updater"
-}
-EOF
-            echo "  Local updater credential provisioned without exposing secret."
-          else
-            echo "Error: Failed to bootstrap local updater credential from API." >&2
-            exit 1
-          fi
-        fi
-      else
-        echo "  Absent updater bootstrap skipped (backend URL must use HTTPS: ${BACKEND_URL})."
-      fi
+  # Prepare local agent updater using shared preparation helper
+  PREPARE_UPDATER_SCRIPT="$(cd "$(dirname "$0")" && pwd)/prepare-agent-updater.sh"
+  if [[ ! -f "$PREPARE_UPDATER_SCRIPT" ]]; then
+    for cand in "${INSTALLER_DIR}/prepare-agent-updater.sh" "./scripts/install/prepare-agent-updater.sh" "/tmp/prepare-agent-updater.sh"; do
+      if [[ -f "$cand" ]]; then PREPARE_UPDATER_SCRIPT="$cand"; break; fi
+    done
+  fi
+  if [[ -f "$PREPARE_UPDATER_SCRIPT" ]]; then
+    echo "  Running shared host updater preparation..."
+    PREP_ARGS=(--compose-file "$COMPOSE_FILE" --backend-url "$BACKEND_URL")
+    if [[ "$DRY_RUN" == "true" ]]; then PREP_ARGS+=(--dry-run); fi
+    if ! bash "$PREPARE_UPDATER_SCRIPT" "${PREP_ARGS[@]}"; then
+      echo "Warning: Shared host updater preparation encountered an issue; continuing agent installation." >&2
     fi
   fi
   AI_EXECUTOR_TMP=""
@@ -889,13 +874,12 @@ EOF
       if [[ "$ENABLE_DOCKER_METRICS_ACCESS" == "true" ]]; then
         AGENT_INSTALL_ARGS+=(--enable-docker-metrics-access)
       fi
-      if [[ -n "$UPDATER_BIN_TMP" ]] || [[ "$DRY_RUN" == "true" ]]; then
+      if [[ -f /etc/vps-updater/config.json && -x /usr/local/lib/vps-manager-agent/vps-updater ]]; then
+        : # Updater already prepared and installed by shared helper
+      elif [[ -n "$UPDATER_BIN_TMP" ]] || [[ "$DRY_RUN" == "true" ]]; then
         AGENT_INSTALL_ARGS+=(--upgrade-updater)
         if [[ -n "$UPDATER_BIN_TMP" ]]; then
           AGENT_INSTALL_ARGS+=(--updater-binary "$UPDATER_BIN_TMP")
-        fi
-        if [[ -n "$UPDATER_CONFIG_TMP" ]]; then
-          AGENT_INSTALL_ARGS+=(--updater-config "$UPDATER_CONFIG_TMP")
         fi
       fi
       if [[ -n "$HOST_PTY_BIN_TMP" ]] || [[ "$ENABLE_LOCAL_TERMINAL" == "true" ]]; then

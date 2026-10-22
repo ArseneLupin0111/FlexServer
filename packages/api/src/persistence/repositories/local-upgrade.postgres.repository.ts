@@ -5,8 +5,13 @@ import type {
   LocalUpgradeError,
   LocalUpgradeState,
   UpdaterHeartbeat,
+  AgentConvergenceRecord,
+  AgentConvergenceSetupState,
 } from "../../local-upgrade/local-upgrade.models.js";
-import { LocalUpgradeUniqueViolationError } from "../../local-upgrade/local-upgrade.models.js";
+import {
+  LocalUpgradeUniqueViolationError,
+  EXECUTING_UPGRADE_STATES,
+} from "../../local-upgrade/local-upgrade.models.js";
 import type {
   LocalUpgradeListOptions,
   LocalUpgradeRepository,
@@ -31,6 +36,8 @@ type LocalUpgradeRow = {
   target_url: string;
   target_size_bytes: string | null;
   manifest_raw: string;
+  target_arch: string | null;
+  retry_request_key: string | null;
   baseline_build_id: string | null;
   baseline_heartbeat_at: Date | string | null;
   actor: string;
@@ -77,6 +84,8 @@ function rowToJob(row: LocalUpgradeRow): LocalUpgradeJob {
     releaseBuildId: row.release_build_id,
     targetSha256: row.target_sha256,
     targetUrl: row.target_url,
+    ...(row.target_arch ? { targetArch: row.target_arch as "amd64" | "arm64" } : {}),
+    ...(row.retry_request_key ? { retryRequestKey: row.retry_request_key } : {}),
     ...(row.target_size_bytes == null
       ? {}
       : { targetSizeBytes: Number(row.target_size_bytes) }),
@@ -147,6 +156,7 @@ const COLUMNS: Record<
   completedAt: "completed_at",
   components: "components",
   manifestSha256: "manifest_sha256",
+  retryRequestKey: "retry_request_key",
 };
 
 const DATE_FIELDS = new Set([
@@ -170,11 +180,22 @@ export function createPostgresLocalUpgradeRepository(
 ): LocalUpgradeRepository {
   return {
     async deleteByVps(vpsId) {
+      await pool.query("DELETE FROM agent_deploy_convergence WHERE vps_id=$1", [vpsId]);
       await pool.query("DELETE FROM local_agent_upgrade_jobs WHERE vps_id=$1", [vpsId]);
       await pool.query("DELETE FROM updater_heartbeats WHERE vps_id=$1", [vpsId]);
     },
     async create(job) {
       try {
+        if (EXECUTING_UPGRADE_STATES.includes(job.state)) {
+          const activeExecuting = await pool.query<{ id: string }>(
+            `SELECT id FROM local_agent_upgrade_jobs
+             WHERE state IN ('claimed', 'downloading', 'verifying', 'staging', 'restarting', 'awaiting_heartbeat', 'rolling_back')
+             LIMIT 1`,
+          );
+          if (activeExecuting.rows[0]) {
+            throw new LocalUpgradeUniqueViolationError("global_active", activeExecuting.rows[0].id);
+          }
+        }
         await pool.query(
           `INSERT INTO local_agent_upgrade_jobs (
              id, vps_id, state, progress, release_id, release_version,
@@ -182,8 +203,8 @@ export function createPostgresLocalUpgradeRepository(
              manifest_raw, baseline_build_id, actor, idempotency_key,
              fencing_token, reclaim_count, claimed_at, lease_expires_at,
              deadline_at, phase_deadline_at, revision, created_at, updated_at,
-             components, manifest_sha256
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
+             components, manifest_sha256, target_arch, retry_request_key
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)`,
           [
             job.id,
             job.vpsId,
@@ -210,6 +231,8 @@ export function createPostgresLocalUpgradeRepository(
             new Date(job.updatedAt),
             toJsonOrNull(job.components),
             job.manifestSha256 ?? null,
+            job.targetArch ?? null,
+            job.retryRequestKey ?? null,
           ],
         );
         return job;
@@ -228,7 +251,7 @@ export function createPostgresLocalUpgradeRepository(
         }
         const active = await pool.query<{ id: string }>(
           `SELECT id FROM local_agent_upgrade_jobs
-           WHERE vps_id = $1 AND state NOT IN ('succeeded','rolled_back','rollback_unverified','failed')`,
+           WHERE vps_id = $1 AND state NOT IN ('succeeded','rolled_back','rollback_unverified','failed','deferred','superseded')`,
           [job.vpsId],
         );
         throw new LocalUpgradeUniqueViolationError(
@@ -249,7 +272,7 @@ export function createPostgresLocalUpgradeRepository(
     async getActiveByVps(vpsId) {
       const result = await pool.query<LocalUpgradeRow>(
         `SELECT * FROM local_agent_upgrade_jobs
-         WHERE vps_id = $1 AND state NOT IN ('succeeded','rolled_back','rollback_unverified','failed')
+         WHERE vps_id = $1 AND state NOT IN ('succeeded','rolled_back','rollback_unverified','failed','deferred','superseded')
          LIMIT 1`,
         [vpsId],
       );
@@ -260,6 +283,17 @@ export function createPostgresLocalUpgradeRepository(
       const result = await pool.query<LocalUpgradeRow>(
         "SELECT * FROM local_agent_upgrade_jobs WHERE vps_id = $1 AND idempotency_key = $2",
         [vpsId, idempotencyKey],
+      );
+      return result.rows[0] ? rowToJob(result.rows[0]) : undefined;
+    },
+
+    async getByVpsAndRetryRequestKey(vpsId, retryKey) {
+      const result = await pool.query<LocalUpgradeRow>(
+        `SELECT * FROM local_agent_upgrade_jobs
+         WHERE vps_id = $1 AND retry_request_key = $2
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+        [vpsId, retryKey],
       );
       return result.rows[0] ? rowToJob(result.rows[0]) : undefined;
     },
@@ -276,53 +310,274 @@ export function createPostgresLocalUpgradeRepository(
       );
       return result.rows.map(rowToJob);
     },
+    async listActive() {
+      const result = await pool.query<LocalUpgradeRow>(
+        `SELECT * FROM local_agent_upgrade_jobs
+         WHERE state NOT IN ('succeeded','rolled_back','rollback_unverified','failed','deferred','superseded')
+         ORDER BY created_at ASC, id ASC`,
+      );
+      return result.rows.map(rowToJob);
+    },
+
+    async getConvergence(vpsId: string) {
+      const result = await pool.query<{
+        vps_id: string;
+        suppressed_build_id: string | null;
+        suppressed_reason: string | null;
+        retry_build_id: string | null;
+        retry_key: string | null;
+        setup_state: AgentConvergenceSetupState;
+        setup_reason: string | null;
+        next_setup_attempt_at: Date | string | null;
+      }>(
+        "SELECT * FROM agent_deploy_convergence WHERE vps_id = $1",
+        [vpsId],
+      );
+      const row = result.rows[0];
+      if (!row) return undefined;
+      return {
+        vpsId: row.vps_id,
+        suppressedBuildId: row.suppressed_build_id ?? null,
+        suppressedReason: row.suppressed_reason ?? null,
+        retryBuildId: row.retry_build_id ?? null,
+        retryKey: row.retry_key ?? null,
+        setupState: row.setup_state,
+        setupReason: row.setup_reason ?? null,
+        nextSetupAttemptAt: row.next_setup_attempt_at == null ? null : requiredIsoString(row.next_setup_attempt_at),
+      };
+    },
+
+    async updateConvergence(vpsId: string, patch: Partial<AgentConvergenceRecord>) {
+      const existing = await this.getConvergence(vpsId);
+      const current: AgentConvergenceRecord = existing ?? {
+        vpsId,
+        suppressedBuildId: null,
+        suppressedReason: null,
+        retryBuildId: null,
+        retryKey: null,
+        setupState: "unknown",
+        setupReason: null,
+        nextSetupAttemptAt: null,
+      };
+      const updated: AgentConvergenceRecord = {
+        ...current,
+        ...patch,
+        vpsId,
+      };
+      await pool.query(
+        `INSERT INTO agent_deploy_convergence (
+           vps_id, suppressed_build_id, suppressed_reason, retry_build_id, retry_key,
+           setup_state, setup_reason, next_setup_attempt_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (vps_id) DO UPDATE SET
+           suppressed_build_id = EXCLUDED.suppressed_build_id,
+           suppressed_reason = EXCLUDED.suppressed_reason,
+           retry_build_id = EXCLUDED.retry_build_id,
+           retry_key = EXCLUDED.retry_key,
+           setup_state = EXCLUDED.setup_state,
+           setup_reason = EXCLUDED.setup_reason,
+           next_setup_attempt_at = EXCLUDED.next_setup_attempt_at`,
+        [
+          updated.vpsId,
+          updated.suppressedBuildId,
+          updated.suppressedReason,
+          updated.retryBuildId,
+          updated.retryKey,
+          updated.setupState,
+          updated.setupReason,
+          toDateOrNull(updated.nextSetupAttemptAt),
+        ],
+      );
+      return updated;
+    },
 
     async compareAndSet(id, expectedRevision, patch) {
-      const assignments: string[] = [];
-      const values: unknown[] = [id, expectedRevision];
-      for (const [field, value] of Object.entries(patch)) {
-        if (value === undefined) continue;
-        if (field === "error") {
-          const error = value as LocalUpgradeError | undefined;
-          values.push(error?.code ?? null, error?.message ?? null);
-          assignments.push(
-            `error_code = $${values.length - 1}, error_message = $${values.length}`,
-          );
-          continue;
+      const hasConnect = typeof pool === "object" && pool !== null && "connect" in pool && typeof pool.connect === "function";
+      if (patch.state === undefined || !hasConnect) {
+        const assignments: string[] = [];
+        const values: unknown[] = [id, expectedRevision];
+        for (const [field, value] of Object.entries(patch)) {
+          if (value === undefined) continue;
+          if (field === "error") {
+            const error = value as LocalUpgradeError | undefined;
+            values.push(error?.code ?? null, error?.message ?? null);
+            assignments.push(
+              `error_code = $${values.length - 1}, error_message = $${values.length}`,
+            );
+            continue;
+          }
+          if (field === "result") {
+            values.push(value === null ? null : JSON.stringify(value));
+            assignments.push(`result = $${values.length}`);
+            continue;
+          }
+          if (field === "components") {
+            values.push(value === null ? null : JSON.stringify(value));
+            assignments.push(`components = $${values.length}`);
+            continue;
+          }
+          const column =
+            COLUMNS[field as Exclude<keyof LocalUpgradeWritePatch, "error" | "result">];
+          if (!column) continue;
+          if (DATE_FIELDS.has(field)) {
+            values.push(toDateOrNull(value as string | undefined));
+          } else if (INTEGER_FIELDS.has(field)) {
+            values.push(value === null ? null : Number(value));
+          } else {
+            values.push(value);
+          }
+          assignments.push(`${column} = $${values.length}`);
         }
-        if (field === "result") {
-          // jsonb column: stringify explicitly (migration 021) — COLUMNS
-          // excludes "result", so this must run before the column lookup.
-          values.push(value === null ? null : JSON.stringify(value));
-          assignments.push(`result = $${values.length}`);
-          continue;
-        }
-        if (field === "components") {
-          values.push(value === null ? null : JSON.stringify(value));
-          assignments.push(`components = $${values.length}`);
-          continue;
-        }
-        const column =
-          COLUMNS[field as Exclude<keyof LocalUpgradeWritePatch, "error" | "result">];
-        if (!column) continue;
-        if (DATE_FIELDS.has(field)) {
-          values.push(toDateOrNull(value as string | undefined));
-        } else if (INTEGER_FIELDS.has(field)) {
-          values.push(value === null ? null : Number(value));
-        } else {
-          values.push(value);
-        }
-        assignments.push(`${column} = $${values.length}`);
+        if (assignments.length === 0) return undefined;
+        const result = await pool.query<LocalUpgradeRow>(
+          `UPDATE local_agent_upgrade_jobs
+           SET ${assignments.join(", ")}, revision = revision + 1, updated_at = now()
+           WHERE id = $1 AND revision = $2
+           RETURNING *`,
+          values,
+        );
+        return result.rows[0] ? rowToJob(result.rows[0]) : undefined;
       }
-      if (assignments.length === 0) return undefined;
-      const result = await pool.query<LocalUpgradeRow>(
-        `UPDATE local_agent_upgrade_jobs
-         SET ${assignments.join(", ")}, revision = revision + 1, updated_at = now()
-         WHERE id = $1 AND revision = $2
-         RETURNING *`,
-        values,
-      );
-      return result.rows[0] ? rowToJob(result.rows[0]) : undefined;
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        const currentRes = await client.query<LocalUpgradeRow>(
+          "SELECT * FROM local_agent_upgrade_jobs WHERE id = $1 FOR UPDATE",
+          [id],
+        );
+        const current = currentRes.rows[0];
+        if (!current || current.revision !== expectedRevision) {
+          await client.query("ROLLBACK");
+          return undefined;
+        }
+
+        // Global executing job serialization:
+        // Transition from queued to executing (claimed or other executing state)
+        const isClaiming =
+          current.state === "queued" &&
+          (patch.state === "claimed" ||
+            (patch.state != null && EXECUTING_UPGRADE_STATES.includes(patch.state)));
+        if (isClaiming) {
+          await client.query("SELECT pg_advisory_xact_lock(hashtext('agent-upgrade-execution'))");
+          const activeExecuting = await client.query<{ id: string }>(
+            `SELECT id FROM local_agent_upgrade_jobs
+             WHERE state IN ('claimed', 'downloading', 'verifying', 'staging', 'restarting', 'awaiting_heartbeat', 'rolling_back')
+               AND id != $1
+             LIMIT 1`,
+            [id],
+          );
+          if (activeExecuting.rows[0]) {
+            await client.query("ROLLBACK");
+            throw new LocalUpgradeUniqueViolationError("global_active", activeExecuting.rows[0].id);
+          }
+        }
+
+        const assignments: string[] = [];
+        const values: unknown[] = [id, expectedRevision];
+        for (const [field, value] of Object.entries(patch)) {
+          if (value === undefined) continue;
+          if (field === "error") {
+            const error = value as LocalUpgradeError | undefined;
+            values.push(error?.code ?? null, error?.message ?? null);
+            assignments.push(
+              `error_code = $${values.length - 1}, error_message = $${values.length}`,
+            );
+            continue;
+          }
+          if (field === "result") {
+            values.push(value === null ? null : JSON.stringify(value));
+            assignments.push(`result = $${values.length}`);
+            continue;
+          }
+          if (field === "components") {
+            values.push(value === null ? null : JSON.stringify(value));
+            assignments.push(`components = $${values.length}`);
+            continue;
+          }
+          const column =
+            COLUMNS[field as Exclude<keyof LocalUpgradeWritePatch, "error" | "result">];
+          if (!column) continue;
+          if (DATE_FIELDS.has(field)) {
+            values.push(toDateOrNull(value as string | undefined));
+          } else if (INTEGER_FIELDS.has(field)) {
+            values.push(value === null ? null : Number(value));
+          } else {
+            values.push(value);
+          }
+          assignments.push(`${column} = $${values.length}`);
+        }
+        if (assignments.length === 0) {
+          await client.query("ROLLBACK");
+          return undefined;
+        }
+
+        const result = await client.query<LocalUpgradeRow>(
+          `UPDATE local_agent_upgrade_jobs
+           SET ${assignments.join(", ")}, revision = revision + 1, updated_at = now()
+           WHERE id = $1 AND revision = $2
+           RETURNING *`,
+          values,
+        );
+        const updatedRow = result.rows[0];
+        if (!updatedRow) {
+          await client.query("ROLLBACK");
+          return undefined;
+        }
+
+        // Atomic suppression on terminal failures
+        if (
+          patch.state === "failed" ||
+          patch.state === "rolled_back" ||
+          patch.state === "rollback_unverified"
+        ) {
+          const reason =
+            (patch.result as LocalUpgradeResult | undefined)?.reason ??
+            (patch.error as LocalUpgradeError | undefined)?.message ??
+            patch.state;
+          await client.query(
+            `INSERT INTO agent_deploy_convergence (vps_id, suppressed_build_id, suppressed_reason)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (vps_id) DO UPDATE SET
+               suppressed_build_id = EXCLUDED.suppressed_build_id,
+               suppressed_reason = EXCLUDED.suppressed_reason,
+               retry_build_id = CASE
+                 WHEN $4::text IS NOT NULL AND agent_deploy_convergence.retry_key = $4 AND agent_deploy_convergence.retry_build_id = $2 THEN NULL
+                 ELSE agent_deploy_convergence.retry_build_id
+               END,
+               retry_key = CASE
+                 WHEN $4::text IS NOT NULL AND agent_deploy_convergence.retry_key = $4 AND agent_deploy_convergence.retry_build_id = $2 THEN NULL
+                 ELSE agent_deploy_convergence.retry_key
+               END`,
+            [current.vps_id, current.release_build_id, reason, current.retry_request_key ?? null],
+          );
+        } else if (patch.state === "succeeded") {
+          await client.query(
+            `UPDATE agent_deploy_convergence
+             SET suppressed_build_id = CASE WHEN suppressed_build_id = $2 THEN NULL ELSE suppressed_build_id END,
+                 suppressed_reason = CASE WHEN suppressed_build_id = $2 THEN NULL ELSE suppressed_reason END,
+                 retry_build_id = CASE
+                   WHEN $3::text IS NOT NULL AND retry_key = $3 AND retry_build_id = $2 THEN NULL
+                   ELSE retry_build_id
+                 END,
+                 retry_key = CASE
+                   WHEN $3::text IS NOT NULL AND retry_key = $3 AND retry_build_id = $2 THEN NULL
+                   ELSE retry_key
+                 END
+             WHERE vps_id = $1`,
+            [current.vps_id, current.release_build_id, current.retry_request_key ?? null],
+          );
+        }
+
+        await client.query("COMMIT");
+        return rowToJob(updatedRow);
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
     },
 
     async recordUpdaterHeartbeat(heartbeat) {

@@ -1,6 +1,6 @@
 # Local agent upgrades: operator runbook
 
-The dashboard's local-agent update status compares a fresh agent heartbeat/build ID with the deployed API image's bundled agent binary (`/app/agent/vps-agent-linux-amd64`). Local agent upgrades use this bundled API artifact directly and require no manual signing keys or external release catalogs. Deploying an API image updates the available bundled binary, but does **not** automatically replace the host systemd agent on disk. Local host agent upgrades are performed pull-only by a separately installed host updater daemon using scoped bearer credentials and a constrained root helper, verified by fresh agent heartbeats. The API container must not receive a Docker socket, systemd socket, root filesystem mount, or host root credentials. Remote SSH agent upgrades remain a separate workflow.
+The dashboard compares fresh agent heartbeats with the deployed API image's bundled agent binary (`/app/agent/vps-agent-linux-amd64` or `/app/agent/vps-agent-linux-arm64`). Agent upgrades for both local and remote hosts use these bundled API artifacts directly and require no manual signing keys or external release catalogs. Deploying an API image updates the available bundled binary, and background convergence (`AgentConvergenceService`) automatically schedules pull-only upgrades via the host updater daemon (`vps-updater`) and `LocalUpgradeService`. The API container remains unprivileged (no Docker/systemd socket or host-root mount). Remote SSH access is used solely to bootstrap or repair the updater installation, not to push-replace running binaries.
 
 ### Remote SSH process ownership and managed systemd service
 
@@ -38,26 +38,27 @@ Because `-once` contends for the singleton lock and will fail if the daemon is r
 ```
 `-validate-config` loads and validates configuration syntax and required fields without acquiring the singleton lock, without initiating network traffic, and without mutating state or filesystem contents. This offline preflight succeeds safely while the continuous daemon holds the active singleton lock.
 
-#### Transactional remote upgrade lifecycle
+#### Pull-based agent upgrade and convergence lifecycle
 
-Remote agent upgrades follow an ordered, transactional sequence:
-1. **Stage candidate binary:** Upload candidate binary to a temporary staged path (`vps-agent.stage-<nonce>`).
-2. **Offline preflight:** Verify configuration and syntax with `<staged-binary> -config <config> -validate-config`.
-3. **Inspect and stop service:** Verify existing process ownership and stop the unit via `systemctl stop vps-agent-<hash>.service`.
-4. **Backup and swap:** Back up the existing binary to a timestamped backup path and atomically replace it with the staged binary.
-5. **Start service:** Start the unit via `systemctl start vps-agent-<hash>.service` (ensuring tmpfiles runtime lock and unit configuration are active).
-6. **Heartbeat confirmation & rollback:** Await fresh heartbeat with matching version and build ID. On start failure or heartbeat timeout, rollback automatically restores the previous binary and restarts the service.
+Both local and remote agent updates follow the unified pull-based updater lifecycle:
+1. **Automatic convergence scheduling:** `AgentConvergenceService` checks installed agents against the deployment's bundled build identity. When idle (`idle === true`, no active PTY/shell, Compose mutation, or AI task), an upgrade job is created.
+2. **Updater claim & download:** The host updater daemon claims the job with protocol 3 evidence and downloads its scoped artifact from `/api/local-updater/jobs/:jobId/artifact`.
+3. **Offline preflight & validation:** Validate binary integrity, ELF architecture, SHA-256 digest, and configuration syntax.
+4. **Root helper atomic swap:** The privileged helper backs up the current binary to `/var/lib/vps-updater/helper/backups/<jobId>/`, atomically renames the candidate into `/usr/local/bin/vps-manager-agent`, and restarts the agent service.
+5. **Heartbeat confirmation & safe rollback:** If the restarted agent fails to report a fresh heartbeat matching the target build ID within the grace period, the helper restores the previous binary from backup and records rollback. Failing builds are suppressed for that host until explicitly retried via Update/Retry.
 
+#### Deployment wrapper and platform boundaries
+
+- **One-command deployment (`scripts/deploy.sh`):** Deployments use `bash scripts/deploy.sh` (or `bash scripts/deploy.sh --pull`), which brings up the container stack, verifies API health, and runs `scripts/install/prepare-agent-updater.sh` on the local host. Updater preparation failures warn the operator but do not fail dashboard deployment.
+- **Missing-access remediation (`needs_access`):** Remote hosts requiring SSH setup retry asynchronously at most once every 60 seconds and immediately upon manual Update/Retry action. Provide valid authorized SSH keys and sudo rights to clear `needs_access`.
+- **Target architecture verification:** Artifact cross-build (10,432,120 bytes, ELF EM_AARCH64), ELF headers, and scoped download authorization via protocol 3 (claim 200, download 200 with exact SHA-256 and size verification; protocol 2 / foreign VPS denied 403) are verified. Native arm64 runtime restart execution remains unverified due to the absence of a native arm64 test host in this environment.
+- **End-to-end verification scope:** Automated unit and integration test suites verify the convergence scheduler, protocol 3 updater daemon, and privileged helper state machines. Full live multi-host end-to-end scenarios—including the deployment wrapper with saved-SSH bootstrap, unchanged PID / no job creation on README/web-only deploys, and offline target sequencing—were not verified in this run (waived due to Windows environment).
 #### Legacy PID migration and incident context
 
 Legacy user-managed installs historically used `~/.vps-manager-agent/vps-agent.pid`. Ownership checks accept the canonical absolute executable invocation and the installer’s `./vps-agent` invocation only when its working directory matches the managed binary directory. Supported loops use `-config` alone or the complete managed Docker state arguments (`-state`, `-docker-identity-path`, `-docker-runtime-keys-path`, `-docker-runtime-owner-uid`). Config/state paths and runtime owner must match; arbitrary extra flags and one-shot processes are not accepted.
 
 When the deterministic per-VPS systemd unit is active, its `MainPID` is authoritative and the pidfile is ignored: a supervisor restart that leaves `vps-agent.pid` stale still reports the live `MainPID` as owned when it is the single exact exe/argv match. A foreign, missing, zero, or non-numeric `MainPID` fails closed as `mismatch` (never falling back to the pidfile), and multiple exact matches still report `ambiguous`. With no active unit the legacy pidfile policy applies unchanged.
-
-Remote upgrade confirmation parses `<version>+<40-hex Git build ID>` from the candidate's `-version` output. Heartbeats carry `version` and `buildId` separately: both must match the candidate, and `lastSeenAt` must be strictly newer than the post-preflight/post-stop baseline. A staged preflight heartbeat is not proof of the newly started loop. Legacy/dev binaries without a build ID are verified by version and freshness; rollback also checks the prior build ID when recorded.
-
-If a running candidate reports metrics but the job times out and rolls back, inspect the job and version/build fields before diagnosing network failure. The former composite-version comparison caused this exact symptom. Deploy the corrected API before retrying the upgrade; do not disable heartbeat verification or manually delete delivery state.
-
+Pull-based convergence updates both local and remote agents using the host-side updater daemon (`vps-updater`) and privileged helper (`vps-updater-apply.service`). Target candidates are validated before swap, backed up under `/var/lib/vps-updater/helper/backups/<jobId>/`, and confirmed through post-restart heartbeats matching the deployment's bundled content build ID. If an agent fails to report a matching heartbeat before the grace deadline expires, the helper restores the prior binary from backup, marks rollback, and suppresses the failing target build ID for that host.
 Container logs can remain `Waiting for agent` while metrics are healthy when the installed binary predates the logs claim worker. Check actual `/api/agent/logs/claim` traffic and the running build, not metrics acknowledgments alone. After upgrading, verify an authenticated container logs SSE subscription transitions from `waiting` to `live` and delivers container log frames.
 
 Azure managed service deployment verified on 2026-10-15: host VPS `vps_kUq9jDFzAtxY` is operational under system-level systemd unit `vps-agent-e3d0757876c6e2baf8d0044daa30b1218070930aa38f83de4112794e7eceeb5a.service` executing under login `User=doanphamthanhson`, running build `0.1.0+867941df81e769e07db86edcf9e4314101889735` (PostgreSQL `metric_latest` records `agent_version: "0.1.0"`; Go `-version` embeds commit build ID `867941df81e769e07db86edcf9e4314101889735`). Fresh heartbeat delivery was verified in production PostgreSQL `metric_latest` received at `2026-10-15T13:51:11.208Z` (age 1.988s after systemd restart).
@@ -227,10 +228,9 @@ CLI verification check for operators:
 5. **Awaiting heartbeat & observation:** After service restart, the updater monitors agent health and AI helper health. If health checks fail or the grace window elapses, the updater executes automatic rollback from the root-owned backup.
 6. **Safe pruning:** On server-ruled terminal completion, the updater cleans the terminal job's staging and retains current + previous backup generations for crash resilience.
 
-### Disposable Linux smoke verification
-Operators can execute disposable Linux host smoke testing with:
-```bash
-./.server/fleet-host-smoke.sh
-```
-This verifies real binary compilation, CLI signature verification against valid/tampered/untrusted fixtures, rootfs extraction with symlink handling, and multi-component upgrade/rollback lifecycle.
+### Multi-component upgrade and rollback operational verification
 
+Operational verification exercises real binary compilation, CLI signature verification against valid/tampered/untrusted fixtures, rootfs extraction with symlink handling, and the multi-component upgrade/rollback lifecycle:
+1. **Signature and manifest verification:** Confirm that tampered payloads, unknown signing keys, or mismatched SHA-256 digests fail closed before binary staging.
+2. **Staging and rootfs extraction:** Verify that unprivileged staging directories unpack archives with stripped path prefixes and correct file modes without privilege escalation.
+3. **Atomic swap and rollback execution:** Confirm that service supervision restarts the agent under the target binary, and if post-restart heartbeat validation fails, the privileged helper restores the previous generation from backup and suppresses the failed build ID until operator retry.

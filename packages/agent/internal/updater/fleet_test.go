@@ -188,6 +188,46 @@ func TestVerifyFleetManifest_NoRecanonicalization(t *testing.T) {
 	}
 }
 
+func TestVerifyFleetManifest_AIOnly(t *testing.T) {
+	_, priv, pemBytes := generateTestEd25519Key(t)
+	buildID := "0123456789abcdef0123456789abcdef01234567"
+	aiComponents := []string{"ai-executor", "ai-host-helper", "ai-rootfs", "ai-profiles"}
+	artifacts := make([]FleetArtifact, len(aiComponents))
+	for i, c := range aiComponents {
+		artifacts[i] = FleetArtifact{
+			Component: c,
+			OS:        "linux",
+			Arch:      "amd64",
+			URL:       "https://github.com/vps-manager/releases/" + c,
+			SHA256:    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+			Size:      1024,
+			Version:   "1.0.0",
+		}
+	}
+	payloadObj := FleetManifestPayload{
+		SchemaVersion: 1,
+		ReleaseID:     buildID,
+		BuildID:       buildID,
+		Version:       "1.0.0",
+		Channel:       "stable",
+		RollbackSafe:  true,
+		Artifacts:     artifacts,
+	}
+	payloadBytes, err := json.Marshal(payloadObj)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	envelopeBytes := signPayloadEnvelope(t, priv, string(payloadBytes), "test-ai-key")
+
+	verified, err := VerifyFleetManifest(envelopeBytes, pemBytes)
+	if err != nil {
+		t.Fatalf("expected successful AI-only manifest verification, got: %v", err)
+	}
+	if len(verified.Artifacts) != 4 {
+		t.Fatalf("expected 4 artifacts, got %d", len(verified.Artifacts))
+	}
+}
+
 func TestExtractTarGz_StripPrefix(t *testing.T) {
 	tmpDir := t.TempDir()
 	var buf bytes.Buffer

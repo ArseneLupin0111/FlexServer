@@ -73,7 +73,6 @@ export type AppConfig = {
   };
   fleet: {
     publicKeyFile?: string;
-    manifestUrl?: string;
   };
 };
 
@@ -213,10 +212,6 @@ const envSchema = z.object({
   FLEET_RELEASE_PUBLIC_KEY_FILE: z.preprocess(
     (value) => (value === "" ? undefined : value),
     z.string().trim().optional(),
-  ),
-  FLEET_RELEASE_MANIFEST_URL: z.preprocess(
-    (value) => (value === "" ? undefined : value),
-    z.string().trim().url().optional(),
   ),
 });
 
@@ -394,7 +389,6 @@ export function parseAppConfig(
     },
     fleet: {
       publicKeyFile: parsed.FLEET_RELEASE_PUBLIC_KEY_FILE,
-      manifestUrl: parsed.FLEET_RELEASE_MANIFEST_URL,
     },
    };
 }

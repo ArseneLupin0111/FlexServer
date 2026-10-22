@@ -76,8 +76,8 @@ function extractProtocolVersion(req: Request): number {
 /**
  * Pull-only updater API. Authenticated by a dedicated bearer credential
  * scoped `local-updater` (never the metrics/agent credential), bound to the
- * credential VPS record. Remote fleet clients require protocol 3; bundled
- * artifact downloads remain local-only. No dashboard session or Origin check.
+ * credential VPS record. Remote fleet clients require protocol 3; artifact
+ * downloads are authorized for the credential's own job.
  */
 @Controller("api/local-updater")
 export class LocalUpdaterController {
@@ -156,12 +156,11 @@ export class LocalUpdaterController {
     @Res() res: Response,
   ) {
     const credential = await this.authenticate(req);
-    const vps = await this.vps.get(credential.vpsId);
-    if (!vps || !isLocalHostVps(vps)) {
+    const existingJob = await this.service.findJobById(jobId);
+    if (existingJob && existingJob.vpsId !== credential.vpsId) {
       throw new ForbiddenException({
         error: {
-          message:
-            "Artifact downloads via local updater route are only available for the local host",
+          message: "Updater credential does not own this upgrade job",
           code: "invalid_credential_scope",
         },
       });

@@ -7,8 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/vps-manager/agent/internal/applications"
 )
 
 // PlatformInfo describes host OS and architecture.
@@ -39,14 +42,26 @@ type ClaimRequest struct {
 // Unknown evidence fails closed (returns false, reason).
 func DetectHostIdle(cfg *Config) (idle bool, reason string) {
 	// 1. Check Compose / Docker exclusion locks
-	exclusionCandidates := []string{
-		"/var/lib/vps-manager-agent/docker-applications/exclusion.json",
+	seen := make(map[string]bool)
+	var exclusionCandidates []string
+	addCandidate := func(p string) {
+		clean := filepath.Clean(p)
+		if !seen[clean] {
+			seen[clean] = true
+			exclusionCandidates = append(exclusionCandidates, clean)
+		}
 	}
-	if cfg != nil && cfg.StateDir != "" {
-		exclusionCandidates = append(exclusionCandidates,
-			filepath.Join(cfg.StateDir, "docker-applications", "exclusion.json"),
-			filepath.Join(cfg.StateDir, "..", "vps-manager-agent", "docker-applications", "exclusion.json"),
-		)
+	if cfg != nil && cfg.AgentStateDir != "" {
+		addCandidate(filepath.Join(cfg.AgentStateDir, "docker-applications", "exclusion.json"))
+	} else {
+		if p, err := applications.DefaultLockPath(); err == nil && p != "" {
+			addCandidate(p)
+		}
+		addCandidate("/var/lib/vps-manager-agent/docker-applications/exclusion.json")
+		if cfg != nil && cfg.StateDir != "" {
+			addCandidate(filepath.Join(cfg.StateDir, "docker-applications", "exclusion.json"))
+			addCandidate(filepath.Join(cfg.StateDir, "..", "vps-manager-agent", "docker-applications", "exclusion.json"))
+		}
 	}
 
 	for _, p := range exclusionCandidates {
@@ -58,21 +73,40 @@ func DetectHostIdle(cfg *Config) (idle bool, reason string) {
 			// Fail closed on unreadable lock registry
 			return false, fmt.Sprintf("exclusion lock registry %s unreadable: %v", p, err)
 		}
-		var rows map[string]struct {
-			Scope  string `json:"scope"`
-			Holder struct {
-				Kind string `json:"kind"`
-				ID   string `json:"id"`
-			} `json:"holder"`
-			ExpiresAtUnix int64 `json:"expiresAtUnix,omitempty"`
-		}
+		var rows []applications.LockRow
 		if err := json.Unmarshal(data, &rows); err != nil {
 			return false, fmt.Sprintf("exclusion lock registry %s corrupt: %v", p, err)
 		}
 		now := time.Now().Unix()
-		for scope, r := range rows {
-			if r.ExpiresAtUnix == 0 || r.ExpiresAtUnix > now {
-				return false, fmt.Sprintf("active exclusion lock on scope %s held by %s", scope, r.Holder.Kind)
+		for _, r := range rows {
+			// Idle inspection must ignore own upgrade scope:
+			if r.Scope == applications.LockScopeUpgrade {
+				if (r.Holder.Kind == "updater-helper" || r.Holder.Kind == "") {
+					if cfg != nil && cfg.CurrentJobID != "" && r.Holder.ID == cfg.CurrentJobID {
+						continue
+					}
+					if cfg != nil && cfg.StateDir != "" {
+						if hj, err := LoadHelperJournal(cfg.StateDir); err == nil && hj != nil && (hj.FenceOwner == r.Holder.ID || hj.JobID == r.Holder.ID) {
+							continue
+						}
+					}
+				}
+			}
+			// Stale activity check:
+			// terminal:* and ai:* ephemeral activity rows (even mutating) are ignored if holder process died.
+			// Mutating Compose operations require explicit recovery even if process died.
+			// Non-mutating rows are ignored if process died.
+			isEphemeralActivity := strings.HasPrefix(r.Scope, "terminal:") || strings.HasPrefix(r.Scope, "ai:")
+			if r.Scope != applications.LockScopeUpgrade && r.Holder.PID > 0 {
+				if isEphemeralActivity || !r.Mutating {
+					if !applications.IsProcessAlive(r.Holder.PID, r.Holder.ProcessStartTime) {
+						continue
+					}
+				}
+			}
+			// Mutating locks never expire by TTL; non-mutating expire after ExpiresAtUnix.
+			if r.Mutating || r.ExpiresAtUnix == 0 || r.ExpiresAtUnix > now {
+				return false, fmt.Sprintf("active exclusion lock on scope %s held by %s", r.Scope, r.Holder.Kind)
 			}
 		}
 	}
@@ -81,16 +115,24 @@ func DetectHostIdle(cfg *Config) (idle bool, reason string) {
 	ptySockets := []string{
 		"/run/flexserver/host-pty/pty.sock",
 		"/var/run/flexserver/host-pty/pty.sock",
+		"/run/flexserver/host-pty/host-pty.sock",
+		"/var/run/flexserver/host-pty/host-pty.sock",
 	}
 	for _, sock := range ptySockets {
 		if fi, err := os.Stat(sock); err == nil && !fi.IsDir() {
 			// Socket exists: check if sessions marker exists
 			activeMarker := filepath.Join(filepath.Dir(sock), "active_sessions")
-			if markerData, err := os.ReadFile(activeMarker); err == nil {
-				txt := strings.TrimSpace(string(markerData))
-				if txt != "" && txt != "0" {
-					return false, fmt.Sprintf("active terminal sessions (%s)", txt)
-				}
+			markerData, err := os.ReadFile(activeMarker)
+			if err != nil {
+				return false, fmt.Sprintf("pty socket %s present with missing or unreadable active_sessions marker: %v", sock, err)
+			}
+			txt := strings.TrimSpace(string(markerData))
+			count, err := strconv.Atoi(txt)
+			if err != nil {
+				return false, fmt.Sprintf("pty socket %s present with non-numeric active_sessions marker (%q)", sock, txt)
+			}
+			if count > 0 {
+				return false, fmt.Sprintf("active terminal sessions (%d)", count)
 			}
 		}
 	}
@@ -103,14 +145,19 @@ func DetectHostIdle(cfg *Config) (idle bool, reason string) {
 				continue
 			}
 			taskProcs := filepath.Join(cgroupBase, e.Name(), "cgroup.procs")
-			if procs, err := os.ReadFile(taskProcs); err == nil {
-				pids := strings.Fields(string(procs))
-				if len(pids) > 0 {
-					return false, fmt.Sprintf("AI task active in cgroup %s (pids: %d)", e.Name(), len(pids))
-				}
+			procs, err := os.ReadFile(taskProcs)
+			if err != nil {
+				return false, fmt.Sprintf("AI cgroup child %s unreadable: %v", taskProcs, err)
+			}
+			pids := strings.Fields(string(procs))
+			if len(pids) > 0 {
+				return false, fmt.Sprintf("AI task active in cgroup %s (pids: %d)", e.Name(), len(pids))
 			}
 		}
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Sprintf("AI cgroup directory %s unreadable: %v", cgroupBase, err)
 	}
+
 	// 4. Check AI scratch directory for recent activity
 	scratchDir := "/var/lib/flexserver-ai/scratch"
 	if entries, err := os.ReadDir(scratchDir); err == nil {
@@ -120,8 +167,12 @@ func DetectHostIdle(cfg *Config) (idle bool, reason string) {
 				if fi.ModTime().After(cutoff) {
 					return false, fmt.Sprintf("recent AI task scratch activity in %s", e.Name())
 				}
+			} else {
+				return false, fmt.Sprintf("AI scratch entry %s unreadable: %v", e.Name(), err)
 			}
 		}
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Sprintf("AI scratch directory %s unreadable: %v", scratchDir, err)
 	}
 
 	return true, ""

@@ -10,6 +10,7 @@ import { createJsonJobRepository } from "../src/persistence/repositories/job.rep
 import { createJsonMetricRepository } from "../src/persistence/repositories/metric.repository.js";
 import { JobRunnerService } from "../src/jobs/job-runner.service.js";
 import { JobActivityService } from "../src/jobs/job-activity.service.js";
+import { AgentLifecycleCoordinator } from "../src/agents/agent-lifecycle-coordinator.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -424,7 +425,11 @@ describe("JobRunnerService", () => {
 
   async function createRunner() {
     const repo = await createJobRepo();
-    const runner = new JobRunnerService(repo, new JobActivityService());
+    const runner = new JobRunnerService(
+      repo,
+      new JobActivityService(),
+      new AgentLifecycleCoordinator(),
+    );
     return { repo, runner };
   }
 

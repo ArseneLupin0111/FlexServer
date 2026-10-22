@@ -20,6 +20,7 @@ import type { AgentRepository } from "../persistence/repositories/agent.reposito
 import type { FleetRepository } from "../persistence/repositories/fleet.repository.js";
 import { SshService } from "../ssh/ssh.service.js";
 import type { KeyService } from "../ssh/keyService.js";
+import { HostKeyPinService } from "../ssh/host-key-pin.service.js";
 import { AgentService } from "./agent.service.js";
 import { AuditService } from "../audit/audit.service.js";
 import { resolveAgentBackendUrl } from "./agent-backend-url.js";
@@ -29,20 +30,47 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+function hashSecret(secret: string): string {
+  return createHash("sha256").update(secret).digest("hex");
+}
+
+const TOKEN_PREFIX = "vma_";
+function parseToken(
+  token: string,
+): { credentialId: string; secret: string } | null {
+  if (!token.startsWith(TOKEN_PREFIX)) {
+    return null;
+  }
+  const rest = token.slice(TOKEN_PREFIX.length);
+  const separatorIndex = rest.lastIndexOf("_");
+  if (separatorIndex < 1) {
+    return null;
+  }
+  const credentialId = rest.slice(0, separatorIndex);
+  const secret = rest.slice(separatorIndex + 1);
+  if (!credentialId || !secret) {
+    return null;
+  }
+  return { credentialId, secret };
+}
+
 export type Architecture = "amd64" | "arm64";
+export type ProvisioningSource = "bundled" | "signed";
+export type FleetProvisioningStatus = "enrolled" | "needs_access" | "failed";
 
 export interface FleetProvisioningOptions {
+  source?: ProvisioningSource;
   isNewHost?: boolean;
-  fleetAutoUpdate?: boolean;
   force?: boolean;
+  rotateCredentials?: boolean;
 }
 
 export interface FleetProvisioningResult {
   vpsId: string;
-  status: "enrolled" | "needs_setup" | "failed";
+  status: FleetProvisioningStatus;
+  reason: string | null;
   message?: string;
 }
-
 export function normalizeArchitecture(rawArch: string): Architecture {
   const trimmed = rawArch.trim().toLowerCase();
   if (trimmed === "aarch64" || trimmed === "arm64") {
@@ -69,28 +97,75 @@ export class FleetProvisioningService {
     @Optional()
     @Inject(FLEET_REPOSITORY)
     private readonly fleetRepo?: FleetRepository,
+    @Optional()
+    @Inject(HostKeyPinService)
+    private readonly hostKeyPin?: HostKeyPinService,
   ) {}
 
   /**
-   * Persists new host auto-update preference honoring opt-out.
+   * Prepares and provisions the bundled updater onto a remote host using saved SSH credentials.
+   * Usable by convergence. Never accepts ephemeral/one-time passwords.
+   * Returns { status: "enrolled" | "needs_access" | "failed", reason: string | null }.
+   * Does not auto-accept changed or unpinned host keys.
+   * Reuses usable existing updater credentials; revokes newly created credentials on failure.
    */
-  async recordNewHostPreference(
-    vpsId: string,
-    fleetAutoUpdate: boolean,
-  ): Promise<void> {
-    if (!this.fleetRepo) return;
-    if (fleetAutoUpdate) {
-      await this.fleetRepo.setEnrolled(vpsId, true);
-      const existing = await this.fleetRepo.getPolicy(vpsId);
-      if (!existing) {
-        await this.fleetRepo.upsertPolicy(vpsId, {
-          mode: "auto",
-          group: "Default",
-        });
-      }
-    } else {
-      await this.fleetRepo.setEnrolled(vpsId, false);
+  async ensureBundled(vpsId: string): Promise<FleetProvisioningResult> {
+    const vps = await this.vpsRepo.get(vpsId);
+    if (!vps) {
+      return { vpsId, status: "failed", reason: "VPS not found", message: "VPS not found" };
     }
+
+    if (vps.kind === "local" || vps.managedBy === "system") {
+      return {
+        vpsId,
+        status: "failed",
+        reason: "Fleet updater not applicable for local or system-managed VPS",
+        message: "Fleet updater not applicable for local or system-managed VPS",
+      };
+    }
+
+    // Strict host key check: require verified pin, never auto-accept changed host keys
+    if (this.hostKeyPin) {
+      try {
+        const trustedFingerprints = await this.hostKeyPin.getTrustedFingerprints(
+          vps.id,
+          vps.host,
+          vps.port,
+        );
+        if (!trustedFingerprints || trustedFingerprints.length === 0) {
+          return {
+            vpsId,
+            status: "needs_access",
+            reason: "SSH host key is not trusted. Operator must verify and pin the host key.",
+            message: "SSH host key is not trusted. Operator must verify and pin the host key.",
+          };
+        }
+      } catch (err) {
+        return {
+          vpsId,
+          status: "needs_access",
+          reason: `SSH host key check failed: ${err instanceof Error ? err.message : String(err)}`,
+          message: `SSH host key check failed: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+    }
+
+    // Require saved authorized private key; never accept or persist one-time passwords
+    const auth = await this.resolveAuth(vpsId);
+    if (!auth || !auth.privateKey) {
+      return {
+        vpsId,
+        status: "needs_access",
+        reason: "No saved authorized SSH key available for remote setup",
+        message: "No saved authorized SSH key available for remote setup",
+      };
+    }
+
+    return this.provisionHost(vpsId, auth, {
+      source: "bundled",
+      isNewHost: false,
+      force: false,
+    });
   }
 
   /**
@@ -103,15 +178,52 @@ export class FleetProvisioningService {
   ): Promise<FleetProvisioningResult> {
     const vps = await this.vpsRepo.get(vpsId);
     if (!vps) {
-      return { vpsId, status: "failed", message: "VPS not found" };
+      return { vpsId, status: "failed", reason: "VPS not found", message: "VPS not found" };
     }
 
     if (vps.kind === "local" || vps.managedBy === "system") {
       return {
         vpsId,
-        status: "needs_setup",
+        status: "failed",
+        reason: "Fleet updater not applicable for local or system-managed VPS",
         message: "Fleet updater not applicable for local or system-managed VPS",
       };
+    }
+
+    const source: ProvisioningSource = options?.source ?? "bundled";
+    if (source !== "bundled" && source !== "signed") {
+      return {
+        vpsId,
+        status: "failed",
+        reason: `Invalid provisioning source: "${source}". Must be "bundled" or "signed".`,
+        message: `Invalid provisioning source: "${source}". Must be "bundled" or "signed".`,
+      };
+    }
+
+    // Strict host key pin validation: never auto-accept changed or unpinned host keys
+    if (this.hostKeyPin) {
+      try {
+        const trustedFingerprints = await this.hostKeyPin.getTrustedFingerprints(
+          vps.id,
+          vps.host,
+          vps.port,
+        );
+        if (!trustedFingerprints || trustedFingerprints.length === 0) {
+          return {
+            vpsId,
+            status: "needs_access",
+            reason: "SSH host key is not trusted. Operator must verify and pin the host key.",
+            message: "SSH host key is not trusted. Operator must verify and pin the host key.",
+          };
+        }
+      } catch (err) {
+        return {
+          vpsId,
+          status: "needs_access",
+          reason: `SSH host key check failed: ${err instanceof Error ? err.message : String(err)}`,
+          message: `SSH host key check failed: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
     }
 
     // Resolve auth without persisting password
@@ -119,19 +231,39 @@ export class FleetProvisioningService {
     if (!auth) {
       return {
         vpsId,
-        status: "needs_setup",
+        status: "needs_access",
+        reason: "No saved authorized SSH key available for remote setup",
         message: "No saved authorized SSH key available for remote setup",
       };
     }
 
     let credentialId: string | undefined;
+    let isNewCredential = false;
     let stagingDir = "";
 
     try {
-      // 1. Inspect remote architecture (fail-closed if command fails)
+      // 1. Inspect remote architecture and verify sudo/root privileges upfront
       const unameResult = await this.ssh.execCommand(vps, "uname -m", auth, 15_000);
       const arch = normalizeArchitecture(unameResult.stdout);
 
+      // Verify privilege requirements: root or passwordless sudo required
+      // Never interpolate passwords into remote shell argv to avoid /proc cmdline leaks
+      const privilegeCheckCmd = [
+        `if [ "$(id -u)" -eq 0 ]; then`,
+        `  echo "PRIV_OK";`,
+        `elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then`,
+        `  echo "PRIV_OK";`,
+        `else echo "PRIV_FAILED"; fi`,
+      ].join("\n");
+      const privResult = await this.ssh.execCommand(vps, privilegeCheckCmd, auth, 15_000);
+      if (!privResult.stdout.includes("PRIV_OK")) {
+        return {
+          vpsId,
+          status: "needs_access",
+          reason: "Root or passwordless sudo required for remote updater setup",
+          message: "Root or passwordless sudo required for remote updater setup",
+        };
+      }
       // 2. Resolve matching architecture daemon/helper updater binary
       const updaterBinaryPath = this.resolveUpdaterBinaryPath(arch);
       const updaterBytes = readFileSync(updaterBinaryPath);
@@ -143,23 +275,158 @@ export class FleetProvisioningService {
       const installerScriptPath = this.resolveInstallerScriptPath();
       const installerScript = readFileSync(installerScriptPath);
 
-      // 4. Resolve pinned public key PEM (strict: config.fleet.publicKeyFile only)
-      const pubkeyPem = this.resolvePublicKeyPem();
+      // 4. Resolve pinned public key PEM: required only in signed mode, omitted in bundled mode
+      let pubkeyPem: string | undefined;
+      if (source === "signed") {
+        pubkeyPem = this.resolvePublicKeyPem();
+      }
 
-      // 5. Mint scoped updater credential (local-updater scope)
-      const credResult = await this.agentService.createCredential(
-        vpsId,
-        "active",
-        "local-updater",
-      );
-      credentialId = credResult.credential.id;
-      const token = credResult.token;
+
+      // 5. Credential reuse or minting:
+      // Try to reuse existing valid updater credential from remote host configuration
+      let token: string | undefined;
+      if (!options?.rotateCredentials && !options?.force) {
+        const readConfigCmd = [
+          `if [ "$(id -u)" -eq 0 ]; then`,
+          `  if [ -f /etc/vps-updater/config.json ]; then cat /etc/vps-updater/config.json; fi;`,
+          `elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then`,
+          `  if sudo -n test -f /etc/vps-updater/config.json; then sudo -n cat /etc/vps-updater/config.json; fi;`,
+          `fi;`,
+        ].join("\n");
+
+        try {
+          const configOutput = await this.ssh.execCommand(vps, readConfigCmd, auth, 15_000);
+          if (configOutput.stdout && configOutput.stdout.trim().startsWith("{")) {
+            const parsedConfig = JSON.parse(configOutput.stdout.trim()) as {
+              credential?: string;
+              vpsId?: string;
+            };
+            if (
+              (!parsedConfig.vpsId || parsedConfig.vpsId === vpsId) &&
+              typeof parsedConfig.credential === "string" &&
+              parsedConfig.credential.startsWith(TOKEN_PREFIX)
+            ) {
+              const parsedToken = parseToken(parsedConfig.credential);
+              if (parsedToken) {
+                const existingCred = await this.agentRepo.getCredential(parsedToken.credentialId);
+                if (
+                  existingCred &&
+                  existingCred.vpsId === vpsId &&
+                  existingCred.status === "active" &&
+                  (existingCred.scope ?? "agent") === "local-updater" &&
+                  hashSecret(parsedToken.secret) === existingCred.secretHash
+                ) {
+                  token = parsedConfig.credential;
+                  credentialId = existingCred.id;
+                  isNewCredential = false;
+                }
+              }
+            }
+          }
+        } catch {
+          // If reading existing config fails or invalid, fall through to minting a fresh credential
+        }
+      }
+
+      if (!token) {
+        // Mint scoped updater credential (local-updater scope)
+        const credResult = await this.agentService.createCredential(
+          vpsId,
+          "active",
+          "local-updater",
+        );
+        credentialId = credResult.credential.id;
+        token = credResult.token;
+        isNewCredential = true;
+      }
 
       // 6. Resolve HTTPS API base URL
       const apiUrl = resolveAgentBackendUrl(this.config);
 
-      // 7. Determine per-VPS agent unit name
+      // 7. Determine per-VPS agent unit name, state path, and check for installed helpers needing refresh
       const agentUnit = getAgentServiceName(vpsId);
+      const discoveryCmd = [
+        `unit=${shellQuote(agentUnit)};`,
+        `bin="";`,
+        `state_dir="";`,
+        `if [ -f "/etc/systemd/system/$unit" ]; then`,
+        `  bin=$(sed -n -e 's/^ExecStart=\\([^ ]*\\).*/\\1/p' "/etc/systemd/system/$unit" 2>/dev/null | head -n 1 || true);`,
+        `  env_dir=$(grep -E '^[[:space:]]*Environment=.*FLEXSERVER_AGENT_STATE_DIR=' "/etc/systemd/system/$unit" 2>/dev/null | sed -e 's/.*FLEXSERVER_AGENT_STATE_DIR=//' -e 's/[ "].*//' | tr -d '\\r\\n');`,
+        `  if [ -n "$env_dir" ]; then state_dir="$env_dir"; fi;`,
+        `fi;`,
+        `if [ -z "$bin" ]; then`,
+        `  u_home=$(getent passwd $(whoami) 2>/dev/null | cut -d: -f6 || echo "$HOME");`,
+        `  if [ -f "$u_home/.vps-manager-agent/vps-agent" ]; then`,
+        `    bin="$u_home/.vps-manager-agent/vps-agent";`,
+        `  fi;`,
+        `fi;`,
+        `if [ -z "$state_dir" ] && [ -f /etc/vps-updater/config.json ]; then`,
+        `  cfg_dir=$(grep -o '"agentStateDir"[[:space:]]*:[[:space:]]*"[^"]*"' /etc/vps-updater/config.json 2>/dev/null | cut -d'"' -f4 | tr -d '\\r\\n');`,
+        `  if [ -n "$cfg_dir" ]; then state_dir="$cfg_dir"; fi;`,
+        `fi;`,
+        `if [ -z "$state_dir" ]; then`,
+        `  u_home=$(getent passwd $(whoami) 2>/dev/null | cut -d: -f6 || echo "$HOME");`,
+        `  if [ -d "$u_home/.flexserver/agent" ]; then`,
+        `    state_dir="$u_home/.flexserver/agent";`,
+        `  else`,
+        `    state_dir="/var/lib/vps-manager-agent";`,
+        `  fi;`,
+        `fi;`,
+        `has_host_pty=0;`,
+        `if [ -f "/etc/systemd/system/flexserver-host-pty.service" ] || [ -f "/lib/systemd/system/flexserver-host-pty.service" ] || [ -f "/usr/local/bin/flexserver-host-pty" ] || [ -S "/run/flexserver/host-pty/host-pty.sock" ] || [ -S "/var/run/flexserver/host-pty/host-pty.sock" ]; then`,
+        `  has_host_pty=1;`,
+        `fi;`,
+        `has_ai_helper=0;`,
+        `if [ -f "/etc/systemd/system/flexserver-ai-helper.service" ] || [ -f "/lib/systemd/system/flexserver-ai-helper.service" ] || [ -f "/usr/local/sbin/ai-host-helper" ] || [ -S "/run/flexserver-ai/helper.sock" ]; then`,
+        `  has_ai_helper=1;`,
+        `fi;`,
+        `echo "AGENT_BIN=$bin";`,
+        `echo "AGENT_STATE_DIR=$state_dir";`,
+        `echo "HAS_HOST_PTY=$has_host_pty";`,
+        `echo "HAS_AI_HELPER=$has_ai_helper";`,
+      ].join("\n");
+      const discoveryResult = await this.ssh.execCommand(vps, discoveryCmd, auth, 15_000);
+      const binMatch = discoveryResult.stdout.match(/AGENT_BIN=(.*)/);
+      const resolvedAgentBinary = binMatch ? binMatch[1].trim() : "";
+      const stateDirMatch = discoveryResult.stdout.match(/AGENT_STATE_DIR=(.*)/);
+      const resolvedAgentStateDir = stateDirMatch && stateDirMatch[1].trim()
+        ? stateDirMatch[1].trim()
+        : "/var/lib/vps-manager-agent";
+      const hasHostPty = discoveryResult.stdout.includes("HAS_HOST_PTY=1");
+      const hasAiHelper = discoveryResult.stdout.includes("HAS_AI_HELPER=1");
+
+      // Check if installed helpers need refresh
+      let hostPtyBytes: Buffer | null = null;
+      let hostPtySha256 = "";
+      if (hasHostPty) {
+        const hostPtyPath = this.resolveHostPtyBinaryPath(arch);
+        if (!hostPtyPath) {
+          return {
+            vpsId,
+            status: "needs_access",
+            reason: "Host terminal helper requires binary refresh but bundled host-pty is unavailable in deployment",
+            message: "Host terminal helper requires binary refresh but bundled host-pty is unavailable in deployment",
+          };
+        }
+        hostPtyBytes = readFileSync(hostPtyPath);
+        hostPtySha256 = createHash("sha256").update(hostPtyBytes).digest("hex");
+      }
+
+      let aiHelperBytes: Buffer | null = null;
+      let aiHelperSha256 = "";
+      if (hasAiHelper) {
+        const aiHelperPath = this.resolveAiHostHelperBinaryPath(arch);
+        if (!aiHelperPath) {
+          return {
+            vpsId,
+            status: "needs_access",
+            reason: "AI host helper requires binary refresh but bundled ai-host-helper is unavailable in deployment",
+            message: "AI host helper requires binary refresh but bundled ai-host-helper is unavailable in deployment",
+          };
+        }
+        aiHelperBytes = readFileSync(aiHelperPath);
+        aiHelperSha256 = createHash("sha256").update(aiHelperBytes).digest("hex");
+      }
 
       // 8. Create temporary staging directory on remote host
       const nonce = randomBytes(8).toString("hex");
@@ -170,17 +437,21 @@ export class FleetProvisioningService {
       const stagedBinary = `${stagingDir}/vps-updater`;
       const stagedPubkey = `${stagingDir}/fleet-release.pub`;
       const stagedToken = `${stagingDir}/.token`;
+      const stagedHostPty = `${stagingDir}/flexserver-host-pty`;
+      const stagedAiHelper = `${stagingDir}/ai-host-helper`;
 
       // 9. Upload artifacts (token uploaded to 0600 file to avoid argv process secret leak)
       await this.ssh.uploadFile(vps, stagedScript, installerScript, 0o700, auth);
       await this.ssh.uploadFile(vps, stagedBinary, updaterBytes, 0o700, auth);
-      await this.ssh.uploadFile(
-        vps,
-        stagedPubkey,
-        Buffer.from(pubkeyPem, "utf8"),
-        0o644,
-        auth,
-      );
+      if (source === "signed" && pubkeyPem) {
+        await this.ssh.uploadFile(
+          vps,
+          stagedPubkey,
+          Buffer.from(pubkeyPem, "utf8"),
+          0o644,
+          auth,
+        );
+      }
       await this.ssh.uploadFile(
         vps,
         stagedToken,
@@ -189,83 +460,228 @@ export class FleetProvisioningService {
         auth,
       );
 
+      if (hostPtyBytes) {
+        await this.ssh.uploadFile(vps, stagedHostPty, hostPtyBytes, 0o755, auth);
+        const verifyPtyCmd = `test "$(sha256sum ${shellQuote(stagedHostPty)} | cut -d' ' -f1)" = ${shellQuote(hostPtySha256)}`;
+        await this.ssh.execCommand(vps, verifyPtyCmd, auth, 15_000);
+      }
+      if (aiHelperBytes) {
+        await this.ssh.uploadFile(vps, stagedAiHelper, aiHelperBytes, 0o755, auth);
+        const verifyAiCmd = `test "$(sha256sum ${shellQuote(stagedAiHelper)} | cut -d' ' -f1)" = ${shellQuote(aiHelperSha256)}`;
+        await this.ssh.execCommand(vps, verifyAiCmd, auth, 15_000);
+      }
+
       // 10. Verify remote binary checksum (execCommand rejects if test fails)
       const verifyCmd = `test "$(sha256sum ${shellQuote(stagedBinary)} | cut -d' ' -f1)" = ${shellQuote(updaterSha256)}`;
       await this.ssh.execCommand(vps, verifyCmd, auth, 15_000);
 
-      // 11. Execute installer script with privilege handling using --token-file
+      // 11. Refresh host helper binaries if installed and staged
+      const helperRefreshParts: string[] = [];
+      if (hostPtyBytes) {
+        helperRefreshParts.push(
+          `if [ ! -f /usr/local/bin/flexserver-host-pty ] || [ "$(sha256sum /usr/local/bin/flexserver-host-pty 2>/dev/null | cut -d' ' -f1)" != ${shellQuote(hostPtySha256)} ]; then`,
+          `  cp -f ${shellQuote(stagedHostPty)} /usr/local/bin/flexserver-host-pty;`,
+          `  chmod 0755 /usr/local/bin/flexserver-host-pty && chown root:root /usr/local/bin/flexserver-host-pty;`,
+          `  ln -sf /usr/local/bin/flexserver-host-pty /usr/local/bin/host-pty 2>/dev/null || true;`,
+          `  if command -v systemctl >/dev/null 2>&1 && systemctl is-active flexserver-host-pty >/dev/null 2>&1; then`,
+          `    systemctl restart flexserver-host-pty || exit 1;`,
+          `  fi;`,
+          `fi;`,
+        );
+      }
+      if (aiHelperBytes) {
+        helperRefreshParts.push(
+          `if [ ! -f /usr/local/sbin/ai-host-helper ] || [ "$(sha256sum /usr/local/sbin/ai-host-helper 2>/dev/null | cut -d' ' -f1)" != ${shellQuote(aiHelperSha256)} ]; then`,
+          `  cp -f ${shellQuote(stagedAiHelper)} /usr/local/sbin/ai-host-helper;`,
+          `  chmod 0755 /usr/local/sbin/ai-host-helper && chown root:root /usr/local/sbin/ai-host-helper;`,
+          `  if command -v systemctl >/dev/null 2>&1; then`,
+          `    if systemctl is-active flexserver-ai-helper >/dev/null 2>&1; then`,
+          `      systemctl restart flexserver-ai-helper || exit 1;`,
+          `    elif systemctl is-active vps-ai-helper >/dev/null 2>&1; then`,
+          `      systemctl restart vps-ai-helper || exit 1;`,
+          `    fi;`,
+          `  fi;`,
+          `fi;`,
+        );
+      }
+
+      // 12. Execute installer script with privilege handling using --token-file, --source, and discovered state dir
       const cmdParts = [
         shellQuote(stagedScript),
+        "--source",
+        shellQuote(source),
         "--api-url",
         shellQuote(apiUrl),
         "--token-file",
         shellQuote(stagedToken),
-        "--pubkey-file",
-        shellQuote(stagedPubkey),
         "--vps-id",
         shellQuote(vpsId),
         "--binary",
         shellQuote(stagedBinary),
         "--agent-unit",
         shellQuote(agentUnit),
+        "--agent-state-dir",
+        shellQuote(resolvedAgentStateDir),
       ];
 
+      if (resolvedAgentBinary) {
+        cmdParts.push("--agent-binary", shellQuote(resolvedAgentBinary));
+      }
+
+      if (source === "signed" && pubkeyPem) {
+        cmdParts.push("--pubkey-file", shellQuote(stagedPubkey));
+      }
+
       const scriptExec = cmdParts.join(" ");
-      const privilegedCmd = [
-        `if [ "$(id -u)" -eq 0 ]; then`,
-        `  ${scriptExec};`,
-        `elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then`,
-        `  sudo -n ${scriptExec};`,
-        auth.password
-          ? `else printf '%s\\n' ${shellQuote(auth.password)} | sudo -S ${scriptExec}; fi`
-          : `else echo "Error: root or passwordless sudo required" >&2; exit 1; fi`,
+
+      // Execute readiness gate check, helper refresh, and updater install under the SAME host registry flock as admissions!
+      // This eliminates the check-then-start race where an admission begins between readiness inspection and helper restart.
+      const execStatements = [
+        `reg_dir=${shellQuote(`${resolvedAgentStateDir}/docker-applications`)};`,
+        `mkdir -p "$reg_dir" 2>/dev/null || true;`,
+        `chmod 0755 "$reg_dir" 2>/dev/null || true;`,
+        `lock_f="$reg_dir/exclusion.json.lock";`,
+        `excl_f="$reg_dir/exclusion.json";`,
+        `touch "$lock_f" 2>/dev/null || true;`,
+        `chmod 0664 "$lock_f" 2>/dev/null || true;`,
+        `exec 9<>"$lock_f";`,
+        `if ! flock -x -w 5 9 2>/dev/null; then`,
+        `  echo "GATE_BUSY: Registry lock is held by active workload";`,
+        `  exit 0;`,
+        `fi;`,
+        `gate_status="ok";`,
+        `gate_reason="";`,
+        `if [ -f "$excl_f" ] && grep -Eq '"scope"[[:space:]]*:[[:space:]]*"(terminal:|ai:|system:upgrade|project:|container:)' "$excl_f" 2>/dev/null; then`,
+        `  gate_status="busy"; gate_reason="Active workload in exclusion registry";`,
+        `fi;`,
+        `if [ "$gate_status" = "ok" ]; then`,
+        `  for pty_dir in /run/flexserver/host-pty /var/run/flexserver/host-pty; do`,
+        `    if [ -d "$pty_dir" ]; then`,
+        `      sock="";`,
+        `      if [ -S "$pty_dir/host-pty.sock" ]; then sock="$pty_dir/host-pty.sock";`,
+        `      elif [ -S "$pty_dir/pty.sock" ]; then sock="$pty_dir/pty.sock"; fi;`,
+        `      if [ -n "$sock" ]; then`,
+        `        marker="$pty_dir/active_sessions";`,
+        `        if [ ! -f "$marker" ]; then`,
+        `          gate_status="busy"; gate_reason="PTY socket present but active_sessions marker missing"; break;`,
+        `        fi;`,
+        `        if [ ! -r "$marker" ]; then`,
+        `          gate_status="busy"; gate_reason="PTY active_sessions marker is unreadable"; break;`,
+        `        fi;`,
+        `        val=$(head -n 1 "$marker" | tr -d '\\r\\n[:space:]');`,
+        `        case "$val" in`,
+        `          ''|*[!0-9]*)`,
+        `            gate_status="busy"; gate_reason="PTY active_sessions marker is non-numeric ($val)"; break ;;`,
+        `          *)`,
+        `            if [ "$val" -gt 0 ]; then`,
+        `              gate_status="busy"; gate_reason="Active PTY sessions ($val)"; break;`,
+        `            fi ;;`,
+        `        esac;`,
+        `      fi;`,
+        `    fi;`,
+        `  done;`,
+        `fi;`,
+        `if [ "$gate_status" = "ok" ]; then`,
+        `  for cg_base in /sys/fs/cgroup/flexserver-ai /sys/fs/cgroup/vps-ai; do`,
+        `    if [ -e "$cg_base" ]; then`,
+        `      if [ ! -d "$cg_base" ] || [ ! -r "$cg_base" ]; then`,
+        `        gate_status="busy"; gate_reason="AI cgroup base directory $cg_base is not readable"; break;`,
+        `      fi;`,
+        `      for child in "$cg_base"/*; do`,
+        `        if [ -d "$child" ]; then`,
+        `          procs_file="$child/cgroup.procs";`,
+        `          if [ ! -f "$procs_file" ] || [ ! -r "$procs_file" ]; then`,
+        `            gate_status="busy"; gate_reason="AI cgroup child $child/cgroup.procs is missing or unreadable"; break;`,
+        `          fi;`,
+        `          pids=$(cat "$procs_file" | tr -d '\\r\\n[:space:]');`,
+        `          if [ -n "$pids" ]; then`,
+        `            gate_status="busy"; gate_reason="AI tasks active in cgroup $(basename "$child")"; break;`,
+        `          fi;`,
+        `        fi;`,
+        `      done;`,
+        `      if [ "$gate_status" = "busy" ]; then break; fi;`,
+        `    fi;`,
+        `  done;`,
+        `fi;`,
+        `if [ "$gate_status" = "busy" ]; then`,
+        `  echo "GATE_BUSY: $gate_reason";`,
+        `  flock -u 9 2>/dev/null || true;`,
+        `  exec 9>&-;`,
+        `  exit 0;`,
+        `fi;`,
+        ...helperRefreshParts,
+        scriptExec,
+        `flock -u 9 2>/dev/null || true;`,
+        `exec 9>&-;`,
+        `echo "PROVISIONING_COMPLETE_OK";`,
       ].join("\n");
 
-      await this.ssh.execCommand(vps, privilegedCmd, auth, 60_000);
+      const privilegedCmd = [
+        `if [ "$(id -u)" -eq 0 ]; then`,
+        `  ${execStatements};`,
+        `elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then`,
+        `  sudo -n sh -c ${shellQuote(execStatements)};`,
+        `else echo "Error: root or passwordless sudo required" >&2; exit 1; fi`,
+      ].join("\n");
 
-      // Record successful audit event
+      const execResult = await this.ssh.execCommand(vps, privilegedCmd, auth, 60_000);
+      if (execResult.stdout.includes("GATE_BUSY:")) {
+        if (isNewCredential && credentialId) {
+          await this.agentRepo.revokeCredential(credentialId).catch(() => undefined);
+        }
+        const reasonMatch = execResult.stdout.match(/GATE_BUSY:\s*(.*)/);
+        const reason = reasonMatch
+          ? reasonMatch[1].trim()
+          : "Host helpers are active or evidence unreadable (terminal/AI activity gate not ready)";
+        return {
+          vpsId,
+          status: "needs_access",
+          reason,
+          message: reason,
+        };
+      }
       await this.audit.record({
         actor: "system",
         action: "fleet.updater.provision",
         resourceType: "vps",
         resourceId: vpsId,
         result: "success",
-        metadata: { arch, agentUnit },
+        metadata: { arch, agentUnit, source },
       });
 
       // Update fleet enrollment state if available
       if (this.fleetRepo && options?.isNewHost !== false) {
-        await this.fleetRepo.setEnrolled(vpsId, true);
-        const policy = await this.fleetRepo.getPolicy(vpsId);
+        await this.fleetRepo.setEnrolled(vpsId, true).catch(() => undefined);
+        const policy = await this.fleetRepo.getPolicy(vpsId).catch(() => undefined);
         if (!policy) {
           await this.fleetRepo.upsertPolicy(vpsId, {
             mode: "auto",
             group: "Default",
-          });
+          }).catch(() => undefined);
         }
         await this.fleetRepo.addNotification({
           kind: "info",
           message: `Fleet updater provisioned on host ${vps.name || vpsId} (${arch})`,
-        });
+        }).catch(() => undefined);
       }
 
-      return { vpsId, status: "enrolled" };
+      return { vpsId, status: "enrolled", reason: null };
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
 
-      // Clean up minted credential on failure
-      if (credentialId) {
+      // Clean up newly minted credential on failure (never revoke reused credentials)
+      if (isNewCredential && credentialId) {
         await this.agentRepo.revokeCredential(credentialId).catch(() => undefined);
       }
 
-      // Record failure audit and fleet notification
+      // Record failure audit
       await this.audit.record({
         actor: "system",
         action: "fleet.updater.provision",
         resourceType: "vps",
         resourceId: vpsId,
         result: "failure",
-        metadata: { error: msg },
+        metadata: { error: msg, source },
       });
 
       if (this.fleetRepo) {
@@ -275,11 +691,23 @@ export class FleetProvisioningService {
         }).catch(() => undefined);
       }
 
-      // Surface failure outcome without rolling back base agent
+      // Classify error: access/privilege/trust vs hard failure
+      const isAccessIssue =
+        msg.includes("root or passwordless sudo required") ||
+        msg.includes("Permission denied") ||
+        msg.includes("All configured authentication methods failed") ||
+        msg.includes("host key") ||
+        msg.includes("Host key") ||
+        msg.includes("verification failed") ||
+        msg.includes("actively busy");
+
+      const sanitizedReason = this.sanitizeErrorReason(msg);
+
       return {
         vpsId,
-        status: "needs_setup",
-        message: `Fleet updater setup failed: ${msg}`,
+        status: isAccessIssue ? "needs_access" : "failed",
+        reason: sanitizedReason,
+        message: sanitizedReason,
       };
     } finally {
       // Clean up staging directory on remote host
@@ -291,6 +719,25 @@ export class FleetProvisioningService {
     }
   }
 
+  private sanitizeErrorReason(raw: string): string {
+    if (raw.includes("root or passwordless sudo required") || raw.includes("PRIV_FAILED")) {
+      return "Root or passwordless sudo required for remote updater setup";
+    }
+    if (raw.includes("host key") || raw.includes("Host key") || raw.includes("verification failed")) {
+      return "SSH host key verification failed or changed: operator trust required";
+    }
+    if (raw.includes("All configured authentication methods failed") || raw.includes("Permission denied")) {
+      return "SSH authentication failed: invalid credentials or rejected key";
+    }
+    if (raw.includes("actively busy")) {
+      return "Host helpers are actively busy (active terminal or AI session in progress)";
+    }
+    if (raw.includes("not found") && raw.includes("binary")) {
+      return "Fleet updater binary not found for host architecture";
+    }
+    return raw.slice(0, 300);
+  }
+
   /**
    * Invoked upon successful agent re-installation:
    * Never auto-enrolls an un-enrolled host or overwrites existing policy.
@@ -300,69 +747,24 @@ export class FleetProvisioningService {
     vpsId: string,
     sshAuth?: { password?: string; privateKey?: string },
   ): Promise<FleetProvisioningResult> {
-    if (!this.fleetRepo) {
-      return { vpsId, status: "needs_setup", message: "Fleet repository unavailable" };
-    }
-
-    const isEnrolled = await this.fleetRepo.isEnrolled(vpsId);
-    if (!isEnrolled) {
-      // Reinstall never auto-enrolls an un-enrolled host or overwrites policy
-      return {
-        vpsId,
-        status: "needs_setup",
-        message: "Host not enrolled in fleet updates; preserving existing policy",
-      };
-    }
-
-    // Host was already enrolled; refresh updater provisioning without overwriting policy
     return this.provisionHost(vpsId, sshAuth, {
+      source: "bundled",
       isNewHost: false,
-      fleetAutoUpdate: true,
       force: true,
     });
   }
 
   /**
    * Bulk enrollment for multiple VPS hosts:
-   * Uses saved authorized SSH key if available, else marks needs_setup with reason.
+   * Uses ensureBundled for each host.
    */
   async enrollBulk(vpsIds: string[]): Promise<FleetProvisioningResult[]> {
     const results: FleetProvisioningResult[] = [];
-
     for (const vpsId of vpsIds) {
-      const vps = await this.vpsRepo.get(vpsId);
-      if (!vps) {
-        results.push({ vpsId, status: "failed", message: "VPS not found" });
-        continue;
-      }
-
-      const auth = await this.resolveAuth(vpsId);
-      if (!auth) {
-        results.push({
-          vpsId,
-          status: "needs_setup",
-          message: "No saved authorized SSH key available for remote setup",
-        });
-        if (this.fleetRepo) {
-          await this.fleetRepo.addNotification({
-            kind: "warning",
-            message: `Bulk enrollment for host ${vps.name || vpsId} requires SSH key setup`,
-          }).catch(() => undefined);
-        }
-        continue;
-      }
-
-      const provResult = await this.provisionHost(
-        vpsId,
-        auth,
-        { isNewHost: false, fleetAutoUpdate: true, force: true },
-      );
-      results.push(provResult);
+      results.push(await this.ensureBundled(vpsId));
     }
-
     return results;
   }
-
   private async resolveAuth(
     vpsId: string,
     sshAuth?: { password?: string; privateKey?: string },
@@ -406,6 +808,50 @@ export class FleetProvisioningService {
       );
     }
     return found;
+  }
+  resolveHostPtyBinaryPath(arch: Architecture): string | null {
+    const envSpecific =
+      arch === "arm64"
+        ? process.env.HOST_PTY_BINARY_PATH_ARM64
+        : process.env.HOST_PTY_BINARY_PATH_AMD64;
+    if (envSpecific && existsSync(envSpecific)) {
+      return envSpecific;
+    }
+    if (process.env.HOST_PTY_BINARY_PATH && existsSync(process.env.HOST_PTY_BINARY_PATH)) {
+      return process.env.HOST_PTY_BINARY_PATH;
+    }
+    const candidates = [
+      `/app/agent/host-pty-linux-${arch}`,
+      join(process.cwd(), "agent", `host-pty-linux-${arch}`),
+      join(process.cwd(), "packages", "agent", "dist", `host-pty-linux-${arch}`),
+      join(process.cwd(), "packages", "agent", `host-pty-linux-${arch}`),
+      join(process.cwd(), "..", "..", "packages", "agent", "dist", `host-pty-linux-${arch}`),
+    ];
+    return candidates.find((c) => existsSync(c)) ?? null;
+  }
+
+  resolveAiHostHelperBinaryPath(arch: Architecture): string | null {
+    const envSpecific =
+      arch === "arm64"
+        ? process.env.AI_HOST_HELPER_BINARY_PATH_ARM64
+        : process.env.AI_HOST_HELPER_BINARY_PATH_AMD64;
+    if (envSpecific && existsSync(envSpecific)) {
+      return envSpecific;
+    }
+    if (
+      process.env.AI_HOST_HELPER_BINARY_PATH &&
+      existsSync(process.env.AI_HOST_HELPER_BINARY_PATH)
+    ) {
+      return process.env.AI_HOST_HELPER_BINARY_PATH;
+    }
+    const candidates = [
+      `/app/agent/ai-host-helper-linux-${arch}`,
+      join(process.cwd(), "agent", `ai-host-helper-linux-${arch}`),
+      join(process.cwd(), "packages", "agent", "dist", `ai-host-helper-linux-${arch}`),
+      join(process.cwd(), "packages", "agent", `ai-host-helper-linux-${arch}`),
+      join(process.cwd(), "..", "..", "packages", "agent", "dist", `ai-host-helper-linux-${arch}`),
+    ];
+    return candidates.find((c) => existsSync(c)) ?? null;
   }
 
   resolveInstallerScriptPath(): string {

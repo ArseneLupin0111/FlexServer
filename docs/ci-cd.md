@@ -50,7 +50,7 @@ Deploy pulls by immutable digest (`name@sha256:...` references recorded from `Re
 
 After publishing, the workflow can deploy over SSH if deployment secrets are configured.
 
-Local host agent upgrades use the bundled agent and updater binaries packaged directly in the deployed API container (`/app/agent/vps-agent-linux-amd64` and `/app/agent/vps-updater-linux-amd64`). The deployment workflow automatically extracts the bundled updater and executes `install-updater.sh --upgrade` to ensure the host updater is running protocol version 2, while preserving existing credentials and state. Deploying the API container updates the bundled agent available for upgrade, but does not automatically replace the host systemd agent on disk — local upgrades are confirmed by operators in the dashboard and safely executed by the host updater. No manual signing keys or external release catalogs are required. See `docs/local-agent-upgrade-operations.md` for updater operations, verification, and rollback.
+Local and remote host agent updates use the bundled agent and updater binaries packaged directly in the deployed API container (`/app/agent/vps-agent-linux-amd64` and `/app/agent/vps-agent-linux-arm64`). Deployment via `scripts/deploy.sh` prepares the host updater using `scripts/install/prepare-agent-updater.sh`, and `AgentConvergenceService` automatically converges installed agents to the deployment-bundled target when the host is idle, without requiring manual release selection or updater enrollment. Busy or offline hosts defer safely until idle, missing host access is reported as `needs_access`, and failed targets are suppressed per host until manually retried.
 
 ## Runtime topology
 
@@ -97,8 +97,6 @@ Optional repository variables can override generated server `.env` values:
 | `RATE_LIMIT_WINDOW_MS`          | `60000`   | Rate limit window.                                                                          |
 | `RATE_LIMIT_MAX`                | `120`     | Rate limit max requests per window.                                                         |
 | `AGENT_PUBLIC_BASE_URL`         | empty     | Public callback URL for installed agents.                                                   |
-| `AGENT_RELEASE_PUBLIC_KEY`      | empty     | Optional legacy Ed25519 public key (base64 of 32 raw bytes) for external catalog lookups. Unneeded for bundled local agent upgrades. |
-| `AGENT_RELEASE_MANIFEST_URL`    | empty     | Optional legacy stable-channel pointer URL (`https`, allowlisted host) for external catalog lookups. Unneeded for bundled local agent upgrades. |
 | `ALLOW_INSECURE_AGENT_HTTP`     | `false`   | Allows HTTP agent callback URLs when explicitly accepted.                                   |
 | `DASHBOARD_SESSION_TTL_SECONDS` | `28800`   | Dashboard session TTL in seconds.                                                           |
 | `DASHBOARD_PUBLIC_ORIGIN`       | empty     | Expected Origin header for CSRF protection.                                                 |
@@ -108,11 +106,7 @@ Optional repository variables can override generated server `.env` values:
 
 ### Local agent updates and optional release catalog
 
-Local host agent upgrades do not require external catalog variables or manual signing keys. The API container bundles the agent and updater binaries directly. During deployment, the workflow extracts the bundled updater from the API container and executes `install-updater.sh --upgrade --binary <path> --config /etc/vps-updater/config.json`, keeping existing host updaters updated to protocol 2 while preserving credentials, configuration, and state. If an updater is absent and an HTTPS backend URL is configured, it bootstraps it.
-
-The repository variables `AGENT_RELEASE_PUBLIC_KEY` and `AGENT_RELEASE_MANIFEST_URL` are strictly optional legacy settings for external catalog pointer lookups:
-- **Unneeded for bundled local updates.** The API serves the bundled agent binary directly to authenticated updaters with protocol 2 over HTTPS.
-- **If configured, both must be set together.** Setting only one variable causes the API to fail closed at startup. The public key must be base64 of exactly 32 raw Ed25519 bytes, and the pointer URL must be HTTPS on an allowlisted host. Never configure the private `AGENT_RELEASE_SIGNING_KEY` on the API or host.
+Host agent upgrades do not require external catalog variables or manual signing keys. The API container bundles architecture-specific agent and updater binaries directly. Deployment automatically prepares the host updater via `scripts/install/prepare-agent-updater.sh`, keeping host updaters updated to protocol 3 while preserving credentials, configuration, and state. The deployment convergence service automatically converges idle managed agents to the deployed build identity. Optional Ed25519-signed release manifests are reserved exclusively for AI runtime components (`ai-executor`, `ai-host-helper`, `ai-rootfs`, `ai-profiles`); signed rollouts for `agent` and `updater` components are rejected in favor of deployment-bundled convergence.
 
 ## Server requirements
 

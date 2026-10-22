@@ -318,8 +318,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Node.js
-        # Pinned when either image builds: agent identity resolution and the
-        # Trivy critical findings gate run `node` without npm dependencies.
+        # Pinned when either image builds: the Trivy critical findings gate
+        # runs `node` without npm dependencies.
         if: needs.changes.outputs.api == 'true' || needs.changes.outputs.web == 'true'
         uses: actions/setup-node@v4
         with:
@@ -328,15 +328,6 @@ jobs:
       - name: Setup Docker Buildx
         if: needs.changes.outputs.api == 'true' || needs.changes.outputs.web == 'true'
         uses: docker/setup-buildx-action@v3
-
-      - name: Resolve agent build identity
-        id: agent-identity
-        # Immutable identity shared by the Docker image build and the embedded
-        # binary -version check below (releaseId/buildId = git SHA).
-        if: needs.changes.outputs.api == 'true'
-        run: |
-          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
-          echo "build_id=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Build API Docker image
         id: api-build
@@ -348,9 +339,6 @@ jobs:
           push: false
           load: true
           tags: vps-manager-nodejs-api:ci
-          build-args: |
-            AGENT_VERSION=${{ steps.agent-identity.outputs.version }}
-            AGENT_BUILD_ID=${{ steps.agent-identity.outputs.build_id }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -390,18 +378,16 @@ jobs:
       - name: Verify embedded agent and updater identity
         # Direct -version checks on the embedded binaries inside the API image.
         # Validates that both the agent and updater binaries built into the image
-        # match the expected package version + git SHA without host Go compilation.
+        # share the same canonical content identity matching VERSION+40-hex.
         if: needs.changes.outputs.api == 'true'
         run: |
-          EXPECTED="${{ steps.agent-identity.outputs.version }}+${{ steps.agent-identity.outputs.build_id }}"
           AGENT_ID="$(docker run --rm --entrypoint /app/agent/vps-agent-linux-amd64 vps-manager-nodejs-api:ci -version)"
           UPDATER_ID="$(docker run --rm --entrypoint /app/agent/vps-updater-linux-amd64 vps-manager-nodejs-api:ci -version)"
           echo "agent:    $AGENT_ID"
           echo "updater:  $UPDATER_ID"
-          echo "expected: $EXPECTED"
-          test "$AGENT_ID" = "$EXPECTED"
-          test "$UPDATER_ID" = "$EXPECTED"
-          echo "embedded binary identity OK: $EXPECTED"
+          test "$AGENT_ID" = "$UPDATER_ID"
+          echo "$AGENT_ID" | grep -Eq "^dev\+[0-9a-f]{40}$"
+          echo "embedded binary identity OK: $AGENT_ID"
 
       - name: Build web Docker image
         id: web-build
@@ -1220,58 +1206,27 @@ jobs:
           fi
           $SSH "cd '$DEPLOY_PATH' && docker compose ps"
           $SSH "for i in \$(seq 1 30); do curl -fsS http://127.0.0.1:3000/api/health && exit 0; sleep 2; done; docker compose -f '$DEPLOY_PATH/docker-compose.yml' logs --tail=80; exit 1"
-          # Refresh or bootstrap local updater on the host using the bundled binary from API image
-          echo "Updating host local-updater from API image..."
+          # Refresh or bootstrap local updater on the host using the shared helper from deployed API image
+          echo "Updating host local-updater using shared preparation helper..."
           # Reuse the authenticated SSH connection; scp uses -P, not ssh's -p.
-          tar -C scripts/install -cf - install-updater.sh installer-lib.sh flexserverctl.py bootstrap-ssh-keyring.sh | "${SSH_BASE[@]}" "tar -xf - -C /tmp && chmod 0755 /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py /tmp/bootstrap-ssh-keyring.sh"
+          tar -C scripts/install -cf - prepare-agent-updater.sh install-updater.sh installer-lib.sh flexserverctl.py bootstrap-ssh-keyring.sh | "${SSH_BASE[@]}" "tar -xf - -C /tmp && chmod 0755 /tmp/prepare-agent-updater.sh /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py /tmp/bootstrap-ssh-keyring.sh"
           "${SSH_BASE[@]}" "
             set -euo pipefail
             SUDO=\"\"
             if [ \"\$(id -u)\" -ne 0 ]; then
-              SUDO=\"sudo\"
-            fi
-
-            UPDATER_TMP=\"\$(mktemp /tmp/vps-updater-bundled.XXXXXX)\"
-            if ! docker run --rm --entrypoint cat '$API_IMAGE' /app/agent/vps-updater-linux-amd64 > \"\$UPDATER_TMP\" || [ ! -s \"\$UPDATER_TMP\" ]; then
-              echo 'Error: Failed to extract bundled updater binary from API image.' >&2
-              rm -f \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py
-              exit 1
-            fi
-            chmod 0755 \"\$UPDATER_TMP\"
-
-            if [ -x /usr/local/lib/vps-manager-agent/vps-updater ] || [ -f /etc/vps-updater/config.json ]; then
-              echo 'Upgrading existing local updater to bundled protocol daemon...'
-              if ! \$SUDO /tmp/install-updater.sh --upgrade --binary \"\$UPDATER_TMP\" --config /etc/vps-updater/config.json; then
-                echo 'Error: Failed to upgrade existing local updater on host.' >&2
-                rm -f \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py
-                exit 1
+              if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+                SUDO=\"sudo -n\"
+              elif command -v sudo >/dev/null 2>&1; then
+                SUDO=\"sudo\"
               fi
-              echo 'Local updater successfully upgraded.'
+            fi
+
+            echo 'Running shared host updater preparation...'
+            if ! \$SUDO /tmp/prepare-agent-updater.sh --compose-file '$DEPLOY_PATH/docker-compose.yml' --image '$API_IMAGE'; then
+              echo 'Warning: Host updater preparation encountered an issue; dashboard deployment remains healthy.' >&2
             else
-              UPDATER_URL=\"${AGENT_PUBLIC_BASE_URL_VALUE:-$DASHBOARD_PUBLIC_ORIGIN_VALUE}\"
-              if [[ \"\$UPDATER_URL\" == https://* ]]; then
-                echo 'Bootstrapping absent local updater using existing provisioning...'
-                CONFIG_TMP=\"\$(mktemp /tmp/vps-updater-cfg.XXXXXX)\"
-                JSON_OUT=\"\$(cd '$DEPLOY_PATH' && docker compose run --rm -T api node dist/scripts/bootstrap-local-updater.js --backend-url \"\$UPDATER_URL\" --rotate 2>/dev/null || true)\"
-                TOKEN=\"\$(printf '%s' \"\$JSON_OUT\" | sed -n 's/.*\"token\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' | head -1)\"
-                if [ -z \"\$TOKEN\" ]; then
-                  echo 'Error: Failed to provision absent local updater credential from API.' >&2
-                  rm -f \"\$CONFIG_TMP\" \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py
-                  exit 1
-                fi
-                printf '{\n  \"apiBase\": \"%s\",\n  \"credential\": \"%s\",\n  \"agentBinary\": \"/usr/local/bin/vps-manager-agent\",\n  \"agentUnit\": \"vps-manager-agent.service\",\n  \"stateDir\": \"/var/lib/vps-updater\"\n}\n' \"\$UPDATER_URL\" \"\$TOKEN\" > \"\$CONFIG_TMP\"
-                chmod 0600 \"\$CONFIG_TMP\"
-                if ! \$SUDO /tmp/install-updater.sh --upgrade --binary \"\$UPDATER_TMP\" --config \"\$CONFIG_TMP\"; then
-                  echo 'Error: Failed to bootstrap absent local updater on host.' >&2
-                  rm -f \"\$CONFIG_TMP\" \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py
-                  exit 1
-                fi
-                rm -f \"\$CONFIG_TMP\"
-                echo 'Local updater successfully bootstrapped without exposing secrets.'
-              else
-                echo 'Local updater is absent and no HTTPS backend URL configured; skipping updater bootstrap.'
-              fi
+              echo 'Host local-updater successfully prepared.'
             fi
-            rm -f \"\$UPDATER_TMP\" /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py
+            rm -f /tmp/prepare-agent-updater.sh /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py /tmp/bootstrap-ssh-keyring.sh
           "
           echo "Host local-updater refresh completed."

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Inject, Injectable } from "@nestjs/common";
 import { APP_CONFIG } from "../tokens.js";
 import type { AppConfig } from "../config/app-config.js";
@@ -165,49 +165,131 @@ export function extractAgentBinaryMetadata(
   };
 }
 
+function inspectElfArch(filePath: string): "amd64" | "arm64" | null {
+
+  try {
+    const stat = statSync(filePath);
+    if (stat.size < 64) return null;
+    const buf = readFileSync(filePath);
+    if (buf.length < 64) return null;
+    if (
+      buf[0] !== 0x7f ||
+      buf[1] !== 0x45 ||
+      buf[2] !== 0x4c ||
+      buf[3] !== 0x46
+    ) {
+      return null;
+    }
+    if (buf[4] !== 2) return null; // ELF64
+    if (buf[5] !== 1) return null; // little-endian
+    if (buf[7] !== 0 && buf[7] !== 3) return null; // Linux OS ABI
+    const machine = buf.readUInt16LE(18);
+    if (machine === 0x3e) return "amd64";
+    if (machine === 0xb7) return "arm64";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 @Injectable()
 export class BundledAgentService {
-  private cached: {
-    mtimeMs: number;
-    size: number;
-    meta: BundledAgentMetadata;
-  } | null = null;
+  private readonly cache = new Map<
+    string,
+    {
+      mtimeMs: number;
+      size: number;
+      meta: BundledAgentMetadata;
+    }
+  >();
 
   constructor(@Inject(APP_CONFIG) private readonly config: AppConfig) {}
 
-  resolveBinaryPath(): string | null {
-    if (this.config.agentBinaryPath) {
-      return existsSync(this.config.agentBinaryPath) ? this.config.agentBinaryPath : null;
+  resolveBinaryPath(arch: "amd64" | "arm64"): string | null {
+    const configuredPath =
+      this.config.agentBinaryPath || process.env.AGENT_BINARY_PATH || null;
+
+    if (configuredPath) {
+      const configuredName = configuredPath.toLowerCase();
+      const otherArch = arch === "amd64" ? "arm64" : "amd64";
+      const targetedForArch =
+        configuredName.includes(arch) && !configuredName.includes(otherArch);
+      const targetedForOther =
+        configuredName.includes(otherArch) && !configuredName.includes(arch);
+
+      if (existsSync(configuredPath)) {
+        const elfArch = inspectElfArch(configuredPath);
+        if (elfArch === arch) {
+          return configuredPath;
+        }
+        // If the configured artifact was explicitly targeted for this arch,
+        // but has invalid/mismatched ELF: fail closed for this arch.
+        if (targetedForArch || elfArch === null) {
+          return null;
+        }
+        // Configured binary is valid ELF for the other architecture.
+        // Resolve the requested architecture via sibling then fallback directories.
+        const sibling = join(
+          dirname(configuredPath),
+          `vps-agent-linux-${arch}`,
+        );
+        if (existsSync(sibling) && inspectElfArch(sibling) === arch) {
+          return sibling;
+        }
+        return this.resolveFallbackPath(arch);
+      }
+
+      // Configured path does not exist on disk (missing configured artifact)
+      // If targeted for the other architecture, check for a valid sibling in the same directory.
+      if (targetedForOther) {
+        const sibling = join(
+          dirname(configuredPath),
+          `vps-agent-linux-${arch}`,
+        );
+        if (existsSync(sibling) && inspectElfArch(sibling) === arch) {
+          return sibling;
+        }
+      }
+      // Missing configured artifact reports unavailable for this architecture (no fallback)
+      return null;
     }
-    if (process.env.AGENT_BINARY_PATH) {
-      return existsSync(process.env.AGENT_BINARY_PATH) ? process.env.AGENT_BINARY_PATH : null;
-    }
+
+    return this.resolveFallbackPath(arch);
+  }
+
+  private resolveFallbackPath(arch: "amd64" | "arm64"): string | null {
     const fallbacks = [
-      "/app/agent/vps-agent-linux-amd64",
-      join(process.cwd(), "agent", "vps-agent-linux-amd64"),
-      join(process.cwd(), "packages", "agent", "dist", "vps-agent-linux-amd64"),
-      join(process.cwd(), "..", "agent", "dist", "vps-agent-linux-amd64"),
+      `/app/agent/vps-agent-linux-${arch}`,
+      join(process.cwd(), "agent", `vps-agent-linux-${arch}`),
+      join(process.cwd(), "packages", "agent", "dist", `vps-agent-linux-${arch}`),
+      join(process.cwd(), "..", "agent", "dist", `vps-agent-linux-${arch}`),
     ];
     for (const fb of fallbacks) {
-      if (existsSync(fb)) return fb;
+      if (existsSync(fb) && inspectElfArch(fb) === arch) {
+        return fb;
+      }
     }
     return null;
   }
 
-  getMetadata(): BundledAgentMetadata | null {
-    const binPath = this.resolveBinaryPath();
+  getMetadata(arch: "amd64" | "arm64"): BundledAgentMetadata | null {
+    const binPath = this.resolveBinaryPath(arch);
     if (!binPath) return null;
     try {
       const stat = statSync(binPath);
+      const cached = this.cache.get(binPath);
       if (
-        this.cached &&
-        this.cached.mtimeMs === stat.mtimeMs &&
-        this.cached.size === stat.size
+        cached &&
+        cached.mtimeMs === stat.mtimeMs &&
+        cached.size === stat.size
       ) {
-        return this.cached.meta;
+        return cached.meta;
       }
       const meta = extractAgentBinaryMetadata(binPath);
-      this.cached = { mtimeMs: stat.mtimeMs, size: stat.size, meta };
+      if (meta.arch !== arch) {
+        return null;
+      }
+      this.cache.set(binPath, { mtimeMs: stat.mtimeMs, size: stat.size, meta });
       return meta;
     } catch {
       return null;

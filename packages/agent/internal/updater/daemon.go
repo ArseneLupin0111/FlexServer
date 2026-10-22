@@ -235,10 +235,15 @@ func (d *Daemon) reconcile(ctx context.Context, j *Journal) error {
 			return d.journal.Save(j)
 		}
 		if resultApplied {
-			// verify_failed is the one helper outcome that guarantees no
-			// mutation happened; anything else without a journal is unclear.
-			if res, err := ReadResult(d.cfg.StateDir, actionApply, j.JobID); err == nil && res != nil && res.Outcome == "verify_failed" {
-				return d.failPreSwap(ctx, j, "helper refused apply: "+res.Detail)
+			// verify_failed and deferred guarantee no mutation happened;
+			// anything else without a journal is unclear.
+			if res, err := ReadResult(d.cfg.StateDir, actionApply, j.JobID); err == nil && res != nil {
+				if res.Outcome == "verify_failed" {
+					return d.failPreSwap(ctx, j, "helper refused apply: "+res.Detail)
+				}
+				if res.Outcome == "deferred" {
+					return d.deferPreSwap(ctx, j, "helper deferred apply: "+res.Detail)
+				}
 			}
 			j.PostSwap = true
 			return d.holdJob(ctx, j, "helper result without root journal: unclear mutation")
@@ -487,6 +492,8 @@ func (d *Daemon) runRestarting(ctx context.Context, j *Journal) error {
 	case "verify_failed":
 		return d.failPreSwap(ctx, j, "helper verification failed: "+res.Detail)
 
+	case "deferred":
+		return d.deferPreSwap(ctx, j, "helper deferred apply: "+res.Detail)
 	case "unclear":
 		j.PostSwap = true
 		return d.holdJob(ctx, j, "helper reported unclear mutation: "+res.Detail)
@@ -648,16 +655,16 @@ func (d *Daemon) consumeWithRuling(ctx context.Context, j *Journal, ruling strin
 			return err
 		}
 		return nil
-	case "failed":
+	case "failed", "deferred", "superseded":
 		if j.PostSwap {
 			// Local evidence says the swap was requested or performed: a
 			// server "failed" cannot prove the post-swap state safe to tear
 			// down. Deleting the backup here would destroy the only rollback
 			// source for an unclear mutation — retain everything and halt.
 			return d.holdJob(ctx, j,
-				"server ruled failed after a post-swap phase — retaining backup and journal")
+				"server ruled "+ruling+" after a post-swap phase — retaining backup and journal")
 		}
-		d.logf("job %s: server ruling failed (pre-swap) — cleaning up", j.JobID)
+		d.logf("job %s: server ruling %s (pre-swap) — cleaning up", j.JobID, ruling)
 		if err := d.consume(ctx, j); err != nil {
 			return err
 		}
@@ -681,6 +688,12 @@ func (d *Daemon) consumeWithRuling(ctx context.Context, j *Journal, ruling strin
 func (d *Daemon) failPreSwap(ctx context.Context, j *Journal, reason string) error {
 	d.logf("job %s: failing pre-swap: %s", j.JobID, reason)
 	return d.reportAndObserve(ctx, j, "failed", reason)
+}
+
+// deferPreSwap reports a pre-swap deferral (no mutation happened; host was busy).
+func (d *Daemon) deferPreSwap(ctx context.Context, j *Journal, reason string) error {
+	d.logf("job %s: deferring pre-swap: %s", j.JobID, reason)
+	return d.reportAndObserve(ctx, j, "deferred", reason)
 }
 
 // holdJob halts the machine without destroying evidence.

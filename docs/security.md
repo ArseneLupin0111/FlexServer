@@ -94,7 +94,7 @@ To prevent unauthorized binary substitution, privilege escalation, and unintende
   - Fresh heartbeat confirmation: An upgrade job succeeds ONLY after a fresh heartbeat bearing the target commit build ID is ingested before the deadline (`awaitHeartbeatGrace`). Failure rolls back to previous binaries; unverified rollbacks halt subsequent jobs as `rollback_unverified` until manual operator acknowledgment (`vps-updater ack`).
 - **Rollout and Verification Boundaries**:
   - Production verification status: Single host Azure VPS `vps_kUq9jDFzAtxY` verified for systemd service supervision, lock contention rejection, and offline preflight (`-validate-config`).
-  - Staging smoke validation: `.server/fleet-host-smoke.sh` exercises CLI signature verification (tamper and wrong-key rejection), tar extraction into temporary rootfs, and multi-component upgrade + rollback test suites.
+  - Staging smoke validation: Multi-component upgrade and rollback verification exercises CLI signature validation (tamper and wrong-key rejection), rootfs tar extraction, and automated backup restoration upon missing heartbeat.
   - Fleet-wide multi-host production rollout across diverse hosts remains unverified and staged per-host; offline recovery and rollback acknowledgement governed by `docs/local-agent-upgrade-operations.md`.
 ### Session cookie hardening
 

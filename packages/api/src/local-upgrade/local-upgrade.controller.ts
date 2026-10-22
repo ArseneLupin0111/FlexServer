@@ -1,25 +1,24 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
   Headers,
+  HttpCode,
   Inject,
   Param,
   Post,
   Query,
-  Req,
   UseGuards,
 } from "@nestjs/common";
-import type { Request } from "express";
 import { DashboardSessionGuard } from "../auth/dashboard-session.guard.js";
 import { OriginGuard } from "../auth/origin-guard.js";
 import { LocalUpgradeService } from "./local-upgrade.service.js";
+import { AgentConvergenceService } from "./agent-convergence.service.js";
 import {
-  idempotencyKeySchema,
-  localAgentUpgradeCreateSchema,
   localUpgradeListQuerySchema,
+  requiredIdempotencyKeySchema,
 } from "./local-upgrade.schemas.js";
-
 /**
  * Admin surface for local agent upgrades.
  * Confirmation is a UX dialog + session cookie + Origin check — no CSRF or
@@ -31,6 +30,8 @@ export class LocalUpgradeController {
   constructor(
     @Inject(LocalUpgradeService)
     private readonly service: LocalUpgradeService,
+    @Inject(AgentConvergenceService)
+    private readonly convergence: AgentConvergenceService,
   ) {}
 
   @Get(":id/agent-update")
@@ -38,22 +39,27 @@ export class LocalUpgradeController {
     return { data: await this.service.getAgentUpdate(id) };
   }
 
-  @Post(":id/local-agent-upgrades")
-  async create(
+  @Post(":id/agent-update")
+  @HttpCode(202)
+  async triggerUpdate(
     @Param("id") id: string,
     @Body() body: unknown,
     @Headers("idempotency-key") idempotencyKeyHeader: string | undefined,
-    @Req() req: Request,
   ) {
-    const input = localAgentUpgradeCreateSchema.parse(body);
-    const idempotencyKey = idempotencyKeyHeader
-      ? idempotencyKeySchema.parse(idempotencyKeyHeader)
-      : undefined;
-    const { job } = await this.service.createJob(id, input, {
-      idempotencyKey,
-      actor: req.dashboardSessionId ?? "dashboard",
-    });
-    return { data: job };
+    if (
+      body !== undefined &&
+      body !== null &&
+      (typeof body !== "object" || Object.keys(body).length > 0)
+    ) {
+      throw new BadRequestException({
+        error: "agent-update request body must be empty",
+      });
+    }
+    const idempotencyKey = requiredIdempotencyKeySchema.parse(
+      idempotencyKeyHeader,
+    );
+    const data = await this.convergence.requestUpdate(id, idempotencyKey);
+    return { data };
   }
 
   @Get(":id/local-agent-upgrades")

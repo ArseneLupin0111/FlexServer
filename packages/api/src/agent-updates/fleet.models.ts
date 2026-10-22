@@ -165,21 +165,6 @@ export interface FleetManifestEnvelope {
   keyId: string;
 }
 
-export interface FleetEnrollmentItem {
-  vpsId: string;
-  status: "enrolled" | "needs_setup" | "failed";
-  message?: string;
-}
-
-export interface FleetEnrollmentResult {
-  results: FleetEnrollmentItem[];
-}
-
-export interface FleetPolicyUpdateResult {
-  updated: number;
-  hosts: string[];
-}
-
 export interface FleetOverviewResponse {
   hosts: FleetHost[];
   groups: FleetGroup[];

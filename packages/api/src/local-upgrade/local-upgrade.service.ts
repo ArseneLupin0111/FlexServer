@@ -33,10 +33,15 @@ import {
   LOCAL_UPGRADE_OVERALL_DEADLINE_MS,
   LOCAL_UPGRADE_PHASE_TIMEOUT_MS,
   UPDATER_HEALTH_TTL_MS,
+  EXECUTING_UPGRADE_STATES,
+  type AgentAutomationView,
+  type AgentConvergenceRecord,
   type LocalUpgradeJob,
   type LocalUpgradeResult,
   type LocalUpgradeState,
 } from "./local-upgrade.models.js";
+import { AgentLifecycleCoordinator } from "../agents/agent-lifecycle-coordinator.js";
+import { Optional } from "@nestjs/common";
 import type {
   LocalUpdaterProgressInput,
   LocalUpdaterResultInput,
@@ -45,13 +50,15 @@ import { AGENT_API_CONTRACT_VERSION } from "./versions.js";
 
 // ── Architecture normalization ───────────────────────────────────────────
 
-const ARCH_BY_KERNEL: Record<string, string> = {
-  x86_64: "amd64",
-  amd64: "amd64",
-  aarch64: "arm64",
-  arm64: "arm64",
-};
-
+export function normalizeArchitecture(
+  raw?: string | null,
+): "amd64" | "arm64" | null {
+  if (!raw) return null;
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed === "x86_64" || trimmed === "amd64") return "amd64";
+  if (trimmed === "aarch64" || trimmed === "arm64") return "arm64";
+  return null;
+}
 // ── Admin views (locked contract with the dashboard) ─────────────────────
 
 export type AgentUpdateReleaseView = {
@@ -97,6 +104,7 @@ export type AgentUpdateView = {
   };
   state: AgentUpdateState;
   job: LocalUpgradeJob | null;
+  automation?: AgentAutomationView;
 };
 
 export type CreateLocalUpgradeResult = {
@@ -203,6 +211,8 @@ const DEADLINE_RULING: Record<LocalUpgradeState, DeadlineRuling | undefined> =
     rolled_back: undefined,
     rollback_unverified: undefined,
     failed: undefined,
+    deferred: undefined,
+    superseded: undefined,
   };
 
 /** Canonical local-host predicate (matches VpsService's own check). */
@@ -210,8 +220,142 @@ export function isLocalHostVps(vps: VpsRecord): boolean {
   return vps.kind === "local" || vps.managedBy === "system";
 }
 
+export function computeAutomationState(params: {
+  arch: "amd64" | "arm64" | null;
+  archConflict: boolean;
+  targetBuildId: string | null;
+  agentFresh: boolean;
+  updaterFresh: boolean;
+  updaterInstalled: boolean;
+  updaterIdle: boolean;
+  busyReason: string | null;
+  installedBuildId: string | null;
+  activeJob: LocalUpgradeJob | null;
+  convergenceRecord: AgentConvergenceRecord | null;
+}): AgentAutomationView {
+  const {
+    arch,
+    archConflict,
+    targetBuildId,
+    agentFresh,
+    updaterFresh,
+    updaterInstalled,
+    updaterIdle,
+    busyReason,
+    installedBuildId,
+    activeJob,
+    convergenceRecord,
+  } = params;
+
+  const retryPending = Boolean(
+    convergenceRecord?.retryBuildId &&
+      targetBuildId &&
+      convergenceRecord.retryBuildId === targetBuildId &&
+      convergenceRecord.retryKey,
+  );
+
+  // 1. active execution/recovery ("updating")
+  if (
+    activeJob &&
+    !isTerminalState(activeJob.state) &&
+    (EXECUTING_UPGRADE_STATES.includes(activeJob.state) || activeJob.claimedAt != null)
+  ) {
+    return {
+      state: "updating",
+      reason: activeJob.message ?? activeJob.state,
+      targetBuildId,
+      retryAllowed: false,
+    };
+  }
+
+  // 2. unavailable/incompatible target
+  if (archConflict || !arch) {
+    return {
+      state: "incompatible",
+      reason: archConflict ? "arch_conflict" : "unsupported_architecture",
+      targetBuildId: null,
+      retryAllowed: false,
+    };
+  }
+  if (!targetBuildId) {
+    return {
+      state: "release_unavailable",
+      reason: "release_unavailable",
+      targetBuildId: null,
+      retryAllowed: false,
+    };
+  }
+
+  // 3. failure suppression ("failed")
+  if (
+    convergenceRecord?.suppressedBuildId === targetBuildId &&
+    !retryPending
+  ) {
+    return {
+      state: "failed",
+      reason: convergenceRecord.suppressedReason ?? "upgrade_failed",
+      targetBuildId,
+      retryAllowed: true,
+    };
+  }
+
+  // 4. missing access ("needs_access")
+  if (
+    !updaterInstalled ||
+    convergenceRecord?.setupState === "needs_access" ||
+    convergenceRecord?.setupState === "failed"
+  ) {
+    return {
+      state: "needs_access",
+      reason: convergenceRecord?.setupReason ?? "updater_not_installed",
+      targetBuildId,
+      retryAllowed: !retryPending,
+    };
+  }
+
+  // 5. stale connection ("waiting_connection")
+  if (!agentFresh || !updaterFresh) {
+    return {
+      state: "waiting_connection",
+      reason: !agentFresh ? "agent_offline" : "updater_offline",
+      targetBuildId,
+      retryAllowed: false,
+    };
+  }
+
+  // 6. busy ("waiting_busy")
+  if (!updaterIdle) {
+    return {
+      state: "waiting_busy",
+      reason: busyReason ?? "host_busy",
+      targetBuildId,
+      retryAllowed: false,
+    };
+  }
+
+  // 7. current only with fresh matching heartbeat ("current")
+  if (installedBuildId === targetBuildId && agentFresh) {
+    return {
+      state: "current",
+      reason: null,
+      targetBuildId,
+      retryAllowed: false,
+    };
+  }
+
+  // 8. pending otherwise ("pending")
+  return {
+    state: "pending",
+    reason: null,
+    targetBuildId,
+    retryAllowed: false,
+  };
+}
+
 @Injectable()
 export class LocalUpgradeService {
+  private readonly activeUpdateFences = new Map<string, () => void>();
+
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(LOCAL_UPGRADE_REPOSITORY)
@@ -221,7 +365,51 @@ export class LocalUpgradeService {
     @Inject(BundledAgentService)
     private readonly bundledAgent: BundledAgentService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Optional()
+    @Inject(AgentLifecycleCoordinator)
+    private readonly coordinator?: AgentLifecycleCoordinator,
   ) {}
+
+  registerUpdateFenceRelease(vpsId: string, release: () => void): void {
+    this.activeUpdateFences.set(vpsId, release);
+  }
+
+  releaseUpdateFence(vpsId: string): void {
+    const release = this.activeUpdateFences.get(vpsId);
+    if (release) {
+      this.activeUpdateFences.delete(vpsId);
+      try {
+        release();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  async deferJob(jobId: string, reason: string): Promise<boolean> {
+    const job = await this.repository.get(jobId);
+    if (!job || job.state !== "queued" || job.claimedAt !== null) return false;
+    const nowIso = new Date().toISOString();
+    const updated = await this.commitTerminal(
+      job,
+      {
+        state: "deferred",
+        completedAt: nowIso,
+        error: null,
+        result: {
+          outcome: "deferred",
+          reason,
+          completedAt: nowIso,
+        },
+      },
+      {
+        action: "local_agent_upgrade.deferred",
+        result: "success",
+        metadata: { reason },
+      },
+    );
+    return Boolean(updated);
+  }
 
   // ── Admin API ─────────────────────────────────────────────────────────
 
@@ -232,12 +420,55 @@ export class LocalUpgradeService {
 
     const agentState = await this.agents.getState(vpsId);
     const systemInfo = await this.agents.getSystemInfo(vpsId);
-    const arch = ARCH_BY_KERNEL[systemInfo?.kernel?.arch ?? ""];
+    const updaterHeartbeat = await this.repository.getUpdaterHeartbeat(vpsId);
+
     const fresh = agentState?.lastSeenAt
       ? isFreshTimestamp(agentState.lastSeenAt)
       : false;
+    const updaterHealthy = Boolean(
+      updaterHeartbeat &&
+        isFreshTimestamp(
+          updaterHeartbeat.lastSeenAt,
+          UPDATER_HEALTH_TTL_MS,
+        ) &&
+        (updaterHeartbeat.protocolVersion ?? 1) >= 2,
+    );
+    const updaterFresh = Boolean(
+      updaterHeartbeat &&
+        isFreshTimestamp(
+          updaterHeartbeat.lastSeenAt,
+          UPDATER_HEALTH_TTL_MS,
+        ),
+    );
 
-    const bundled = this.bundledAgent.getMetadata();
+    const agentArch = normalizeArchitecture(systemInfo?.kernel?.arch);
+    const updaterArch = normalizeArchitecture(updaterHeartbeat?.platform?.arch);
+
+    let arch: "amd64" | "arm64" | null = null;
+    let archConflict = false;
+    if (fresh && agentArch && updaterFresh && updaterArch) {
+      if (agentArch !== updaterArch) {
+        archConflict = true;
+        arch = null;
+      } else {
+        arch = agentArch;
+      }
+    } else if (fresh && agentArch) {
+      arch = agentArch;
+    } else if (updaterFresh && updaterArch) {
+      arch = updaterArch;
+    } else if (agentArch && updaterArch) {
+      if (agentArch !== updaterArch) {
+        archConflict = true;
+        arch = null;
+      } else {
+        arch = agentArch;
+      }
+    } else {
+      arch = agentArch ?? updaterArch ?? null;
+    }
+
+    const bundled = arch ? this.bundledAgent.getMetadata(arch) : null;
 
     let available: AgentUpdateReleaseView | null = null;
     let compatible = false;
@@ -259,26 +490,14 @@ export class LocalUpgradeService {
           },
         ],
       };
-      if (!arch || bundled.arch !== arch) {
-        compatible = false;
-        reason = "unsupported_architecture";
-        available = null;
-      } else {
-        compatible = true;
-        reason = "ok";
-      }
+      compatible = true;
+      reason = "ok";
       releaseBuildIds = [bundled.buildId];
+    } else if (archConflict || (systemInfo?.kernel?.arch && !agentArch) || (updaterHeartbeat?.platform?.arch && !updaterArch)) {
+      compatible = false;
+      reason = "unsupported_architecture";
     }
 
-    const updaterHeartbeat = await this.repository.getUpdaterHeartbeat(vpsId);
-    const updaterHealthy = Boolean(
-      updaterHeartbeat &&
-        isFreshTimestamp(
-          updaterHeartbeat.lastSeenAt,
-          UPDATER_HEALTH_TTL_MS,
-        ) &&
-        (updaterHeartbeat.protocolVersion ?? 1) >= 2,
-    );
     const updater = {
       installed: updaterHeartbeat != null,
       healthy: updaterHealthy,
@@ -287,7 +506,7 @@ export class LocalUpgradeService {
 
     const installedBuild = agentState?.buildId ?? null;
     let state: AgentUpdateState;
-    if (!arch) {
+    if (!arch || archConflict) {
       reason = "unsupported_architecture";
       state = "incompatible";
     } else if (!bundled) {
@@ -305,6 +524,22 @@ export class LocalUpgradeService {
     }
 
     const jobs = await this.repository.listByVps(vpsId, { limit: 1 });
+    const activeJob = await this.repository.getActiveByVps(vpsId);
+    const conv = await this.repository.getConvergence(vpsId);
+    const automation = computeAutomationState({
+      arch,
+      archConflict,
+      targetBuildId: bundled?.buildId ?? null,
+      agentFresh: fresh,
+      updaterFresh,
+      updaterInstalled: updater.installed,
+      updaterIdle: updaterHeartbeat?.idle === true,
+      busyReason: updaterHeartbeat?.busyReason ?? null,
+      installedBuildId: installedBuild,
+      activeJob: activeJob ?? null,
+      convergenceRecord: conv ?? null,
+    });
+
     return {
       installed: {
         version: agentState?.version ?? null,
@@ -321,26 +556,20 @@ export class LocalUpgradeService {
       updater,
       state,
       job: jobs[0] ?? null,
+      automation,
     };
   }
 
   async createJob(
     vpsId: string,
     input: { releaseId: string },
-    options: { idempotencyKey?: string; actor?: string } = {},
+    options: { idempotencyKey?: string; retryRequestKey?: string; actor?: string } = {},
   ): Promise<CreateLocalUpgradeResult> {
     if (this.config.mode === "demo") throw new DemoMutationBlockedError();
 
     const vps = await this.vps.get(vpsId);
     if (!vps) throw new VpsNotFoundError();
-    if (!isLocalHostVps(vps)) {
-      throw new ConflictException({
-        error: {
-          message: "Upgrade jobs are only available for the local host",
-          code: "not_local",
-        },
-      });
-    }
+    await this.reconcile(vpsId, Date.now());
 
     if (options.idempotencyKey) {
       const replay = await this.repository.getByIdempotencyKey(
@@ -365,19 +594,42 @@ export class LocalUpgradeService {
         },
       });
     }
-    if ((updaterHeartbeat.protocolVersion ?? 1) < 2) {
+    if ((updaterHeartbeat.protocolVersion ?? 1) < 3) {
       throw new ConflictException({
         error: {
           message:
-            "Local updater is running an outdated protocol; upgrade the updater to enable bundled agent updates",
+            "Updater is running an outdated protocol; upgrade the updater to enable agent updates",
           code: "updater_incompatible",
+        },
+      });
+    }
+    if (updaterHeartbeat.idle !== true) {
+      throw new ConflictException({
+        error: {
+          message: updaterHeartbeat.busyReason
+            ? `Host is busy: ${updaterHeartbeat.busyReason}`
+            : "Host is busy; wait for ongoing work to finish before updating the agent",
+          code: "host_busy",
         },
       });
     }
 
     const agentState = await this.agents.getState(vpsId);
     const systemInfo = await this.agents.getSystemInfo(vpsId);
-    const arch = ARCH_BY_KERNEL[systemInfo?.kernel?.arch ?? ""];
+    const agentArch = normalizeArchitecture(systemInfo?.kernel?.arch);
+    const updaterArch = normalizeArchitecture(updaterHeartbeat.platform?.arch);
+
+    if (agentArch && updaterArch && agentArch !== updaterArch) {
+      throw new BadRequestException({
+        error: {
+          message: `Agent architecture (${agentArch}) and updater platform architecture (${updaterArch}) conflict`,
+          code: "release_incompatible",
+          reason: "unsupported_architecture",
+        },
+      });
+    }
+
+    const arch = agentArch ?? updaterArch;
     if (!arch) {
       throw new BadRequestException({
         error: {
@@ -400,7 +652,7 @@ export class LocalUpgradeService {
       });
     }
 
-    const bundled = this.bundledAgent.getMetadata();
+    const bundled = this.bundledAgent.getMetadata(arch);
     if (!bundled) {
       throw new ConflictException({
         error: {
@@ -427,7 +679,6 @@ export class LocalUpgradeService {
         },
       });
     }
-
     const installedFresh = !!(
       agentState?.buildId &&
       agentState.lastSeenAt &&
@@ -450,6 +701,7 @@ export class LocalUpgradeService {
       vpsId,
       state: "queued",
       progress: null,
+      targetArch: arch,
       releaseId: bundled.buildId,
       releaseVersion: bundled.version,
       releaseBuildId: bundled.buildId,
@@ -461,6 +713,9 @@ export class LocalUpgradeService {
       actor: options.actor ?? "dashboard",
       ...(options.idempotencyKey
         ? { idempotencyKey: options.idempotencyKey }
+        : {}),
+      ...(options.retryRequestKey
+        ? { retryRequestKey: options.retryRequestKey }
         : {}),
       fencingToken: 0,
       reclaimCount: 0,
@@ -524,25 +779,60 @@ export class LocalUpgradeService {
     return this.requireJob(vpsId, jobId);
   }
 
+  async findJobById(jobId: string): Promise<LocalUpgradeJob | undefined> {
+    return this.repository.get(jobId);
+  }
+
   // ── Updater API ───────────────────────────────────────────────────────
 
   async claim(
     credential: AgentCredential,
-    protocolVersion: number = 2,
+    protocolVersion: number = 3,
     evidence?: Record<string, unknown>,
   ): Promise<UpdaterClaimResult | null> {
     const nowMs = Date.now();
+    const existingHeartbeat = await this.repository.getUpdaterHeartbeat(
+      credential.vpsId,
+    );
+
+    const platform =
+      typeof evidence?.platform === "object" && evidence.platform !== null
+        ? (evidence.platform as { os: string; arch: string })
+        : existingHeartbeat?.platform;
+
+    const idle =
+      typeof evidence?.idle === "boolean" ? evidence.idle : undefined;
+
+    const busyReason =
+      typeof evidence?.busyReason === "string"
+        ? evidence.busyReason
+        : undefined;
+
+    const updaterVersion =
+      typeof evidence?.updaterVersion === "string"
+        ? evidence.updaterVersion
+        : existingHeartbeat?.updaterVersion;
+
+    const installedAi = Array.isArray(evidence?.installedAi)
+      ? (evidence.installedAi as string[])
+      : existingHeartbeat?.installedAi;
+
+    const aiHealth =
+      typeof evidence?.aiHealth === "object" && evidence.aiHealth !== null
+        ? (evidence.aiHealth as { status: string; healthy: boolean })
+        : existingHeartbeat?.aiHealth;
+
     await this.repository.recordUpdaterHeartbeat({
       vpsId: credential.vpsId,
       lastSeenAt: new Date(nowMs).toISOString(),
       credentialId: credential.id,
       protocolVersion,
-      ...(typeof evidence?.updaterVersion === "string" ? { updaterVersion: evidence.updaterVersion } : {}),
-      ...(typeof evidence?.platform === "object" && evidence.platform !== null ? { platform: evidence.platform as { os: string; arch: string } } : {}),
-      ...(typeof evidence?.idle === "boolean" ? { idle: evidence.idle } : {}),
-      ...(typeof evidence?.busyReason === "string" ? { busyReason: evidence.busyReason } : {}),
-      ...(Array.isArray(evidence?.installedAi) ? { installedAi: evidence.installedAi as string[] } : {}),
-      ...(typeof evidence?.aiHealth === "object" && evidence.aiHealth !== null ? { aiHealth: evidence.aiHealth as { status: string; healthy: boolean } } : {}),
+      ...(updaterVersion ? { updaterVersion } : {}),
+      ...(platform ? { platform } : {}),
+      ...(typeof idle === "boolean" ? { idle } : {}),
+      ...(busyReason ? { busyReason } : {}),
+      ...(installedAi ? { installedAi } : {}),
+      ...(aiHealth ? { aiHealth } : {}),
     });
     await this.reconcile(credential.vpsId, nowMs);
 
@@ -551,8 +841,8 @@ export class LocalUpgradeService {
       if (!job) return null;
       if (isTerminalState(job.state)) return null;
 
-      // Protocol guard: legacy updater (protocol < 2) requires signed manifest
-      if (!job.manifestRaw && protocolVersion < 2) {
+      // Protocol guard: bundled jobs require protocol >= 3
+      if (!job.manifestRaw && protocolVersion < 3) {
         return null;
       }
       const leaseValid =
@@ -560,27 +850,106 @@ export class LocalUpgradeService {
       if (leaseValid) {
         return { job, requiresReconcile: isPostSwapState(job.state) };
       }
+      // Only safely pre-lease: a queued bundled job requires fresh idle evidence.
+      // In-flight active attempts (claimed/downloading/verifying/staging/restarting)
+      // must NOT be blocked or deferred on claim - Go reports final pre-swap check.
+      if (job.state === "queued" && !job.manifestRaw) {
+        if (evidence?.idle !== true) {
+          const reason =
+            typeof evidence?.busyReason === "string"
+              ? evidence.busyReason
+              : "host_busy_at_claim";
+          await this.commitTerminal(
+            job,
+            {
+              state: "deferred",
+              completedAt: new Date(nowMs).toISOString(),
+              error: null,
+              result: {
+                outcome: "deferred",
+                reason,
+                completedAt: new Date(nowMs).toISOString(),
+              },
+            },
+            {
+              action: "local_agent_upgrade.deferred",
+              result: "success",
+              metadata: { reason },
+            },
+          );
+          return null;
+        }
+      }
+      let releaseCoordinatorFence: (() => void) | undefined;
+      if (job.state === "queued" && this.coordinator) {
+        try {
+          releaseCoordinatorFence = await this.coordinator.tryAcquire(credential.vpsId, "update");
+        } catch {
+          const reason = "activity_in_progress";
+          await this.commitTerminal(
+            job,
+            {
+              state: "deferred",
+              completedAt: new Date(nowMs).toISOString(),
+              error: null,
+              result: {
+                outcome: "deferred",
+                reason,
+                completedAt: new Date(nowMs).toISOString(),
+              },
+            },
+            {
+              action: "local_agent_upgrade.deferred",
+              result: "success",
+              metadata: { reason },
+            },
+          );
+          return null;
+        }
+      }
+
       const agentState = await this.agents.getState(credential.vpsId);
-      const updated = await this.repository.compareAndSet(
-        job.id,
-        job.revision,
-        {
-          state: job.state === "queued" ? "claimed" : job.state,
-          fencingToken: job.fencingToken + 1,
-          reclaimCount:
-            job.claimedAt != null ? job.reclaimCount + 1 : job.reclaimCount,
-          claimedAt: job.claimedAt ?? new Date(nowMs).toISOString(),
-          leaseExpiresAt: new Date(
-            nowMs + LOCAL_UPGRADE_LEASE_TTL_MS,
-          ).toISOString(),
-          ...(job.baselineBuildId == null && agentState?.buildId
-            ? { baselineBuildId: agentState.buildId }
-            : {}),
-        },
-      );
+      let updated: LocalUpgradeJob | undefined;
+      try {
+        updated = await this.repository.compareAndSet(
+          job.id,
+          job.revision,
+          {
+            state: job.state === "queued" ? "claimed" : job.state,
+            fencingToken: job.fencingToken + 1,
+            reclaimCount:
+              job.claimedAt != null ? job.reclaimCount + 1 : job.reclaimCount,
+            claimedAt: job.claimedAt ?? new Date(nowMs).toISOString(),
+            leaseExpiresAt: new Date(
+              nowMs + LOCAL_UPGRADE_LEASE_TTL_MS,
+            ).toISOString(),
+            ...(job.baselineBuildId == null && agentState?.buildId
+              ? { baselineBuildId: agentState.buildId }
+              : {}),
+          },
+        );
+      } catch (err) {
+        if (releaseCoordinatorFence) {
+          releaseCoordinatorFence();
+        }
+        if (
+          err instanceof LocalUpgradeUniqueViolationError &&
+          err.kind === "global_active"
+        ) {
+          return null;
+        }
+        throw err;
+      }
+      if (!updated) {
+        if (releaseCoordinatorFence) {
+          releaseCoordinatorFence();
+        }
+        continue;
+      }
+      if (releaseCoordinatorFence) {
+        this.activeUpdateFences.set(credential.vpsId, releaseCoordinatorFence);
+      }
       if (updated) {
-        // Auditable claim: which credential took (or reclaimed) the lease —
-        // identifiers only, never the bearer token or its hash. Lease-valid
         // replay polls above return without mutating, so they never audit.
         await this.audit.record({
           actor: "system",
@@ -704,6 +1073,8 @@ export class LocalUpgradeService {
           job.result != null &&
           (job.result.outcome === input.outcome ||
             (input.outcome === "failed" &&
+              job.result.outcome === "rollback_unverified") ||
+            (input.outcome === "deferred" &&
               job.result.outcome === "rollback_unverified"))
         ) {
           return { job };
@@ -770,6 +1141,110 @@ export class LocalUpgradeService {
               action: "local_agent_upgrade.failure",
               result: "failure" as const,
               metadata: { reason: input.reason ?? "update_failed" },
+            };
+        const updated = await this.commitTerminal(job, patch, audit);
+        if (updated) return { job: updated };
+        continue;
+      }
+
+      if (input.outcome === "deferred") {
+        const postSwap = isPostSwapState(job.state);
+        const patch: LocalUpgradeWritePatch = postSwap
+          ? {
+              state: "rollback_unverified",
+              completedAt: nowIso,
+              error: {
+                code: "post_swap_failed",
+                message: input.reason
+                  ? `Upgrade deferred report received at or after binary swap: ${input.reason}`
+                  : "Upgrade deferred report received at or after binary swap; verify host",
+              },
+              result: {
+                outcome: "rollback_unverified",
+                ...(input.reportedBuildId
+                  ? { reportedBuildId: input.reportedBuildId }
+                  : {}),
+                completedAt: nowIso,
+              },
+            }
+          : {
+              state: "deferred",
+              completedAt: nowIso,
+              error: null,
+              result: {
+                outcome: "deferred",
+                ...(input.reason ? { reason: input.reason } : {}),
+                ...(input.reportedBuildId
+                  ? { reportedBuildId: input.reportedBuildId }
+                  : {}),
+                completedAt: nowIso,
+              },
+            };
+        const audit = postSwap
+          ? {
+              action: "local_agent_upgrade.rollback",
+              result: "failure" as const,
+              metadata: {
+                reason: input.reason ?? "post_swap_deferred",
+                reportedOutcome: "deferred",
+              },
+            }
+          : {
+              action: "local_agent_upgrade.deferred",
+              result: "success" as const,
+              metadata: { reason: input.reason ?? "host_busy" },
+            };
+        const updated = await this.commitTerminal(job, patch, audit);
+        if (updated) return { job: updated };
+        continue;
+      }
+      if (input.outcome === "superseded") {
+        const postSwap = isPostSwapState(job.state);
+        const patch: LocalUpgradeWritePatch = postSwap
+          ? {
+              state: "rollback_unverified",
+              completedAt: nowIso,
+              error: {
+                code: "post_swap_failed",
+                message: input.reason
+                  ? `Upgrade superseded report received at or after binary swap: ${input.reason}`
+                  : "Upgrade superseded report received at or after binary swap; verify host",
+              },
+              result: {
+                outcome: "rollback_unverified",
+                ...(input.reason ? { reason: input.reason } : {}),
+                ...(input.reportedBuildId
+                  ? { reportedBuildId: input.reportedBuildId }
+                  : {}),
+                completedAt: nowIso,
+              },
+            }
+          : {
+              state: "superseded",
+              completedAt: nowIso,
+              error: null,
+              result: {
+                outcome: "superseded",
+                ...(input.reason ? { reason: input.reason } : {}),
+                ...(input.reportedBuildId
+                  ? { reportedBuildId: input.reportedBuildId }
+                  : {}),
+                completedAt: nowIso,
+              },
+            };
+        const audit = postSwap
+          ? {
+              action: "local_agent_upgrade.rollback",
+              result: "failure" as const,
+              metadata: {
+                reason: input.reason ?? "post_swap_superseded",
+                reportedOutcome: "superseded",
+              },
+            }
+          : {
+              action: "local_agent_upgrade.superseded",
+              result: "success" as const,
+              metadata: { reason: input.reason ?? "superseded_by_deployment" },
             };
         const updated = await this.commitTerminal(job, patch, audit);
         if (updated) return { job: updated };
@@ -867,11 +1342,19 @@ export class LocalUpgradeService {
    * one VPS. Runs on reads (admin views, updater claim, updater get) so the
    * durable store converges without cron.
    */
-  private async reconcile(vpsId: string, nowMs: number): Promise<void> {
+  async reconcile(vpsId: string, nowMs: number): Promise<void> {
     const jobs = await this.repository.listByVps(vpsId, { limit: 100 });
     for (const job of jobs) {
       if (isTerminalState(job.state)) continue;
       const nowIso = new Date(nowMs).toISOString();
+
+      // Supersede unclaimed bundled jobs pinned to a deployment target that is
+      // no longer the running deployment's artifact. Provenance is immutable:
+      // the old job retires untouched and a new job carries the new target.
+      if (job.state === "queued" && !job.manifestRaw && job.claimedAt == null) {
+        const superseded = await this.supersedeIfObsolete(job, nowMs);
+        if (superseded) continue;
+      }
 
       // Heartbeat-confirmed success outruns every deadline: the new binary
       // proved itself by identifying itself in a fresh heartbeat.
@@ -919,8 +1402,15 @@ export class LocalUpgradeService {
         {
           state: ruling.state,
           completedAt: nowIso,
-          error: { code: ruling.code, message: ruling.message },
-          result: { outcome: ruling.outcome, completedAt: nowIso },
+          error:
+            ruling.state === "deferred"
+              ? null
+              : { code: ruling.code, message: ruling.message },
+          result: {
+            outcome: ruling.outcome,
+            reason: ruling.state === "deferred" ? ruling.code : undefined,
+            completedAt: nowIso,
+          },
         },
         {
           action: ruling.auditAction,
@@ -1017,6 +1507,9 @@ export class LocalUpgradeService {
       patch,
     );
     if (!updated) return undefined;
+    if (isTerminalState(updated.state)) {
+      this.releaseUpdateFence(job.vpsId);
+    }
     await this.audit.record({
       actor: "system",
       action: audit.action,
@@ -1098,7 +1591,17 @@ export class LocalUpgradeService {
     if (isTerminalState(job.state) || job.state === "queued") {
       throw this.jobTerminalConflict();
     }
-    const bundled = this.bundledAgent.getMetadata();
+    const arch = await this.resolveJobArch(job);
+    if (!arch) {
+      throw new NotFoundException({
+        error: {
+          message: "Unable to determine target architecture for job artifact",
+          code: "artifact_missing",
+        },
+      });
+    }
+
+    const bundled = this.bundledAgent.getMetadata(arch);
     if (!bundled) {
       throw new NotFoundException({
         error: {
@@ -1109,7 +1612,8 @@ export class LocalUpgradeService {
     }
     if (
       bundled.sha256 !== job.targetSha256 ||
-      bundled.buildId !== job.releaseBuildId
+      bundled.buildId !== job.releaseBuildId ||
+      (job.targetSizeBytes != null && bundled.size !== job.targetSizeBytes)
     ) {
       throw new ConflictException({
         error: {
@@ -1124,5 +1628,86 @@ export class LocalUpgradeService {
       size: bundled.size,
       sha256: bundled.sha256,
     };
+  }
+
+  private async resolveJobArch(
+    job: LocalUpgradeJob,
+  ): Promise<"amd64" | "arm64" | null> {
+    let arch: "amd64" | "arm64" | null = job.targetArch ?? null;
+    if (!arch && job.manifestRaw) {
+      try {
+        const parsed = JSON.parse(job.manifestRaw);
+        if (Array.isArray(parsed.artifacts)) {
+          for (const art of parsed.artifacts) {
+            const norm = normalizeArchitecture(art.arch);
+            if (norm) {
+              arch = norm;
+              break;
+            }
+          }
+        }
+      } catch {
+        // Ignored
+      }
+    }
+    if (!arch) {
+      for (const candidateArch of ["amd64", "arm64"] as const) {
+        const meta = this.bundledAgent.getMetadata(candidateArch);
+        if (meta && meta.sha256 === job.targetSha256) {
+          arch = candidateArch;
+          break;
+        }
+      }
+    }
+    if (!arch) {
+      const updaterHeartbeat = await this.repository.getUpdaterHeartbeat(job.vpsId);
+      const norm = normalizeArchitecture(updaterHeartbeat?.platform?.arch);
+      if (norm) {
+        arch = norm;
+      }
+    }
+    return arch;
+  }
+
+  private async supersedeIfObsolete(
+    job: LocalUpgradeJob,
+    nowMs: number,
+  ): Promise<boolean> {
+    const arch = await this.resolveJobArch(job);
+    if (!arch) return false;
+    const bundled = this.bundledAgent.getMetadata(arch);
+    if (!bundled) return false;
+
+    if (
+      bundled.buildId === job.releaseBuildId &&
+      bundled.sha256 === job.targetSha256
+    ) {
+      return false;
+    }
+
+    const nowIso = new Date(nowMs).toISOString();
+    const updated = await this.commitTerminal(
+      job,
+      {
+        state: "superseded",
+        completedAt: nowIso,
+        error: null,
+        result: {
+          outcome: "superseded",
+          reason: "superseded_by_newer_deployment",
+          completedAt: nowIso,
+        },
+      },
+      {
+        action: "local_agent_upgrade.superseded",
+        result: "success",
+        metadata: {
+          reason: "superseded_by_new_deployment",
+          previousBuildId: job.releaseBuildId,
+          newBuildId: bundled.buildId,
+        },
+      },
+    );
+    return Boolean(updated);
   }
 }

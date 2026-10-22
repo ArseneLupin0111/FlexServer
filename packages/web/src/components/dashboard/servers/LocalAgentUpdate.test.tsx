@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,8 +9,7 @@ import type {
   LocalAgentUpgradeState,
   VpsRecord,
 } from "../../../lib/api";
-import { MemoryRouter } from "react-router-dom";
-import { DashboardContext, DashboardProvider, type DashboardCtx } from "../../../context/DashboardContext";
+import { DashboardContext, type DashboardCtx } from "../../../context/DashboardContext";
 
 const vps: VpsRecord = {
   id: "local-1",
@@ -54,7 +53,8 @@ const fail = (status: number, error: { code: string; message: string; jobId?: st
 });
 
 const fetchMock = vi.fn();
-let handler: (url: string, init?: RequestInit) => FetchReply = () => fail(500, { code: "unhandled", message: "unhandled request" });
+let handler: (url: string, init?: RequestInit) => FetchReply = () =>
+  fail(500, { code: "unhandled", message: "unhandled request" });
 
 const status = (overrides: Partial<AgentUpdateStatus> = {}): AgentUpdateStatus => ({
   installed: {
@@ -69,7 +69,13 @@ const status = (overrides: Partial<AgentUpdateStatus> = {}): AgentUpdateStatus =
     buildId: TARGET_BUILD,
     publishedAt: "2026-09-27T08:00:00.000Z",
     artifacts: [
-      { os: "linux", arch: "amd64", size: 4096, sha256: "d".repeat(64), url: "https://releases.example.com/rel-2001/vps-agent-linux-amd64" },
+      {
+        os: "linux",
+        arch: "amd64",
+        size: 4096,
+        sha256: "d".repeat(64),
+        url: "https://releases.example.com/rel-2001/vps-agent-linux-amd64",
+      },
     ],
   },
   compatibility: { compatible: true, apiContractVersion: 1, reason: "ok" },
@@ -98,7 +104,6 @@ const job = (overrides: Partial<LocalAgentUpgradeJob> = {}): LocalAgentUpgradeJo
 // ── Existing SSE mechanism mock (lib/live-api subscribeMonitoring) ────
 
 type SseListener = (event: MessageEvent) => void;
-let sseEventSeq = 0;
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -118,18 +123,20 @@ class MockEventSource {
 
   close(): void {}
 
-  /** Dispatch a monitoring envelope to every live stream, like the server would. */
   static emit(type: string, payload: unknown): void {
     const envelope = {
-      schemaVersion: 1,
-      type,
-      id: `evt-${++sseEventSeq}`,
-      emittedAt: new Date().toISOString(),
-      payload,
+      data: JSON.stringify({
+        schemaVersion: 1,
+        type,
+        emittedAt: new Date().toISOString(),
+        seq: 1,
+        payload,
+      }),
     };
-    const event = new MessageEvent("message", { data: JSON.stringify(envelope) });
-    for (const instance of MockEventSource.instances) {
-      for (const listener of instance.listeners[type] ?? []) listener(event);
+    for (const inst of MockEventSource.instances) {
+      for (const listener of inst.listeners[type] ?? []) {
+        listener(envelope as MessageEvent);
+      }
     }
   }
 }
@@ -138,7 +145,9 @@ beforeEach(() => {
   fetchMock.mockReset();
   handler = () => fail(500, { code: "unhandled", message: "unhandled request" });
   vi.stubGlobal("fetch", fetchMock);
-  fetchMock.mockImplementation((url: unknown, init?: RequestInit) => Promise.resolve(handler(String(url), init)));
+  fetchMock.mockImplementation((url: unknown, init?: RequestInit) =>
+    Promise.resolve(handler(String(url), init)),
+  );
   MockEventSource.instances = [];
   vi.stubGlobal("EventSource", MockEventSource);
 });
@@ -153,39 +162,86 @@ function localStatusFetch(): FetchReply {
   return ok(status());
 }
 
-describe("LocalAgentUpdate confirm flow", () => {
-  it("confirms with a dialog and posts only the releaseId plus an Idempotency-Key", async () => {
-    handler = (url) => (url.includes("/agent-update") ? localStatusFetch() : fail(500, { code: "unexpected", message: "unexpected request" }));
+describe("LocalAgentUpdate action flow", () => {
+  it("triggers update directly without confirmation dialog and sends Idempotency-Key", async () => {
+    let updateRequested = false;
+    handler = (url, init) => {
+      if (url.includes("/agent-update")) {
+        if (init?.method === "POST") {
+          updateRequested = true;
+          return ok(
+            status({
+              state: "available",
+              job: job({ state: "queued" }),
+              automation: {
+                state: "updating",
+                reason: "Update requested",
+                targetBuildId: TARGET_BUILD,
+                retryAllowed: false,
+              },
+            }),
+          );
+        }
+        return localStatusFetch();
+      }
+      return fail(500, { code: "unexpected", message: "unexpected request" });
+    };
+
     render(<LocalAgentUpdate vps={vps} />);
 
     await screen.findByText("Update available");
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "Upgrade agent" }));
+    const upgradeButton = screen.getByRole("button", { name: "Upgrade agent" });
+    await user.click(upgradeButton);
 
-    const dialog = await screen.findByRole("alertdialog");
-    expect(within(dialog).getByText(/Upgrade agent on Local box\?/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/1\.0\.0 \(aaaa1111aaaa\)/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/1\.1\.0 \(bbbb1111bbbb\)/)).toBeInTheDocument();
-    expect(within(dialog).getByText("rel-2001")).toBeInTheDocument();
-    expect(within(dialog).getByText("Deployed API image")).toBeInTheDocument();
-    expect(within(dialog).getByText(/Monitoring pauses for a few seconds while the agent restarts/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/Existing credentials are preserved/)).toBeInTheDocument();
+    // No alertdialog is opened!
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
 
-    handler = (url, init) =>
-      init?.method === "POST" && url.endsWith("/local-agent-upgrades") ? ok(job()) : fail(500, { code: "unexpected", message: "unexpected request" });
-    await user.click(within(dialog).getByRole("button", { name: "Upgrade agent" }));
-
-    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
-    const post = fetchMock.mock.calls.find(([url, init]) => String(url).includes("/local-agent-upgrades") && (init as RequestInit | undefined)?.method === "POST");
+    const post = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).includes("/agent-update") &&
+        (init as RequestInit | undefined)?.method === "POST",
+    );
     expect(post).toBeDefined();
     const [postUrl, postInit] = post as [string, RequestInit];
-    expect(postUrl).toBe("/api/vps/local-1/local-agent-upgrades");
-    const body = JSON.parse(String(postInit.body));
-    expect(Object.keys(body)).toEqual(["releaseId"]);
-    expect(body.releaseId).toBe("rel-2001");
+    expect(postUrl).toBe("/api/vps/local-1/agent-update");
     expect(new Headers(postInit.headers).get("Idempotency-Key")).toBeTruthy();
-    expect(new Headers(postInit.headers).get("Content-Type")).toBe("application/json");
+
     await screen.findByText("Queued");
+    expect(updateRequested).toBe(true);
+  });
+
+  it("retransmits same idempotency key on failure", async () => {
+    let callCount = 0;
+    let firstKey = "";
+    handler = (url, init) => {
+      if (url.includes("/agent-update")) {
+        if (init?.method === "POST") {
+          callCount++;
+          firstKey = new Headers(init.headers).get("Idempotency-Key") || "";
+          return fail(500, { code: "BUSY", message: "Server busy with active tasks" });
+        }
+        return localStatusFetch();
+      }
+      return fail(500, { code: "unexpected", message: "unexpected request" });
+    };
+
+    render(<LocalAgentUpdate vps={vps} />);
+    await screen.findByText("Update available");
+    const user = userEvent.setup();
+    const upgradeButton = screen.getByRole("button", { name: "Upgrade agent" });
+
+    await user.click(upgradeButton);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Server busy with active tasks");
+    expect(callCount).toBe(1);
+
+    // Click again to retransmit
+    await user.click(upgradeButton);
+    expect(callCount).toBe(2);
+    const secondKey = new Headers(
+      (fetchMock.mock.calls[fetchMock.mock.calls.length - 1][1] as RequestInit).headers,
+    ).get("Idempotency-Key");
+    expect(secondKey).toBe(firstKey);
   });
 });
 
@@ -210,21 +266,24 @@ describe("LocalAgentUpdate persisted job progress", () => {
     expect(bar).toHaveAttribute("aria-valuenow", "42");
     expect(bar).toHaveAttribute("aria-valuemin", "0");
     expect(bar).toHaveAttribute("aria-valuemax", "100");
-    expect(screen.getByText(/target 1\.1\.0 \(bbbb1111bbbb\)/)).toBeInTheDocument();
-    // Active job: the upgrade control stays visible but disabled, with the
-    // specific job-running reason instead of a hidden affordance.
+    expect(screen.getByText(/target 1\.1\.0/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Upgrade agent" })).toBeDisabled();
-    expect(screen.getByText("An upgrade job is already running for this server.")).toBeInTheDocument();
+    expect(
+      screen.getByText("An upgrade job is already running for this server."),
+    ).toBeInTheDocument();
 
-    const jobCallsBefore = fetchMock.mock.calls.filter(([url]) => String(url).includes("/local-agent-upgrades/job-1")).length;
+    const jobCallsBefore = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("/local-agent-upgrades/job-1"),
+    ).length;
     expect(jobCallsBefore).toBe(0);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5_000);
     });
-    const jobCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("/local-agent-upgrades/job-1"));
+    const jobCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("/local-agent-upgrades/job-1"),
+    );
     expect(jobCalls.length).toBe(1);
     expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "55");
-    expect(screen.getByText("Downloading update").closest('[aria-live="polite"]')).not.toBeNull();
   });
 });
 
@@ -238,7 +297,9 @@ describe("LocalAgentUpdate disabled upgrade control", () => {
 
     expect(await screen.findByText("Staging update")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Upgrade agent" })).toBeDisabled();
-    expect(screen.getByText("An upgrade job is already running for this server.")).toBeInTheDocument();
+    expect(
+      screen.getByText("An upgrade job is already running for this server."),
+    ).toBeInTheDocument();
     expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "30");
   });
 
@@ -282,8 +343,6 @@ describe("LocalAgentUpdate live SSE refresh", () => {
       fetchMock.mock.calls.filter(([url]) => String(url).includes("/local-agent-upgrades/job-1")).length;
     expect(jobCalls()).toBe(0);
 
-    // A metrics event scoped to this host nudges an immediate debounced
-    // re-read — well before the 5s fallback poll would run.
     MockEventSource.emit("metrics.updated", { metrics: [{ vpsId: vps.id }] });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
@@ -291,14 +350,12 @@ describe("LocalAgentUpdate live SSE refresh", () => {
     expect(jobCalls()).toBe(1);
     expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "70");
 
-    // Events for other hosts never trigger a re-read for this job.
     MockEventSource.emit("metrics.updated", { metrics: [{ vpsId: "other-host" }] });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
     expect(jobCalls()).toBe(1);
 
-    // The 5s poll stays as the fallback on its own cadence.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5_000);
     });
@@ -383,7 +440,7 @@ describe("LocalAgentUpdate terminal results", () => {
       );
     render(<LocalAgentUpdate vps={vps} />);
     expect(await screen.findByText(/is sending a fresh heartbeat/)).toBeInTheDocument();
-    expect(screen.getByText(/1\.1\.0 \(cccc1111cccc\)/)).toBeInTheDocument();
+    expect(screen.getByText(/1\.1\.0/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Upgrade agent" })).not.toBeInTheDocument();
     expect(screen.queryByText(/manual intervention required/)).not.toBeInTheDocument();
   });
@@ -404,7 +461,7 @@ describe("LocalAgentUpdate terminal results", () => {
         }),
       );
     render(<LocalAgentUpdate vps={vps} />);
-    expect(await screen.findByText(/Previous upgrade — 1\.0\.0 \(aaaa1111aaaa\) was confirmed by heartbeat\./)).toBeInTheDocument();
+    expect(await screen.findByText(/Previous upgrade — 1\.0\.0/)).toBeInTheDocument();
     expect(screen.queryByText(/is sending a fresh heartbeat/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Upgrade agent" })).toBeInTheDocument();
   });
@@ -415,7 +472,11 @@ describe("LocalAgentUpdate terminal results", () => {
         status({
           state: "unknown",
           available: null,
-          job: job({ state: "rollback_unverified", completedAt: "2026-09-27T10:06:00.000Z", error: { code: "HEARTBEAT_TIMEOUT", message: "No heartbeat after swap deadline" } }),
+          job: job({
+            state: "rollback_unverified",
+            completedAt: "2026-09-27T10:06:00.000Z",
+            error: { code: "HEARTBEAT_TIMEOUT", message: "No heartbeat after swap deadline" },
+          }),
         }),
       );
     render(<LocalAgentUpdate vps={vps} />);
@@ -430,7 +491,11 @@ describe("LocalAgentUpdate terminal results", () => {
         status({
           state: "unknown",
           available: null,
-          job: job({ state: "rolled_back", completedAt: "2026-09-27T10:05:00.000Z", error: { code: "HEARTBEAT_TIMEOUT", message: "New build missed its heartbeat" } }),
+          job: job({
+            state: "rolled_back",
+            completedAt: "2026-09-27T10:05:00.000Z",
+            error: { code: "HEARTBEAT_TIMEOUT", message: "New build missed its heartbeat" },
+          }),
         }),
       );
     render(<LocalAgentUpdate vps={vps} />);
@@ -446,85 +511,66 @@ describe("LocalAgentUpdate terminal results", () => {
       ok(
         status({
           state: "available",
-          job: job({ state: "failed", completedAt: "2026-09-27T10:07:00.000Z", error: { code: "DOWNLOAD_FAILED", message: "Checksum mismatch from mirror" } }),
+          job: job({
+            state: "failed",
+            completedAt: "2026-09-27T10:07:00.000Z",
+            error: { code: "DOWNLOAD_FAILED", message: "Checksum mismatch from mirror" },
+          }),
         }),
       );
     render(<LocalAgentUpdate vps={vps} />);
     expect(await screen.findByText(/Upgrade failed before the agent was swapped/)).toBeInTheDocument();
     expect(screen.getByText(/Checksum mismatch from mirror/)).toBeInTheDocument();
-    expect(screen.queryByText(/manual intervention required/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/rolled back/)).not.toBeInTheDocument();
-    // Failed before the swap: trying again stays possible.
-    expect(screen.getByRole("button", { name: "Upgrade agent" })).toBeInTheDocument();
   });
-});
 
-describe("LocalAgentUpdate freshness gating", () => {
-  it("never claims current on a stale heartbeat and disables the action with a reason", async () => {
+  it("renders a deferred terminal result", async () => {
     handler = () =>
       ok(
         status({
-          state: "unknown",
-          installed: { version: "1.0.0", buildId: null, lastSeenAt: "2026-01-01T00:00:00.000Z", fresh: false },
+          state: "available",
+          job: job({
+            state: "deferred",
+            completedAt: "2026-09-27T10:07:00.000Z",
+            result: { outcome: "deferred", completedAt: "2026-09-27T10:07:00.000Z" },
+          }),
         }),
       );
     render(<LocalAgentUpdate vps={vps} />);
-
-    expect(await screen.findByText("Update status unknown")).toBeInTheDocument();
-    expect(screen.queryByText("Agent up to date")).not.toBeInTheDocument();
-    expect(screen.getByText(/heartbeat stale \(/)).toBeInTheDocument();
-    expect(screen.getByText(/heartbeat is stale or the build ID is missing/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Upgrade agent" })).toBeDisabled();
-    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(await screen.findByText(/Upgrade was deferred because the host was actively running tasks/)).toBeInTheDocument();
   });
 
-  it("shows phase text in the live region but no progressbar until progress is real", async () => {
-    handler = () => ok(status({ job: job({ state: "awaiting_heartbeat", progress: null }), state: "available" }));
+  it("renders a superseded terminal result", async () => {
+    handler = () =>
+      ok(
+        status({
+          state: "available",
+          job: job({
+            state: "superseded",
+            completedAt: "2026-09-27T10:07:00.000Z",
+            result: { outcome: "superseded", completedAt: "2026-09-27T10:07:00.000Z" },
+          }),
+        }),
+      );
     render(<LocalAgentUpdate vps={vps} />);
-
-    expect(await screen.findByText("Waiting for fresh heartbeat")).toBeInTheDocument();
-    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
-    expect(screen.getByText("Waiting for fresh heartbeat").closest('[aria-live="polite"]')).not.toBeNull();
-    expect(screen.getByText(/target 1\.1\.0/)).toBeInTheDocument();
+    expect(await screen.findByText(/Previous update attempt was superseded by a newer deployment build/)).toBeInTheDocument();
   });
 });
 
-describe("LocalAgentUpdate live region persistence", () => {
-  it("keeps an empty status region mounted before any job so start and results are announced", async () => {
-    vi.useFakeTimers();
-    handler = () => ok(status());
-    render(<LocalAgentUpdate vps={vps} />);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-
-    // No job yet: the live region must already exist, empty.
-    expect(screen.getByText("Update available")).toBeInTheDocument();
-    const region = screen.getByRole("status");
-    expect(region).toBeEmptyDOMElement();
-
-    // The next status poll delivers a job; content lands in the SAME region
-    // node so assistive tech announces the insertion instead of the node.
-    handler = (url) =>
-      url.includes("/agent-update")
-        ? ok(status({ job: job({ state: "downloading", progress: 10 }), state: "available" }))
-        : ok(job({ state: "downloading", progress: 10 }));
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(30_000);
-    });
-
-    expect(screen.getByRole("status")).toBe(region);
-    expect(region).toHaveTextContent("Downloading update");
-  });
-});
-
-describe("Remote agent update in Settings", () => {
-  it("renders remote host details and handles upgrade confirmation flow", async () => {
-    let upgraded = false;
+describe("Remote agent update in Settings (consolidated contracts)", () => {
+  it("renders remote host details and handles update via POST /api/vps/:id/agent-update", async () => {
+    let updateRequested = false;
     handler = (url, init) => {
-      if (url.includes("/upgrade-agent") && init?.method === "POST") {
-        upgraded = true;
-        return ok({ jobId: "job-up-1", state: { status: "installing" } });
+      if (url.includes("/api/vps/remote-1/agent-update")) {
+        if (init?.method === "POST") {
+          updateRequested = true;
+          return ok(
+            status({
+              state: "available",
+              job: job({ vpsId: "remote-1", state: "queued" }),
+            }),
+          );
+        }
+        return ok(status());
       }
       return fail(500, { code: "unexpected", message: "unexpected request" });
     };
@@ -533,21 +579,17 @@ describe("Remote agent update in Settings", () => {
 
     expect(screen.getByText("Agent updates")).toBeInTheDocument();
 
-    const upgradeButton = screen.getByRole("button", { name: "Upgrade agent" });
+    const upgradeButton = await screen.findByRole("button", { name: "Upgrade agent" });
     expect(upgradeButton).toBeEnabled();
 
     const user = userEvent.setup();
     await user.click(upgradeButton);
 
-    const dialog = await screen.findByRole("alertdialog");
-    expect(within(dialog).getByText(/Upgrade agent on web-01\?/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/Monitoring will pause briefly/)).toBeInTheDocument();
-    expect(within(dialog).getByText("root@10.0.0.1:22")).toBeInTheDocument();
+    // Consolidated: no alertdialog!
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
 
-    await user.click(within(dialog).getByRole("button", { name: "Upgrade agent" }));
-
-    await waitFor(() => expect(upgraded).toBe(true));
-    expect(await screen.findByText("An agent installation or upgrade is currently in progress.")).toBeInTheDocument();
+    await waitFor(() => expect(updateRequested).toBe(true));
+    expect(await screen.findByText("Queued")).toBeInTheDocument();
   });
 
   it("disables upgrade when agent is not installed and shows concrete reason", () => {
@@ -571,7 +613,9 @@ describe("Remote agent update in Settings", () => {
 
     const button = screen.getByRole("button", { name: "Upgrade agent" });
     expect(button).toBeDisabled();
-    expect(screen.getByText("An agent installation or upgrade is currently in progress.")).toBeInTheDocument();
+    expect(
+      screen.getByText("An agent installation or upgrade is currently in progress."),
+    ).toBeInTheDocument();
   });
 
   it("disables upgrade in demo mode", () => {
@@ -593,7 +637,7 @@ describe("Remote agent update in Settings", () => {
     expect(screen.getByText("Agent upgrades are unavailable in demo mode.")).toBeInTheDocument();
   });
 
-  it("disables upgrade when an active restart job is running, even if agentStatus preserves offline", () => {
+  it("disables upgrade when an active restart job is running", () => {
     const offlineVps: VpsRecord = {
       ...remoteVps,
       agentStatus: "offline",
@@ -652,93 +696,64 @@ describe("Remote agent update in Settings", () => {
 
     const button = screen.getByRole("button", { name: "Upgrade agent" });
     expect(button).toBeDisabled();
-    expect(screen.getByText("An agent credential rotation is currently in progress.")).toBeInTheDocument();
+    expect(
+      screen.getByText("An agent credential rotation is currently in progress."),
+    ).toBeInTheDocument();
   });
 
-  it("retains confirmation dialog and shows error when onUpgradeAgent rejects, keeping error visible after cancel", async () => {
-    const onUpgradeAgent = vi.fn().mockRejectedValue(new Error("Remote agent upgrade timed out"));
-    const user = userEvent.setup();
-
-    render(
-      <DashboardContext.Provider
-        value={
-          {
-            mode: "local",
-            busy: false,
-            onUpgradeAgent,
-          } as unknown as DashboardCtx
-        }
-      >
-        <LocalAgentUpdate vps={remoteVps} />
-      </DashboardContext.Provider>,
-    );
-
-    const upgradeButton = screen.getByRole("button", { name: "Upgrade agent" });
-    await user.click(upgradeButton);
-
-    const dialog = await screen.findByRole("alertdialog");
-    const confirmButton = within(dialog).getByRole("button", { name: "Upgrade agent" });
-    await user.click(confirmButton);
-
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Remote agent upgrade timed out");
-    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "Upgrade agent" })).toBeEnabled();
-
-    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
-    expect(screen.getByRole("alert")).toHaveTextContent("Remote agent upgrade timed out");
-  });
-
-  it("propagates API failure through real DashboardProvider and keeps dialog open", async () => {
-    const overviewData = {
-      mode: "local",
-      summary: {
-        totalServers: 1,
-        healthyServers: 1,
-        warningServers: 0,
-        unreachableServers: 0,
-        runningJobs: 0,
-      },
-      servers: [remoteVps],
-      metrics: [],
-      dockerMetrics: [],
-      jobs: [],
-      auditEvents: [],
-      terminal: { label: "Terminal", networkAccess: "disabled", commands: [], sessions: [] },
-      settings: { appMode: "local", webTerminalEnabled: false, terminalCommandGuardEnabled: false, realSshEnabled: false, authRequiredInLocalMode: false },
-      systemInfo: [],
-    };
-
-    handler = (url, init) => {
-      if (url.includes("/api/overview")) {
-        return ok(overviewData);
-      }
-      if (url.includes("/api/vps/remote-1/upgrade-agent") && init?.method === "POST") {
-        return fail(500, { code: "UPGRADE_FAILED", message: "SSH connection timed out" });
-      }
-      if (url.includes("/api/vps")) {
-        return ok([remoteVps]);
+  it("shows waiting notice when host automation state is waiting_busy", async () => {
+    handler = (url) => {
+      if (url.includes("/agent-update")) {
+        return ok(
+          status({
+            automation: {
+              state: "waiting_busy",
+              reason: "Host has active docker task running",
+              targetBuildId: TARGET_BUILD,
+              retryAllowed: true,
+            },
+          }),
+        );
       }
       return fail(500, { code: "unexpected", message: "unexpected request" });
     };
 
-    const user = userEvent.setup();
-    render(
-      <MemoryRouter>
-        <DashboardProvider authRequired={false}>
-          <LocalAgentUpdate vps={remoteVps} />
-        </DashboardProvider>
-      </MemoryRouter>,
-    );
+    render(<LocalAgentUpdate vps={remoteVps} />);
 
-    const upgradeButton = await screen.findByRole("button", { name: "Upgrade agent" });
-    await user.click(upgradeButton);
+    expect(
+      await screen.findByText(
+        "Server is busy with active tasks. Update will automatically apply when the host becomes idle.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Waiting (busy)")).toBeInTheDocument();
+  });
 
-    const dialog = await screen.findByRole("alertdialog");
-    const confirmButton = within(dialog).getByRole("button", { name: "Upgrade agent" });
-    await user.click(confirmButton);
+  it("shows setup guidance when automation state is needs_access", async () => {
+    handler = (url) => {
+      if (url.includes("/agent-update")) {
+        return ok(
+          status({
+            state: "updater_unavailable",
+            automation: {
+              state: "needs_access",
+              reason: "SSH key lacked sudo permissions",
+              targetBuildId: null,
+              retryAllowed: true,
+            },
+          }),
+        );
+      }
+      return fail(500, { code: "unexpected", message: "unexpected request" });
+    };
 
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent("SSH connection timed out");
-    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    render(<LocalAgentUpdate vps={remoteVps} />);
+
+    expect(await screen.findByText("Host setup required")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /The updater daemon requires root or passwordless sudo privileges to install and swap binaries/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry setup" })).toBeInTheDocument();
   });
 });

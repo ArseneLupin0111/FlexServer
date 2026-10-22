@@ -20,9 +20,9 @@ import (
 	"time"
 
 	"github.com/vps-manager/agent/internal/ai"
+	"github.com/vps-manager/agent/internal/applications"
 	"golang.org/x/sys/unix"
 )
-
 func run(cfg ServerConfig) error {
 	if cfg.SocketPath == "" {
 		return errors.New("socket path cannot be empty")
@@ -780,6 +780,18 @@ func handleTaskExecute(ctx context.Context, conn net.Conn, params json.RawMessag
 		return
 	}
 
+	if p.TaskID != "" {
+		if err := applications.AcquireHostScopeAt(cfg.AgentStateDir, "ai:"+p.TaskID, "ai-host-helper", p.TaskID, true, 0); err != nil {
+			sendStreamMsg(conn, ai.TaskExecuteStreamMessage{
+				Stream: "error",
+				Error:  fmt.Sprintf("ai task admission blocked by host lock: %v", err),
+			})
+			return
+		}
+		defer func() {
+			_ = applications.ReleaseHostScopeAt(cfg.AgentStateDir, "ai:"+p.TaskID, "ai-host-helper", p.TaskID)
+		}()
+	}
 	// 1. Verify cgroup v2 availability
 	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err != nil {
 		sendStreamMsg(conn, ai.TaskExecuteStreamMessage{

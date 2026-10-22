@@ -209,15 +209,105 @@ describe("BundledAgentService", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  it("returns null when configured path does not exist", () => {
+  it("returns null when configured path does not exist for matching arch", () => {
     const service = new BundledAgentService({
-      agentBinaryPath: join(tempDir, "nonexistent"),
+      agentBinaryPath: join(tempDir, "vps-agent-linux-amd64"),
     } as AppConfig);
-    expect(service.resolveBinaryPath()).toBeNull();
-    expect(service.getMetadata()).toBeNull();
+    expect(service.resolveBinaryPath("amd64")).toBeNull();
+    expect(service.getMetadata("amd64")).toBeNull();
   });
 
-  it("caches metadata across subsequent calls when mtime and size are unchanged", () => {
+  it("fails closed and returns null when configured binary has invalid ELF header", () => {
+    const corruptPath = join(tempDir, "vps-agent-linux-amd64");
+    writeFileSync(corruptPath, Buffer.from("not an elf binary at all"));
+
+    const service = new BundledAgentService({
+      agentBinaryPath: corruptPath,
+    } as AppConfig);
+    expect(service.resolveBinaryPath("amd64")).toBeNull();
+    expect(service.getMetadata("amd64")).toBeNull();
+  });
+
+  it("uses configured path only for matching ELF architecture and resolves sibling for other arch", () => {
+    const amd64Buf = createDummyElf({
+      arch: "amd64",
+      buildId: VALID_BUILD_ID,
+      version: "1.0.0",
+    });
+    const arm64Buf = createDummyElf({
+      arch: "arm64",
+      buildId: VALID_BUILD_ID,
+      version: "1.0.0",
+    });
+
+    const amd64Path = join(tempDir, "vps-agent-linux-amd64");
+    const arm64Path = join(tempDir, "vps-agent-linux-arm64");
+    writeFileSync(amd64Path, amd64Buf);
+    writeFileSync(arm64Path, arm64Buf);
+
+    // Explicitly configure the amd64 path
+    const service = new BundledAgentService({
+      agentBinaryPath: amd64Path,
+    } as AppConfig);
+
+    // Resolves amd64 to the configured path
+    expect(service.resolveBinaryPath("amd64")).toBe(amd64Path);
+    const metaAmd64 = service.getMetadata("amd64");
+    expect(metaAmd64?.arch).toBe("amd64");
+
+    // Resolves arm64 via sibling vps-agent-linux-arm64
+    expect(service.resolveBinaryPath("arm64")).toBe(arm64Path);
+    const metaArm64 = service.getMetadata("arm64");
+    expect(metaArm64?.arch).toBe("arm64");
+  });
+
+  it("reports unavailable for the other architecture when sibling binary is missing", () => {
+    const amd64Buf = createDummyElf({
+      arch: "amd64",
+      buildId: VALID_BUILD_ID,
+      version: "1.0.0",
+    });
+    const amd64Path = join(tempDir, "vps-agent-linux-amd64");
+    writeFileSync(amd64Path, amd64Buf);
+
+    const service = new BundledAgentService({
+      agentBinaryPath: amd64Path,
+    } as AppConfig);
+
+    expect(service.resolveBinaryPath("amd64")).toBe(amd64Path);
+    // arm64 sibling does not exist in tempDir
+    expect(service.resolveBinaryPath("arm64")).toBeNull();
+    expect(service.getMetadata("arm64")).toBeNull();
+  });
+  it("fails closed when configured path has mismatched ELF architecture", () => {
+    // Configured filename is amd64, but content is arm64 ELF
+    const arm64Buf = createDummyElf({
+      arch: "arm64",
+      buildId: VALID_BUILD_ID,
+      version: "1.0.0",
+    });
+    const amd64Path = join(tempDir, "vps-agent-linux-amd64");
+    writeFileSync(amd64Path, arm64Buf);
+
+    const service = new BundledAgentService({
+      agentBinaryPath: amd64Path,
+    } as AppConfig);
+
+    // Requesting amd64 must fail closed (not guess or use the arm64 ELF)
+    expect(service.resolveBinaryPath("amd64")).toBeNull();
+    expect(service.getMetadata("amd64")).toBeNull();
+  });
+
+  it("returns null for generic missing configured path without guessing", () => {
+    const service = new BundledAgentService({
+      agentBinaryPath: join(tempDir, "missing-agent"),
+    } as AppConfig);
+
+    expect(service.resolveBinaryPath("amd64")).toBeNull();
+    expect(service.resolveBinaryPath("arm64")).toBeNull();
+  });
+
+  it("caches metadata per binary path and invalidates on mtime change", () => {
     const buf = createDummyElf({
       arch: "amd64",
       buildId: VALID_BUILD_ID,
@@ -230,11 +320,11 @@ describe("BundledAgentService", () => {
       agentBinaryPath: filePath,
     } as AppConfig);
 
-    const first = service.getMetadata();
+    const first = service.getMetadata("amd64");
     expect(first).not.toBeNull();
     expect(first?.buildId).toBe(VALID_BUILD_ID);
 
-    const second = service.getMetadata();
-    expect(second).toBe(first); // Strict object reference equality from cache
+    const second = service.getMetadata("amd64");
+    expect(second).toBe(first); // Strict object reference equality from per-path cache
   });
 });

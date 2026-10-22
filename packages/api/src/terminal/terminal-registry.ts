@@ -46,6 +46,12 @@ export class TerminalSessionRegistry {
   release(id: string) {
     return this.sessions.delete(id);
   }
+  hasActive(vpsId: string): boolean {
+    for (const session of this.sessions.values()) {
+      if (session.vpsId === vpsId) return true;
+    }
+    return false;
+  }
   async closeByDashboard(id: string) {
     await this.closeMatching((x) => x.dashboardId === id, "session_expired");
   }

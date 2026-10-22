@@ -120,6 +120,7 @@ export function buildSystemdUnitContent(options: SystemdUnitOptions): string {
     `User=${user}`,
     ...(groupLine ? [groupLine.trim()] : []),
     `WorkingDirectory=${workingDir}`,
+    "Environment=FLEXSERVER_AGENT_STATE_DIR=/var/lib/vps-manager-agent",
     `ExecStart=${execStart}`,
     "Restart=always",
     "RestartSec=10",

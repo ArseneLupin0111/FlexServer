@@ -163,6 +163,7 @@ CONFIG_DIR="/etc/vps-updater"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 STATE_DIR="/var/lib/vps-updater"
 SERVICE_USER="vps-updater"
+AGENT_STATE_DIR="/var/lib/vps-manager-agent"
 UNIT_DAEMON="/etc/systemd/system/vps-updater.service"
 UNIT_PATH="/etc/systemd/system/vps-updater-apply.path"
 UNIT_HELPER="/etc/systemd/system/vps-updater-apply.service"
@@ -539,6 +540,12 @@ if ! CFG_ERR="$(node -e '
   printf '%s\n' "$CFG_ERR" | sed 's/^/  /' >&2
   exit 1
 fi
+if [[ -f "$CONFIG_SRC" ]]; then
+  EXTRACTED_AGENT_STATE_DIR="$(node -e 'try { const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (c.agentStateDir) console.log(c.agentStateDir); } catch {}' "$CONFIG_SRC" 2>/dev/null || true)"
+  if [[ -n "$EXTRACTED_AGENT_STATE_DIR" ]]; then
+    AGENT_STATE_DIR="$EXTRACTED_AGENT_STATE_DIR"
+  fi
+fi
 
 # ── flexserverctl CLI — source and python3 prerequisite ───────────────────
 #
@@ -637,6 +644,16 @@ fi
 # Quiesce active daemon before binary replacement to avoid ETXTBSY on live executable.
 WAS_UPDATER_ACTIVE=false
 if systemctl is-active --quiet vps-updater.service 2>/dev/null; then
+  helper_journal="${STATE_DIR}/helper/journal.json"
+  journal_wait=0
+  while [[ -f "$helper_journal" ]] && grep -Eq '"phase"[[:space:]]*:[[:space:]]*"(intent|renamed)"' "$helper_journal" 2>/dev/null; do
+    if [[ $journal_wait -ge 60 ]]; then
+      echo "Error: updater journal remains in mutation/recovery; refusing updater binary replacement." >&2
+      exit 1
+    fi
+    sleep 1
+    journal_wait=$((journal_wait + 1))
+  done
   WAS_UPDATER_ACTIVE=true
   echo "[Upgrade] Quiescing active vps-updater daemon before binary replacement..."
   run systemctl stop vps-updater.service 2>/dev/null || true
@@ -687,6 +704,27 @@ else
   mkdir -p "$STATE_DIR"
   chown root:"$SERVICE_USER" "$STATE_DIR"
   chmod 0770 "$STATE_DIR"
+  local reg_group="$SERVICE_USER"
+  if getent group vps-manager-agent &>/dev/null; then
+    reg_group="vps-manager-agent"
+  fi
+  if getent group "$SERVICE_USER" &>/dev/null && getent passwd vps-manager-agent &>/dev/null; then
+    usermod -a -G "$SERVICE_USER" vps-manager-agent 2>/dev/null || true
+  fi
+  mkdir -p "${AGENT_STATE_DIR}"
+  chown root:"$reg_group" "${AGENT_STATE_DIR}"
+  chmod 1770 "${AGENT_STATE_DIR}"
+  mkdir -p "${AGENT_STATE_DIR}/docker-applications"
+  chown root:"$reg_group" "${AGENT_STATE_DIR}/docker-applications"
+  chmod 0755 "${AGENT_STATE_DIR}/docker-applications"
+  if [[ -f "${AGENT_STATE_DIR}/docker-applications/exclusion.json" ]]; then
+    chown root:"$reg_group" "${AGENT_STATE_DIR}/docker-applications/exclusion.json"
+    chmod 0664 "${AGENT_STATE_DIR}/docker-applications/exclusion.json"
+  fi
+  if [[ -f "${AGENT_STATE_DIR}/docker-applications/exclusion.json.lock" ]]; then
+    chown root:"$reg_group" "${AGENT_STATE_DIR}/docker-applications/exclusion.json.lock"
+    chmod 0664 "${AGENT_STATE_DIR}/docker-applications/exclusion.json.lock"
+  fi
   for d in pending results staging; do
     mkdir -p "$STATE_DIR/$d"
     chown root:"$SERVICE_USER" "$STATE_DIR/$d"
@@ -778,8 +816,8 @@ UMask=0022
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=${STATE_DIR} /usr/local/bin /run/vps-manager-agent /etc/tmpfiles.d
-ProtectHome=true
+ReadWritePaths=${STATE_DIR} /usr/local/bin /run/vps-manager-agent /etc/tmpfiles.d ${AGENT_STATE_DIR}/docker-applications
+ProtectHome=read-only
 ReadOnlyPaths=/etc/vps-manager-agent/config.json
 CapabilityBoundingSet=
 AmbientCapabilities=

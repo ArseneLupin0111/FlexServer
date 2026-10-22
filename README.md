@@ -209,7 +209,7 @@ By default this installs JSON-backed local mode under `/opt/vps-manager`, genera
 | **Storage** | [PostgreSQL and TimescaleDB guide](docs/postgres-timescale-storage.md) |
 | **Safe exploration** | [Demo guide](docs/demo.md) |
 | **Access and host permissions** | [Security model](docs/security.md) |
-| **Local agent upgrades & operations** | [Operator runbook](docs/local-agent-upgrade-operations.md) — bundled agent updates, updater protocol v2 migration, and backend endpoint cutovers |
+| **Agent upgrades & deployment convergence** | [Operator runbook](docs/local-agent-upgrade-operations.md) — automatic deployment convergence, bundled agent updates, updater protocol v3, and safe rollback |
 | **Project history** | [Changelog](CHANGELOG.md) |
 
 The API, web interface, and agent live in `packages/api/`, `packages/web/`, and `packages/agent/`. Direct source runs use JSON storage by default; Docker Compose uses PostgreSQL. Local data and private keys are not served as public assets.
@@ -222,7 +222,7 @@ The API, web interface, and agent live in `packages/api/`, `packages/web/`, and 
 - **Docker access is privileged.** The host agent has no Docker access by default. Opting into Docker group membership is effectively root-equivalent on the host. The API does not open the Docker socket.
 - **Logs are read-only and ephemeral.** Local-mode streams need real agent capability, current container inventory, and Docker access. They do not enable container mutations and are not persisted to jobs, audit, or storage. System VPS records and demo mode are excluded.
 - **Treat volumes and secrets as operational assets.** `docker compose down` preserves volumes; `docker compose down -v` deletes the data. Never commit `.env`, passwords, SSH keys, or tokens.
-- **Local agent updates use bundled binaries and scoped credentials.** Host agent upgrades are delivered via the API container's bundled binary without manual signing keys or release catalogs. The pull-only host updater runs as an unprivileged user, connects over HTTPS with scoped credentials, verifies SHA-256 digests, and uses a constrained root helper for atomic swaps and fresh-heartbeat verification with safe rollback. Repoint existing agents with `flexserverctl set-backend <URL>`. See the [runbook](docs/local-agent-upgrade-operations.md).
+- **Automatic deployment convergence and scoped pull updates.** Managed agent installations (local and remote) automatically converge to the API deployment's bundled binaries without manual release selection or updater enrollment. The pull-only host updater runs as an unprivileged user, connects over HTTPS with scoped credentials, verifies SHA-256 digests and content build IDs, and uses a constrained root helper for atomic swaps and fresh-heartbeat verification with safe rollback. Repoint existing agents with `flexserverctl set-backend <URL>`. See the [runbook](docs/local-agent-upgrade-operations.md).
 - **Agent singleton lock and managed service lifecycle.** Agents enforce a per-VPS singleton OS process lock in `/run/vps-manager-agent/` to prevent duplicate metric collectors and concurrent worker contention. Remote agents on Linux hosts run as managed systemd services with offline preflight validation (`-validate-config`) and automatic failure recovery.
 
 See the [security model](docs/security.md) for the full configuration boundaries. Do not post vulnerability details or credentials in public issues; follow the [private reporting guidance](#reporting-security-issues).

@@ -43,7 +43,7 @@ type Journal struct {
 	OldSha256        string    `json:"oldSha256,omitempty"`
 	NewSha256        string    `json:"newSha256,omitempty"`
 	BaselineHBAt     time.Time `json:"baselineHeartbeatAt,omitempty"`
-	Outcome          string    `json:"outcome,omitempty"` // succeeded|rolled_back|rollback_unverified|failed
+	Outcome          string    `json:"outcome,omitempty"` // succeeded|rolled_back|rollback_unverified|failed|deferred|superseded
 	Reason           string    `json:"reason,omitempty"`
 	ReportedToServer bool      `json:"reportedToServer"`
 	CleanupDone      bool      `json:"cleanupDone"`

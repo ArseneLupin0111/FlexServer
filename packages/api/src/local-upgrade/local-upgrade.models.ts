@@ -15,13 +15,17 @@ export type LocalUpgradeState =
   | "succeeded"
   | "rolled_back"
   | "rollback_unverified"
-  | "failed";
+  | "failed"
+  | "deferred"
+  | "superseded";
 
 export const LOCAL_UPGRADE_TERMINAL_STATES: readonly LocalUpgradeState[] = [
   "succeeded",
   "rolled_back",
   "rollback_unverified",
   "failed",
+  "deferred",
+  "superseded",
 ];
 
 /** Phases the updater may report via progress. */
@@ -47,11 +51,27 @@ export const LOCAL_UPGRADE_POST_SWAP_STATES: readonly LocalUpgradeState[] = [
   "rolling_back",
 ];
 
+/**
+ * States during which a job is actively executing on a host.
+ * At most one job globally may be in an executing state at any time.
+ */
+export const EXECUTING_UPGRADE_STATES: readonly LocalUpgradeState[] = [
+  "claimed",
+  "downloading",
+  "verifying",
+  "staging",
+  "restarting",
+  "awaiting_heartbeat",
+  "rolling_back",
+];
+
 export type LocalUpgradeOutcome =
   | "succeeded"
   | "rolled_back"
   | "rollback_unverified"
-  | "failed";
+  | "failed"
+  | "deferred"
+  | "superseded";
 
 export type LocalUpgradeError = {
   code: string;
@@ -64,6 +84,7 @@ export type LocalUpgradeResult = {
   reportedBuildId?: string;
   /** Build id of the heartbeat that confirmed the terminal ruling. */
   heartbeatBuildId?: string;
+  reason?: string;
   completedAt: string;
 };
 
@@ -73,6 +94,8 @@ export type LocalUpgradeJob = {
   state: LocalUpgradeState;
   /** Real percentage only; null until a phase reports one. */
   progress: number | null;
+  /** Immutable target architecture pinned at creation time. */
+  targetArch?: "amd64" | "arm64";
   /** Pinned at confirm time — later channel-pointer moves never retarget a job. */
   releaseId: string;
   releaseVersion: string;
@@ -90,7 +113,8 @@ export type LocalUpgradeJob = {
   baselineHeartbeatAt?: string;
   actor: string;
   idempotencyKey?: string;
-  /** Last journal message reported by the updater (ops-visible, ≤160 chars). */
+  /** Original user-supplied Idempotency-Key from requestUpdate, if created from a retry intent */
+  retryRequestKey?: string;
   message?: string;
   fencingToken: number;
   reclaimCount: number;
@@ -143,6 +167,8 @@ export const LOCAL_UPGRADE_PHASE_TIMEOUT_MS: Record<
   rolled_back: 0,
   rollback_unverified: 0,
   failed: 0,
+  deferred: 0,
+  superseded: 0,
 };
 
 /** Updater claim cadence expected from the host. */
@@ -166,17 +192,54 @@ export function isPostSwapState(state: LocalUpgradeState): boolean {
  */
 export class LocalUpgradeUniqueViolationError extends Error {
   constructor(
-    public readonly kind: "active" | "idempotency",
+    public readonly kind: "active" | "idempotency" | "global_active",
     public readonly existingId?: string,
   ) {
     super(
       kind === "active"
         ? "An upgrade job is already active for this VPS"
-        : "Idempotency key already used",
+        : kind === "global_active"
+          ? "Another upgrade job is currently executing globally"
+          : "Idempotency key already used",
     );
     this.name = "LocalUpgradeUniqueViolationError";
   }
 }
+
+export type AgentConvergenceSetupState =
+  | "unknown"
+  | "ready"
+  | "needs_access"
+  | "failed";
+
+export type AgentConvergenceRecord = {
+  vpsId: string;
+  suppressedBuildId: string | null;
+  suppressedReason: string | null;
+  retryBuildId: string | null;
+  retryKey: string | null;
+  setupState: AgentConvergenceSetupState;
+  setupReason: string | null;
+  nextSetupAttemptAt: string | null;
+};
+
+export type AgentAutomationState =
+  | "current"
+  | "pending"
+  | "waiting_busy"
+  | "waiting_connection"
+  | "updating"
+  | "needs_access"
+  | "failed"
+  | "incompatible"
+  | "release_unavailable";
+
+export type AgentAutomationView = {
+  state: AgentAutomationState;
+  reason: string | null;
+  targetBuildId: string | null;
+  retryAllowed: boolean;
+};
 
 export class LocalUpgradeConflictError extends Error {
   constructor(

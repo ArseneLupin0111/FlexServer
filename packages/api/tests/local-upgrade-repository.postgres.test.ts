@@ -142,10 +142,12 @@ describe("local-upgrade postgres terminal outcome (live PostgreSQL)", () => {
       await pool.query("CREATE TABLE vps (id text PRIMARY KEY)");
       const migrations = await loadMigrations();
       await pool.query(migrations.find((m) => m.id === "021_local_agent_upgrades.sql")!.sql);
+      const m033 = migrations.find((m) => m.id === "033_agent_deploy_convergence.sql");
+      if (m033) await pool.query(m033.sql);
       await pool.query("INSERT INTO vps (id) VALUES ('vps-live-1')");
 
       const repo = createPostgresLocalUpgradeRepository(pool);
-      await repo.create(baseJob());
+      await repo.create({ ...baseJob(), targetArch: "amd64" });
 
       const updated = await repo.compareAndSet("lug_live_1", 0, {
         state: "succeeded",
@@ -158,10 +160,110 @@ describe("local-upgrade postgres terminal outcome (live PostgreSQL)", () => {
       const reloaded = await repo.get("lug_live_1");
       expect(reloaded?.result).toEqual(TERMINAL_RESULT);
       expect(reloaded?.revision).toBe(1);
+      expect(reloaded?.targetArch).toBe("amd64");
 
       await expect(
         repo.compareAndSet("lug_live_1", 0, { result: { ...TERMINAL_RESULT } }),
       ).resolves.toBeUndefined();
+    } finally {
+      await pool.end();
+      await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await admin.end();
+    }
+  });
+
+  it.skipIf(!databaseUrl)("persists and retrieves deferred and superseded states, excluding from active", async () => {
+    const schema = `test_lug_states_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const admin = new pg.Pool({ connectionString: databaseUrl! });
+    await admin.query(`CREATE SCHEMA "${schema}"`);
+    const pool = new pg.Pool({ connectionString: databaseUrl!, options: `-c search_path="${schema}"` });
+    try {
+      await pool.query("CREATE TABLE vps (id text PRIMARY KEY)");
+      const migrations = await loadMigrations();
+      await pool.query(migrations.find((m) => m.id === "021_local_agent_upgrades.sql")!.sql);
+      const m033 = migrations.find((m) => m.id === "033_agent_deploy_convergence.sql");
+      if (m033) await pool.query(m033.sql);
+
+      await pool.query("INSERT INTO vps (id) VALUES ('vps-1')");
+      const repo = createPostgresLocalUpgradeRepository(pool);
+      await repo.create({ ...baseJob(), targetArch: "amd64" });
+
+      const deferredUpdated = await repo.compareAndSet("lug_live_1", 0, {
+        state: "deferred",
+        result: { outcome: "deferred", reason: "host busy", completedAt: "2026-09-27T00:00:00.000Z" },
+        completedAt: "2026-09-27T00:00:00.000Z",
+      });
+      expect(deferredUpdated?.state).toBe("deferred");
+      expect(deferredUpdated?.result?.outcome).toBe("deferred");
+
+      const activeAfterDeferred = await repo.getActiveByVps("vps-1");
+      expect(activeAfterDeferred).toBeUndefined();
+    } finally {
+      await pool.end();
+      await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await admin.end();
+    }
+  });
+
+  it.skipIf(!databaseUrl)("supports convergence records and global execution serialization", async () => {
+    const schema = `test_lug_conv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const admin = new pg.Pool({ connectionString: databaseUrl! });
+    await admin.query(`CREATE SCHEMA "${schema}"`);
+    const pool = new pg.Pool({ connectionString: databaseUrl!, options: `-c search_path="${schema}"` });
+    try {
+      await pool.query("CREATE TABLE vps (id text PRIMARY KEY)");
+      const migrations = await loadMigrations();
+      await pool.query(migrations.find((m) => m.id === "021_local_agent_upgrades.sql")!.sql);
+      const m033 = migrations.find((m) => m.id === "033_agent_deploy_convergence.sql");
+      if (m033) await pool.query(m033.sql);
+      const m034 = migrations.find((m) => m.id === "034_agent_convergence_indexes.sql");
+      if (m034) await pool.query(m034.sql);
+
+      await pool.query("INSERT INTO vps (id) VALUES ('vps-1'), ('vps-2')");
+      const repo = createPostgresLocalUpgradeRepository(pool);
+
+      // Convergence record operations
+      const initial = await repo.getConvergence("vps-1");
+      expect(initial).toBeUndefined();
+
+      const created = await repo.updateConvergence("vps-1", {
+        setupState: "needs_access",
+        setupReason: "ssh_missing",
+        suppressedBuildId: "build-123",
+      });
+      expect(created.setupState).toBe("needs_access");
+      expect(created.suppressedBuildId).toBe("build-123");
+
+      const loaded = await repo.getConvergence("vps-1");
+      expect(loaded?.setupState).toBe("needs_access");
+      expect(loaded?.suppressedBuildId).toBe("build-123");
+
+      // Two queued jobs
+      await repo.create({ ...baseJob(), id: "lug_1", vpsId: "vps-1", targetArch: "amd64" });
+      await repo.create({ ...baseJob(), id: "lug_2", vpsId: "vps-2", targetArch: "amd64" });
+
+      // Claim first job -> succeeds
+      const claimed1 = await repo.compareAndSet("lug_1", 0, { state: "claimed" });
+      expect(claimed1?.state).toBe("claimed");
+
+      // Claim second job while first is executing -> throws global_active error
+      await expect(
+        repo.compareAndSet("lug_2", 0, { state: "claimed" }),
+      ).rejects.toThrowError(/Another agent upgrade job is currently executing/);
+
+      // listActive returns only active non-terminal jobs
+      const activeList = await repo.listActive();
+      expect(activeList.length).toBe(2);
+
+      // Transition first job to terminal succeeded
+      await repo.compareAndSet("lug_1", 1, {
+        state: "succeeded",
+        result: { outcome: "succeeded", completedAt: new Date().toISOString() },
+      });
+
+      // Now claim second job -> succeeds!
+      const claimed2 = await repo.compareAndSet("lug_2", 0, { state: "claimed" });
+      expect(claimed2?.state).toBe("claimed");
     } finally {
       await pool.end();
       await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);

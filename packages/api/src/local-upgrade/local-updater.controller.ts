@@ -76,8 +76,8 @@ function extractProtocolVersion(req: Request): number {
 /**
  * Pull-only updater API. Authenticated by a dedicated bearer credential
  * scoped `local-updater` (never the metrics/agent credential), bound to the
- * local host VPS record. No dashboard session, no Origin check: the updater
- * is a headless client; scope + local binding are the authorization.
+ * credential VPS record. Remote fleet clients require protocol 3; bundled
+ * artifact downloads remain local-only. No dashboard session or Origin check.
  */
 @Controller("api/local-updater")
 export class LocalUpdaterController {
@@ -156,6 +156,16 @@ export class LocalUpdaterController {
     @Res() res: Response,
   ) {
     const credential = await this.authenticate(req);
+    const vps = await this.vps.get(credential.vpsId);
+    if (!vps || !isLocalHostVps(vps)) {
+      throw new ForbiddenException({
+        error: {
+          message:
+            "Artifact downloads via local updater route are only available for the local host",
+          code: "invalid_credential_scope",
+        },
+      });
+    }
     const artifact = await this.service.getJobArtifact(credential, jobId);
     res.setHeader("Content-Type", "application/octet-stream");
     res.setHeader("Content-Length", artifact.size);
@@ -181,6 +191,16 @@ export class LocalUpdaterController {
       throw new ForbiddenException({
         error: {
           message: "VPS not found for updater credential",
+          code: "invalid_credential_scope",
+        },
+      });
+    }
+    const isLocal = isLocalHostVps(vps);
+    const protocolVersion = extractProtocolVersion(req);
+    if (!isLocal && protocolVersion < 3) {
+      throw new ForbiddenException({
+        error: {
+          message: "Updater credential is not bound to a local host",
           code: "invalid_credential_scope",
         },
       });

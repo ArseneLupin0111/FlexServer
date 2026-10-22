@@ -14,6 +14,7 @@ async function installScenario(mode: "new" | "none" | "old") {
     execCommand: async (_v: unknown, command: string) => {
       if (command.includes("mv -f --")) rolledBack = true;
       return { stdout: command === "echo $HOME" ? "/home/audit" :
+        command.includes("uname -m") ? "x86_64" :
         command.startsWith("if mkdir") ? "acquired" :
         command.includes("owned:") ? "none" : "" };
     },

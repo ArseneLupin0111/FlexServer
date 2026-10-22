@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "./test/setup";
 import { App } from "./App";
+import "./DashboardApp";
 import { calculateServerOpsSummary } from "./components/dashboard/servers/ServerOpsSummary";
 
 const fetchMock = vi.fn();
@@ -442,7 +443,7 @@ describe("React dashboard", () => {
     );
     await userEvent.type(displayNameInput, "Production Singapore");
     await userEvent.type(screen.getByLabelText("Name"), "prod");
-    await userEvent.type(screen.getByLabelText(/Host/i, { selector: "input" }), "203.0.113.20");
+    await userEvent.type(screen.getByLabelText("Host / IP"), "203.0.113.20");
     await userEvent.type(screen.getByLabelText(/Username/i), "root");
     await userEvent.type(
       screen.getByLabelText(/Optional password/i),
@@ -460,6 +461,7 @@ describe("React dashboard", () => {
           host: "203.0.113.20",
           port: 22,
           username: "root",
+          fleetAutoUpdate: true,
         }),
       }),
     );

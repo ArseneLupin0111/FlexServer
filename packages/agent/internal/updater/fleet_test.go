@@ -76,6 +76,20 @@ func signPayloadEnvelope(t *testing.T, priv ed25519.PrivateKey, payloadStr strin
 	return raw
 }
 
+// testJobAuthorizer is an in-memory JobAuthorizer implementation for tests
+// that returns a pre-configured ClaimedJob or error.
+type testJobAuthorizer struct {
+	job *ClaimedJob
+	err error
+}
+
+func (a *testJobAuthorizer) Get(_ context.Context, _ string) (*ClaimedJob, error) {
+	if a.err != nil {
+		return nil, a.err
+	}
+	return a.job, nil
+}
+
 func TestVerifyFleetManifest_Success(t *testing.T) {
 	_, priv, pemBytes := generateTestEd25519Key(t)
 	buildID := "0123456789abcdef0123456789abcdef01234567"
@@ -397,7 +411,7 @@ func TestSecurity_RejectMaliciousTargetPath(t *testing.T) {
 			BuildID:   buildID,
 		},
 	}
-	auth := &smokeAuthorizer{job: apiJob}
+	auth := &testJobAuthorizer{job: apiJob}
 	res := &HelperResult{JobID: "job-sec-1", Action: actionApply}
 
 	applyRes := handleApplyFleet(context.Background(), cfg, auth, apiJob, "job-sec-1", staging, res)
@@ -471,7 +485,7 @@ func TestSecurity_RejectEscapingSourcePath(t *testing.T) {
 			BuildID:   buildID,
 		},
 	}
-	auth := &smokeAuthorizer{job: apiJob}
+	auth := &testJobAuthorizer{job: apiJob}
 	res := &HelperResult{JobID: "job-sec-2", Action: actionApply}
 
 	applyRes := handleApplyFleet(context.Background(), cfg, auth, apiJob, "job-sec-2", staging, res)
@@ -534,7 +548,7 @@ func TestSecurity_RejectUnsignedManifestRaw(t *testing.T) {
 			BuildID:   buildID,
 		},
 	}
-	auth := &smokeAuthorizer{job: apiJob}
+	auth := &testJobAuthorizer{job: apiJob}
 	res := &HelperResult{JobID: "job-sec-3", Action: actionApply}
 
 	applyRes := handleApplyFleet(context.Background(), cfg, auth, apiJob, "job-sec-3", staging, res)

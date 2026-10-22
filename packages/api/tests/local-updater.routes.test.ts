@@ -421,6 +421,69 @@ describe("local-updater credential isolation", () => {
     expect(res.body.error.code).toBe("invalid_credential_scope");
     expect(res.body.error.message).toContain("local host");
   });
+
+  it("allows legitimate protocol 3 fleet updater claim for a remote host", async () => {
+    const server = serveApp();
+    const remoteId = await createRemoteVps();
+    const token = await credentialToken(remoteId, "local-updater");
+
+    const res = await request(server)
+      .post("/api/local-updater/jobs/claim")
+      .set("Authorization", `Bearer ${token}`)
+      .set("X-Updater-Protocol-Version", "3")
+      .expect(200);
+    expect(res.body.data.job).toBeNull();
+  });
+
+  it("remote updater credential cannot claim a local host job", async () => {
+    const server = serveApp();
+    const localId = await createLocalVps();
+    await touchHeartbeat(localId);
+    await upsertBuild(localId, BASELINE_SHA, 5_000);
+    const localJob = await createQueuedJob(server, localId);
+
+    const remoteId = await createRemoteVps();
+    const remoteToken = await credentialToken(remoteId, "local-updater");
+
+    const res = await request(server)
+      .post("/api/local-updater/jobs/claim")
+      .set("Authorization", `Bearer ${remoteToken}`)
+      .set("X-Updater-Protocol-Version", "3")
+      .expect(200);
+    expect(res.body.data.job).toBeNull();
+
+    const untouched = await lugRepo.get(localJob.id);
+    expect(untouched?.state).toBe("queued");
+  });
+
+  it("remote updater credential cannot access local host artifact", async () => {
+    const server = serveApp();
+    const localId = await createLocalVps();
+    await touchHeartbeat(localId);
+    await upsertBuild(localId, BASELINE_SHA, 5_000);
+    const localJob = await createQueuedJob(server, localId);
+
+    const remoteId = await createRemoteVps();
+    const remoteToken = await credentialToken(remoteId, "local-updater");
+
+    const res = await request(server)
+      .get(`/api/local-updater/jobs/${localJob.id}/artifact`)
+      .set("Authorization", `Bearer ${remoteToken}`)
+      .set("X-Updater-Protocol-Version", "3")
+      .expect(403);
+    expect(res.body.error.code).toBe("invalid_credential_scope");
+  });
+
+  it("remote updater credential cannot access local rotation", async () => {
+    const server = serveApp();
+    const remoteId = await createRemoteVps();
+    const remoteToken = await credentialToken(remoteId, "local-updater");
+
+    await request(server)
+      .post(`/api/vps/${remoteId}/rotate-agent`)
+      .set("Authorization", `Bearer ${remoteToken}`)
+      .expect(401);
+  });
 });
 
 describe("claim, progress and result", () => {

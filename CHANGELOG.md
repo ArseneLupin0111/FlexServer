@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — Fleet CI regression fixes
+
+- Keep permanent updater security tests independent of deleted disposable smoke helpers.
+- Target the VPS host field by its exact accessible label, avoiding the automatic-update checkbox in the same form.
+- Require protocol 3 for remote fleet updater credentials while retaining VPS-bound claims and local-only bundled artifact downloads; update install-readiness fixtures for architecture detection.
+- Preload the dashboard module in its integration tests so lazy compilation is outside authentication assertions; retain the existing timeout.
+
 ## Unreleased — Signed fleet agent host updater and multi-component upgrades
 
 - Verify signed release manifest envelopes against pinned Ed25519 public key (`/etc/vps-updater/fleet-release.pub`) strictly over exact payload UTF-8 bytes without recanonicalization.

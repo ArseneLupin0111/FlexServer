@@ -47,9 +47,14 @@ function directlyInvoked(): boolean {
   catch { return resolve(process.argv[1]).toLowerCase() === resolve(fileURLToPath(import.meta.url)).toLowerCase(); }
 }
 if (directlyInvoked()) {
-  manageAiKeysFromCli().catch(() => {
-    // Storage and crypto failures may contain private values. Do not emit their messages.
-    console.error("AI key administration failed. Verify storage ownership, task state, and the original external keyring.");
+  manageAiKeysFromCli().catch((error: unknown) => {
+    // Emit only allowlisted diagnostics, never storage/crypto messages or values.
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    const safeCodes: Record<string, true> = { EACCES: true, EPERM: true, EROFS: true, ENOENT: true, ECONNREFUSED: true, "28P01": true, "42P01": true, "42501": true };
+    const reason = error instanceof Error && error.message === "Existing encrypted AI data requires its original keyring; initialization would orphan data."
+      ? "original_keyring_required"
+      : Object.hasOwn(safeCodes, code) ? code : "unclassified";
+    console.error(`AI key administration failed (${reason}). Verify storage ownership, task state, and the original external keyring.`);
     process.exitCode = 1;
   });
 }

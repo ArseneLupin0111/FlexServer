@@ -880,6 +880,7 @@ jobs:
           TERMINAL_OUTPUT_BUFFER_BYTES_VALUE="${TERMINAL_OUTPUT_BUFFER_BYTES_VALUE:-1048576}"
           TERMINAL_INPUT_BUFFER_BYTES_VALUE="${TERMINAL_INPUT_BUFFER_BYTES_VALUE:-65536}"
           TERMINAL_SLOW_CONSUMER_TIMEOUT_MS_VALUE="${TERMINAL_SLOW_CONSUMER_TIMEOUT_MS_VALUE:-10000}"
+          APP_AI_ENABLED_VALUE="${APP_AI_ENABLED_VALUE:-true}"
 
           SSH_OPTS=(
             -i ~/.ssh/deploy_key
@@ -957,6 +958,8 @@ jobs:
           LOCAL_AGENT_ROTATION_HELPER=/usr/local/bin/local-agent-rotation-client
           LOCAL_AGENT_ROTATION_SOCKET=/var/run/flexserver/agent-rotation/agent-rotation.sock
           SSH_KEY_ENCRYPTION_KEY_FILE=/etc/flexserver/ssh-keyring.json
+          AI_KEYRING_FILE=/etc/flexserver/ai-keyring.json
+          APP_AI_ENABLED=$APP_AI_ENABLED_VALUE
           COMPOSE_KEYRING_FILE=/etc/flexserver/compose-keyring.json
           COMPOSE_CLAIM_LEASE_SECONDS=120
           COMPOSE_INVENTORY_MAX_BYTES=524288
@@ -1003,6 +1006,8 @@ jobs:
                 LOCAL_AGENT_ROTATION_SOCKET: \${LOCAL_AGENT_ROTATION_SOCKET:-/var/run/flexserver/agent-rotation/agent-rotation.sock}
                 SSH_KEY_ENCRYPTION_KEY_FILE: \${SSH_KEY_ENCRYPTION_KEY_FILE:-/etc/flexserver/ssh-keyring.json}
                 COMPOSE_KEYRING_FILE: \${COMPOSE_KEYRING_FILE:-/etc/flexserver/compose-keyring.json}
+                AI_KEYRING_FILE: \${AI_KEYRING_FILE:-/etc/flexserver/ai-keyring.json}
+                APP_AI_ENABLED: \${APP_AI_ENABLED:-true}
                 COMPOSE_CLAIM_LEASE_SECONDS: \${COMPOSE_CLAIM_LEASE_SECONDS:-120}
                 COMPOSE_INVENTORY_MAX_BYTES: \${COMPOSE_INVENTORY_MAX_BYTES:-524288}
                 COMPOSE_PREVIEW_TTL_SECONDS: \${COMPOSE_PREVIEW_TTL_SECONDS:-300}
@@ -1166,6 +1171,33 @@ jobs:
           "
           $SSH "cd '$DEPLOY_PATH' && docker compose run --rm api node dist/db/migrate.js"
           $SSH "cd '$DEPLOY_PATH' && docker compose run --rm api node dist/db/migrate.js --include-optional" || echo "Optional Timescale migration failed or is unavailable; continuing with core PostgreSQL schema."
+          # Provision the external AI keyring after core migrations so the CLI
+          # encrypted-data guard can consult the storage driver on a fresh DB.
+          "${SSH_BASE[@]}" "
+            set -euo pipefail
+            API_UID_GID=\"\$(docker run --rm --entrypoint sh '$API_IMAGE' -lc 'printf \"%s:%s\" \"\$(id -u)\" \"\$(id -g)\"')\"
+            if [[ ! \"\$API_UID_GID\" =~ ^[0-9]+:[0-9]+$ ]]; then
+              echo \"Error: Could not determine API container runtime UID/GID for $API_IMAGE.\" >&2
+              exit 1
+            fi
+            API_UID=\"\${API_UID_GID%%:*}\"
+            API_GID=\"\${API_UID_GID##*:}\"
+            KEYRING_DIR=\"/etc/flexserver\"
+            AI_KEYRING_FILE=\"\${KEYRING_DIR}/ai-keyring.json\"
+            sudo mkdir -p \"\$KEYRING_DIR\"
+            sudo chown \"\${API_UID}:\${API_GID}\" \"\$KEYRING_DIR\"
+            sudo chmod 0750 \"\$KEYRING_DIR\"
+            if sudo test -f \"\$AI_KEYRING_FILE\"; then
+              echo \"Preserving existing AI keyring at \$AI_KEYRING_FILE.\"
+              sudo chown \"\${API_UID}:\${API_GID}\" \"\$AI_KEYRING_FILE\"
+              sudo chmod 0600 \"\$AI_KEYRING_FILE\"
+            else
+              echo \"Initializing external AI key encryption keyring...\"
+              cd '$DEPLOY_PATH' && docker compose run --rm --no-deps -v \"\${KEYRING_DIR}:\${KEYRING_DIR}:rw\" -e AI_KEYRING_FILE=\"\$AI_KEYRING_FILE\" api node dist/scripts/manage-ai-keys.js init
+              sudo chown \"\${API_UID}:\${API_GID}\" \"\$AI_KEYRING_FILE\"
+              sudo chmod 0600 \"\$AI_KEYRING_FILE\"
+            fi
+          "
           # Bootstrap/rotate dashboard admin password if secret is provided
           if [ -n "$DASHBOARD_ADMIN_PASSWORD" ]; then
             printf '%s\n' "$DASHBOARD_ADMIN_PASSWORD" | $SSH "cd '$DEPLOY_PATH' && docker compose run --rm -T api node dist/scripts/set-dashboard-password.js --stdin --skip-if-same"

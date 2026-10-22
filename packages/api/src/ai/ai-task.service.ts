@@ -1,7 +1,7 @@
 import { BadRequestException, Inject, Injectable, NotFoundException, OnModuleDestroy } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type { Request } from "express";
-import { AI_REPOSITORY, APP_CONFIG, DOCKER_MONITORING_REPOSITORY } from "../tokens.js";
+import { AI_REPOSITORY, APP_CONFIG, DOCKER_MONITORING_REPOSITORY, VPS_REPOSITORY } from "../tokens.js";
 import type { AiRepository } from "../persistence/repositories/ai.persistence.js";
 import { AiPersistenceConflictError } from "../persistence/repositories/ai.persistence.js";
 import type { AppConfig } from "../config/app-config.js";
@@ -18,6 +18,7 @@ import { DashboardSessionService } from "../auth/dashboard-session.service.js";
 import { DockerMonitoringService } from "../docker/docker-monitoring.service.js";
 import { AiHostPlanService, hostTools, sha256 } from "./ai-host-plan.service.js";
 import { AiDockerBridgeService, bridgeTools } from "./ai-docker-bridge.service.js";
+import type { VpsRepository } from "../persistence/repositories/vps.repository.js";
 import { AiReadToolsService, readTools } from "./ai-read-tools.service.js";
 import type { DockerMonitoringRepository } from "../persistence/repositories/docker-monitoring.repository.js";
 
@@ -46,6 +47,7 @@ export class AiTaskService implements OnModuleDestroy {
     @Inject(AiDockerBridgeService) private readonly dockerBridge: AiDockerBridgeService,
     @Inject(DOCKER_MONITORING_REPOSITORY) private readonly monitoring: DockerMonitoringRepository,
     @Inject(AiReadToolsService) private readonly readToolsService: AiReadToolsService,
+    @Inject(VPS_REPOSITORY) private readonly vps: VpsRepository,
   ) {}
   onModuleDestroy() { for (const controller of this.running.values()) controller.abort(); }
   private authorize(request: Request) { this.policy.requireAdminSession(request); if (!this.policy.isGlobalEnabled()) throw new AiAssistantError("ai_disabled"); }
@@ -65,6 +67,9 @@ export class AiTaskService implements OnModuleDestroy {
     this.authorize(request);
     const input = createAiTaskSchema.safeParse(body);
     if (!input.success) throw new BadRequestException("Invalid AI task");
+    // Absent-policy defaults must not grant capability to an unknown or
+    // deleted VPS: the AI policy is projected, so existence is the gate.
+    if (!await this.vps.get(vpsId)) throw new NotFoundException("VPS not found");
     const policy = await this.policy.authorizeTaskAdmission(vpsId, true);
     this.policy.authorizeToolCall(policy, "readEnabled");
     const readiness = await this.policy.resolveProviderReadiness();

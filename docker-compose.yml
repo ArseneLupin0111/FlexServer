@@ -74,6 +74,8 @@ services:
       SSH_KEY_ENCRYPTION_KEY_FILE: ${SSH_KEY_ENCRYPTION_KEY_FILE:-}
       # Keyring is an external secret; mount its configured path read-only.
       COMPOSE_KEYRING_FILE: ${COMPOSE_KEYRING_FILE:-/etc/flexserver/compose-keyring.json}
+      AI_KEYRING_FILE: ${AI_KEYRING_FILE:-/etc/flexserver/ai-keyring.json}
+      APP_AI_ENABLED: ${APP_AI_ENABLED:-true}
       COMPOSE_CLAIM_LEASE_SECONDS: ${COMPOSE_CLAIM_LEASE_SECONDS:-120}
       COMPOSE_INVENTORY_MAX_BYTES: ${COMPOSE_INVENTORY_MAX_BYTES:-524288}
       COMPOSE_PREVIEW_TTL_SECONDS: ${COMPOSE_PREVIEW_TTL_SECONDS:-300}

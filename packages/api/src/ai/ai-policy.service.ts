@@ -1,13 +1,14 @@
 // ── AI policy, capability and admission gate (plan §4, §7.2, §9) ────────
 //
 // Permission to act = intersection of:
-//   admin policy (ai_policies row, defaults off) × current VPS gates ×
-//   host capability snapshot (ai_capabilities, freshness-bounded) ×
+//   admin policy (ai_policies row; absent rows default on for ai/read/
+//   docker/compose, off for shell/egress/scopes) × current VPS gates ×
 //   tool policy × approval requirement × provider configuration.
 //
 // Demo mode never reaches a provider or a real host action; runtime
-// opt-ins (read/docker/compose/shell/egress) are default OFF and every
-// mutation step must be covered by a consumed canonical plan approval.
+// opt-ins (shell/egress) default OFF and every mutation step must be
+// covered by a consumed canonical plan approval; read/docker/compose
+// gates default ON with no persisted policy.
 // Gate answers are decided here — never from model output.
 
 import { Inject, Injectable, Logger } from "@nestjs/common";

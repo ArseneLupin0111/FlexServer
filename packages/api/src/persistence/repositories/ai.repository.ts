@@ -24,9 +24,11 @@ import {
 } from "./json-file.js";
 
 const bumpRevision = (revision: number): number => revision + 1;
+// Absent-policy default: observation and approval-gated management stay
+// available by default; shell and provider-egress grants remain opt-in.
 const defaultAiPolicy = (vpsId: string): AiPolicy => ({
-  vpsId, aiEnabled: false, readEnabled: false, dockerActionsEnabled: false,
-  composeActionsEnabled: false, shellEnabled: false, fileReadScopes: [],
+  vpsId, aiEnabled: true, readEnabled: true, dockerActionsEnabled: true,
+  composeActionsEnabled: true, shellEnabled: false, fileReadScopes: [],
   fileWriteScopes: [], serviceProfileIds: [], sendLogsToProvider: false,
   sendFilesToProvider: false, revision: 0, updatedAt: new Date(0).toISOString(),
 });
@@ -868,7 +870,7 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
 
     async getAiPolicy(vpsId) {
       const state = await exec((s) => s);
-      return state.policies.find((p) => p.vpsId === vpsId);
+      return state.policies.find((p) => p.vpsId === vpsId) ?? defaultAiPolicy(vpsId);
     },
 
     async updateAiPolicy(input) {

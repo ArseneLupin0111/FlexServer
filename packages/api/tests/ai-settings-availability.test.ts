@@ -27,4 +27,19 @@ describe("AI settings availability", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+  it("allows observation and approval-gated management without overriding an explicit VPS opt-out", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ai-onboarding-policy-"));
+    try {
+      const repository = createJsonAiRepository(join(dir, "ai.json"));
+      const config = parseAppConfig({ APP_MODE: "local", DASHBOARD_SESSION_SECRET: "settings-test-secret-at-least-32-characters" });
+      const policy = new AiPolicyService(config, repository);
+      await expect(policy.authorizeTaskAdmission("vps-new", true)).resolves.toMatchObject({ aiEnabled: true, readEnabled: true, dockerActionsEnabled: true, composeActionsEnabled: true, shellEnabled: false, fileReadScopes: [], fileWriteScopes: [], sendLogsToProvider: false, sendFilesToProvider: false });
+      const current = await repository.getAiPolicy("vps-new");
+      await repository.updateAiPolicy({ vpsId: "vps-new", patch: { aiEnabled: false }, expectedRevision: current!.revision });
+      await expect(policy.authorizeTaskAdmission("vps-new", true)).rejects.toMatchObject({ code: "ai_disabled" });
+      await expect(policy.authorizeTaskAdmission("vps-other", true)).resolves.toMatchObject({ aiEnabled: true });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

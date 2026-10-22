@@ -104,6 +104,12 @@ export function AssistantSettingsModal({
       setCheckResult(null);
     }
   }, [providerSettings, open]);
+  useEffect(() => {
+    if (open) {
+      setActiveTab("provider");
+    }
+  }, [open]);
+
 
   useEffect(() => {
     if (policy) {
@@ -121,6 +127,12 @@ export function AssistantSettingsModal({
       setPolicySuccess(null);
     }
   }, [policy, open]);
+  const hasExistingConnection = Boolean(
+    providerSettings &&
+      (providerSettings.hasApiKey ||
+        (providerSettings.endpoint && providerSettings.endpoint.trim().length > 0)),
+  );
+
 
   if (!open) return null;
 
@@ -248,7 +260,7 @@ export function AssistantSettingsModal({
             }`}
           >
             <Globe className="h-3.5 w-3.5" />
-            <span>Global Provider</span>
+            <span>Provider</span>
           </button>
 
           <button
@@ -261,7 +273,7 @@ export function AssistantSettingsModal({
             }`}
           >
             <Server className="h-3.5 w-3.5" />
-            <span>Host Policy & Scopes</span>
+            <span>Advanced permissions</span>
           </button>
 
           <button
@@ -274,7 +286,7 @@ export function AssistantSettingsModal({
             }`}
           >
             <Cpu className="h-3.5 w-3.5" />
-            <span>Host Capability</span>
+            <span>Host execution</span>
           </button>
         </div>
 
@@ -444,7 +456,7 @@ export function AssistantSettingsModal({
                   {savingProvider ? (
                     <LoaderCircle className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                   ) : null}
-                  Save Global Settings
+                  {hasExistingConnection ? "Update connection" : "Connect provider"}
                 </Button>
               </div>
             </div>
@@ -454,7 +466,7 @@ export function AssistantSettingsModal({
           {activeTab === "policy" ? (
             <div className="space-y-4">
               <div className="border border-line bg-ink/40 p-3 text-xs text-dim">
-                <span className="font-semibold text-text">Scope: Per-VPS Isolation.</span>{" "}
+                <span className="font-semibold text-text">Scope: Per-VPS Isolation (Optional).</span>{" "}
                 Controls tool invocation boundaries and egress disclosure for this host.
                 Modifying policy immediately invalidates all active pending plans.
               </div>
@@ -655,7 +667,7 @@ export function AssistantSettingsModal({
           {activeTab === "capability" ? (
             <div className="space-y-4">
               <div className="border border-line bg-ink/40 p-3 text-xs text-dim">
-                <span className="font-semibold text-text">Host Confinement & Runtime Telemetry.</span>{" "}
+                <span className="font-semibold text-text">Host Confinement & Runtime Telemetry (Optional).</span>{" "}
                 Reported by the installed agent daemon and verified before dispatching plan operations.
               </div>
 

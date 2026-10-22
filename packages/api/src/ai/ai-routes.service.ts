@@ -53,7 +53,7 @@ export class AiRoutesService {
   async policy(request: Request, vpsId: string) {
     this.authorize(request);
     if (!await this.vps.get(vpsId)) throw new NotFoundException("VPS not found");
-    return await this.repository.getAiPolicy(vpsId) ?? { vpsId, aiEnabled: false, readEnabled: false, dockerActionsEnabled: false, composeActionsEnabled: false, shellEnabled: false, fileReadScopes: [], fileWriteScopes: [], serviceProfileIds: [], sendLogsToProvider: false, sendFilesToProvider: false, revision: 0, updatedAt: new Date(0).toISOString() };
+    return await this.repository.getAiPolicy(vpsId) ?? { vpsId, aiEnabled: true, readEnabled: true, dockerActionsEnabled: true, composeActionsEnabled: true, shellEnabled: false, fileReadScopes: [], fileWriteScopes: [], serviceProfileIds: [], sendLogsToProvider: false, sendFilesToProvider: false, revision: 0, updatedAt: new Date(0).toISOString() };
   }
 
   async updatePolicy(request: Request, vpsId: string, body: unknown) {

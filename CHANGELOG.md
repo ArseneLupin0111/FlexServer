@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased — AI settings available by default
+## Unreleased — Provider-first AI onboarding
 
-- Default `APP_AI_ENABLED` to `true` so authenticated local administrators can configure a provider before using AI. Explicit `APP_AI_ENABLED=false` still disables AI globally.
-- Keep provider readiness checks and per-VPS policy opt-in unchanged; an unconfigured provider remains unavailable for execution.
+- Connect endpoint, model and API key to use cached metrics/inventory without per-VPS setup. Absent policies allow observation and approval-gated Docker/Compose proposals; persisted opt-outs remain authoritative and can be explicitly re-enabled with one action.
+- Keep shell execution, file scopes, service profiles and logs/files egress off by default. Existing management prerequisites, immutable-plan approval and the global `APP_AI_ENABLED=false` switch remain enforced.
+- Open settings on Provider; move advanced permissions and host execution to optional tabs. Unsupported host execution no longer blocks cached observations. Wire the Send button to task creation.
+- Provision the external AI keyring through supported installer/bootstrap/CI paths, preserving existing keys and refusing regeneration over encrypted data. CI initializes after core database migrations; keyring permissions remain `0600` in a `0750` directory.
 
 ## Unreleased — PostgreSQL deployment health
 

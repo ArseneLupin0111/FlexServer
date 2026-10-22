@@ -1,7 +1,8 @@
-# Opt-in Docker Compose override for the external Compose keyring. Demo defaults
-# remain unchanged when this file is omitted. The keyring is distinct from the
-# SSH keyring despite sharing the external /etc/flexserver directory.
-# Host directory: mode 0750, owned by the API runtime UID:GID; keyring file:
+# Opt-in Docker Compose override for the external Compose and AI keyrings. Demo
+# defaults remain unchanged when this file is omitted. The Compose keyring is
+# distinct from the AI keyring despite sharing the external /etc/flexserver
+# directory.
+# Host directory: mode 0750, owned by the API runtime UID:GID; keyring files:
 # mode 0600, owned by the same UID:GID. Provision separately before enabling.
 #
 # Usage:
@@ -13,3 +14,7 @@ services:
       - /etc/flexserver:/etc/flexserver:ro
     environment:
       COMPOSE_KEYRING_FILE: /etc/flexserver/compose-keyring.json
+      AI_KEYRING_FILE: ${AI_KEYRING_FILE:-/etc/flexserver/ai-keyring.json}
+      # Forwarded so admins can disable AI globally without editing this file;
+      # the override never force-enables an explicit APP_AI_ENABLED=false.
+      APP_AI_ENABLED: ${APP_AI_ENABLED:-true}

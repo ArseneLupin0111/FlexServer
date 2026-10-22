@@ -183,6 +183,15 @@ In containerized production deployments:
 - Permissions are strictly restricted: host directory `/etc/flexserver` has mode `0750` owned by the API runtime UID:GID (`100:101`), and `/etc/flexserver/ssh-keyring.json` has mode `0600` owned by the API runtime UID:GID.
 - An idempotent host bootstrapper script is provided at `scripts/install/bootstrap-ssh-keyring.sh`.
 - For standalone Docker Compose setups, the optional override `docker-compose.keyring.yml` mounts `/etc/flexserver` into the API container without breaking demo mode when unmounted.
+
+## AI Keyring Deployment & Container Wiring
+
+The AI subsystem uses the same external keyring directory as the SSH and Compose keyrings.
+- The external AI keyring resides outside checkout, `DATA_DIR`, and `PRIVATE_DIR` on the host at `/etc/flexserver/ai-keyring.json` (canonical default `AI_DEFAULT_KEYRING_PATH`; a custom `AI_KEYRING_FILE` from `.env` is preserved verbatim).
+- The host directory `/etc/flexserver` is mounted read-only into the API container: `- /etc/flexserver:/etc/flexserver:ro`. `AI_KEYRING_FILE` and `APP_AI_ENABLED` are defined in `.env` and passed through `docker-compose.yml` (`APP_AI_ENABLED` is forwarded but never force-enables an explicit `false`).
+- Permissions are strictly restricted: host directory `/etc/flexserver` mode `0750` owned by the API runtime UID:GID; `/etc/flexserver/ai-keyring.json` mode `0600` owned by the same UID:GID.
+- Supported deployments provision the AI keyring automatically: `scripts/install/bootstrap-ssh-keyring.sh` (SSH bootstrap), `scripts/install/install.sh` (own initial init), and the CI/CD host provisioning job. All invoke `node dist/scripts/manage-ai-keys.js init` with a one-shot read-write bind mount and the storage env intact; the CLI's encrypted-data guard refuses regeneration when encrypted AI data exists (stop JSON-storage API writers first — the CLI guards storage with a writer lock), and the CI deployment job runs core DB migrations before AI init on a fresh database.
+- Never remove a live writer lock; keep the external AI keyring and encrypted storage backed up separately (see `npm run manage-ai-keys` for `init|rotate|rewrap|check`).
 ### Docker Compose applications (phase 2)
 
 Compose discovery is observational. Each VPS has a separate Compose-management gate, disabled by default; existing Docker-container management permission does not enable it. Enabling the gate and opting a detected stack into external control are explicit, authenticated actions. Specifying an external Compose source path is privileged and separately consented; the path remains externally owned and is treated as read-only. Managed configuration is a separate path. There is no implicit `up` or `start`, no runtime installation triggered by ordinary application operations, and no automatic rollback. Start operates only on existing captured containers; a missing container cannot be recreated by Start. Readiness is evaluated using configured checks and observed results; a readiness timeout is a failed outcome that leaves observed resources in place. An uncertain operation remains locked for reconciliation—never blindly retry or clear its lock.
@@ -233,6 +242,8 @@ The AI adapter uses an explicitly configured OpenAI-compatible endpoint. It send
 AI secrets use a separate external keyring and the authenticated namespace `flexserver:ai:v1`. Envelopes bind VPS, task, field and revision; changing any identity invalidates decryption. Wrapped-key rotation preserves the encrypted payload and requires retaining old keys until all retained envelopes are rewrapped. Missing or invalid key material fails closed; there is no plaintext fallback. Do not reuse Compose or SSH keyring files for AI, mount provider credentials into agents, or log provider request/response bodies. Provider failures expose fixed error messages, not remote error bodies.
 
 Transport verification uses a synthetic local endpoint and does not establish compatibility, privacy, tool-selection quality or billing accuracy of a real provider. Host confinement and mutation rollout require independent Linux staging evidence; passing adapter tests does not authorize VPS operations.
+
+Connecting a provider makes cached metrics and inventory available without per-VPS setup for hosts without an explicit AI policy. Managed Docker/Compose actions may be proposed by default, but still require the existing management prerequisites and individual immutable-plan approval before execution. Existing saved policy opt-outs are preserved. Shell execution, file scopes, service profiles, and sending logs/files to the provider are not enabled automatically; host execution retains its separate confinement checks. `APP_AI_ENABLED=false` remains the global kill switch.
 
 ## AI Assistant Operational Safety, Retention, and Secret Redaction
 

@@ -3,8 +3,10 @@ import { useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
   Bot,
+  Cable,
   LoaderCircle,
   RefreshCw,
+  ShieldCheck,
   Terminal,
 } from "lucide-react";
 import type { VpsRecord } from "../../../lib/api";
@@ -357,9 +359,16 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   // Save global settings
   async function handleSaveProviderSettings(patch: UpdateAiSettings) {
     setActionBusy(true);
+    setRootError(null);
     try {
       const updated = await patchAiSettings(patch);
       setProviderSettings(updated);
+    } catch (err) {
+      setRootError(
+        err instanceof Error ? err.message : "Failed to save provider settings.",
+      );
+      // Modal caller surfaces its own error state; never report false success.
+      throw err;
     } finally {
       setActionBusy(false);
     }
@@ -368,6 +377,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   // Save host policy
   async function handleSavePolicy(patch: UpdateAiPolicy) {
     setActionBusy(true);
+    setRootError(null);
     try {
       const updated = await patchVpsAiPolicy(vps.id, patch);
       setPolicy(updated);
@@ -376,6 +386,12 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         const freshTask = await getVpsAiTask(vps.id, activeTaskId).catch(() => null);
         if (freshTask) setActiveTask(freshTask);
       }
+    } catch (err) {
+      setRootError(
+        err instanceof Error ? err.message : "Failed to save VPS policy.",
+      );
+      // Modal caller surfaces its own error state; never report false success.
+      throw err;
     } finally {
       setActionBusy(false);
     }
@@ -383,7 +399,13 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
 
   // Check provider connectivity
   async function handleCheckProvider() {
-    await checkAiProvider();
+    try {
+      await checkAiProvider();
+    } catch (err) {
+      setRootError(
+        err instanceof Error ? err.message : "Provider check failed.",
+      );
+    }
   }
 
   // Select history conversation
@@ -416,7 +438,6 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     });
   }
 
-  // Delete conversation
   async function handleDeleteConversation(convId: string) {
     await deleteVpsAiConversation(vps.id, convId);
     setConversations((prev) => prev.filter((c) => c.id !== convId));
@@ -425,8 +446,26 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       setMessages([]);
     }
   }
+
+  // One-click enable: observation plus individually-approved managed actions only.
+  async function handleEnableAssistant() {
+    if (actionBusy) return;
+    await handleSavePolicy({
+      aiEnabled: true,
+      readEnabled: true,
+      dockerActionsEnabled: true,
+      composeActionsEnabled: true,
+    });
+  }
+
+  const providerReady = Boolean(
+    providerSettings &&
+      providerSettings.endpoint.trim().length > 0 &&
+      providerSettings.model.trim().length > 0 &&
+      providerSettings.hasApiKey === true,
+  );
   const aiEnabled = policy?.aiEnabled === true;
-  const capabilitySupported = capability?.supported === true;
+  const readEnabled = policy?.readEnabled === true;
 
   if (loading) {
     return (
@@ -473,6 +512,50 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         </div>
       ) : null}
 
+      {/* Provider setup gate: visible Connect action before any configured provider */}
+      {!providerReady ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 border border-warn/40 bg-warn/10 px-4 py-2.5 text-xs text-warn">
+          <div className="flex items-center gap-2">
+            <Cable className="h-4 w-4 shrink-0" />
+            <span>
+              No provider is configured (endpoint, model, and API key). Connect a provider to
+              enable the Assistant on this host.
+            </span>
+          </div>
+          <Button
+            type="button"
+            variant="default"
+            size="sm"
+            onClick={() => setSettingsModalOpen(true)}
+            disabled={actionBusy}
+            className="text-xs font-semibold"
+          >
+            Connect Provider
+          </Button>
+        </div>
+      ) : !(aiEnabled && readEnabled) ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 border border-info/40 bg-info/10 px-4 py-2.5 text-xs text-info">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4 shrink-0" />
+            <span>
+              Provider is ready. Enabling grants read-only observation plus individually-approved
+              managed Docker and Compose actions; shell execution and file egress stay off until
+              explicitly approved in Settings.
+            </span>
+          </div>
+          <Button
+            type="button"
+            variant="default"
+            size="sm"
+            onClick={() => void handleEnableAssistant()}
+            disabled={actionBusy}
+            className="text-xs font-semibold"
+          >
+            Enable Assistant
+          </Button>
+        </div>
+      ) : null}
+
       {/* Main 2-column layout: Left Chat / Right Task Execution Console */}
       <div className="grid flex-1 grid-cols-1 gap-3 lg:grid-cols-12 min-h-0">
         {/* Left Column: Chat & Clarifications (7 cols on lg) */}
@@ -486,7 +569,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
             busyTaskId={busyTaskId}
             busy={actionBusy}
             aiEnabled={aiEnabled}
-            capabilitySupported={capabilitySupported}
+            providerReady={providerReady}
           />
         </div>
 

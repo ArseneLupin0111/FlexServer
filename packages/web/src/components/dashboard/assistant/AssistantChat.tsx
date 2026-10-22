@@ -26,7 +26,7 @@ export type AssistantChatProps = {
   busyTaskId?: string | null;
   busy?: boolean;
   aiEnabled: boolean;
-  capabilitySupported: boolean;
+  providerReady: boolean;
 };
 
 export function AssistantChat({
@@ -38,7 +38,7 @@ export function AssistantChat({
   busyTaskId,
   busy = false,
   aiEnabled,
-  capabilitySupported,
+  providerReady,
 }: AssistantChatProps) {
   const [inputText, setInputText] = useState("");
   const [clarificationText, setClarificationText] = useState("");
@@ -63,7 +63,7 @@ export function AssistantChat({
 
   async function handleSend() {
     const trimmed = inputText.trim();
-    if (!trimmed || sending || busy || isTaskRunning || !aiEnabled) return;
+    if (!trimmed || sending || busy || isTaskRunning || !(aiEnabled && providerReady)) return;
 
     setSending(true);
     setChatError(null);
@@ -122,8 +122,7 @@ export function AssistantChat({
               How can the Assistant help?
             </h2>
             <p className="mt-1 max-w-md text-xs text-dim">
-              Ask questions about host health, inspect docker workloads, or propose
-              administrative operations. All mutations require exact plan verification.
+              Connect provider to use metrics/inventory. Changes require approval; shell/files advanced.
             </p>
           </div>
         ) : (
@@ -277,14 +276,15 @@ export function AssistantChat({
         </div>
       ) : null}
 
-      {/* Disabled / Unsupported Banners */}
+      {/* Disabled / Provider Banner */}
       {!aiEnabled ? (
         <div className="border-t border-line bg-raised/30 p-3 text-xs text-dim">
-          AI Assistant is disabled on this VPS. Enable it in Settings to submit instructions.
+          AI Assistant is explicitly disabled by policy on this VPS. Enable it in Settings to
+          submit instructions.
         </div>
-      ) : !capabilitySupported ? (
-        <div className="border-t border-crit/30 bg-crit/5 p-3 text-xs text-dim">
-          Host environment does not support AI execution capabilities.
+      ) : !providerReady ? (
+        <div className="border-t border-line bg-raised/30 p-3 text-xs text-dim">
+          Connect a provider (endpoint, model, and API key) in Settings to enable the Assistant.
         </div>
       ) : null}
 
@@ -295,13 +295,15 @@ export function AssistantChat({
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={sending || busy || isTaskRunning || !aiEnabled}
+            disabled={sending || busy || isTaskRunning || !(aiEnabled && providerReady)}
             placeholder={
               isTaskRunning
                 ? "Task is currently executing..."
                 : !aiEnabled
-                  ? "AI Assistant is disabled."
-                  : "Ask the assistant or propose an operation (Shift+Enter for newline)..."
+                  ? "AI Assistant is explicitly disabled by policy."
+                  : !providerReady
+                    ? "Connect a provider in Settings to enable the Assistant."
+                    : "Ask the assistant or propose an operation (Shift+Enter for newline)..."
             }
             rows={3}
             maxLength={32768}
@@ -316,14 +318,14 @@ export function AssistantChat({
               type="button"
               size="sm"
               variant="default"
+              onClick={() => void handleSend()}
               disabled={
                 !inputText.trim() ||
                 sending ||
                 busy ||
                 isTaskRunning ||
-                !aiEnabled
+                !(aiEnabled && providerReady)
               }
-              onClick={() => void handleSend()}
               className="h-7 px-2.5 text-xs font-semibold"
             >
               {sending ? (

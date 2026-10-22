@@ -301,6 +301,19 @@ if [[ -z "$CURRENT_DASHBOARD_SECRET" ]]; then
   CURRENT_DASHBOARD_SECRET="${CURRENT_DASHBOARD_SECRET:0:64}"
 fi
 
+CURRENT_AI_KEYRING_FILE=""
+if [[ -f "$ENV_FILE" ]]; then
+  CURRENT_AI_KEYRING_FILE=$(grep -E '^AI_KEYRING_FILE=' "$ENV_FILE" | cut -d= -f2- || true)
+fi
+
+if [[ -n "$CURRENT_AI_KEYRING_FILE" ]]; then
+  AI_KEYRING_FILE="$CURRENT_AI_KEYRING_FILE"
+  AI_KEYRING_DIR="$(dirname "$AI_KEYRING_FILE")"
+else
+  AI_KEYRING_DIR="$KEYRING_DIR"
+  AI_KEYRING_FILE="${AI_KEYRING_DIR}/ai-keyring.json"
+fi
+
 # ── URL resolution ────────────────────────────────────────────────────────
 #
 # Precedence (contract order):
@@ -411,6 +424,8 @@ AUDIT_HISTORY_LIMIT=5000
 
 SSH_HOST_KEY_POLICY=strict
 SSH_KEY_ENCRYPTION_KEY_FILE=${KEYRING_FILE}
+AI_KEYRING_FILE=${AI_KEYRING_FILE}
+APP_AI_ENABLED=true
 COMPOSE_KEYRING_FILE=/etc/flexserver/compose-keyring.json
 COMPOSE_CLAIM_LEASE_SECONDS=120
 COMPOSE_INVENTORY_MAX_BYTES=524288
@@ -455,6 +470,7 @@ services:
 ${TERMINAL_VOLUME_LINE}
     env_file: .env
     environment:
+      AI_KEYRING_FILE: ${AI_KEYRING_FILE}
 ${TERMINAL_ENV_LINE}
       SSH_KEY_ENCRYPTION_KEY_FILE: ${KEYRING_FILE}
       LOCAL_AGENT_ROTATION_HELPER: /usr/local/bin/local-agent-rotation-client
@@ -513,7 +529,7 @@ fi
 # be written on first boot.
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "[DRY-RUN] Would set ${DATA_DIR} and ${PRIVATE_DIR} ownership to the API container user"
-  echo "[DRY-RUN] Would prepare ${KEYRING_DIR} (chmod 0750) and initialize/migrate ${KEYRING_FILE}"
+  echo "[DRY-RUN] Would prepare ${KEYRING_DIR} (chmod 0750) and initialize/migrate ${KEYRING_FILE} plus AI keyring ${AI_KEYRING_FILE}"
 else
   API_UID_GID="$(docker run --rm --entrypoint sh "$API_IMAGE" -lc 'printf "%s:%s" "$(id -u)" "$(id -g)"')"
   if [[ ! "$API_UID_GID" =~ ^[0-9]+:[0-9]+$ ]]; then
@@ -546,6 +562,28 @@ else
   docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
     -v "${KEYRING_DIR}:${KEYRING_DIR}:ro" \
     api node dist/scripts/manage-ssh-keys.js migrate --path "$KEYRING_FILE"
+
+  if [[ "$AI_KEYRING_DIR" != "$KEYRING_DIR" ]]; then
+    mkdir -p "$AI_KEYRING_DIR"
+    chown "$API_UID_GID" "$AI_KEYRING_DIR"
+    chmod 0750 "$AI_KEYRING_DIR"
+  fi
+
+  if test -f "$AI_KEYRING_FILE"; then
+    echo "[Setup] Preserving existing AI keyring at ${AI_KEYRING_FILE}."
+    chown "$API_UID_GID" "$AI_KEYRING_FILE"
+    chmod 0600 "$AI_KEYRING_FILE"
+  else
+    echo "[Setup] Initializing AI key encryption keyring..."
+    # Stopping API first because the CLI guards JSON storage with a writer lock.
+    docker compose -f "$COMPOSE_FILE" rm -sf api >/dev/null 2>&1 || true
+    docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
+      -v "${AI_KEYRING_DIR}:${AI_KEYRING_DIR}:rw" \
+      -e AI_KEYRING_FILE="$AI_KEYRING_FILE" \
+      api node dist/scripts/manage-ai-keys.js init
+    chown "$API_UID_GID" "$AI_KEYRING_FILE"
+    chmod 0600 "$AI_KEYRING_FILE"
+  fi
 fi
 
 # ── Start ─────────────────────────────────────────────────────────────────

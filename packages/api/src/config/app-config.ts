@@ -81,7 +81,7 @@ const booleanSchema = z
 const envSchema = z.object({
   APP_MODE: z.enum(["demo", "local"]).default("demo"),
   ENABLE_WEB_TERMINAL: booleanSchema.default("false"),
-  APP_AI_ENABLED: booleanSchema.default("false"),
+  APP_AI_ENABLED: booleanSchema.default("true"),
   ALLOW_PRIVATE_NETWORK_TARGETS: booleanSchema.default("false"),
   DATA_DIR: z.string().trim().min(1).default("data"),
   PRIVATE_DIR: z.string().trim().min(1).default("private"),

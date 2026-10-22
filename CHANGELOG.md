@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — AI settings available by default
+
+- Default `APP_AI_ENABLED` to `true` so authenticated local administrators can configure a provider before using AI. Explicit `APP_AI_ENABLED=false` still disables AI globally.
+- Keep provider readiness checks and per-VPS policy opt-in unchanged; an unconfigured provider remains unavailable for execution.
+
 ## Unreleased — PostgreSQL deployment health
 
 - Restore the shared `DATABASE_POOL` provider in application wiring so PostgreSQL health checks receive the initialized pool instead of returning HTTP 503 `Database pool not available`.

@@ -42,6 +42,19 @@ func runUnixSocketServer(socketPath, shell string, defaultRows, defaultCols uint
 	}
 
 	var shuttingDown atomic.Bool
+	var activeSessions atomic.Int32
+	activeMarkerPath := filepath.Join(dir, "active_sessions")
+	updateMarker := func(delta int32) {
+		n := activeSessions.Add(delta)
+		if n < 0 {
+			n = 0
+			activeSessions.Store(0)
+		}
+		_ = os.WriteFile(activeMarkerPath, []byte(fmt.Sprintf("%d\n", n)), 0o644)
+	}
+	updateMarker(0)
+	defer os.Remove(activeMarkerPath)
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -61,14 +74,17 @@ func runUnixSocketServer(socketPath, shell string, defaultRows, defaultCols uint
 			return err
 		}
 		sessionWg.Add(1)
+		updateMarker(1)
 		go func(c net.Conn) {
 			defer sessionWg.Done()
+			defer updateMarker(-1)
 			defer c.Close()
 			_ = runSession(c, c, shell, defaultRows, defaultCols)
 		}(conn)
 	}
 	closeAllSessions()
 	sessionWg.Wait()
+	_ = os.Remove(activeMarkerPath)
 	_ = os.Remove(socketPath)
 	return nil
 }

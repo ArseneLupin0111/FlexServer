@@ -177,7 +177,10 @@ AI_EXECUTOR_SRC=""
 AI_HOST_HELPER_SRC=""
 AI_ROOTFS_TAR_SRC=""
 AI_ROOTFS_MANIFEST_SRC=""
+AI_ROOTFS_BUNDLE_SRC=""
 AI_PROFILES_DIR_SRC=""
+AI_PROFILES_BUNDLE_SRC=""
+FLEET_RELEASE_PUB_KEY_SRC=""
 AI_USER="${AI_USER_DEFAULT}"
 AI_GROUP="${AI_GROUP_DEFAULT}"
 
@@ -264,8 +267,14 @@ while [[ $# -gt 0 ]]; do
       AI_ROOTFS_TAR_SRC="$2"; INSTALL_AI=true; shift 2 ;;
     --ai-rootfs-manifest)
       AI_ROOTFS_MANIFEST_SRC="$2"; INSTALL_AI=true; shift 2 ;;
+    --ai-rootfs-bundle)
+      AI_ROOTFS_BUNDLE_SRC="$2"; INSTALL_AI=true; shift 2 ;;
     --ai-profiles-dir)
       AI_PROFILES_DIR_SRC="$2"; INSTALL_AI=true; shift 2 ;;
+    --ai-profiles-bundle)
+      AI_PROFILES_BUNDLE_SRC="$2"; INSTALL_AI=true; shift 2 ;;
+    --fleet-release-pub-key)
+      FLEET_RELEASE_PUB_KEY_SRC="$2"; shift 2 ;;
     --ai-user)
       AI_USER="$2"; shift 2 ;;
     --ai-group)
@@ -297,6 +306,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --ai-profiles-dir <path>     Path to root-owned AI profiles directory."
       echo "  --ai-user <user>             Unprivileged AI execution user (default: ${AI_USER_DEFAULT})."
       echo "  --ai-group <group>           Unprivileged AI execution group (default: ${AI_GROUP_DEFAULT})."
+      echo "  --fleet-release-pub-key <path>"
+      echo "                               Path to pinned Ed25519 public key file for signed fleet updates."
       echo "  --help                Show this help."
       exit 0 ;;
     *)
@@ -820,9 +831,17 @@ if [[ "$INSTALL_AI" == "true" ]]; then
     chown root:root "$AI_PROFILES_DIR" "$AI_ROOTFS_DIR"
     chmod 0755 "$AI_PROFILES_DIR" "$AI_ROOTFS_DIR"
 
-    # Install default profiles
-    if [[ -n "$AI_PROFILES_DIR_SRC" && -d "$AI_PROFILES_DIR_SRC" ]]; then
-      cp -a "$AI_PROFILES_DIR_SRC"/* "$AI_PROFILES_DIR/" 2>/dev/null || true
+    # Extract rootfs bundle (remote-style tar enclosing a rootfs/ directory)
+    if [[ -n "$AI_ROOTFS_BUNDLE_SRC" && -f "$AI_ROOTFS_BUNDLE_SRC" ]]; then
+      echo "[install-ai] Unpacking rootfs bundle ${AI_ROOTFS_BUNDLE_SRC} into ${AI_ROOTFS_DIR}"
+      tar -xzf "$AI_ROOTFS_BUNDLE_SRC" -C "$AI_ROOTFS_DIR" --strip-components=1 2>/dev/null || true
+    fi
+    # Extract profiles bundle (remote-style tar enclosing a profiles/ directory)
+    if [[ -n "$AI_PROFILES_BUNDLE_SRC" && -f "$AI_PROFILES_BUNDLE_SRC" ]]; then
+      echo "[install-ai] Unpacking profiles bundle ${AI_PROFILES_BUNDLE_SRC} into ${AI_PROFILES_DIR}"
+      tar -xzf "$AI_PROFILES_BUNDLE_SRC" -C "$AI_PROFILES_DIR" --strip-components=1 2>/dev/null || true
+      chmod 0644 "${AI_PROFILES_DIR}"/*.json 2>/dev/null || true
+      chown root:root "${AI_PROFILES_DIR}"/*.json 2>/dev/null || true
     fi
     if [[ ! -f "${AI_PROFILES_DIR}/nginx.json" ]]; then
       cat << 'EOF_NGINX' > "${AI_PROFILES_DIR}/nginx.json"
@@ -855,6 +874,11 @@ EOF_NGINX
       cp -f "$AI_ROOTFS_MANIFEST_SRC" "$AI_ROOTFS_MANIFEST"
       chmod 0644 "$AI_ROOTFS_MANIFEST"
       chown root:root "$AI_ROOTFS_MANIFEST"
+    fi
+
+    # Install pinned release public key for signed fleet updates
+    if [[ -n "$FLEET_RELEASE_PUB_KEY_SRC" && -f "$FLEET_RELEASE_PUB_KEY_SRC" ]]; then
+      install -m 0644 -o root -g root "$FLEET_RELEASE_PUB_KEY_SRC" /etc/vps-updater/fleet-release.pub
     fi
 
     # Install binaries
@@ -1267,6 +1291,9 @@ if [[ -x /usr/local/lib/vps-manager-agent/vps-updater || -f /etc/vps-updater/con
     if [[ -f "$UPGRADE_CONFIG" ]]; then
       UPGRADE_ARGS+=(--config "$UPGRADE_CONFIG")
     fi
+    if [[ -n "$FLEET_RELEASE_PUB_KEY_SRC" && -f "$FLEET_RELEASE_PUB_KEY_SRC" ]]; then
+      UPGRADE_ARGS+=(--pubkey-file "$FLEET_RELEASE_PUB_KEY_SRC")
+    fi
     if [[ "$DRY_RUN" == "true" ]]; then
       UPGRADE_ARGS+=(--dry-run)
     fi
@@ -1286,12 +1313,11 @@ if [[ -x /usr/local/lib/vps-manager-agent/vps-updater || -f /etc/vps-updater/con
 elif [[ -n "${UPDATER_CONFIG_SRC:-}" && -f "${UPDATER_CONFIG_SRC:-}" ]] && [[ -n "$UPDATER_SRC" && -f "$UPDATER_SRC" ]]; then
   echo "Updater:  bootstrapping bundled safe-upgrade daemon..."
   BOOTSTRAP_ARGS=(--upgrade --binary "$UPDATER_SRC" --config "$UPDATER_CONFIG_SRC")
+  if [[ -n "$FLEET_RELEASE_PUB_KEY_SRC" && -f "$FLEET_RELEASE_PUB_KEY_SRC" ]]; then
+    BOOTSTRAP_ARGS+=(--pubkey-file "$FLEET_RELEASE_PUB_KEY_SRC")
+  fi
   if [[ "$DRY_RUN" == "true" ]]; then
     BOOTSTRAP_ARGS+=(--dry-run)
-  fi
-  if [[ -z "$UPDATER_INSTALL_SCRIPT" || (! -f "$UPDATER_INSTALL_SCRIPT" && "$DRY_RUN" != "true") ]]; then
-    echo "Error: install-updater.sh not found for updater bootstrap." >&2
-    exit 1
   fi
   if ! "$UPDATER_INSTALL_SCRIPT" "${BOOTSTRAP_ARGS[@]}"; then
     echo "Error: Bundled updater bootstrap failed." >&2

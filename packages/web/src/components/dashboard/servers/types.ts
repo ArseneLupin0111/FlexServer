@@ -10,6 +10,7 @@ export type CreateFormType = {
   port: string;
   username: string;
   password: string;
+  fleetAutoUpdate: boolean;
 };
 
 export type ServersPanelProps = {

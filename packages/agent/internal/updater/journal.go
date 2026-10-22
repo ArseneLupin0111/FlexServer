@@ -39,6 +39,7 @@ type Journal struct {
 	Phase            string    `json:"phase"`
 	SwapRequested    bool      `json:"swapRequested"`
 	PostSwap         bool      `json:"postSwap"`
+	UpdaterUpgraded  bool      `json:"updaterUpgraded,omitempty"`
 	OldSha256        string    `json:"oldSha256,omitempty"`
 	NewSha256        string    `json:"newSha256,omitempty"`
 	BaselineHBAt     time.Time `json:"baselineHeartbeatAt,omitempty"`

@@ -19,6 +19,20 @@ import { JobRunnerService } from "../jobs/job-runner.service.js";
 import { JobService } from "../jobs/job.service.js";
 import { AgentLifecycleCoordinator } from "./agent-lifecycle-coordinator.js";
 import {
+  APP_CONFIG,
+  AGENT_REPOSITORY,
+  FLEET_PROVISIONING_SERVICE,
+  FLEET_SERVICE,
+  KEY_SERVICE,
+  VPS_REPOSITORY,
+} from "../tokens.js";
+import type { FleetService } from "../agent-updates/fleet.service.js";
+import {
+  FleetProvisioningService,
+  normalizeArchitecture,
+  type Architecture,
+} from "./fleet-provisioning.service.js";
+import {
   AGENT_LIFECYCLE_LOCK,
   buildDockerStateProvisionCommand,
   buildLifecycleLockAcquireCommand,
@@ -29,12 +43,6 @@ import {
 } from "./agent-lifecycle-remote.js";
 import { resolveAgentBackendUrl } from "./agent-backend-url.js";
 import { sanitiseError } from "../jobs/job-runner.service.js";
-import {
-  APP_CONFIG,
-  AGENT_REPOSITORY,
-  VPS_REPOSITORY,
-  KEY_SERVICE,
-} from "../tokens.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -118,6 +126,10 @@ export class AgentInstallerService {
     @Inject(AgentLifecycleCoordinator)
     private readonly lifecycle: AgentLifecycleCoordinator,
     @Optional() private readonly polling?: Partial<Polling>,
+    @Optional()
+    @Inject(FLEET_PROVISIONING_SERVICE)
+    private readonly fleetProvisioning?: FleetProvisioningService,
+    @Optional() @Inject(FLEET_SERVICE) private readonly fleetService?: FleetService,
   ) {}
 
   /**
@@ -130,6 +142,7 @@ export class AgentInstallerService {
     vpsId: string,
     password: string | undefined,
     _requestHost: string | undefined,
+    fleetAutoUpdate?: boolean,
   ): Promise<{ jobId: string; state: AgentState }> {
     const releaseLifecycle = await this.lifecycle.tryAcquire(vpsId, "install");
     let handedOff = false;
@@ -152,8 +165,12 @@ export class AgentInstallerService {
       // 3. Resolve backend URL (may throw if localhost/no config)
       const backendUrl = resolveAgentBackendUrl(this.config);
 
-      // 4. Check agent binary exists locally
-      const binaryPath = this.resolveBinaryPath();
+      // Determine reinstall status before starting
+      const isReinstall =
+        priorState !== undefined && priorState.status !== "not_installed";
+
+      // 4. Initial check that an agent binary exists locally (defaulting to amd64 check)
+      let binaryPath = this.resolveBinaryPath("amd64");
       if (!existsSync(binaryPath)) {
         throw new BadRequestException(
           "Agent binary not found. Run 'npm run build:agent' first or configure AGENT_BINARY_PATH.",
@@ -232,6 +249,11 @@ export class AgentInstallerService {
           if (!homeDir || !validInstallHome(homeDir)) {
             throw new Error("Could not determine remote home directory");
           }
+
+          // Detect remote host architecture (no hardcoded amd64 override)
+          const unameResult = await this.ssh.execCommand(vps, "uname -m", sshAuth, 10_000);
+          const targetArch = normalizeArchitecture(unameResult.stdout);
+          binaryPath = this.resolveBinaryPath(targetArch);
           liveDir = `${homeDir}/.vps-manager-agent`;
           liveBinary = `${liveDir}/vps-agent`;
           liveConfig = `${liveDir}/config.json`;
@@ -444,6 +466,46 @@ export class AgentInstallerService {
           });
 
           await ctx.succeed("complete");
+          try {
+            if (this.fleetProvisioning) {
+              if (isReinstall) {
+                await this.fleetProvisioning.onAgentReinstalled(vpsId, sshAuth);
+              } else {
+                const autoUpdate = fleetAutoUpdate !== false;
+                if (autoUpdate) {
+                  await this.fleetProvisioning.provisionHost(vpsId, sshAuth, {
+                    isNewHost: true,
+                    fleetAutoUpdate: true,
+                  });
+                } else {
+                  await this.fleetProvisioning.recordNewHostPreference(vpsId, false);
+                }
+              }
+            } else if (this.fleetService) {
+              await this.fleetService
+                .onAgentInstallSuccess(vpsId, sshAuth, {
+                  isNewHost: !isReinstall,
+                  fleetAutoUpdate: fleetAutoUpdate !== false,
+                })
+                .catch(() => undefined);
+            }
+          } catch (provisionError) {
+            await this.audit
+              .record({
+                actor: "system",
+                action: "fleet.updater.provision.failure",
+                resourceType: "vps",
+                resourceId: vpsId,
+                result: "failure",
+                metadata: {
+                  error:
+                    provisionError instanceof Error
+                      ? provisionError.message
+                      : String(provisionError),
+                },
+              })
+              .catch(() => undefined);
+          }
           await this.ssh.execCommand(vps,
             `rm -f -- ${shellQuote(backupBinary)} ${shellQuote(backupConfig)} ${shellQuote(stagedBinary)} ${shellQuote(stagedConfig)}`,
             sshAuth, 10_000).catch(() => undefined);
@@ -620,17 +682,15 @@ export class AgentInstallerService {
     });
   }
 
-  private resolveBinaryPath(): string {
-    if (this.config.agentBinaryPath) {
+  private resolveBinaryPath(arch: Architecture = "amd64"): string {
+    if (this.config.agentBinaryPath && existsSync(this.config.agentBinaryPath)) {
       return this.config.agentBinaryPath;
     }
     const candidates = [
-      // Docker default path (set via AGENT_BINARY_PATH env in Dockerfile)
-      "/app/agent/vps-agent-linux-amd64",
-      // process.cwd() relative Docker default (when not set explicitly)
-      join(process.cwd(), "agent", "vps-agent-linux-amd64"),
-      // Source-tree development paths
-      join(process.cwd(), "packages", "agent", "dist", "vps-agent-linux-amd64"),
+      // Docker path with matching arch
+      `/app/agent/vps-agent-linux-${arch}`,
+      join(process.cwd(), "agent", `vps-agent-linux-${arch}`),
+      join(process.cwd(), "packages", "agent", "dist", `vps-agent-linux-${arch}`),
       join(
         process.cwd(),
         "..",
@@ -638,15 +698,13 @@ export class AgentInstallerService {
         "packages",
         "agent",
         "dist",
-        "vps-agent-linux-amd64",
+        `vps-agent-linux-${arch}`,
       ),
     ];
     const found = candidates.find((candidate) => existsSync(candidate));
     if (found) return found;
     throw new BadRequestException(
-      "Agent binary not found. The API Docker image includes the agent at /app/agent/vps-agent-linux-amd64. " +
-        "For local development, run 'npm run build:agent' first. " +
-        "You can also set AGENT_BINARY_PATH to override the search path.",
+      `Host agent binary for ${arch} not found. Looked in: ${candidates.join(", ")}`,
     );
   }
 }

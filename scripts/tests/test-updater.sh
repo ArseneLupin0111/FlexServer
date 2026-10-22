@@ -6,8 +6,8 @@
 # packages/agent/cmd/vps-updater).
 #
 # Verifies:
-#   1. Syntax: install-updater.sh, install-local-agent.sh, install.sh and
-#      this test pass `bash -n`.
+#   1. Syntax: install-updater.sh, install-local-agent.sh, install.sh,
+#      install-fleet-updater.sh, and this test pass `bash -n`.
 #   2. Live --help and behavioral rejection checks:
 #        - help command exits cleanly;
 #        - unprivileged non-dry-run install refused (tested across host EUID);
@@ -16,7 +16,12 @@
 #        - generated daemon, helper, and path units verify hardening and triggers;
 #        - SHA-256 match succeeds, mismatch and malformed hex rejected;
 #        - config validation rejects non-HTTPS, userinfo, unscoped bearer,
-#          deviant targets (binary/unit/stateDir), allowedHosts, malformed JSON.
+#          deviant targets (binary/unit/stateDir), allowedHosts, malformed JSON;
+#        - argument parsing rejects --fleet-release-pub-key and accepts --pubkey-file.
+#   2b. Installer boundary regression checks:
+#        - install-local-agent.sh forwards --pubkey-file to install-updater.sh at
+#          both upgrade and bootstrap callsites (never --fleet-release-pub-key);
+#        - install-local-agent.sh provisions pinned public key to /etc/vps-updater/fleet-release.pub.
 #   3. Scoped Go verification: vet + tests for internal/updater and
 #      internal/config, plus a GOOS=linux build of cmd/vps-updater.
 #
@@ -29,6 +34,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALL_UPDATER="${REPO_ROOT}/scripts/install/install-updater.sh"
 INSTALL_LOCAL="${REPO_ROOT}/scripts/install/install-local-agent.sh"
 INSTALL_SH="${REPO_ROOT}/scripts/install/install.sh"
+INSTALL_FLEET_UPDATER="${REPO_ROOT}/scripts/install/install-fleet-updater.sh"
 AGENT_DIR="${REPO_ROOT}/packages/agent"
 
 PASS=0
@@ -39,8 +45,10 @@ fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1" >&2; }
 
 # ── 1. Syntax ─────────────────────────────────────────────────────────────
 
-for f in "$INSTALL_UPDATER" "$INSTALL_LOCAL" "$INSTALL_SH" "${BASH_SOURCE[0]}"; do
-  if bash -n "$f"; then pass "$(basename "$f") syntax OK"; else fail "$(basename "$f") syntax"; fi
+for f in "$INSTALL_UPDATER" "$INSTALL_LOCAL" "$INSTALL_SH" "$INSTALL_FLEET_UPDATER" "${BASH_SOURCE[0]}"; do
+  if [[ -f "$f" ]]; then
+    if bash -n "$f"; then pass "$(basename "$f") syntax OK"; else fail "$(basename "$f") syntax"; fi
+  fi
 done
 
 # ── 2. Live --help and behavioral rejection checks ────────────────────────
@@ -162,6 +170,21 @@ JSON
     pass "malformed --sha256 is refused"
   fi
 
+  # Installer argument boundary: install-updater.sh accepts --pubkey-file
+  touch "$WORK/fleet-release.pub"
+  if "$INSTALL_UPDATER" --dry-run --upgrade --binary "$WORK/vps-updater" --config "$WORK/config-valid.json" --pubkey-file "$WORK/fleet-release.pub" >/dev/null 2>&1; then
+    pass "install-updater.sh accepts --pubkey-file in --upgrade mode"
+  else
+    fail "install-updater.sh must accept --pubkey-file in --upgrade mode"
+  fi
+
+  # install-updater.sh rejects legacy / foreign --fleet-release-pub-key option
+  if "$INSTALL_UPDATER" --dry-run --upgrade --binary "$WORK/vps-updater" --config "$WORK/config-valid.json" --fleet-release-pub-key "$WORK/fleet-release.pub" >/dev/null 2>&1; then
+    fail "install-updater.sh must reject unknown --fleet-release-pub-key option"
+  else
+    pass "install-updater.sh rejects unknown --fleet-release-pub-key option"
+  fi
+
   cat > "$WORK/config-http.json" <<JSON
 {
   "apiBase": "http://api.example.com",
@@ -271,6 +294,7 @@ JSON
 else
   fail "node or sha256sum/shasum unavailable for behavioral dry-run smoke"
 fi
+
 
 # ── 3. Scoped Go verification ─────────────────────────────────────────────
 

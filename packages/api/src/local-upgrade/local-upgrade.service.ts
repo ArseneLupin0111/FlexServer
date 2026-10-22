@@ -529,6 +529,7 @@ export class LocalUpgradeService {
   async claim(
     credential: AgentCredential,
     protocolVersion: number = 2,
+    evidence?: Record<string, unknown>,
   ): Promise<UpdaterClaimResult | null> {
     const nowMs = Date.now();
     await this.repository.recordUpdaterHeartbeat({
@@ -536,6 +537,12 @@ export class LocalUpgradeService {
       lastSeenAt: new Date(nowMs).toISOString(),
       credentialId: credential.id,
       protocolVersion,
+      ...(typeof evidence?.updaterVersion === "string" ? { updaterVersion: evidence.updaterVersion } : {}),
+      ...(typeof evidence?.platform === "object" && evidence.platform !== null ? { platform: evidence.platform as { os: string; arch: string } } : {}),
+      ...(typeof evidence?.idle === "boolean" ? { idle: evidence.idle } : {}),
+      ...(typeof evidence?.busyReason === "string" ? { busyReason: evidence.busyReason } : {}),
+      ...(Array.isArray(evidence?.installedAi) ? { installedAi: evidence.installedAi as string[] } : {}),
+      ...(typeof evidence?.aiHealth === "object" && evidence.aiHealth !== null ? { aiHealth: evidence.aiHealth as { status: string; healthy: boolean } } : {}),
     });
     await this.reconcile(credential.vpsId, nowMs);
 

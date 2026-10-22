@@ -114,6 +114,12 @@ import { AiAgentController } from "./ai/ai-agent.controller.js";
 import { AiAgentService } from "./ai/ai-agent.service.js";
 import { AiReadToolsService } from "./ai/ai-read-tools.service.js";
 import { AiRetentionService } from "./ai/ai-retention.service.js";
+import { FLEET_REPOSITORY, FLEET_SERVICE } from "./tokens.js";
+import type { FleetRepository } from "./persistence/repositories/fleet.repository.js";
+import { FleetService } from "./agent-updates/fleet.service.js";
+import { AgentUpdatesController } from "./agent-updates/agent-updates.controller.js";
+import { FleetProvisioningService } from "./agents/fleet-provisioning.service.js";
+import { FLEET_PROVISIONING_SERVICE } from "./tokens.js";
 export {
   ADMIN_CREDENTIAL_REPOSITORY,
   AGENT_REPOSITORY,
@@ -131,6 +137,7 @@ export {
   SESSION_REPOSITORY,
   VPS_REPOSITORY,
   SETTINGS_REPOSITORY,
+  FLEET_PROVISIONING_SERVICE,
 };
 
 const DATABASE_POOL_OWNS = Symbol("DATABASE_POOL_OWNS");
@@ -152,6 +159,7 @@ export type AppDependencies = {
   settings?: SettingsRepository;
   applicationsInventory?: ApplicationsInventoryRepository;
   ai?: AiRepository;
+  fleet?: FleetRepository;
   localFilesTransport?: FilesTransport;
   remoteFilesTransport?: FilesTransport;
   /** Optional pre-created DB pool. Caller owns lifecycle unless ownsPool=true. */
@@ -222,6 +230,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       AiSettingsController,
       AiPolicyController,
       AiAgentController,
+      AgentUpdatesController,
     ],
     providers: [
       { provide: APP_CONFIG, useValue: config },
@@ -418,6 +427,93 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       },
       BundledAgentService,
       LocalUpgradeService,
+      {
+        provide: FLEET_REPOSITORY,
+        useValue: deps.fleet ?? repositories!.fleet,
+      },
+      {
+        provide: FleetService,
+        inject: [
+          APP_CONFIG,
+          FLEET_REPOSITORY,
+          VPS_REPOSITORY,
+          AGENT_REPOSITORY,
+          LOCAL_UPGRADE_REPOSITORY,
+          LocalUpgradeService,
+          METRIC_REPOSITORY,
+          AuditService,
+          SshService,
+          KEY_SERVICE,
+          DATABASE_POOL,
+        ],
+        useFactory: (
+          appConfig: AppConfig,
+          fleetRepo: FleetRepository,
+          vpsRepo: VpsRepository,
+          agentRepo: AgentRepository,
+          localUpgradeRepo: LocalUpgradeRepository,
+          localUpgradeService: LocalUpgradeService,
+          metricRepo: MetricRepository,
+          audit: AuditService,
+          ssh: SshService,
+          keys: KeyService,
+          pool?: Pool,
+        ) =>
+          new FleetService({
+            config: appConfig,
+            fleetRepository: fleetRepo,
+            vpsRepository: vpsRepo,
+            agentRepository: agentRepo,
+            localUpgradeRepository: localUpgradeRepo,
+            localUpgradeService,
+            metricRepository: metricRepo,
+            auditService: audit,
+            sshService: ssh,
+            keyService: keys,
+            pool,
+          }),
+      },
+      {
+        provide: FLEET_SERVICE,
+        useExisting: FleetService,
+      },
+      {
+        provide: FleetProvisioningService,
+        inject: [
+          APP_CONFIG,
+          VPS_REPOSITORY,
+          KEY_SERVICE,
+          AGENT_REPOSITORY,
+          AgentService,
+          SshService,
+          AuditService,
+          FLEET_REPOSITORY,
+        ],
+        useFactory: (
+          config: AppConfig,
+          vpsRepo: VpsRepository,
+          keys: KeyService,
+          agentRepo: AgentRepository,
+          agentService: AgentService,
+          ssh: SshService,
+          audit: AuditService,
+          fleetRepo?: FleetRepository,
+        ) =>
+          new FleetProvisioningService(
+            config,
+            vpsRepo,
+            keys,
+            agentRepo,
+            agentService,
+            ssh,
+            audit,
+            fleetRepo,
+          ),
+      },
+      {
+        provide: FLEET_PROVISIONING_SERVICE,
+        useExisting: FleetProvisioningService,
+      },
        DockerActivityService,
        DockerMonitoringService,
        DockerManagementService,
@@ -445,6 +541,8 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           AgentLifecycleCoordinator,
           FilesService,
           ApplicationsService,
+          FLEET_REPOSITORY,
+          FleetProvisioningService,
         ],
         useFactory: (
           store: VpsRepository,
@@ -457,14 +555,16 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           agentRepo: AgentRepository,
           hostKeyPin: HostKeyPinService,
           upgrader: AgentUpgraderService,
-           restarter: AgentRestartService,
-           dockerMonitoringService: DockerMonitoringService,
+          restarter: AgentRestartService,
+          dockerMonitoringService: DockerMonitoringService,
           jobs: JobRepository, metrics: MetricRepository, docker: DockerMonitoringRepository,
           management: DockerManagementRepository, upgrades: LocalUpgradeRepository,
           pins: HostKeyPinRepository, terminal: TerminalSessionService, logs: DockerLogsService,
           lifecycle: AgentLifecycleCoordinator,
           filesService: FilesService,
           applications: ApplicationsService,
+          fleet: FleetRepository,
+          fleetProvisioning: FleetProvisioningService,
         ) =>
           new VpsService(
             store,
@@ -479,9 +579,10 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
              upgrader,
              restarter,
              dockerMonitoringService,
-             createVpsCleanup(agentRepo, jobs, metrics, docker, management, upgrades, pins, terminal, logs, applications),
+             createVpsCleanup(agentRepo, jobs, metrics, docker, management, upgrades, pins, terminal, logs, applications, fleet),
              lifecycle,
              filesService,
+             fleetProvisioning,
            ),
       },
     ],

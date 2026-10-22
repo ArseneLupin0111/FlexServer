@@ -1,14 +1,20 @@
 package updater
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/vps-manager/agent/internal/version"
 )
+
+var systemdUnitRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]+\.service$`)
 
 // parseHTTPBase parses an absolute http(s) base URL without userinfo.
 func parseHTTPBase(raw string) (*url.URL, error) {
@@ -51,9 +57,10 @@ type Config struct {
 
 	// VpsID is an optional trusted local VPS identifier override in the updater config.
 	VpsID string `json:"vpsId,omitempty"`
+	// FleetReleasePublicKeyFile is the path to the pinned Ed25519 public key PEM.
+	FleetReleasePublicKeyFile string `json:"fleetReleasePublicKeyFile,omitempty"`
 	// StateDir holds journal, staging, pending, results, backups and the lock.
 	StateDir string `json:"stateDir"`
-
 	// MaxArtifactBytes caps a single artifact download (default 128 MiB).
 	MaxArtifactBytes int64 `json:"maxArtifactBytes,omitempty"`
 	// HTTPTimeout bounds every API/download request.
@@ -77,20 +84,25 @@ type Config struct {
 	// testMode opts out of the fixed production invariants. It is unexported
 	// so no config file can ever enable it; only in-process test harnesses
 	// call EnableTestOverrides.
-	testMode        bool
-	testAuthorizer  JobAuthorizer
-	testLockDir     string
-	testTmpfilesDir string
+	testMode              bool
+	testAuthorizer        JobAuthorizer
+	testLockDir           string
+	testTmpfilesDir       string
+	testCanonicalTargets  map[string]string
+	testFleetPublicKeyPEM []byte
+	testUpdaterVersion    string
 }
-
-// Fixed production targets: the helper may only replace this binary and
-// restart this unit, and LoadConfig must resolve to exactly these.
 const (
-	FixedAgentBinary = "/usr/local/bin/vps-manager-agent"
-	FixedAgentUnit   = "vps-manager-agent.service"
-	FixedAgentConfig = "/etc/vps-manager-agent/config.json"
+	FixedAgentBinary           = "/usr/local/bin/vps-manager-agent"
+	FixedAgentUnit             = "vps-manager-agent.service"
+	FixedAgentConfig           = "/etc/vps-manager-agent/config.json"
+	FixedUpdaterBinary         = "/usr/local/lib/vps-manager-agent/vps-updater"
+	FixedAIExecutorBinary      = "/usr/local/sbin/ai-executor"
+	FixedAIHostHelperBinary    = "/usr/local/sbin/ai-host-helper"
+	FixedAIRootfsDir           = "/usr/local/share/flexserver-ai/rootfs"
+	FixedAIProfilesDir         = "/etc/flexserver-ai/profiles"
+	FixedFleetReleasePublicKey = "/etc/vps-updater/fleet-release.pub"
 )
-
 // EnableTestOverrides allows this in-process Config to deviate from the
 // fixed production invariants (https-only apiBase, fixed agent binary/unit,
 // pinned allowlist) so the fault-injection harness can redirect them at
@@ -101,6 +113,66 @@ func (c *Config) EnableTestOverrides() { c.testMode = true }
 func (c *Config) SetTestAuthorizer(auth JobAuthorizer) { c.testAuthorizer = auth }
 func (c *Config) SetTestLockDir(dir string)            { c.testLockDir = dir }
 func (c *Config) SetTestTmpfilesDir(dir string)        { c.testTmpfilesDir = dir }
+func (c *Config) SetTestCanonicalTargets(targets map[string]string) {
+	c.testCanonicalTargets = targets
+}
+
+func (c *Config) SetTestCanonicalTarget(component, target string) {
+	if c.testCanonicalTargets == nil {
+		c.testCanonicalTargets = make(map[string]string)
+	}
+	c.testCanonicalTargets[component] = target
+}
+
+func (c *Config) CanonicalTarget(component string) (string, bool) {
+	if c.testMode && c.testCanonicalTargets != nil {
+		if target, ok := c.testCanonicalTargets[component]; ok {
+			return target, true
+		}
+	}
+	switch component {
+	case "agent":
+		return c.AgentBinary, true
+	case "updater":
+		return FixedUpdaterBinary, true
+	case "ai-executor":
+		return FixedAIExecutorBinary, true
+	case "ai-host-helper":
+		return FixedAIHostHelperBinary, true
+	case "ai-rootfs":
+		return FixedAIRootfsDir, true
+	case "ai-profiles":
+		return FixedAIProfilesDir, true
+	default:
+		return "", false
+	}
+}
+
+func (c *Config) SetTestFleetPublicKeyPEM(pem []byte) {
+	c.testFleetPublicKeyPEM = pem
+}
+
+func (c *Config) FleetPublicKeyPEM() ([]byte, error) {
+	if c.testMode && len(c.testFleetPublicKeyPEM) > 0 {
+		return c.testFleetPublicKeyPEM, nil
+	}
+	keyPath := c.FleetReleasePublicKeyFile
+	if !c.testMode || keyPath == "" {
+		keyPath = FixedFleetReleasePublicKey
+	}
+	return LoadPublicKeyPEM(keyPath)
+}
+
+func (c *Config) SetTestUpdaterVersion(v string) {
+	c.testUpdaterVersion = v
+}
+
+func (c *Config) UpdaterVersion() string {
+	if c.testMode && c.testUpdaterVersion != "" {
+		return c.testUpdaterVersion
+	}
+	return version.String()
+}
 
 // Defaults applied when duration fields are absent or zero.
 const (
@@ -168,35 +240,69 @@ func (c *Config) NormalizeAndValidate() error {
 	if !strings.HasPrefix(c.Credential, "vma_") {
 		return fmt.Errorf("credential must be a scoped vma_ bearer")
 	}
-	if c.AgentBinary == "" {
-		if c.testMode {
-			return fmt.Errorf("agentBinary is required")
+	if c.VpsID != "" {
+		h := sha256.Sum256([]byte(c.VpsID))
+		expectedUnit := fmt.Sprintf("vps-agent-%x.service", h)
+		if c.AgentUnit == "" {
+			c.AgentUnit = expectedUnit
+		} else {
+			if !systemdUnitRe.MatchString(c.AgentUnit) {
+				return fmt.Errorf("invalid agentUnit name: %q", c.AgentUnit)
+			}
 		}
-		c.AgentBinary = FixedAgentBinary
-	}
-	if !c.testMode && c.AgentBinary != FixedAgentBinary {
-		return fmt.Errorf("agentBinary must be %s", FixedAgentBinary)
-	}
-	if c.testMode && !filepath.IsAbs(c.AgentBinary) {
-		return fmt.Errorf("agentBinary must be an absolute path")
-	}
-	if c.AgentUnit == "" {
-		c.AgentUnit = FixedAgentUnit
-	}
-	if !c.testMode && c.AgentUnit != FixedAgentUnit {
-		return fmt.Errorf("agentUnit must be %s", FixedAgentUnit)
-	}
-	if c.AgentConfig == "" {
-		if !c.testMode {
+		if c.AgentBinary == "" {
+			c.AgentBinary = FixedAgentBinary
+		} else if !filepath.IsAbs(c.AgentBinary) {
+			return fmt.Errorf("agentBinary must be an absolute path")
+		}
+		if c.AgentConfig == "" {
 			c.AgentConfig = FixedAgentConfig
+		} else if !filepath.IsAbs(c.AgentConfig) {
+			return fmt.Errorf("agentConfig must be an absolute path")
 		}
 	} else {
-		c.AgentConfig = filepath.Clean(c.AgentConfig)
-		if !c.testMode && c.AgentConfig != FixedAgentConfig {
-			return fmt.Errorf("agentConfig must be %s", FixedAgentConfig)
+		if c.AgentBinary == "" {
+			if c.testMode {
+				return fmt.Errorf("agentBinary is required")
+			}
+			c.AgentBinary = FixedAgentBinary
 		}
-		if c.testMode && !filepath.IsAbs(c.AgentConfig) {
-			return fmt.Errorf("agentConfig must be an absolute path")
+		if !c.testMode && c.AgentBinary != FixedAgentBinary {
+			return fmt.Errorf("agentBinary must be %s", FixedAgentBinary)
+		}
+		if c.testMode && !filepath.IsAbs(c.AgentBinary) {
+			return fmt.Errorf("agentBinary must be an absolute path")
+		}
+		if c.AgentUnit == "" {
+			c.AgentUnit = FixedAgentUnit
+		}
+		if !c.testMode && c.AgentUnit != FixedAgentUnit {
+			return fmt.Errorf("agentUnit must be %s", FixedAgentUnit)
+		}
+		if c.AgentConfig == "" {
+			if !c.testMode {
+				c.AgentConfig = FixedAgentConfig
+			}
+		} else {
+			c.AgentConfig = filepath.Clean(c.AgentConfig)
+			if !c.testMode && c.AgentConfig != FixedAgentConfig {
+				return fmt.Errorf("agentConfig must be %s", FixedAgentConfig)
+			}
+			if c.testMode && !filepath.IsAbs(c.AgentConfig) {
+				return fmt.Errorf("agentConfig must be an absolute path")
+			}
+		}
+	}
+	if c.FleetReleasePublicKeyFile == "" {
+		if !c.testMode {
+			c.FleetReleasePublicKeyFile = FixedFleetReleasePublicKey
+		}
+	} else {
+		if !c.testMode && c.FleetReleasePublicKeyFile != FixedFleetReleasePublicKey {
+			return fmt.Errorf("fleetReleasePublicKeyFile must be %s", FixedFleetReleasePublicKey)
+		}
+		if c.testMode && !filepath.IsAbs(c.FleetReleasePublicKeyFile) {
+			return fmt.Errorf("fleetReleasePublicKeyFile must be an absolute path")
 		}
 	}
 	if c.StateDir == "" {

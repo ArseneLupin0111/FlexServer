@@ -53,6 +53,8 @@ function updaterJob(job: LocalUpgradeJob, requiresReconcile = false) {
     targetUrl: job.targetUrl || `/api/local-updater/jobs/${job.id}/artifact`,
     targetSha256: job.targetSha256,
     targetSizeBytes: job.targetSizeBytes,
+    ...(job.components ? { components: job.components } : {}),
+    ...(job.manifestSha256 ? { manifestSha256: job.manifestSha256 } : {}),
   };
 }
 
@@ -88,10 +90,11 @@ export class LocalUpdaterController {
 
   @Post("jobs/claim")
   @HttpCode(200)
-  async claim(@Req() req: Request) {
+  async claim(@Req() req: Request, @Body() body: unknown) {
     const credential = await this.authenticate(req);
     const protocolVersion = extractProtocolVersion(req);
-    const claim = await this.service.claim(credential, protocolVersion);
+    const evidence = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : undefined;
+    const claim = await this.service.claim(credential, protocolVersion, evidence);
     if (!claim) return { data: { job: null } };
     return {
       data: {
@@ -174,10 +177,10 @@ export class LocalUpdaterController {
       });
     }
     const vps = await this.vps.get(credential.vpsId);
-    if (!vps || !isLocalHostVps(vps)) {
+    if (!vps) {
       throw new ForbiddenException({
         error: {
-          message: "Updater credential is not bound to a local host",
+          message: "VPS not found for updater credential",
           code: "invalid_credential_scope",
         },
       });

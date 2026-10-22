@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Search, Plus } from "lucide-react";
+import { Search, Plus, Layers } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { vpsDisplayName } from "../../lib/dashboard-formatters";
 import type { DashboardOverview, VpsRecord } from "../../lib/api";
@@ -104,6 +104,15 @@ export function FleetSidebar({
         )}
       </nav>
 
+      <div className="hidden shrink-0 border-t border-line p-2.5 lg:block">
+        <Link
+          to="/vps/updates"
+          className="flex items-center justify-center gap-1.5 border border-line bg-raised/30 py-2 text-center text-xs font-medium text-dim transition-colors duration-160 ease-out hover:border-signal/50 hover:bg-raised hover:text-signal focus-visible:outline-2 focus-visible:outline-signal"
+        >
+          <Layers size={13} aria-hidden="true" />
+          Fleet updates
+        </Link>
+      </div>
       <div className="hidden shrink-0 border-t border-line p-2.5 lg:block">
         <Link
           to="/vps/new"

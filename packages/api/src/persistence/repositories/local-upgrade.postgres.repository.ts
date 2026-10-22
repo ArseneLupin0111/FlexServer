@@ -16,6 +16,7 @@ import {
   optionalIsoString,
   requiredIsoString,
   toDateOrNull,
+  toJsonOrNull,
 } from "./postgres-mappers.js";
 
 type LocalUpgradeRow = {
@@ -48,6 +49,8 @@ type LocalUpgradeRow = {
   created_at: Date | string;
   updated_at: Date | string;
   completed_at: Date | string | null;
+  components: string[] | null;
+  manifest_sha256: string | null;
 };
 
 type UpdaterHeartbeatRow = {
@@ -55,6 +58,12 @@ type UpdaterHeartbeatRow = {
   last_seen_at: Date | string;
   credential_id: string | null;
   protocol_version: number | null;
+  updater_version: string | null;
+  platform: { os: string; arch: string } | null;
+  idle: boolean | null;
+  busy_reason: string | null;
+  installed_ai: string[] | null;
+  ai_health: { status: string; healthy: boolean } | null;
 };
 
 function rowToJob(row: LocalUpgradeRow): LocalUpgradeJob {
@@ -71,6 +80,8 @@ function rowToJob(row: LocalUpgradeRow): LocalUpgradeJob {
     ...(row.target_size_bytes == null
       ? {}
       : { targetSizeBytes: Number(row.target_size_bytes) }),
+    ...(row.components ? { components: row.components } : {}),
+    ...(row.manifest_sha256 ? { manifestSha256: row.manifest_sha256 } : {}),
     manifestRaw: row.manifest_raw,
     ...(row.baseline_build_id == null
       ? {}
@@ -134,6 +145,8 @@ const COLUMNS: Record<
   phaseDeadlineAt: "phase_deadline_at",
   message: "message",
   completedAt: "completed_at",
+  components: "components",
+  manifestSha256: "manifest_sha256",
 };
 
 const DATE_FIELDS = new Set([
@@ -168,8 +181,9 @@ export function createPostgresLocalUpgradeRepository(
              release_build_id, target_sha256, target_url, target_size_bytes,
              manifest_raw, baseline_build_id, actor, idempotency_key,
              fencing_token, reclaim_count, claimed_at, lease_expires_at,
-             deadline_at, phase_deadline_at, revision, created_at, updated_at
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
+             deadline_at, phase_deadline_at, revision, created_at, updated_at,
+             components, manifest_sha256
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
           [
             job.id,
             job.vpsId,
@@ -194,6 +208,8 @@ export function createPostgresLocalUpgradeRepository(
             0,
             new Date(job.createdAt),
             new Date(job.updatedAt),
+            toJsonOrNull(job.components),
+            job.manifestSha256 ?? null,
           ],
         );
         return job;
@@ -281,6 +297,11 @@ export function createPostgresLocalUpgradeRepository(
           assignments.push(`result = $${values.length}`);
           continue;
         }
+        if (field === "components") {
+          values.push(value === null ? null : JSON.stringify(value));
+          assignments.push(`components = $${values.length}`);
+          continue;
+        }
         const column =
           COLUMNS[field as Exclude<keyof LocalUpgradeWritePatch, "error" | "result">];
         if (!column) continue;
@@ -306,17 +327,31 @@ export function createPostgresLocalUpgradeRepository(
 
     async recordUpdaterHeartbeat(heartbeat) {
       await pool.query(
-        `INSERT INTO updater_heartbeats (vps_id, last_seen_at, credential_id, protocol_version)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO updater_heartbeats (
+           vps_id, last_seen_at, credential_id, protocol_version,
+           updater_version, platform, idle, busy_reason, installed_ai, ai_health
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (vps_id) DO UPDATE SET
            last_seen_at = EXCLUDED.last_seen_at,
            credential_id = EXCLUDED.credential_id,
-           protocol_version = EXCLUDED.protocol_version`,
+           protocol_version = EXCLUDED.protocol_version,
+           updater_version = COALESCE(EXCLUDED.updater_version, updater_heartbeats.updater_version),
+           platform = COALESCE(EXCLUDED.platform, updater_heartbeats.platform),
+           idle = COALESCE(EXCLUDED.idle, updater_heartbeats.idle),
+           busy_reason = COALESCE(EXCLUDED.busy_reason, updater_heartbeats.busy_reason),
+           installed_ai = COALESCE(EXCLUDED.installed_ai, updater_heartbeats.installed_ai),
+           ai_health = COALESCE(EXCLUDED.ai_health, updater_heartbeats.ai_health)`,
         [
           heartbeat.vpsId,
           new Date(heartbeat.lastSeenAt),
           heartbeat.credentialId ?? null,
           heartbeat.protocolVersion ?? 1,
+          heartbeat.updaterVersion ?? null,
+          toJsonOrNull(heartbeat.platform),
+          heartbeat.idle ?? null,
+          heartbeat.busyReason ?? null,
+          toJsonOrNull(heartbeat.installedAi),
+          toJsonOrNull(heartbeat.aiHealth),
         ],
       );
     },
@@ -332,9 +367,13 @@ export function createPostgresLocalUpgradeRepository(
         vpsId: row.vps_id,
         lastSeenAt: requiredIsoString(row.last_seen_at),
         protocolVersion: row.protocol_version ?? 1,
-        ...(row.credential_id == null
-          ? {}
-          : { credentialId: row.credential_id }),
+        ...(row.credential_id == null ? {} : { credentialId: row.credential_id }),
+        ...(row.updater_version == null ? {} : { updaterVersion: row.updater_version }),
+        ...(row.platform == null ? {} : { platform: row.platform }),
+        ...(row.idle == null ? {} : { idle: row.idle }),
+        ...(row.busy_reason == null ? {} : { busyReason: row.busy_reason }),
+        ...(row.installed_ai == null ? {} : { installedAi: row.installed_ai }),
+        ...(row.ai_health == null ? {} : { aiHealth: row.ai_health }),
       };
     },
   };

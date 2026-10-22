@@ -41,5 +41,6 @@ export function withVpsDefaults(record: VpsRecord): VpsRecord {
     dockerManagementEnabled: normalized.dockerManagementEnabled ?? false,
     composeManagementEnabled: normalized.composeManagementEnabled ?? false,
     sftpEnabled: normalized.sftpEnabled ?? false,
+    fleetAutoUpdate: normalized.fleetAutoUpdate !== false,
   };
 }

@@ -184,3 +184,53 @@ Stable-domain prerequisite: before cutting over to any stable API domain, its DN
 ## Rollout and rollback gate
 
 This gate covers binary upgrades only; the endpoint cutover to `https://api.flexserver.tech` is verified separately and does not satisfy this gate. Note on operational limits and status: local test verification passed against simulated updater and heartbeat processes; it does not constitute a verified production rollout on real systemd hosts. Before rolling out in production, execute the verification procedure on a disposable Linux staging host: install the updater and scoped credential, confirm an upgrade to the bundled binary, verify process build ID, fresh heartbeat, Docker source sequence and chart samples. Fault-inject simulated failure scenarios: corrupt/mismatched SHA-256, interrupted download, disk exhaustion, crash after swap, and missing heartbeat; verify no unconfirmed success and a recoverable journal/backup. Force a failed restart and confirm rollback identity. Only then perform an authorized production canary. If a bundled release must be withdrawn, redeploying the API container with a previous bundled binary updates the target, but does not roll back the host agent automatically until an upgrade job is confirmed or manual fallback is applied. Never label a staging or production rollout verified without observing those host checks.
+
+## Signed fleet release promotion
+
+The fleet channel is separate from the deployed-image local upgrade path above. `scripts/release/fleet-release.mjs` signs `{payload, signature, keyId}`: Ed25519 authenticates the exact UTF-8 payload string, not reconstructed JSON. Artifacts bind component, Linux architecture, byte size, SHA-256 and credential-free HTTPS URL. Every platform requires an agent/updater pair; publishing any AI component requires the complete four-component AI runtime.
+
+Use **Promote stable agent release** (`.github/workflows/fleet-release.yml`) with a main-branch ancestor commit, semantic version, minimum updater version and explicit rollback-safety declaration. Verification pins the commit used by promotion. Configure the `agent-stable` GitHub environment with required reviewers; promotion refuses publication unless the reviewer rule exists. Configure environment secrets `FLEET_RELEASE_SIGNING_KEY` (Ed25519 private PEM), `FLEET_ENVIRONMENT_READ_TOKEN` (repository environment metadata read permission), and variable `FLEET_RELEASE_KEY_ID`. Signing secrets never belong in API or host environments.
+
+Promotion cross-builds Linux amd64/arm64 executables, packages the pinned BusyBox rootfs and committed profiles, hashes actual artifacts, signs and verifies before publication. Immutable release `agent-<buildId>` must not already exist. The signed `stable.json` pointer under release `agent-stable` is replaced only after artifact publication.
+
+```sh
+node scripts/release/fleet-release.mjs sign --spec spec.json --key private.pem --key-id release-key --output stable.json
+node scripts/release/fleet-release.mjs verify --manifest stable.json --key public.pem --expect-release <40-hex-build-id>
+```
+
+The specification adds `file` to each signed artifact; signing derives size and hash from actual file bytes. The workflow generates its specification with `scripts/release/fleet-spec.mjs` using `BUILD_ID`, `REPOSITORY`, `RELEASE_VERSION`, `MIN_UPDATER`, `ROLLBACK_SAFE` and optional comma-separated `UPGRADE_FROM`.
+
+Configure API trust with external Ed25519 public PEM path `FLEET_RELEASE_PUBLIC_KEY_FILE` and HTTPS pointer `FLEET_RELEASE_MANIFEST_URL`. Mount the public key read-only at that absolute path; the keyring Compose override mounts `/etc/flexserver` read-only. Distribute the public key through the existing trusted administration channel, not from the manifest being verified.
+
+Local release smoke verified actual artifact signing, exact-payload verification, rejection of tampering/untrusted keys, incomplete/duplicate platform sets, and cleartext artifact URLs. Remote GitHub publication and environment approval remain unexercised.
+
+## Signed fleet host updater operations
+
+### Pinned release key and envelope verification
+The host updater (`vps-updater`) enforces cryptographic verification of release manifests before any staging or execution occurs:
+- Pinned public key path: `/etc/vps-updater/fleet-release.pub` (root-owned 0644). In production, this path is immutable and enforced against the root-owned config.
+- The signature envelope is parsed as `{payload: string, signature: string, keyId: string}`. The Ed25519 signature is strictly validated against the exact UTF-8 bytes of `payload`. Recanonicalization is forbidden.
+- Verification asserts required manifest fields: `schemaVersion == 1`, `releaseId == buildId`, `channel == "stable"`, and presence of required platform artifacts (`agent`, `updater`).
+
+CLI verification check for operators:
+```bash
+/usr/local/lib/vps-manager-agent/vps-updater verify \
+  -manifest /path/to/manifest.json \
+  -pubkey-file /etc/vps-updater/fleet-release.pub
+```
+
+### Multi-component upgrade lifecycle
+1. **Evidence & protocol:** The updater connects to the API via pull protocol version 3 (`X-Updater-Protocol-Version: 3`), advertising host OS, architecture, current versions, CPU load/busy state, and local AI capability & health.
+2. **Updater self-upgrade:** If the release contains a newer `vps-updater` binary, the updater stages and replaces itself first, restarting its service to execute subsequent steps under the newer supervisor logic.
+3. **Agent binary swap:** The agent binary is backed up to a root-owned backup directory and replaced atomically by rename (`renameat2` / POSIX atomic rename).
+4. **AI component upgrades:** AI components (`ai-executor`, `ai-host-helper`, `ai-rootfs`, `ai-profiles`) are updated only if already installed on the host. Uninstalled components are never silently activated. Rootfs archives are unpacked with leading `rootfs/` stripped; profiles archives are unpacked with leading `profiles/` stripped.
+5. **Awaiting heartbeat & observation:** After service restart, the updater monitors agent health and AI helper health. If health checks fail or the grace window elapses, the updater executes automatic rollback from the root-owned backup.
+6. **Safe pruning:** On server-ruled terminal completion, the updater cleans the terminal job's staging and retains current + previous backup generations for crash resilience.
+
+### Disposable Linux smoke verification
+Operators can execute disposable Linux host smoke testing with:
+```bash
+./.server/fleet-host-smoke.sh
+```
+This verifies real binary compilation, CLI signature verification against valid/tampered/untrusted fixtures, rootfs extraction with symlink handling, and multi-component upgrade/rollback lifecycle.
+

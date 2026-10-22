@@ -8,6 +8,7 @@ import type { HostKeyPinRepository } from "../ssh/host-key-pin.repository.js";
 import type { TerminalSessionService } from "../terminal/terminal-session.service.js";
 import type { DockerLogsService } from "../docker/docker-logs.service.js";
 import type { ApplicationsService } from "../docker-applications/applications.service.js";
+import type { FleetRepository } from "./repositories/fleet.repository.js";
 
 export type VpsCleanup = {
   prepare(id: string): Promise<void>;
@@ -20,6 +21,7 @@ export function createVpsCleanup(
   upgrades: LocalUpgradeRepository, pins: HostKeyPinRepository,
   terminal: TerminalSessionService, logs: DockerLogsService,
   applications?: ApplicationsService,
+  fleet?: FleetRepository,
 ): VpsCleanup {
   return {
     async prepare(id) {
@@ -40,6 +42,7 @@ export function createVpsCleanup(
       await upgrades.deleteByVps(id);
       await pins.deleteByVpsId(id);
       await agent.deleteVpsData(id);
+      await fleet?.deleteByVps(id);
     },
   };
 }

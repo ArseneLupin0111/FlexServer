@@ -47,6 +47,14 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -o /out/ai-executor-linux-amd64 ./cmd/ai-executor && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -o /out/ai-host-helper-linux-amd64 ./cmd/ai-host-helper
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+    -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${AGENT_BUILD_ID}" \
+    -o /out/vps-agent-linux-arm64 ./cmd/vps-agent && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+    -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${AGENT_BUILD_ID}" \
+    -o /out/vps-updater-linux-arm64 ./cmd/vps-updater
 RUN mkdir -p /out/ai-rootfs/bin /out/ai-rootfs/usr/bin /out/ai-rootfs/dev /out/ai-rootfs/proc /out/ai-rootfs/sys /out/ai-rootfs/tmp /out/ai-rootfs/etc && \
     chmod 1777 /out/ai-rootfs/tmp && \
     cp /bin/busybox /out/ai-rootfs/bin/busybox && \
@@ -82,6 +90,8 @@ COPY --from=api-build --chown=app:app /app/dist ./dist
 COPY --from=api-build --chown=app:app /app/packages/api/db ./db
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-agent-linux-amd64 /app/agent/vps-agent-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-updater-linux-amd64 /app/agent/vps-updater-linux-amd64
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-agent-linux-arm64 /app/agent/vps-agent-linux-arm64
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-updater-linux-arm64 /app/agent/vps-updater-linux-arm64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-pty-linux-amd64 /app/agent/host-pty-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/local-agent-rotator-linux-amd64 /app/agent/local-agent-rotator-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-files-linux-amd64 /app/agent/host-files-linux-amd64
@@ -91,6 +101,8 @@ COPY --from=agent-builder --chown=app:app --chmod=0644 /out/ai-rootfs-linux-amd6
 COPY --from=agent-builder --chown=app:app --chmod=0644 /out/ai-rootfs-linux-amd64.manifest.json /app/agent/ai-rootfs-linux-amd64.manifest.json
 COPY --from=agent-builder --chown=app:app /out/ai-profiles /app/agent/ai-profiles
 COPY scripts/install/install-host-files.sh /app/scripts/install-host-files.sh
+COPY --chown=app:app --chmod=0755 scripts/install/install-fleet-updater.sh /app/scripts/install/install-fleet-updater.sh
+COPY scripts/install/install-updater.sh /app/scripts/install/install-updater.sh
 RUN ln -s /app/agent/local-agent-rotator-linux-amd64 /usr/local/bin/local-agent-rotation-client && \
     ln -s /app/agent/local-agent-rotator-linux-amd64 /usr/local/bin/flexserver-local-agent-rotator
 RUN mkdir -p /app/data /app/private && chown -R app:app /app/data /app/private

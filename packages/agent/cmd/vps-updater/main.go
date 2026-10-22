@@ -40,7 +40,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: vps-updater [-config path] <daemon|helper|status|ack|version>")
+		return fmt.Errorf("usage: vps-updater [-config path] <daemon|helper|status|ack|version|verify>")
 	}
 	fs := flag.NewFlagSet("vps-updater", flag.ContinueOnError)
 	configPath := fs.String("config", defaultConfigPath, "path to root-owned updater config")
@@ -55,9 +55,12 @@ func run(args []string) error {
 			fmt.Println(version.Identity())
 			return nil
 		}
-		return fmt.Errorf("usage: vps-updater [-config path] <daemon|helper|status|ack|version>")
+		return fmt.Errorf("usage: vps-updater [-config path] <daemon|helper|status|ack|version|verify>")
 	}
 	sub := rest[0]
+	if sub == "verify" {
+		return runVerify(rest[1:])
+	}
 	// Accept flags after the subcommand too (`vps-updater status -config X`).
 	subArgs := rest[1:]
 	if len(subArgs) > 0 {
@@ -102,7 +105,45 @@ func run(args []string) error {
 			return runAck(cfg)
 		}
 	}
-	return fmt.Errorf("unknown subcommand %q (want daemon|helper|status|ack|version)", sub)
+	return fmt.Errorf("unknown subcommand %q (want daemon|helper|status|ack|version|verify)", sub)
+}
+
+func runVerify(args []string) error {
+	vfs := flag.NewFlagSet("verify", flag.ContinueOnError)
+	manifestPath := vfs.String("manifest", "", "path to release manifest file")
+	pubKeyFile := vfs.String("pubkey-file", "", "path to Ed25519 public key PEM")
+	pubKey := vfs.String("pubkey", "", "pinned Ed25519 public key (PEM or base64)")
+	if err := vfs.Parse(args); err != nil {
+		return err
+	}
+	if *manifestPath == "" {
+		return fmt.Errorf("verify requires -manifest <path>")
+	}
+	var pubKeyBytes []byte
+	if *pubKey != "" {
+		pubKeyBytes = []byte(*pubKey)
+	} else {
+		var err error
+		pubKeyBytes, err = updater.LoadPublicKeyPEM(*pubKeyFile)
+		if err != nil {
+			return fmt.Errorf("load public key: %w", err)
+		}
+	}
+	manifestRaw, err := os.ReadFile(*manifestPath)
+	if err != nil {
+		return fmt.Errorf("read manifest: %w", err)
+	}
+	payload, err := updater.VerifyFleetManifest(manifestRaw, pubKeyBytes)
+	if err != nil {
+		legacy, legacyErr := updater.VerifyManifest(manifestRaw, string(pubKeyBytes))
+		if legacyErr != nil {
+			return fmt.Errorf("manifest verification failed: %w (legacy check failed: %v)", err, legacyErr)
+		}
+		fmt.Printf(`{"verified":true,"type":"legacy","releaseId":%q,"version":%q,"buildId":%q}`+"\n", legacy.ReleaseID, legacy.Version, legacy.BuildID)
+		return nil
+	}
+	fmt.Printf(`{"verified":true,"type":"fleet","releaseId":%q,"version":%q,"buildId":%q,"artifactsCount":%d}`+"\n", payload.ReleaseID, payload.Version, payload.BuildID, len(payload.Artifacts))
+	return nil
 }
 
 // runDaemon blocks until SIGINT/SIGTERM. Exactly one daemon per state dir

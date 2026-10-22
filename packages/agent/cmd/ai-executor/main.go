@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	"github.com/vps-manager/agent/internal/version"
 )
 
 func main() {
@@ -13,8 +15,13 @@ func main() {
 	uid := flag.Int("uid", -1, "Target unprivileged execution UID")
 	gid := flag.Int("gid", -1, "Target unprivileged execution GID")
 	cgroup := flag.String("cgroup", "", "Path to cgroup directory for scope confinement")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Println(version.Identity())
+		return
+	}
 	if *script == "" {
 		fmt.Fprintln(os.Stderr, "ai-executor: -script is required")
 		os.Exit(1)

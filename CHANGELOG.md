@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — Signed fleet agent host updater and multi-component upgrades
+
+- Verify signed release manifest envelopes against pinned Ed25519 public key (`/etc/vps-updater/fleet-release.pub`) strictly over exact payload UTF-8 bytes without recanonicalization.
+- Implement multi-component upgrade lifecycle: updater binary updated first with restart; agent binary swapped via root-owned atomic rename; installed AI components (`ai-executor`, `ai-host-helper`, `ai-rootfs`, `ai-profiles`) upgraded in-place without activating uninstalled services.
+- Safe pruning retains current and previous backup generations for durable rollback while cleaning terminal job backups under root ownership.
+- Extend claim evidence reporting to protocol version 3, advertising host OS, architecture, version, CPU/busy activity, and local AI capability/health.
+- Add provisioning support via `scripts/install/install-fleet-updater.sh` and `--fleet-release-pub-key` flag in `scripts/install/install-local-agent.sh`.
+- Provide disposable Linux smoke validation script `.server/fleet-host-smoke.sh` verifying CLI signature validation, tar extraction, and multi-component rollback.
+
+## Unreleased — Signed fleet release promotion
+
+- Add protected manual stable promotion with immutable commit pinning, Linux amd64/arm64 agent/updater/AI artifacts, exact-payload Ed25519 signatures, and artifact size/SHA-256 integrity metadata. Publish the stable pointer only after immutable artifacts.
+- Reject tampered payloads, untrusted signing keys, incomplete or duplicate platform component sets, and cleartext/credential-bearing artifact URLs. Keep private signing keys in the protected CI environment; configure API trust through an external read-only public PEM.
+- Verify release signing with actual artifact bytes and four security regression tests. Remote GitHub promotion remains unexercised.
+- Build pinned BusyBox runtime artifacts for both Linux amd64 and arm64; verified the architecture-specific static-binary SHA-256 values and generated runtime manifests locally. This does not establish a verified host rollout.
+
 ## Unreleased — PostgreSQL AI keyring deployment fix
 
 - Run AI key initialization, checks and rotation under the PostgreSQL journal row lock instead of rejecting non-JSON storage. Preserve encrypted-data initialization refusal, active-task rotation guards and transactional rollback; close the CLI-owned database pool.

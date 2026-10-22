@@ -85,6 +85,8 @@ export type LocalUpgradeJob = {
   /** Build id of the binary being replaced (captured at claim). */
   baselineBuildId?: string;
   /** Last agent heartbeat before the swap point (set when restarting is reported). */
+  components?: string[];
+  manifestSha256?: string;
   baselineHeartbeatAt?: string;
   actor: string;
   idempotencyKey?: string;
@@ -110,6 +112,12 @@ export type UpdaterHeartbeat = {
   lastSeenAt: string;
   credentialId?: string;
   protocolVersion?: number;
+  updaterVersion?: string;
+  platform?: { os: string; arch: string };
+  idle?: boolean;
+  busyReason?: string;
+  installedAi?: string[];
+  aiHealth?: { status: string; healthy: boolean };
 };
 
 // ── Timing policy ────────────────────────────────────────────────────────

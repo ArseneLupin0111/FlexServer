@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -39,15 +41,23 @@ const (
 // HelperJournal records the privileged mutation so a crash between backup,
 // rename and restart is always reconcilable from on-disk facts. Root-owned:
 // the unprivileged updater can read it but never write or delete it.
-type HelperJournal struct {
-	JobID      string    `json:"jobId"`
-	Phase      string    `json:"phase"`
-	OldSha256  string    `json:"oldSha256"`
-	NewSha256  string    `json:"newSha256"`
-	BackupPath string    `json:"backupPath"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+type ComponentBackup struct {
+	Component  string `json:"component"`
+	TargetPath string `json:"targetPath"`
+	BackupPath string `json:"backupPath"`
+	OldSha256  string `json:"oldSha256,omitempty"`
+	NewSha256  string `json:"newSha256,omitempty"`
 }
 
+type HelperJournal struct {
+	JobID            string            `json:"jobId"`
+	Phase            string            `json:"phase"`
+	OldSha256        string            `json:"oldSha256"`
+	NewSha256        string            `json:"newSha256"`
+	BackupPath       string            `json:"backupPath"`
+	ComponentBackups []ComponentBackup `json:"componentBackups,omitempty"`
+	UpdatedAt        time.Time         `json:"updatedAt"`
+}
 // HelperResult is what the helper writes back for the daemon to consume.
 type HelperResult struct {
 	JobID         string    `json:"jobId"`
@@ -362,6 +372,10 @@ func handleApply(ctx context.Context, cfg *Config, auth JobAuthorizer, jobID str
 		res.Outcome, res.Detail = "verify_failed", "job overall deadline missing or expired"
 		return res
 	}
+	applySpecPath := filepath.Join(staging, "apply-spec.json")
+	if fileExists(applySpecPath) {
+		return handleApplyFleet(ctx, cfg, auth, apiJob, jobID, staging, res)
+	}
 
 	expectedSha := apiJob.TargetSha256
 	if !hex64Re.MatchString(expectedSha) {
@@ -553,7 +567,7 @@ func restartOrRollback(ctx context.Context, cfg *Config, hj *HelperJournal, res 
 // autoRollback restores the backup after a failed start. It refuses to run
 // when the backup does not hash to the recorded old value.
 func autoRollback(ctx context.Context, cfg *Config, hj *HelperJournal, res *HelperResult) *HelperResult {
-	if hj.OldSha256 == "" || hj.BackupPath == "" {
+	if (hj.OldSha256 == "" || hj.BackupPath == "") && len(hj.ComponentBackups) == 0 {
 		res.Outcome, res.Detail = "restart_failed_rollback_failed", "no backup to restore"
 		return res
 	}
@@ -563,51 +577,192 @@ func autoRollback(ctx context.Context, cfg *Config, hj *HelperJournal, res *Help
 	}
 	hj.Phase = hjRolledBack
 	_ = saveHelperJournal(cfg.StateDir, hj)
-	if _, err := runSystemctl(ctx, "restart", cfg.AgentUnit); err != nil {
-		res.Outcome, res.Detail = "restart_failed_rollback_failed", "restart old: "+err.Error()
+
+	hasAgent := hj.BackupPath != ""
+	hasAI := false
+	for _, cb := range hj.ComponentBackups {
+		if cb.Component == "agent" {
+			hasAgent = true
+		}
+		if strings.HasPrefix(cb.Component, "ai-") {
+			hasAI = true
+		}
+	}
+
+	if hasAgent {
+		if _, err := runSystemctl(ctx, "restart", cfg.AgentUnit); err != nil {
+			res.Outcome, res.Detail = "restart_failed_rollback_failed", "restart old: "+err.Error()
+			return res
+		}
+	}
+	if hasAI && unitExists(ctx, "flexserver-ai-helper.service") {
+		_, _ = runSystemctl(ctx, "restart", "flexserver-ai-helper.service")
+	}
+
+	if hasAgent {
+		active, detail := ensureServiceActive(ctx, cfg)
+		res.ServiceActive = active
+		res.BinarySha256 = hj.OldSha256
+		if active {
+			res.Outcome = "auto_rolled_back"
+			return res
+		}
+		res.Outcome, res.Detail = "restart_failed_rollback_failed", "old binary also inactive: "+detail
 		return res
 	}
-	active, detail := ensureServiceActive(ctx, cfg)
-	res.ServiceActive = active
-	res.BinarySha256 = hj.OldSha256
-	if active {
-		res.Outcome = "auto_rolled_back"
-		return res
-	}
-	res.Outcome, res.Detail = "restart_failed_rollback_failed", "old binary also inactive: "+detail
+
+	res.ServiceActive = true
+	res.Outcome = "auto_rolled_back"
 	return res
 }
 
 // restoreBackup copies the root-owned backup over the target atomically,
 // verifying the backup still hashes to the recorded old value first.
 func restoreBackup(cfg *Config, hj *HelperJournal) (string, error) {
-	sha, err := sha256File(hj.BackupPath)
-	if err != nil {
-		return "", fmt.Errorf("hash backup: %w", err)
+	got := ""
+	if hj.BackupPath != "" && hj.OldSha256 != "" {
+		sha, err := sha256File(hj.BackupPath)
+		if err != nil {
+			return "", fmt.Errorf("hash backup: %w", err)
+		}
+		if sha != hj.OldSha256 {
+			return "", fmt.Errorf("backup sha %s != recorded %s", sha, hj.OldSha256)
+		}
+		binDir := filepath.Dir(cfg.AgentBinary)
+		tmpPath := filepath.Join(binDir, ".vps-restore-"+hj.JobID)
+		defer os.Remove(tmpPath)
+		var copyErr error
+		got, copyErr = copyHashed(hj.BackupPath, tmpPath, hj.OldSha256, 0)
+		if copyErr != nil {
+			return "", copyErr
+		}
+		if err := os.Chmod(tmpPath, 0o755); err != nil {
+			return "", err
+		}
+		if err := os.Rename(tmpPath, cfg.AgentBinary); err != nil {
+			return "", err
+		}
+		_ = fsyncDir(binDir)
 	}
-	if sha != hj.OldSha256 {
-		return "", fmt.Errorf("backup sha %s != recorded %s", sha, hj.OldSha256)
+
+	// Restore secondary component backups (e.g. AI executor, helper, profiles, rootfs)
+	for _, cb := range hj.ComponentBackups {
+		if cb.TargetPath == "" {
+			continue
+		}
+		// Component was not present prior to upgrade: remove it on rollback
+		if cb.BackupPath == "" {
+			if err := os.RemoveAll(cb.TargetPath); err != nil {
+				return "", fmt.Errorf("rollback remove new component %s: %w", cb.Component, err)
+			}
+			continue
+		}
+
+		fi, err := os.Lstat(cb.BackupPath)
+		if err != nil {
+			return "", fmt.Errorf("stat backup for %s (%s): %w", cb.Component, cb.BackupPath, err)
+		}
+
+		if fi.IsDir() {
+			if err := os.RemoveAll(cb.TargetPath); err != nil {
+				return "", fmt.Errorf("clear target dir %s for %s: %w", cb.TargetPath, cb.Component, err)
+			}
+			if err := copyDir(cb.BackupPath, cb.TargetPath); err != nil {
+				return "", fmt.Errorf("restore dir %s for %s: %w", cb.Component, cb.TargetPath, err)
+			}
+			_ = fsyncDir(cb.TargetPath)
+		} else {
+			cbSha, err := sha256File(cb.BackupPath)
+			if err != nil {
+				return "", fmt.Errorf("hash backup for %s: %w", cb.Component, err)
+			}
+			if cb.OldSha256 != "" && cbSha != cb.OldSha256 {
+				return "", fmt.Errorf("backup sha %s != recorded %s for %s", cbSha, cb.OldSha256, cb.Component)
+			}
+			cbDir := filepath.Dir(cb.TargetPath)
+			tmpCB := filepath.Join(cbDir, ".restore-"+filepath.Base(cb.TargetPath))
+			defer os.Remove(tmpCB)
+			if _, err := copyHashed(cb.BackupPath, tmpCB, cbSha, 0); err != nil {
+				return "", fmt.Errorf("copy backup for %s: %w", cb.Component, err)
+			}
+			perm := fi.Mode().Perm()
+			if perm == 0 {
+				perm = 0o755
+			}
+			if err := os.Chmod(tmpCB, perm); err != nil {
+				return "", fmt.Errorf("chmod %s: %w", tmpCB, err)
+			}
+			if err := os.Rename(tmpCB, cb.TargetPath); err != nil {
+				return "", fmt.Errorf("rename %s -> %s: %w", tmpCB, cb.TargetPath, err)
+			}
+			_ = fsyncDir(cbDir)
+		}
 	}
-	binDir := filepath.Dir(cfg.AgentBinary)
-	tmpPath := filepath.Join(binDir, ".vps-restore-"+hj.JobID)
-	defer os.Remove(tmpPath)
-	got, err := copyHashed(hj.BackupPath, tmpPath, hj.OldSha256, 0)
-	if err != nil {
-		return "", err
-	}
-	if err := os.Chmod(tmpPath, 0o755); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmpPath, cfg.AgentBinary); err != nil {
-		return "", err
-	}
-	_ = fsyncDir(binDir)
 	return got, nil
 }
 
 // reconcileApply completes or aborts a previously initiated mutation based on
 // what is actually on disk — it never re-swaps a mutation of unclear outcome.
 func reconcileApply(ctx context.Context, cfg *Config, hj *HelperJournal, res *HelperResult) *HelperResult {
+	hasAgent := hj.NewSha256 != "" || hj.OldSha256 != "" || hj.BackupPath != ""
+	if !hasAgent {
+		for _, cb := range hj.ComponentBackups {
+			if cb.Component == "agent" {
+				hasAgent = true
+				break
+			}
+		}
+	}
+
+	if !hasAgent {
+		// Non-agent / updater-only update
+		allMatchNew := len(hj.ComponentBackups) > 0
+		allMatchOld := len(hj.ComponentBackups) > 0
+		for _, cb := range hj.ComponentBackups {
+			if cb.TargetPath == "" {
+				continue
+			}
+			if cb.BackupPath == "" {
+				if fileExists(cb.TargetPath) || dirExists(cb.TargetPath) {
+					allMatchOld = false
+				} else {
+					allMatchNew = false
+				}
+				continue
+			}
+			if fi, err := os.Stat(cb.TargetPath); err == nil && !fi.IsDir() {
+				curSha, _ := sha256File(cb.TargetPath)
+				if cb.NewSha256 != "" && curSha != cb.NewSha256 {
+					allMatchNew = false
+				}
+				if cb.OldSha256 != "" && curSha != cb.OldSha256 {
+					allMatchOld = false
+				}
+			}
+		}
+
+		switch {
+		case allMatchNew && (hj.Phase == hjRenamed || hj.Phase == hjRestarted):
+			hj.Phase = hjRestarted
+			_ = saveHelperJournal(cfg.StateDir, hj)
+			res.Outcome = "recovered_restarted"
+			res.ServiceActive = true
+			return res
+		case allMatchOld || hj.Phase == hjIntent:
+			res.Outcome = "recovered_no_swap"
+			res.ServiceActive = true
+			return res
+		default:
+			if hj.Phase == hjRestarted {
+				res.Outcome = "recovered_restarted"
+				res.ServiceActive = true
+				return res
+			}
+			res.Outcome, res.Detail = "unclear", "components match neither new nor old state"
+			return res
+		}
+	}
+
 	actual, err := sha256File(cfg.AgentBinary)
 	if err != nil {
 		res.Outcome, res.Detail = "unclear", "cannot hash current binary: "+err.Error()
@@ -622,9 +777,7 @@ func reconcileApply(ctx context.Context, cfg *Config, hj *HelperJournal, res *He
 		res.ServiceActive, _ = ensureServiceActive(ctx, cfg)
 		return res
 	case actual == hj.NewSha256:
-		// Swap happened. Restart only when the restart was never confirmed —
-		// re-triggering systemctl for an already-restarted job would keep
-		// re-running a mutation whose outcome is recorded (or held unclear).
+		// Swap happened. Restart only when the restart was never confirmed
 		if hj.Phase != hjRestarted {
 			_ = provisionLockForUpgrade(cfg)
 			if _, err := runSystemctl(ctx, "restart", cfg.AgentUnit); err == nil {
@@ -655,7 +808,7 @@ func reconcileApply(ctx context.Context, cfg *Config, hj *HelperJournal, res *He
 func handleRollback(ctx context.Context, cfg *Config, jobID string) *HelperResult {
 	res := &HelperResult{JobID: jobID, Action: actionRollback}
 	hj, err := LoadHelperJournal(cfg.StateDir)
-	if err != nil || hj == nil || hj.JobID != jobID || hj.BackupPath == "" || hj.OldSha256 == "" {
+	if err != nil || hj == nil || hj.JobID != jobID || (hj.BackupPath == "" && len(hj.ComponentBackups) == 0) {
 		res.Outcome, res.Detail = "rollback_failed", "no helper journal with backup for this job"
 		return res
 	}
@@ -671,17 +824,41 @@ func handleRollback(ctx context.Context, cfg *Config, jobID string) *HelperResul
 	}
 	hj.Phase = hjRolledBack
 	_ = saveHelperJournal(cfg.StateDir, hj)
-	if _, err := runSystemctl(ctx, "restart", cfg.AgentUnit); err != nil {
-		res.Outcome, res.Detail = "rollback_failed", "restart: "+err.Error()
+
+	hasAgent := hj.BackupPath != ""
+	hasAI := false
+	for _, cb := range hj.ComponentBackups {
+		if cb.Component == "agent" {
+			hasAgent = true
+		}
+		if strings.HasPrefix(cb.Component, "ai-") {
+			hasAI = true
+		}
+	}
+
+	if hasAgent {
+		if _, err := runSystemctl(ctx, "restart", cfg.AgentUnit); err != nil {
+			res.Outcome, res.Detail = "rollback_failed", "restart: "+err.Error()
+			return res
+		}
+	}
+	if hasAI && unitExists(ctx, "flexserver-ai-helper.service") {
+		_, _ = runSystemctl(ctx, "restart", "flexserver-ai-helper.service")
+	}
+
+	if hasAgent {
+		res.ServiceActive, res.Detail = ensureServiceActive(ctx, cfg)
+		res.BinarySha256 = hj.OldSha256
+		if res.ServiceActive {
+			res.Outcome = "rolled_back"
+		} else {
+			res.Outcome, res.Detail = "rollback_failed", "old binary inactive: "+res.Detail
+		}
 		return res
 	}
-	res.ServiceActive, res.Detail = ensureServiceActive(ctx, cfg)
-	res.BinarySha256 = hj.OldSha256
-	if res.ServiceActive {
-		res.Outcome = "rolled_back"
-	} else {
-		res.Outcome, res.Detail = "rollback_failed", "old binary inactive: "+res.Detail
-	}
+
+	res.ServiceActive = true
+	res.Outcome = "rolled_back"
 	return res
 }
 
@@ -696,14 +873,51 @@ func handleCleanup(_ context.Context, cfg *Config, jobID string) *HelperResult {
 		res.Outcome, res.Detail = "cleanup_failed", err.Error()
 		return res
 	}
-	if err := os.RemoveAll(backupDir(cfg.StateDir, jobID)); err != nil {
-		res.Outcome, res.Detail = "cleanup_failed", err.Error()
-		return res
+
+	backupsBase := filepath.Join(helperRoot(cfg.StateDir), "backups")
+	if cfg.testMode {
+		if err := os.RemoveAll(backupDir(cfg.StateDir, jobID)); err != nil {
+			res.Outcome, res.Detail = "cleanup_failed", err.Error()
+			return res
+		}
+	} else {
+		// Safe pruning: retain current + previous backup (up to 2 backup generations)
+		if entries, err := os.ReadDir(backupsBase); err == nil {
+			type dirInfo struct {
+				path    string
+				modTime time.Time
+			}
+			var dirs []dirInfo
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				p := filepath.Join(backupsBase, e.Name())
+				fi, err := os.Stat(p)
+				if err == nil {
+					dirs = append(dirs, dirInfo{path: p, modTime: fi.ModTime()})
+				}
+			}
+			sort.Slice(dirs, func(i, j int) bool {
+				return dirs[i].modTime.After(dirs[j].modTime)
+			})
+			for i := 2; i < len(dirs); i++ {
+				_ = os.RemoveAll(dirs[i].path)
+			}
+		}
 	}
+
 	// The helper journal exists to protect this backup. Once the backup is
 	// gone (ruled terminal) a stale journal would drive reconciliation of a
 	// consumed job — remove it, but only when it belongs to this job.
 	if hj, err := LoadHelperJournal(cfg.StateDir); err == nil && hj != nil && hj.JobID == jobID {
+		jobBackupDir := filepath.Join(backupsBase, jobID)
+		if dirExists(jobBackupDir) {
+			if raw, err := os.ReadFile(helperJournalPath(cfg.StateDir)); err == nil {
+				_ = os.WriteFile(filepath.Join(jobBackupDir, "journal.json"), raw, 0o600)
+				_ = fsyncDir(jobBackupDir)
+			}
+		}
 		_ = os.Remove(helperJournalPath(cfg.StateDir))
 		_ = fsyncDir(helperRoot(cfg.StateDir))
 	}
@@ -879,4 +1093,403 @@ func provisionLockForUpgrade(cfg *Config) error {
 	}
 
 	return lock.Provision(vpsID, opts...)
+}
+
+// ApplySpec is written by the daemon during fleet staging
+type ApplySpec struct {
+	JobID      string               `json:"jobId"`
+	ReleaseID  string               `json:"releaseId"`
+	BuildID    string               `json:"buildId"`
+	Components []ComponentApplySpec `json:"components"`
+}
+
+type ComponentApplySpec struct {
+	Component   string `json:"component"`
+	SourcePath  string `json:"sourcePath"`
+	TargetPath  string `json:"targetPath"`
+	SHA256      string `json:"sha256"`
+	Size        int64  `json:"size"`
+	IsTar       bool   `json:"isTar,omitempty"`
+	StripPrefix string `json:"stripPrefix,omitempty"`
+}
+
+func handleApplyFleet(ctx context.Context, cfg *Config, auth JobAuthorizer, apiJob *ClaimedJob, jobID string, staging string, res *HelperResult) *HelperResult {
+	if apiJob == nil || apiJob.ManifestRaw == "" {
+		res.Outcome, res.Detail = "verify_failed", "api job manifestRaw is empty"
+		return res
+	}
+
+	pubKeyPEM, err := cfg.FleetPublicKeyPEM()
+	if err != nil {
+		res.Outcome, res.Detail = "verify_failed", "load fleet release public key: "+err.Error()
+		return res
+	}
+
+	payload, err := VerifyFleetManifest([]byte(apiJob.ManifestRaw), pubKeyPEM)
+	if err != nil {
+		res.Outcome, res.Detail = "verify_failed", "verify fleet release manifest: "+err.Error()
+		return res
+	}
+
+	if apiJob.Release.BuildID != "" && payload.BuildID != apiJob.Release.BuildID {
+		res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("payload buildId %s != api job %s", payload.BuildID, apiJob.Release.BuildID)
+		return res
+	}
+	if apiJob.Release.ReleaseID != "" && payload.ReleaseID != apiJob.Release.ReleaseID {
+		res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("payload releaseId %s != api job %s", payload.ReleaseID, apiJob.Release.ReleaseID)
+		return res
+	}
+
+	specPath := filepath.Join(staging, "apply-spec.json")
+	specData, err := os.ReadFile(specPath)
+	if err != nil {
+		res.Outcome, res.Detail = "verify_failed", "read apply-spec: "+err.Error()
+		return res
+	}
+	var spec ApplySpec
+	if err := json.Unmarshal(specData, &spec); err != nil {
+		res.Outcome, res.Detail = "verify_failed", "parse apply-spec: "+err.Error()
+		return res
+	}
+
+	if spec.JobID != "" && spec.JobID != jobID {
+		res.Outcome, res.Detail = "verify_failed", "apply-spec jobId mismatch"
+		return res
+	}
+	if spec.BuildID != "" && payload.BuildID != spec.BuildID {
+		res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("payload buildId %s != spec %s", payload.BuildID, spec.BuildID)
+		return res
+	}
+	if spec.ReleaseID != "" && payload.ReleaseID != spec.ReleaseID {
+		res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("payload releaseId %s != spec %s", payload.ReleaseID, spec.ReleaseID)
+		return res
+	}
+	if len(spec.Components) == 0 {
+		res.Outcome, res.Detail = "verify_failed", "apply-spec contains no components"
+		return res
+	}
+
+	curVer := cfg.UpdaterVersion()
+	if payload.MinUpdaterVersion != "" && curVer != "dev" && CompareSemver(curVer, payload.MinUpdaterVersion) < 0 {
+		for _, c := range spec.Components {
+			if c.Component == "agent" {
+				res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("current updater version %s is below required minUpdaterVersion %s for agent upgrade", curVer, payload.MinUpdaterVersion)
+				return res
+			}
+		}
+	}
+
+	cleanStaging := filepath.Clean(staging)
+	for _, c := range spec.Components {
+		expectedTarget, ok := cfg.CanonicalTarget(c.Component)
+		if !ok || filepath.Clean(c.TargetPath) != filepath.Clean(expectedTarget) {
+			res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("component %s target path %q is not canonical (expected %q)", c.Component, c.TargetPath, expectedTarget)
+			return res
+		}
+
+		cleanSource := filepath.Clean(c.SourcePath)
+		rel, err := filepath.Rel(cleanStaging, cleanSource)
+		if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+			res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("component %s source path %q escapes staging", c.Component, c.SourcePath)
+			return res
+		}
+
+		var match *FleetArtifact
+		for i := range payload.Artifacts {
+			a := &payload.Artifacts[i]
+			if a.Component == c.Component {
+				if a.OS == runtime.GOOS && a.Arch == runtime.GOARCH {
+					match = a
+					break
+				}
+				if match == nil {
+					match = a
+				}
+			}
+		}
+		if match == nil {
+			res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("component %s not in signed manifest artifacts", c.Component)
+			return res
+		}
+
+		if c.SHA256 != match.SHA256 {
+			res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("component %s sha256 %s != manifest %s", c.Component, c.SHA256, match.SHA256)
+			return res
+		}
+		if c.Size != match.Size {
+			res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("component %s size %d != manifest %d", c.Component, c.Size, match.Size)
+			return res
+		}
+
+		srcSha, err := sha256File(c.SourcePath)
+		if err != nil {
+			res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("component %s source missing: %v", c.Component, err)
+			return res
+		}
+		if srcSha != match.SHA256 {
+			res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("component %s source sha %s != manifest %s", c.Component, srcSha, match.SHA256)
+			return res
+		}
+	}
+
+	if err := requireSecureDir(helperRoot(cfg.StateDir)); err != nil {
+		res.Outcome, res.Detail = "verify_failed", err.Error()
+		return res
+	}
+
+	bdir := backupDir(cfg.StateDir, jobID)
+	if err := os.MkdirAll(bdir, 0o755); err != nil {
+		res.Outcome, res.Detail = "verify_failed", "backup dir: "+err.Error()
+		return res
+	}
+
+	hj := &HelperJournal{
+		JobID: jobID,
+		Phase: hjIntent,
+	}
+
+	// 1. Take backups
+	for _, c := range spec.Components {
+		if fi, err := os.Lstat(c.TargetPath); err == nil {
+			backupPath := filepath.Join(bdir, c.Component)
+			if c.IsTar || fi.IsDir() {
+				if err := copyDir(c.TargetPath, backupPath); err != nil {
+					res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("backup %s dir: %v", c.Component, err)
+					return res
+				}
+				hj.ComponentBackups = append(hj.ComponentBackups, ComponentBackup{
+					Component:  c.Component,
+					TargetPath: c.TargetPath,
+					BackupPath: backupPath,
+				})
+			} else {
+				oldSha, err := copyHashed(c.TargetPath, backupPath, "", 0)
+				if err != nil {
+					res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("backup %s: %v", c.Component, err)
+					return res
+				}
+				_ = os.Chmod(backupPath, fi.Mode().Perm())
+				hj.ComponentBackups = append(hj.ComponentBackups, ComponentBackup{
+					Component:  c.Component,
+					TargetPath: c.TargetPath,
+					BackupPath: backupPath,
+					OldSha256:  oldSha,
+					NewSha256:  c.SHA256,
+				})
+				if c.Component == "agent" {
+					hj.OldSha256 = oldSha
+					hj.NewSha256 = c.SHA256
+					hj.BackupPath = backupPath
+				}
+			}
+		} else {
+			// Newly installed component not present on host prior to upgrade
+			hj.ComponentBackups = append(hj.ComponentBackups, ComponentBackup{
+				Component:  c.Component,
+				TargetPath: c.TargetPath,
+				BackupPath: "",
+				NewSha256:  c.SHA256,
+			})
+			if c.Component == "agent" {
+				hj.NewSha256 = c.SHA256
+			}
+		}
+	}
+
+	if err := saveHelperJournal(cfg.StateDir, hj); err != nil {
+		res.Outcome, res.Detail = "verify_failed", "save helper journal: "+err.Error()
+		return res
+	}
+
+	if err := provisionLockForUpgrade(cfg); err != nil {
+		res.Outcome, res.Detail = "verify_failed", "provision lock: "+err.Error()
+		return res
+	}
+
+	// 2. Perform component mutations
+	hasAI := false
+	hasAgent := false
+	for _, c := range spec.Components {
+		if strings.HasPrefix(c.Component, "ai-") {
+			hasAI = true
+		}
+		if c.Component == "agent" {
+			hasAgent = true
+		}
+		if c.IsTar {
+			if err := ExtractTarGz(c.SourcePath, c.TargetPath, c.StripPrefix); err != nil {
+				res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("extract %s: %v", c.Component, err)
+				return res
+			}
+		} else {
+			targetDir := filepath.Dir(c.TargetPath)
+			if err := os.MkdirAll(targetDir, 0o755); err != nil {
+				res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("mkdir %s: %v", targetDir, err)
+				return res
+			}
+			tmp := filepath.Join(targetDir, ".vps-fleet-new-"+c.Component+"-"+jobID)
+			defer os.Remove(tmp)
+			if _, err := copyHashed(c.SourcePath, tmp, c.SHA256, c.Size); err != nil {
+				res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("copy %s: %v", c.Component, err)
+				return res
+			}
+			_ = os.Chmod(tmp, 0o755)
+			if os.Geteuid() == 0 {
+				_ = os.Chown(tmp, 0, 0)
+			}
+			if err := os.Rename(tmp, c.TargetPath); err != nil {
+				res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("rename %s: %v", c.Component, err)
+				return res
+			}
+			_ = fsyncDir(targetDir)
+		}
+	}
+
+	hj.Phase = hjRenamed
+	if err := saveHelperJournal(cfg.StateDir, hj); err != nil {
+		res.Outcome, res.Detail = "unclear", "post-swap journal: "+err.Error()
+		return res
+	}
+
+	// 3. Restart services
+	if hasAgent {
+		if _, err := runSystemctl(ctx, "restart", cfg.AgentUnit); err != nil {
+			res.Outcome, res.Detail = "restart_failed", "restart agent: "+err.Error()
+			return autoRollback(ctx, cfg, hj, res)
+		}
+	}
+
+	if hasAI && unitExists(ctx, "flexserver-ai-helper.service") {
+		if _, err := runSystemctl(ctx, "restart", "flexserver-ai-helper.service"); err != nil {
+			res.Outcome, res.Detail = "restart_failed", "restart ai-helper: "+err.Error()
+			return autoRollback(ctx, cfg, hj, res)
+		}
+	}
+
+	// 4. Verify health
+	if hasAgent {
+		active, detail := ensureServiceActive(ctx, cfg)
+		res.ServiceActive = active
+		if !active {
+			res.Detail = "agent service not active after restart: " + detail
+			return autoRollback(ctx, cfg, hj, res)
+		}
+	} else {
+		res.ServiceActive = true
+	}
+
+	if hasAI && unitExists(ctx, "flexserver-ai-helper.service") {
+		aiActive, aiDetail := ensureUnitActive(ctx, "flexserver-ai-helper.service")
+		if !aiActive {
+			res.Detail = "ai-helper service not active after restart: " + aiDetail
+			return autoRollback(ctx, cfg, hj, res)
+		}
+	}
+
+	hj.Phase = hjRestarted
+	_ = saveHelperJournal(cfg.StateDir, hj)
+	res.Outcome = "restarted"
+	res.BinarySha256 = hj.NewSha256
+	return res
+}
+
+func dirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
+func unitExists(ctx context.Context, unit string) bool {
+	for _, dir := range []string{"/etc/systemd/system", "/lib/systemd/system", "/usr/lib/systemd/system"} {
+		if _, err := os.Stat(filepath.Join(dir, unit)); err == nil {
+			return true
+		}
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := runSystemctl(cctx, "cat", unit)
+	if err != nil {
+		return false
+	}
+	trimmed := strings.TrimSpace(out)
+	return len(trimmed) > 0 && !strings.Contains(trimmed, "could not be found")
+}
+
+func ensureUnitActive(ctx context.Context, unit string) (bool, string) {
+	deadline := time.Now().Add(serviceActiveWait)
+	last := ""
+	for {
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		out, err := runSystemctl(cctx, "is-active", unit)
+		cancel()
+		if err == nil && out == "active" {
+			return true, "active"
+		}
+		if err != nil {
+			last = err.Error()
+		} else {
+			last = out
+		}
+		if time.Now().After(deadline) {
+			return false, last
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err().Error()
+		case <-time.After(servicePollEvery):
+		}
+	}
+}
+
+func copyDir(src, dst string) error {
+	srcFi, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	perm := srcFi.Mode().Perm()
+	if perm == 0 {
+		perm = 0o755
+	}
+	if err := os.MkdirAll(dst, perm); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		s := filepath.Join(src, e.Name())
+		d := filepath.Join(dst, e.Name())
+		fi, err := os.Lstat(s)
+		if err != nil {
+			return err
+		}
+		switch {
+		case fi.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(s)
+			if err != nil {
+				return err
+			}
+			_ = os.Remove(d)
+			if err := os.Symlink(target, d); err != nil {
+				return err
+			}
+		case fi.IsDir():
+			if err := copyDir(s, d); err != nil {
+				return err
+			}
+		default:
+			data, err := os.ReadFile(s)
+			if err != nil {
+				return err
+			}
+			filePerm := fi.Mode().Perm()
+			if filePerm == 0 {
+				filePerm = 0o644
+			}
+			if err := os.WriteFile(d, data, filePerm); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

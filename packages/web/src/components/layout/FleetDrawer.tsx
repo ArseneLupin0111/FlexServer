@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Search, Server, Plus } from "lucide-react";
+import { Search, Server, Plus, Layers } from "lucide-react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "../ui/sheet";
 import { BrandMark } from "../Brand";
 import { FleetHostItem } from "./FleetHostItem";
@@ -112,6 +112,16 @@ export function FleetDrawer({
           )}
         </nav>
 
+        <div className="shrink-0 border-t border-line p-3">
+          <Link
+            to="/vps/updates"
+            onClick={() => onOpenChange(false)}
+            className="flex items-center justify-center gap-1.5 border border-line bg-raised/50 py-2 text-xs font-medium text-dim transition-colors duration-160 ease-out hover:border-signal/50 hover:bg-raised hover:text-signal focus-visible:outline-2 focus-visible:outline-signal"
+          >
+            <Layers size={14} aria-hidden="true" />
+            Fleet updates
+          </Link>
+        </div>
         <div className="shrink-0 border-t border-line p-3">
           <Link
             to="/vps/new"

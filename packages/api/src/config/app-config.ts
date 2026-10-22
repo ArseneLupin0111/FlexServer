@@ -71,6 +71,10 @@ export type AppConfig = {
     enabled: boolean;
     keyringFile: string;
   };
+  fleet: {
+    publicKeyFile?: string;
+    manifestUrl?: string;
+  };
 };
 
 const booleanSchema = z
@@ -206,6 +210,14 @@ const envSchema = z.object({
   TERMINAL_INPUT_BUFFER_BYTES: z.coerce.number().int().positive().max(1024 * 1024).default(64 * 1024),
   TERMINAL_SLOW_CONSUMER_TIMEOUT_MS: z.coerce.number().int().positive().max(600000).default(10000),
   TERMINAL_PENDING_LIMIT: z.coerce.number().int().positive().max(1000).default(10),
+  FLEET_RELEASE_PUBLIC_KEY_FILE: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().trim().optional(),
+  ),
+  FLEET_RELEASE_MANIFEST_URL: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().trim().url().optional(),
+  ),
 });
 
 export function parseAppConfig(
@@ -379,6 +391,10 @@ export function parseAppConfig(
       inputBufferBytes: parsed.TERMINAL_INPUT_BUFFER_BYTES,
       slowConsumerTimeoutMs: parsed.TERMINAL_SLOW_CONSUMER_TIMEOUT_MS,
       pendingLimit: parsed.TERMINAL_PENDING_LIMIT,
+    },
+    fleet: {
+      publicKeyFile: parsed.FLEET_RELEASE_PUBLIC_KEY_FILE,
+      manifestUrl: parsed.FLEET_RELEASE_MANIFEST_URL,
     },
    };
 }

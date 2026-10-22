@@ -4,7 +4,7 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { DashboardShell } from "../components/layout/DashboardShell";
-import { ServersPanel } from "../components/dashboard/DashboardPanels";
+import { ServersPanel, FleetAgentUpdatesPanel } from "../components/dashboard/DashboardPanels";
 import { useDashboard, type DashboardCtx } from "../context/DashboardContext";
 import { vpsDisplayName } from "../lib/dashboard-formatters";
 
@@ -225,6 +225,29 @@ function CreateVpsFormInline({ ctx }: { ctx: DashboardCtx }) {
             />
           </Label>
         </fieldset>
+        <div className="border border-line bg-raised/30 p-3 text-xs space-y-2">
+          <div>
+            <div className="font-semibold text-text">Fleet Agent Updates</div>
+            <p className="text-dim leading-relaxed">
+              New hosts automatically enroll in the stable auto-update channel with overnight maintenance windows.
+            </p>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer font-normal text-text">
+            <input
+              type="checkbox"
+              aria-label="Enable automatic stable updates for new host"
+              checked={ctx.createForm.fleetAutoUpdate !== false}
+              onChange={(e) =>
+                ctx.onCreateFormChange({
+                  ...ctx.createForm,
+                  fleetAutoUpdate: e.target.checked,
+                })
+              }
+              className="accent-signal cursor-pointer"
+            />
+            <span>Enable automatic stable updates (uncheck to opt out)</span>
+          </label>
+        </div>
         <Button
           type="submit"
           disabled={ctx.busy}
@@ -235,6 +258,12 @@ function CreateVpsFormInline({ ctx }: { ctx: DashboardCtx }) {
       </form>
     </div>
   );
+}
+
+// ── Fleet agent updates page ──────────────────────────────────────────
+
+export function FleetAgentUpdatesPage() {
+  return <FleetAgentUpdatesPanel />;
 }
 
 // ── 404 page ────────────────────────────────────────────────────────

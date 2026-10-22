@@ -71,6 +71,7 @@ const initialCreateForm = {
   port: "22",
   username: "",
   password: "",
+  fleetAutoUpdate: true,
 };
 
 export type DashboardCtx = {
@@ -543,6 +544,7 @@ export function DashboardProvider({
       host: createForm.host.trim(),
       port: Number(createForm.port || 22),
       username: createForm.username.trim(),
+      fleetAutoUpdate: createForm.fleetAutoUpdate ?? true,
     };
 
     const created = await runAction("Creating VPS...", async () => {

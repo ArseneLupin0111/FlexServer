@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/vps-manager/agent/internal/version"
 )
 
 // Sentinel errors surfaced by the API client.
@@ -93,6 +96,7 @@ func (j *ClaimedJob) terminal() (string, bool) {
 
 // Client talks to the local-updater API with the scoped bearer credential.
 type Client struct {
+	cfg        *Config
 	base       string
 	credential string
 	http       *http.Client
@@ -101,6 +105,7 @@ type Client struct {
 // NewClient builds the API client from config.
 func NewClient(cfg *Config) *Client {
 	return &Client{
+		cfg:        cfg,
 		base:       strings.TrimRight(cfg.APIBase, "/"),
 		credential: cfg.Credential,
 		http: &http.Client{
@@ -120,14 +125,30 @@ type envelope struct {
 	} `json:"error"`
 }
 
-// Claim tries to claim the in-flight job. Returns (nil, nil) when there is no
-// claimable job (idle or already terminal server-side).
+// Claim tries to claim the in-flight job, sending protocol 3 evidence (version, platform, idle, AI health).
 func (c *Client) Claim(ctx context.Context) (*ClaimedJob, error) {
+	req := &ClaimRequest{
+		UpdaterVersion: version.Identity(),
+		Platform: PlatformInfo{
+			OS:   runtime.GOOS,
+			Arch: runtime.GOARCH,
+		},
+	}
+	if c.cfg != nil {
+		req.Idle, req.BusyReason = DetectHostIdle(c.cfg)
+		req.AIHealth = DetectAIHealth(c.cfg)
+	} else {
+		req.Idle = true
+	}
+	return c.ClaimWithEvidence(ctx, req)
+}
+
+// ClaimWithEvidence issues a claim request with explicit evidence payload.
+func (c *Client) ClaimWithEvidence(ctx context.Context, req *ClaimRequest) (*ClaimedJob, error) {
 	var out struct {
 		Job *ClaimedJob `json:"job"`
 	}
-	// Bodyless per the API contract: the route reads no request fields.
-	if err := c.do(ctx, http.MethodPost, "/api/local-updater/jobs/claim", nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/api/local-updater/jobs/claim", req, &out); err != nil {
 		return nil, err
 	}
 	return out.Job, nil
@@ -202,8 +223,8 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.credential)
-	req.Header.Set("User-Agent", "vps-updater/2")
-	req.Header.Set("X-Updater-Protocol-Version", "2")
+	req.Header.Set("User-Agent", "vps-updater/3")
+	req.Header.Set("X-Updater-Protocol-Version", "3")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

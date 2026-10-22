@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 )
 
@@ -250,6 +252,58 @@ func (d *Daemon) reconcile(ctx context.Context, j *Journal) error {
 		j.Phase = PhaseRestarting
 		return d.journal.Save(j)
 	}
+	hasAgent := hj.BackupPath != ""
+	if !hasAgent {
+		for _, cb := range hj.ComponentBackups {
+			if cb.Component == "agent" {
+				hasAgent = true
+				break
+			}
+		}
+	}
+
+	if !hasAgent && len(hj.ComponentBackups) > 0 {
+		allNew := true
+		allOld := true
+		for _, cb := range hj.ComponentBackups {
+			curSha, err := sha256File(cb.TargetPath)
+			if err != nil {
+				allNew = false
+				allOld = false
+				break
+			}
+			if cb.NewSha256 != "" && curSha != cb.NewSha256 {
+				allNew = false
+			}
+			if cb.OldSha256 != "" && curSha != cb.OldSha256 {
+				allOld = false
+			}
+		}
+
+		if allNew && hj.Phase != hjRolledBack {
+			j.PostSwap = true
+			if j.Phase == PhaseDownloading || j.Phase == PhaseVerifying || j.Phase == PhaseStaging {
+				j.Phase = PhaseRestarting
+				if err := d.journal.Save(j); err != nil {
+					return err
+				}
+				if err := d.reportPhase(ctx, j, PhaseRestarting, ""); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if allOld && hj.Phase == hjIntent {
+			return d.failPreSwap(ctx, j, "crash before rename; swap never occurred")
+		}
+		if allOld && hj.Phase == hjRolledBack {
+			j.PostSwap = true
+			j.Phase = PhaseRollingBack
+			return d.journal.Save(j)
+		}
+		j.PostSwap = true
+		return d.holdJob(ctx, j, "component sha256 matches neither new nor old; manual intervention")
+	}
 
 	actual, err := sha256File(d.cfg.AgentBinary)
 	if err != nil {
@@ -296,6 +350,9 @@ func (d *Daemon) runPreSwap(ctx context.Context, j *Journal) error {
 		return fmt.Errorf("staging dir (disk full?): %w", err)
 	}
 
+	if isFleetManifestEnvelope(j.ManifestRaw) {
+		return d.runFleetPreSwap(ctx, j)
+	}
 	targetSha := j.TargetSha256
 	if targetSha == "" {
 		targetSha = j.ReleaseID
@@ -404,6 +461,9 @@ func (d *Daemon) runRestarting(ctx context.Context, j *Journal) error {
 		if res.BinarySha256 != "" {
 			j.NewSha256 = res.BinarySha256
 		}
+		if j.UpdaterUpgraded {
+			go restartUpdaterService()
+		}
 		j.Phase = PhaseAwaitingHB
 		if err := d.journal.Save(j); err != nil {
 			return err
@@ -412,7 +472,6 @@ func (d *Daemon) runRestarting(ctx context.Context, j *Journal) error {
 			return err
 		}
 		return d.awaitHeartbeat(ctx, j)
-
 	case "recovered_no_swap":
 		return d.failPreSwap(ctx, j, "helper confirmed the swap never happened")
 
@@ -475,6 +534,12 @@ func (d *Daemon) awaitHeartbeat(ctx context.Context, j *Journal) error {
 		active, detail := runIsActive(ctx, d.cfg)
 		if !active {
 			return d.startRollback(ctx, j, "agent service not active after restart: "+detail)
+		}
+		if isFleetManifestEnvelope(j.ManifestRaw) {
+			aiHealth := DetectAIHealth(d.cfg)
+			if aiHealth.Installed && !aiHealth.Healthy {
+				return d.startRollback(ctx, j, "AI helper service not healthy after restart: "+aiHealth.Detail)
+			}
 		}
 
 		if err := sleepCtx(ctx, d.cfg.HeartbeatInterval); err != nil {
@@ -789,6 +854,12 @@ func runIsActive(ctx context.Context, cfg *Config) (bool, string) {
 	return out == "active", out
 }
 
+func restartUpdaterService() {
+	time.Sleep(200 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = runSystemctl(ctx, "restart", "vps-updater.service")
+}
 // MarshalJob pretty-prints the journal for the status command.
 func MarshalJob(j *Journal) string {
 	raw, err := json.MarshalIndent(j, "", "  ")
@@ -796,4 +867,266 @@ func MarshalJob(j *Journal) string {
 		return j.JobID
 	}
 	return string(raw)
+}
+
+func isFleetManifestEnvelope(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	var env FleetReleaseEnvelope
+	if err := json.Unmarshal([]byte(raw), &env); err == nil && env.Payload != "" && env.Signature != "" {
+		return true
+	}
+	return false
+}
+
+func (d *Daemon) runFleetPreSwap(ctx context.Context, j *Journal) error {
+	staging := stagingDir(d.cfg.StateDir, j.JobID)
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		return fmt.Errorf("staging dir: %w", err)
+	}
+
+	// 1. Load public key PEM
+	pubKeyPEM, err := d.cfg.FleetPublicKeyPEM()
+	if err != nil {
+		return d.failPreSwap(ctx, j, "load public key: "+err.Error())
+	}
+
+	// 2. Verify signed manifest envelope
+	payload, err := VerifyFleetManifest([]byte(j.ManifestRaw), pubKeyPEM)
+	if err != nil {
+		return d.failPreSwap(ctx, j, "verify manifest: "+err.Error())
+	}
+
+	// 3. Match release buildId
+	if j.BuildID != "" && payload.BuildID != j.BuildID {
+		return d.failPreSwap(ctx, j, fmt.Sprintf("payload buildId %s != job %s", payload.BuildID, j.BuildID))
+	}
+
+	// 4. Select components for host OS and Arch
+	hostOS := runtime.GOOS
+	hostArch := runtime.GOARCH
+
+	curVer := d.cfg.UpdaterVersion()
+	if payload.MinUpdaterVersion != "" && curVer != "dev" && CompareSemver(curVer, payload.MinUpdaterVersion) < 0 {
+		hasAgentArtifact := false
+		for _, a := range payload.Artifacts {
+			if a.Component == "agent" && a.OS == hostOS && a.Arch == hostArch {
+				hasAgentArtifact = true
+				break
+			}
+		}
+		if hasAgentArtifact {
+			return d.failPreSwap(ctx, j, fmt.Sprintf("updater version %s is below required minUpdaterVersion %s for agent upgrade", curVer, payload.MinUpdaterVersion))
+		}
+	}
+
+	type selectedComp struct {
+		artifact    FleetArtifact
+		targetPath  string
+		isTar       bool
+		stripPrefix string
+	}
+	var selected []selectedComp
+
+	for _, a := range payload.Artifacts {
+		if a.OS != hostOS || a.Arch != hostArch {
+			continue
+		}
+		switch a.Component {
+		case "agent":
+			targetPath, _ := d.cfg.CanonicalTarget("agent")
+			selected = append(selected, selectedComp{
+				artifact:   a,
+				targetPath: targetPath,
+			})
+		case "updater":
+			if !strings.HasPrefix(curVer, a.Version) {
+				targetPath, _ := d.cfg.CanonicalTarget("updater")
+				selected = append(selected, selectedComp{
+					artifact:   a,
+					targetPath: targetPath,
+				})
+				j.UpdaterUpgraded = true
+			}
+		case "ai-executor":
+			targetPath, _ := d.cfg.CanonicalTarget("ai-executor")
+			if fileExists(targetPath) {
+				selected = append(selected, selectedComp{
+					artifact:   a,
+					targetPath: targetPath,
+				})
+			}
+		case "ai-host-helper":
+			targetPath, _ := d.cfg.CanonicalTarget("ai-host-helper")
+			if fileExists(targetPath) {
+				selected = append(selected, selectedComp{
+					artifact:   a,
+					targetPath: targetPath,
+				})
+			}
+		case "ai-rootfs":
+			targetPath, _ := d.cfg.CanonicalTarget("ai-rootfs")
+			if fileExists(targetPath) {
+				selected = append(selected, selectedComp{
+					artifact:    a,
+					targetPath:  targetPath,
+					isTar:       true,
+					stripPrefix: "rootfs",
+				})
+			}
+		case "ai-profiles":
+			targetPath, _ := d.cfg.CanonicalTarget("ai-profiles")
+			if fileExists(targetPath) {
+				selected = append(selected, selectedComp{
+					artifact:    a,
+					targetPath:  targetPath,
+					isTar:       true,
+					stripPrefix: "profiles",
+				})
+			}
+		}
+	}
+
+	if len(selected) == 0 {
+		return d.failPreSwap(ctx, j, "no matching components for host platform")
+	}
+
+	compDir := filepath.Join(staging, "components")
+	if err := os.MkdirAll(compDir, 0o755); err != nil {
+		return err
+	}
+
+	// 5. Downloading phase
+	if j.Phase == PhaseDownloading {
+		if err := d.reportPhase(ctx, j, PhaseDownloading, ""); err != nil {
+			return err
+		}
+		for _, sc := range selected {
+			ext := ".bin"
+			perm := os.FileMode(0o755)
+			if sc.isTar {
+				ext = ".tar.gz"
+				perm = 0o644
+			}
+			destFile := filepath.Join(compDir, sc.artifact.Component+ext)
+			curSha, err := sha256File(destFile)
+			if err == nil && curSha == sc.artifact.SHA256 {
+				d.logf("job %s: component %s already downloaded", j.JobID, sc.artifact.Component)
+				continue
+			}
+			d.logf("job %s: downloading component %s from %s", j.JobID, sc.artifact.Component, sc.artifact.URL)
+			if _, err := DownloadFleetArtifact(ctx, sc.artifact.URL, sc.artifact.SHA256, sc.artifact.Size, destFile, perm); err != nil {
+				return fmt.Errorf("download component %s: %w", sc.artifact.Component, err)
+			}
+		}
+		j.Phase = PhaseVerifying
+		if err := d.journal.Save(j); err != nil {
+			return err
+		}
+	}
+
+	// 6. Verifying phase
+	if j.Phase == PhaseVerifying {
+		if err := d.reportPhase(ctx, j, PhaseVerifying, ""); err != nil {
+			return err
+		}
+		for _, sc := range selected {
+			ext := ".bin"
+			if sc.isTar {
+				ext = ".tar.gz"
+			}
+			destFile := filepath.Join(compDir, sc.artifact.Component+ext)
+			gotSha, err := sha256File(destFile)
+			if err != nil {
+				return fmt.Errorf("hash component %s: %w", sc.artifact.Component, err)
+			}
+			if gotSha != sc.artifact.SHA256 {
+				return d.failPreSwap(ctx, j, fmt.Sprintf("component %s sha %s != target %s", sc.artifact.Component, gotSha, sc.artifact.SHA256))
+			}
+			if !sc.isTar {
+				_ = os.Chmod(destFile, 0o755)
+				vctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				line, err := execStagedVersion(vctx, destFile)
+				cancel()
+				if err != nil {
+					return d.failPreSwap(ctx, j, fmt.Sprintf("staged %s -version: %v", sc.artifact.Component, err))
+				}
+				_, buildID, err := ParseVersionLine(line)
+				if err != nil {
+					return d.failPreSwap(ctx, j, fmt.Sprintf("parse %s version: %v", sc.artifact.Component, err))
+				}
+				if buildID != payload.BuildID {
+					return d.failPreSwap(ctx, j, fmt.Sprintf("component %s buildId %s != payload %s", sc.artifact.Component, buildID, payload.BuildID))
+				}
+			}
+		}
+		j.Phase = PhaseStaging
+		if err := d.journal.Save(j); err != nil {
+			return err
+		}
+	}
+
+	// 7. Staging phase
+	if j.Phase == PhaseStaging {
+		if err := d.reportPhase(ctx, j, PhaseStaging, ""); err != nil {
+			return err
+		}
+		var applyComps []ComponentApplySpec
+		for _, sc := range selected {
+			ext := ".bin"
+			if sc.isTar {
+				ext = ".tar.gz"
+			}
+			sourcePath := filepath.Join(compDir, sc.artifact.Component+ext)
+			applyComps = append(applyComps, ComponentApplySpec{
+				Component:   sc.artifact.Component,
+				SourcePath:  sourcePath,
+				TargetPath:  sc.targetPath,
+				SHA256:      sc.artifact.SHA256,
+				Size:        sc.artifact.Size,
+				IsTar:       sc.isTar,
+				StripPrefix: sc.stripPrefix,
+			})
+			if sc.artifact.Component == "agent" {
+				_, _ = copyHashed(sourcePath, filepath.Join(staging, "artifact.bin"), sc.artifact.SHA256, 0)
+			}
+		}
+
+		spec := ApplySpec{
+			JobID:      j.JobID,
+			ReleaseID:  payload.ReleaseID,
+			BuildID:    payload.BuildID,
+			Components: applyComps,
+		}
+		specRaw, err := json.MarshalIndent(spec, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := atomicWriteFile(filepath.Join(staging, "apply-spec.json"), specRaw, 0o644); err != nil {
+			return fmt.Errorf("write apply-spec.json: %w", err)
+		}
+
+		metaBytes, err := json.Marshal(map[string]any{
+			"jobId":   j.JobID,
+			"buildId": payload.BuildID,
+			"sha256":  j.TargetSha256,
+			"size":    j.TargetSizeBytes,
+		})
+		if err == nil {
+			_ = atomicWriteFile(filepath.Join(staging, "meta.json"), metaBytes, 0o644)
+		}
+
+		j.SwapRequested = true
+		j.Phase = PhaseRestarting
+		if err := d.journal.Save(j); err != nil {
+			return err
+		}
+		if err := d.reportPhase(ctx, j, PhaseRestarting, ""); err != nil {
+			return err
+		}
+		return d.runRestarting(ctx, j)
+	}
+
+	return nil
 }

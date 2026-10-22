@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+
+	"github.com/vps-manager/agent/internal/version"
 )
 
 type ServerConfig struct {
@@ -33,8 +35,13 @@ func main() {
 	rootfsDir := flag.String("rootfs-dir", "/usr/local/share/flexserver-ai/rootfs", "Pinned minimal rootfs directory")
 	cgroupBase := flag.String("cgroup-base", "/sys/fs/cgroup/flexserver-ai", "Base cgroup v2 directory")
 	backupsDir := flag.String("backups-dir", "/var/lib/flexserver-ai/backups", "Root-owned backups directory for config CAS")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Println(version.Identity())
+		return
+	}
 	permission, err := strconv.ParseUint(*mode, 8, 32)
 	if err == nil {
 		cfg := ServerConfig{

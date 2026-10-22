@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, Optional } from "@nestjs/common";
 import { AuditService } from "../audit/audit.service.js";
 import type { AppConfig } from "../config/app-config.js";
 import { demoServers } from "../demo/demo-fixtures.js";
@@ -24,7 +24,8 @@ import { AgentInstallerService } from "../agents/agent-installer.service.js";
 import { AgentUninstallerService } from "../agents/agent-uninstaller.service.js";
 import { AgentUpgraderService } from "../agents/agent-upgrader.service.js";
 import { AgentRestartService } from "../agents/agent-restart.service.js";
-import { AGENT_REPOSITORY } from "../tokens.js";
+import { AGENT_REPOSITORY, FLEET_PROVISIONING_SERVICE } from "../tokens.js";
+import { FleetProvisioningService } from "../agents/fleet-provisioning.service.js";
 import type { AgentRepository } from "../persistence/repositories/agent.repository.js";
 import { HostKeyPinService } from "../ssh/host-key-pin.service.js";
 import { applyAgentState, type VpsRecord } from "./vps.models.js";
@@ -54,6 +55,9 @@ export class VpsService {
     private readonly removalCleanup?: VpsCleanup,
     private readonly lifecycle?: AgentLifecycleCoordinator,
     private readonly filesService?: VpsFilesCanceller,
+    @Optional()
+    @Inject(FLEET_PROVISIONING_SERVICE)
+    private readonly fleetProvisioning?: FleetProvisioningService,
   ) {}
 
   async list() {
@@ -107,14 +111,21 @@ export class VpsService {
 
   async create(body: unknown) {
     this.assertNotDemo();
-    const record = await this.store.create(createVpsSchema.parse(body));
+    const parsed = createVpsSchema.parse(body);
+    const record = await this.store.create(parsed);
+    const fleetAutoUpdate = parsed.fleetAutoUpdate !== false;
+    if (this.fleetProvisioning) {
+      await this.fleetProvisioning
+        .recordNewHostPreference(record.id, fleetAutoUpdate)
+        .catch(() => undefined);
+    }
     await this.audit.record({
       actor: "system",
       action: "vps.create",
       resourceType: "vps",
       resourceId: record.id,
       result: "success",
-      metadata: { host: record.host },
+      metadata: { host: record.host, fleetAutoUpdate },
     });
     return record;
   }
@@ -436,12 +447,13 @@ export class VpsService {
     this.assertNotDemo();
     const vps = await this.get(id);
     this.assertRemoteUserManaged(vps);
-    const { password } = installAgentSchema.parse(body);
+    const { password, fleetAutoUpdate } = installAgentSchema.parse(body);
     try {
       const result = await this.agentInstaller.install(
         vps.id,
         password,
         requestHost,
+        fleetAutoUpdate,
       );
       await this.audit.record({
         actor: "system",

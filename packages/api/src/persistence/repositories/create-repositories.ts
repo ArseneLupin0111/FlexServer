@@ -67,6 +67,8 @@ import {
   createPostgresAiRepository,
 } from "./ai.repository.js";
 import type { AiRepository } from "./ai.persistence.js";
+import { createJsonFleetRepository, type FleetRepository } from "./fleet.repository.js";
+import { createPostgresFleetRepository } from "./fleet.postgres.repository.js";
 
 import { registerComposeAdminContextFactory } from "../../crypto/secret-envelope.js";
 import { createComposeAdminContext } from "./compose-admin-registry.js";
@@ -89,6 +91,7 @@ export type RepositorySet = {
   applicationsInventory: ApplicationsInventoryRepository;
   ai?: AiRepository;
   pool?: Pool;
+  fleet: FleetRepository;
 };
 
 /**
@@ -119,6 +122,7 @@ export function createRepositories(
       settings: createPostgresSettingsRepository(pool),
       applicationsInventory: createPostgresApplicationsInventoryRepository(pool),
       ai: createPostgresAiRepository(pool),
+      fleet: createPostgresFleetRepository(pool),
     };
   }
 
@@ -152,5 +156,6 @@ export function createRepositories(
       join(config.dataDir, "settings.json"),
     ),
     ai: createJsonAiRepository(join(config.dataDir, "ai.json")),
+    fleet: createJsonFleetRepository(join(config.dataDir, "fleet.json")),
   };
 }

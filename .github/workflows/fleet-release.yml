@@ -1,0 +1,155 @@
+name: Promote stable agent release
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit or tag to promote (must belong to main)
+        required: true
+        type: string
+      version:
+        description: Agent semantic version
+        required: true
+        type: string
+      rollback_safe:
+        description: Release supports rollback without irreversible migration
+        required: true
+        type: boolean
+        default: true
+      min_updater_version:
+        description: Minimum compatible updater version
+        required: true
+        type: string
+      upgrade_from:
+        description: Optional comma-separated compatible source build IDs
+        required: false
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: fleet-stable-promotion
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      build_id: ${{ steps.source.outputs.build_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - name: Validate promotion source and changed components
+        id: source
+        env:
+          VERSION: ${{ inputs.version }}
+          MIN_UPDATER: ${{ inputs.min_updater_version }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main
+          node -e 'for (const v of [process.env.VERSION,process.env.MIN_UPDATER]) if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(v)) process.exit(1)'
+          # A source commit must change the shipped host code or runtime inputs.
+          test -n "$(git diff-tree --root -m --no-commit-id --name-only -r HEAD -- packages/agent scripts/agent scripts/install scripts/release)"
+          echo "build_id=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/agent/go.mod
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test -- --run
+      - name: Verify host packages
+        working-directory: packages/agent
+        run: go test ./...
+  promote:
+    needs: verify
+    runs-on: ubuntu-latest
+    # Configure required reviewers for this environment. This job also checks
+    # that a reviewer rule exists before it can access the signing operation.
+    environment: agent-stable
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.build_id }}
+          fetch-depth: 0
+      - name: Require protected promotion environment
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_ENVIRONMENT_READ_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          gh api "repos/$REPOSITORY/environments/agent-stable" --jq '.protection_rules | any(.type == "required_reviewers" and (.reviewers | length > 0))' | grep -qx true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/agent/go.mod
+      - name: Build compatible component artifacts
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          BUILD_ID="$(git rev-parse HEAD)"
+          mkdir -p fleet-dist
+          for arch in amd64 arm64; do
+            for item in 'agent:vps-agent' 'updater:vps-updater' 'ai-executor:ai-executor' 'ai-host-helper:ai-host-helper'; do
+              component="${item%%:*}"; command="${item#*:}"
+              (cd packages/agent && GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags "-X github.com/vps-manager/agent/internal/version.Value=$RELEASE_VERSION -X github.com/vps-manager/agent/internal/version.Build=$BUILD_ID" -o "../../fleet-dist/${component}-linux-${arch}" "./cmd/$command")
+            done
+            node scripts/agent/build-rootfs.mjs fleet-dist "linux-$arch"
+            mkdir -p "fleet-dist/runtime-$arch/rootfs" "fleet-dist/runtime-$arch/profiles"
+            tar -xzf "fleet-dist/ai-rootfs-linux-$arch.tar.gz" -C "fleet-dist/runtime-$arch/rootfs"
+            cp "fleet-dist/ai-rootfs-linux-$arch.manifest.json" "fleet-dist/runtime-$arch/manifest.json"
+            cp packages/agent/profiles/*.json "fleet-dist/runtime-$arch/profiles/"
+            find "fleet-dist/runtime-$arch" -type d -exec chmod 0755 {} +
+            find "fleet-dist/runtime-$arch/rootfs" -type f -exec chmod 0755 {} +
+            chmod 0644 "fleet-dist/runtime-$arch/manifest.json" "fleet-dist/runtime-$arch/profiles/"*.json
+            tar --owner=0 --group=0 --numeric-owner -czf "fleet-dist/ai-rootfs-bundle-linux-$arch.tar.gz" -C "fleet-dist/runtime-$arch" rootfs manifest.json
+            tar --owner=0 --group=0 --numeric-owner -czf "fleet-dist/ai-profiles-linux-$arch.tar.gz" -C "fleet-dist/runtime-$arch" profiles
+          done
+      - name: Sign and verify stable manifest
+        env:
+          FLEET_SIGNING_KEY: ${{ secrets.FLEET_RELEASE_SIGNING_KEY }}
+          FLEET_KEY_ID: ${{ vars.FLEET_RELEASE_KEY_ID }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          MIN_UPDATER: ${{ inputs.min_updater_version }}
+          ROLLBACK_SAFE: ${{ inputs.rollback_safe }}
+          UPGRADE_FROM: ${{ inputs.upgrade_from }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          umask 077
+          KEY="$(mktemp)"
+          trap 'rm -f "$KEY" "$KEY.pub"' EXIT
+          printf '%s\n' "$FLEET_SIGNING_KEY" > "$KEY"
+          openssl pkey -in "$KEY" -pubout -out "$KEY.pub"
+          export BUILD_ID="$(git rev-parse HEAD)"
+          node scripts/release/fleet-spec.mjs --output fleet-dist/spec.json
+          node scripts/release/fleet-release.mjs sign --spec fleet-dist/spec.json --key "$KEY" --key-id "$FLEET_KEY_ID" --output fleet-dist/stable.json
+          node scripts/release/fleet-release.mjs verify --manifest fleet-dist/stable.json --key "$KEY.pub" --expect-release "$BUILD_ID"
+      - name: Publish immutable release then stable pointer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          BUILD_ID="$(git rev-parse HEAD)"
+          TAG="agent-$BUILD_ID"
+          # Refuse overwrite: release identities and their artifacts are immutable.
+          if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            echo 'This build was already published; use a new release identity.' >&2; exit 1
+          fi
+          gh release create "$TAG" --repo "$REPOSITORY" --target "$BUILD_ID" --title "Agent $RELEASE_VERSION" --notes 'Signed fleet agent/runtime release.' fleet-dist/agent-linux-* fleet-dist/updater-linux-* fleet-dist/ai-executor-linux-* fleet-dist/ai-host-helper-linux-* fleet-dist/ai-rootfs-bundle-linux-*.tar.gz fleet-dist/ai-profiles-linux-*.tar.gz fleet-dist/stable.json
+          if ! gh release view agent-stable --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release create agent-stable --repo "$REPOSITORY" --target "$BUILD_ID" --title 'Agent stable channel' --notes 'Mutable pointer to a signed immutable release.'
+          fi
+          gh release upload agent-stable fleet-dist/stable.json --clobber --repo "$REPOSITORY"

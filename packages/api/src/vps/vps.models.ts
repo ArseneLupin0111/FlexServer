@@ -25,6 +25,7 @@ export type VpsRecord = {
   dockerManagementEnabled?: boolean;
   composeManagementEnabled?: boolean;
   sftpEnabled?: boolean;
+  fleetAutoUpdate?: boolean;
   /** Persisted agent lifecycle state (from agent_states), surfaced on VPS data. */
   agentStatus?: "not_installed" | "installing" | "online" | "offline" | "failed";
   /** Job that last drove agent install/uninstall (used to track progress live). */
@@ -84,6 +85,7 @@ export type CreateVpsInput = {
   status?: "unknown" | "healthy" | "warning" | "unreachable";
   notes?: string;
   password?: string;
+  fleetAutoUpdate?: boolean;
 };
 
 export type UpdateVpsInput = Partial<Omit<CreateVpsInput, "password">> & {

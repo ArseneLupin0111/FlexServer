@@ -250,6 +250,7 @@ export type CreateVpsPayload = {
   host: string;
   port: number;
   username: string;
+  fleetAutoUpdate?: boolean;
 };
 
 type ApiResponse<T> = {
@@ -912,4 +913,170 @@ export function listVpsAuditEvents(
     ? `?limit=${params.limit ?? 100}&offset=${params.offset ?? 0}`
     : "";
   return request<AuditEvent[]>(`${vpsPath(id)}/audit${query}`);
+}
+
+// ── Fleet Agent Updates (Phase 5 / Fleet Orchestrator) ──────────────
+
+export type FleetPolicyMode = "auto" | "manual" | "pinned";
+
+export type FleetMaintenanceWindow = {
+  timezone: string;
+  start: string; // HH:mm
+  end: string;   // HH:mm
+  days: number[]; // 0=Sun .. 6=Sat
+};
+
+export type FleetPolicy = {
+  mode: FleetPolicyMode;
+  group: string;
+  pinnedReleaseId?: string;
+  canary?: boolean;
+  maintenanceWindow?: FleetMaintenanceWindow;
+};
+
+export type FleetHostState =
+  | "needs_setup"
+  | "idle"
+  | "queued"
+  | "updating"
+  | "observing"
+  | "succeeded"
+  | "failed"
+  | "rolled_back"
+  | "waiting_verification"
+  | "offline"
+  | "busy"
+  | "pinned"
+  | string;
+
+export type FleetHost = {
+  vpsId: string;
+  name: string;
+  online: boolean;
+  installedBuildId: string | null;
+  targetReleaseId: string | null;
+  policy: FleetPolicy;
+  enrolled: boolean;
+  setupRequired: boolean;
+  status: FleetHostState;
+  reason?: string;
+  updaterVersion?: string;
+};
+
+export type FleetGroup = {
+  name: string;
+};
+
+export type FleetRelease = {
+  id: string;
+  version: string;
+  buildId: string;
+  publishedAt: string;
+  components: string[];
+  rollbackSafe: boolean;
+};
+
+export type FleetRolloutHost = {
+  vpsId: string;
+  state: string;
+  jobId?: string;
+  reason?: string;
+};
+
+export type FleetRollout = {
+  id: string;
+  releaseId: string;
+  state:
+    | "pending"
+    | "running"
+    | "paused"
+    | "completed"
+    | "failed"
+    | "canceled"
+    | string;
+  group: string;
+  createdAt: string;
+  updatedAt: string;
+  hosts: FleetRolloutHost[];
+  reason?: string;
+};
+
+export type FleetNotification = {
+  id: string;
+  createdAt: string;
+  message: string;
+  kind: "info" | "warning" | "error" | "success" | string;
+};
+
+export type FleetUpdatesDashboardData = {
+  hosts: FleetHost[];
+  groups: FleetGroup[];
+  releases: FleetRelease[];
+  rollouts: FleetRollout[];
+  notifications: FleetNotification[];
+};
+
+export type FleetEnrollResult = {
+  vpsId: string;
+  status: "enrolled" | "needs_setup" | "failed";
+  message?: string;
+};
+
+export type FleetPolicyUpdateResult = {
+  vpsId: string;
+  status: "updated" | "failed";
+  message?: string;
+};
+
+export function getFleetAgentUpdates(signal?: AbortSignal) {
+  return request<FleetUpdatesDashboardData>("/api/agent-updates", { signal });
+}
+
+export function enrollFleetHosts(payload: {
+  vpsIds: string[];
+  confirmed: true;
+  policy?: FleetPolicy;
+}) {
+  return request<{ results: FleetEnrollResult[] }>("/api/agent-updates/enroll", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateFleetPolicies(payload: {
+  vpsIds: string[];
+  policy: FleetPolicy;
+}) {
+  return request<{ results: FleetPolicyUpdateResult[] }>(
+    "/api/agent-updates/policies",
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function createFleetRollout(payload: {
+  vpsIds: string[];
+  releaseId: string;
+  confirmed: true;
+  irreversibleConsent?: boolean;
+}) {
+  return request<FleetRollout>("/api/agent-updates/rollouts", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function controlFleetRollout(
+  id: string,
+  action: "pause" | "resume" | "retry",
+) {
+  return request<FleetRollout>(
+    `/api/agent-updates/rollouts/${encodeURIComponent(id)}/control`,
+    {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    },
+  );
 }

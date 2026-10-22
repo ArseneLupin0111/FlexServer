@@ -23,6 +23,7 @@ export function toDateOrNull(value: string | null | undefined): Date | null {
   return value ? new Date(value) : null;
 }
 
-export function toJsonOrNull(value: unknown): unknown {
-  return value === undefined ? null : value;
+export function toJsonOrNull(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  return typeof value === "string" ? value : JSON.stringify(value);
 }

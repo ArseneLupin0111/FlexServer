@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — Assistant history column
+
+- Replace the Assistant history overlay drawer with a conversation column pinned left of the chat (visible by default; the History header button toggles it with `aria-expanded`). On wide screens it is a 240px sidebar; on narrow screens it stacks above the chat with its own scroll. Selecting a conversation keeps the column open, and the delete-per-conversation control moves into each row.
+
 ## Unreleased — Distilled AI Assistant settings modal
 
 - Simplify the Assistant settings modal so configuration reads at a glance: remove the three dense scope banners in favor of one-line tab intros, drop per-switch descriptions in favor of short row titles plus a single "actions run only after you approve the exact plan" note, collapse path scopes and service profiles behind a native disclosure, merge host-execution facts into one inline row with runtime details behind a disclosure, and move Check Endpoint beside the save action in the provider footer. All switches, gating, safety copy, and test contracts are unchanged.

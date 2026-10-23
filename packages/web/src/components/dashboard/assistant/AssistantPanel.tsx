@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
@@ -54,6 +54,23 @@ export type AssistantPanelProps = {
 export function AssistantPanel({ vps }: AssistantPanelProps) {
   const [searchParams, setSearchParams] = useSearchParams();
 
+  // Writing ?taskId= (task selection/creation) must not retrigger the full
+  // initial load: read the param through a ref so loadInitialData only
+  // re-runs when the host changes, preserving the active conversation.
+  const searchParamsRef = useRef(searchParams);
+  searchParamsRef.current = searchParams;
+
+  // Async race guards: a slower load for a superseded host/refresh, or a
+  // conversation detail fetch for a superseded selection, must never
+  // clobber newer panel state.
+  const loadSeqRef = useRef(0);
+  const convSeqRef = useRef(0);
+
+  // Mirrors activeConversationId including explicit null (New Chat) so
+  // refresh keeps the user's selection instead of falling back to the
+  // latest conversation. undefined = nothing selected yet this host.
+  const activeConversationRef = useRef<string | null | undefined>(undefined);
+
   // Root state
   const [providerSettings, setProviderSettings] = useState<AiProviderSettings | null>(null);
   const [policy, setPolicy] = useState<AiPolicy | null>(null);
@@ -73,6 +90,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   const [approvalDialogOpen, setApprovalDialogOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
+  const [taskDetailsOpen, setTaskDetailsOpen] = useState(false);
 
   // Loading & Error
   const [loading, setLoading] = useState(true);
@@ -119,9 +137,24 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     }, []),
   });
 
-  // Load all initial data for this host
-  const loadInitialData = useCallback(async () => {
+  // Load all initial data for this host. Re-runs only when the host changes;
+  // manual refresh reuses the same seq-guarded path without a full reload.
+  const loadInitialData = useCallback(async (mode: "initial" | "refresh" = "refresh") => {
+    const seq = ++loadSeqRef.current;
+    // Captured before any await: a conversation action (history select /
+    // New Chat) during the fetches supersedes this load's selection.
+    const convSeq = convSeqRef.current;
     setRootError(null);
+    if (mode === "initial") {
+      // Drop any previous host's task/conversation state before loading.
+      setTasks([]);
+      setConversations([]);
+      setActiveTaskId(null);
+      setActiveTask(null);
+      setActiveConversationId(null);
+      setMessages([]);
+      activeConversationRef.current = undefined;
+    }
     try {
       const [provRes, polRes, capRes, tasksRes, convRes] = await Promise.all([
         getAiSettings().catch(() => null),
@@ -131,43 +164,71 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         listVpsAiConversations(vps.id).catch(() => [] as AiConversation[]),
       ]);
 
+      // A newer load (host switch / refresh) superseded this response set.
+      if (seq !== loadSeqRef.current) return;
+
       if (provRes) setProviderSettings(provRes);
       if (polRes) setPolicy(polRes);
       if (capRes) setCapability(capRes);
-      if (tasksRes) setTasks(tasksRes);
+      if (tasksRes) {
+        setTasks(tasksRes);
+        // The refreshed list must not be shadowed by a stale activeTask
+        // snapshot in the chat projection; never regress a newer live one.
+        setActiveTask((prev) => {
+          if (!prev) return prev;
+          const fresh = tasksRes.find((t) => t.id === prev.id);
+          return fresh && fresh.revision >= prev.revision ? fresh : prev;
+        });
+      }
       if (convRes) setConversations(convRes);
 
-      // Determine active task: URL query param takes precedence, then first active executing/planning/approval task
-      const urlTaskId = searchParams.get("taskId");
+      if (convSeqRef.current !== convSeq) return;
+
+      // Determine active task (initial only; refresh keeps the user's
+      // selection): URL query param takes precedence, then first active
+      // executing/planning/approval task
       let selectedTask: AiTask | null = null;
+      if (mode === "initial") {
+        const urlTaskId = searchParamsRef.current.get("taskId");
 
-      if (urlTaskId && tasksRes) {
-        selectedTask = tasksRes.find((t) => t.id === urlTaskId) || null;
+        if (urlTaskId && tasksRes) {
+          selectedTask = tasksRes.find((t) => t.id === urlTaskId) || null;
+        }
+
+        if (!selectedTask && tasksRes && tasksRes.length > 0) {
+          // Find first non-terminal task
+          const active = tasksRes.find(
+            (t) =>
+              t.state === "planning" ||
+              t.state === "awaiting_approval" ||
+              t.state === "awaiting_input" ||
+              t.state === "executing" ||
+              t.state === "verifying",
+          );
+          selectedTask = active || tasksRes[0] || null;
+        }
+
+        if (selectedTask) {
+          setActiveTaskId(selectedTask.id);
+          setActiveTask(selectedTask);
+        }
       }
 
-      if (!selectedTask && tasksRes && tasksRes.length > 0) {
-        // Find first non-terminal task
-        const active = tasksRes.find(
-          (t) =>
-            t.state === "planning" ||
-            t.state === "awaiting_approval" ||
-            t.state === "awaiting_input" ||
-            t.state === "executing" ||
-            t.state === "verifying",
-        );
-        selectedTask = active || tasksRes[0] || null;
-      }
+      // Conversation selection: refresh keeps the user's exact choice
+      // (explicit null = New Chat stays empty — never fall through to the
+      // latest conversation); initial load prefers the deep-linked/selected
+      // task's conversation, then the latest conversation.
+      const preferredConvId =
+        mode === "refresh"
+          ? (activeConversationRef.current ?? null)
+          : (selectedTask?.conversationId ?? (convRes || [])[0]?.id ?? null);
 
-      if (selectedTask) {
-        setActiveTaskId(selectedTask.id);
-        setActiveTask(selectedTask);
-      }
-
-      // Populate conversation messages
-      if (convRes && convRes.length > 0) {
-        const latestConv = convRes[0];
-        setActiveConversationId(latestConv.id);
-        const detail = await getVpsAiConversation(vps.id, latestConv.id).catch(() => null);
+      if (preferredConvId) {
+        setActiveConversationId(preferredConvId);
+        if (mode === "initial") activeConversationRef.current = preferredConvId;
+        const detail = await getVpsAiConversation(vps.id, preferredConvId).catch(() => null);
+        // Superseded by a newer load, a conversation selection, or New Chat.
+        if (seq !== loadSeqRef.current || convSeqRef.current !== convSeq) return;
         if (detail) {
           setMessages(detail.messages || []);
         }
@@ -177,14 +238,16 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         err instanceof Error ? err.message : "Failed to load assistant configuration.",
       );
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (seq === loadSeqRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  }, [vps.id, searchParams]);
+  }, [vps.id]);
 
   useEffect(() => {
     setLoading(true);
-    void loadInitialData();
+    void loadInitialData("initial");
   }, [loadInitialData]);
 
   // When activeTaskId changes, sync with URL
@@ -237,6 +300,11 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       setTasks((prev) => [newTask, ...prev]);
       setActiveTaskId(newTask.id);
       setActiveTask(newTask);
+      // The created task pins the conversation for this chat session; adopt
+      // it so projected summaries and follow-ups target the right
+      // conversation even before it appears in list refreshes.
+      setActiveConversationId(newTask.conversationId);
+      activeConversationRef.current = newTask.conversationId;
       clearOutput();
 
       setSearchParams(
@@ -412,10 +480,14 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
 
   // Select history conversation
   async function handleSelectConversation(conv: AiConversation) {
+    const seq = ++convSeqRef.current;
     setActiveConversationId(conv.id);
+    activeConversationRef.current = conv.id;
     setHistoryDrawerOpen(false);
     try {
       const detail = await getVpsAiConversation(vps.id, conv.id);
+      // A newer selection (or "New Chat") superseded this fetch.
+      if (seq !== convSeqRef.current) return;
       setMessages(detail.messages || []);
       const lastMsgWithTask = [...detail.messages].reverse().find((m) => m.taskId);
       if (lastMsgWithTask?.taskId) {
@@ -428,7 +500,11 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
 
   // Start new empty conversation
   function handleNewConversation() {
+    // Invalidate any in-flight history selection so it cannot resurrect
+    // its conversation after the user explicitly started a new chat.
+    convSeqRef.current += 1;
     setActiveConversationId(null);
+    activeConversationRef.current = null;
     setMessages([]);
     setActiveTaskId(null);
     setActiveTask(null);
@@ -445,6 +521,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     setConversations((prev) => prev.filter((c) => c.id !== convId));
     if (activeConversationId === convId) {
       setActiveConversationId(null);
+      activeConversationRef.current = null;
       setMessages([]);
     }
   }
@@ -460,6 +537,12 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     });
   }
 
+  useEffect(() => {
+    if (activeTask && ["awaiting_approval", "uncertain", "failed", "cancel_requested"].includes(activeTask.state)) {
+      setTaskDetailsOpen(true);
+    }
+  }, [activeTask?.id, activeTask?.state]);
+
   const providerReady = Boolean(
     providerSettings &&
       providerSettings.endpoint.trim().length > 0 &&
@@ -468,6 +551,68 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   );
   const aiEnabled = policy?.aiEnabled === true;
   const readEnabled = policy?.readEnabled === true;
+
+  // Chat projection: persisted messages plus synthesized turns for the
+  // active conversation only. Final task summaries (from the task list or a
+  // live SSE snapshot) and the selected task's request must be readable in
+  // the chat even when the persisted message list omits them, without
+  // duplicating content the conversation already carries. One projected
+  // summary per task id; an earlier assistant turn with different content
+  // never suppresses the final result.
+  const chatMessages = useMemo(() => {
+    if (!activeConversationId) return messages;
+
+    const tasksById = new Map<string, AiTask>();
+    for (const t of tasks) tasksById.set(t.id, t);
+    if (activeTask) tasksById.set(activeTask.id, activeTask);
+
+    const projected: AiConversationMessage[] = [];
+
+    const selectedTask =
+      activeTask && activeTask.conversationId === activeConversationId ? activeTask : null;
+    if (selectedTask && selectedTask.requestSummary.trim().length > 0) {
+      const requestText = selectedTask.requestSummary.trim();
+      const hasUserTurn =
+        messages.some((m) => m.role === "user" && m.taskId === selectedTask.id) ||
+        messages.some((m) => m.role === "user" && m.content.trim() === requestText);
+      if (!hasUserTurn) {
+        projected.push({
+          id: `request-${selectedTask.id}`,
+          conversationId: selectedTask.conversationId,
+          taskId: selectedTask.id,
+          role: "user",
+          content: selectedTask.requestSummary,
+          createdAt: selectedTask.createdAt,
+        });
+      }
+    }
+
+    const summaries: AiConversationMessage[] = [];
+    for (const t of tasksById.values()) {
+      if (t.conversationId !== activeConversationId) continue;
+      const summaryText = t.summary?.trim();
+      if (!summaryText) continue;
+      const alreadyPersisted = messages.some(
+        (m) => m.role === "assistant" && m.taskId === t.id && m.content.trim() === summaryText,
+      );
+      if (alreadyPersisted) continue;
+      summaries.push({
+        id: `summary-${t.id}`,
+        conversationId: t.conversationId,
+        taskId: t.id,
+        role: "assistant",
+        content: summaryText,
+        createdAt: t.updatedAt,
+      });
+    }
+
+    if (projected.length === 0 && summaries.length === 0) return messages;
+    // Chronological merge so an old task's summary never jumps past later
+    // turns; synthesized turns carry the task's own createdAt/updatedAt.
+    const merged = [...messages, ...projected, ...summaries];
+    merged.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return merged;
+  }, [messages, tasks, activeTask, activeConversationId]);
 
   if (loading) {
     return (
@@ -479,7 +624,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   }
 
   return (
-    <div className="flex h-[calc(100vh-14rem)] min-h-[600px] flex-col space-y-3">
+    <div className={`flex min-h-[32rem] min-w-0 flex-col gap-3 ${taskDetailsOpen && activeTask ? "h-auto xl:h-[calc(100dvh-18rem)]" : "h-[calc(100dvh-18rem)]"}`}>
       {/* Global Header */}
       <AssistantHeader
         vps={vps}
@@ -491,7 +636,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         onOpenHistory={() => setHistoryDrawerOpen(true)}
         onRefresh={() => {
           setRefreshing(true);
-          void loadInitialData();
+          void loadInitialData("refresh");
         }}
         refreshing={refreshing}
         onNewConversation={handleNewConversation}
@@ -558,12 +703,26 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         </div>
       ) : null}
 
-      {/* Main 2-column layout: Left Chat / Right Task Execution Console */}
-      <div className="grid flex-1 grid-cols-1 gap-3 lg:grid-cols-12 min-h-0">
-        {/* Left Column: Chat & Clarifications (7 cols on lg) */}
-        <div className="h-full min-h-0 lg:col-span-7">
+      {activeTask ? (
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line pb-2 text-xs">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className={`font-medium ${activeTask.state === "failed" || activeTask.state === "uncertain" ? "text-crit" : activeTask.state === "awaiting_approval" ? "text-warn" : "text-dim"}`}>
+              {activeTask.state.replace(/_/g, " ")}
+            </span>
+            {activeTask.state === "awaiting_approval" ? (
+              <Button size="sm" onClick={() => setApprovalDialogOpen(true)} className="text-xs">Review Plan</Button>
+            ) : null}
+          </div>
+          <Button type="button" variant="ghost" size="sm" aria-expanded={taskDetailsOpen} aria-controls="assistant-task-details" onClick={() => setTaskDetailsOpen((open) => !open)} className="text-xs">
+            <Terminal className="mr-1.5 h-3.5 w-3.5" />{taskDetailsOpen ? "Hide task details" : "Task details"}
+          </Button>
+        </div>
+      ) : null}
+
+      <div className={`grid min-h-0 min-w-0 flex-1 gap-3 ${taskDetailsOpen && activeTask ? "grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,24rem)]" : "grid-cols-1"}`}>
+        <div className={`min-h-0 min-w-0 ${taskDetailsOpen && activeTask ? "h-[32rem] xl:h-full" : "h-full"}`}>
           <AssistantChat
-            messages={messages}
+            messages={chatMessages}
             activeTask={activeTask}
             onSendMessage={handleSendMessage}
             onSubmitClarification={handleSubmitClarification}
@@ -575,8 +734,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
           />
         </div>
 
-        {/* Right Column: Active Task & Streaming Execution Panel (5 cols on lg) */}
-        <div className="h-full min-h-0 lg:col-span-5">
+        <div id="assistant-task-details" hidden={!taskDetailsOpen || !activeTask} className="h-[28rem] min-h-0 min-w-0 xl:h-full">
           <AssistantTaskPanel
             task={activeTask}
             streamState={streamState}

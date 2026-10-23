@@ -1292,6 +1292,114 @@
   font-weight: 600;
 }
 
+/* AI Assistant chat preview */
+.landing-home .assistant-chat-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.landing-home .assistant-bubble {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.375rem;
+  padding: 0.5rem 0.625rem;
+  background: hsl(var(--l-panel));
+  border: 1px solid hsl(var(--l-line));
+  border-radius: var(--radius-panel);
+  font-size: 0.75rem;
+}
+
+.landing-home .assistant-bubble.is-assistant {
+  background: hsl(var(--l-raised));
+}
+
+.landing-home .assistant-bubble p {
+  margin: 0;
+  color: hsl(var(--l-text));
+  overflow-wrap: anywhere;
+}
+
+.landing-home .assistant-role {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: hsl(var(--l-dim));
+}
+
+.landing-home .assistant-mini-table {
+  width: 100%;
+  border: 1px solid hsl(var(--l-line));
+  border-radius: var(--radius-control);
+  overflow: hidden;
+  font-size: 0.6875rem;
+}
+
+.landing-home .assistant-mini-table [role="row"] {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr;
+}
+
+.landing-home .assistant-mini-table [role="row"].is-head {
+  background: hsl(var(--l-line) / 0.5);
+  color: hsl(var(--l-dim));
+  font-weight: 600;
+}
+
+.landing-home .assistant-mini-table [role="columnheader"],
+.landing-home .assistant-mini-table [role="cell"] {
+  padding: 0.25rem 0.5rem;
+}
+
+.landing-home .assistant-mini-table [role="row"]:not(.is-head) [role="cell"] {
+  border-top: 1px solid hsl(var(--l-line));
+  color: hsl(var(--l-text));
+}
+
+.landing-home .assistant-code {
+  max-width: 100%;
+  padding: 0.125rem 0.375rem;
+  background: hsl(var(--l-panel));
+  border: 1px solid hsl(var(--l-line));
+  border-radius: var(--radius-control);
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.6875rem;
+  color: hsl(var(--l-text));
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.landing-home .assistant-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  padding: 0.5rem 0.625rem;
+  background: hsl(var(--l-accent) / 0.08);
+  border: 1px solid hsl(var(--l-accent) / 0.35);
+  border-radius: var(--radius-panel);
+  font-size: 0.75rem;
+}
+
+.landing-home .assistant-action-meta {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  min-width: 0;
+}
+
+.landing-home .assistant-action-meta strong {
+  color: hsl(var(--l-text));
+}
+
+.landing-home .assistant-action-meta span {
+  color: hsl(var(--l-dim));
+  font-size: 0.6875rem;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
 /* ── 2. Capabilities Section (Unified Single Accessible Tablist) ── */
 .landing-home .showcase-layout {
   display: grid;

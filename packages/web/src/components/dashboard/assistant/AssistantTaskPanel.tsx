@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { AssistantMarkdown } from "./AssistantMarkdown";
 import {
   Activity,
   AlertOctagon,
@@ -125,7 +126,8 @@ export function AssistantTaskPanel({
 
   useEffect(() => {
     if (autoScroll && consoleEndRef.current) {
-      consoleEndRef.current.scrollIntoView({ behavior: "smooth" });
+      const container = consoleEndRef.current.parentElement;
+      if (container) container.scrollTop = container.scrollHeight;
     }
   }, [outputChunks, autoScroll]);
 
@@ -181,7 +183,7 @@ export function AssistantTaskPanel({
   }
 
   return (
-    <aside aria-label="Task inspector" className="flex h-full flex-col border border-line bg-panel">
+    <aside aria-label="Task inspector" className="flex h-full min-h-0 min-w-0 flex-col border border-line bg-panel">
       {/* Task identity header */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line p-3">
         <div className="flex items-center gap-2">
@@ -213,7 +215,13 @@ export function AssistantTaskPanel({
         </div>
       </div>
 
-      <div className="flex-1 space-y-4 overflow-y-auto p-4">
+      <div className="min-h-0 min-w-0 flex-1 space-y-5 overflow-y-auto overscroll-contain p-4">
+        {task.usage ? (
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 border-b border-line pb-4 text-xs">
+            <div><dt className="text-dim">Input / output tokens</dt><dd className="mt-1 font-mono text-text">{task.usage.inputTokens.toLocaleString()} / {task.usage.outputTokens.toLocaleString()}{task.usage.estimated ? " (estimated)" : ""}</dd></div>
+            <div><dt className="text-dim">Tool calls / rounds</dt><dd className="mt-1 font-mono text-text">{task.usage.toolCalls} / {task.usage.rounds}</dd></div>
+          </dl>
+        ) : null}
         {/* Awaiting Approval Action Card */}
         {isAwaitingApproval && task.plan ? (
           <div className="border border-warn/40 bg-warn/10 p-4">
@@ -297,12 +305,10 @@ export function AssistantTaskPanel({
 
         {/* Task Summary */}
         {task.summary ? (
-          <div className="border border-line bg-ink/30 p-3 text-xs">
-            <div className="text-[11px] uppercase tracking-wider text-dim">
-              Summary
-            </div>
-            <div className="mt-1 text-text leading-relaxed">{task.summary}</div>
-          </div>
+          <details className="min-w-0 border-b border-line pb-4">
+            <summary className="cursor-pointer text-sm font-medium text-dim hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-signal">Response summary</summary>
+            <div className="mt-3 min-w-0"><AssistantMarkdown content={task.summary} /></div>
+          </details>
         ) : null}
 
         {/* Plan Steps Timeline */}
@@ -343,7 +349,8 @@ export function AssistantTaskPanel({
         ) : null}
 
         {/* Live Output Console */}
-        <div className="space-y-1.5">
+        <details key={task.id} open={outputChunks.length > 0 || hasGap || isTruncated || streamState === "error"} className="min-w-0 space-y-3">
+          <summary className="cursor-pointer text-sm font-medium text-dim hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-signal">Execution output{outputChunks.length === 0 ? " · no output" : ""}</summary>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Terminal className="h-3.5 w-3.5 text-signal" />
@@ -394,6 +401,10 @@ export function AssistantTaskPanel({
             </div>
           </div>
 
+          {streamState === "error" ? (
+            <p role="status" className="text-xs text-warn">Live output disconnected. Reconnect to resume updates.</p>
+          ) : null}
+
           {/* Output gap alert */}
           {hasGap ? (
             <div className="flex items-center gap-1.5 border border-warn/40 bg-warn/10 p-2 font-mono text-[11px] text-warn">
@@ -410,7 +421,7 @@ export function AssistantTaskPanel({
           ) : null}
 
           {/* Console Output box */}
-          <div className="h-60 overflow-y-auto border border-line bg-ink p-3 font-mono text-xs text-text [scrollbar-width:thin]">
+          <div className={`${outputChunks.length ? "max-h-64" : ""} overflow-auto overscroll-contain border border-line bg-ink p-3 font-mono text-xs text-text [scrollbar-width:thin]`}>
             {outputChunks.length === 0 ? (
               <span className="text-dim/60 italic">
                 {streamState === "live"
@@ -420,7 +431,7 @@ export function AssistantTaskPanel({
                     : "No stream output for this task."}
               </span>
             ) : (
-              <div className="space-y-0.5">
+              <>
                 {outputChunks.map((chunk) => (
                   <div
                     key={chunk.id}
@@ -432,14 +443,14 @@ export function AssistantTaskPanel({
                   </div>
                 ))}
                 <div ref={consoleEndRef} />
-              </div>
+              </>
             )}
           </div>
-        </div>
+        </details>
       </div>
 
       {/* Task Controls Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line p-3">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-line p-3">
         <div className="flex items-center gap-2">
           {!isTerminal && !isCancelRequested ? (
             <Button

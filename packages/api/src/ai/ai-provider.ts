@@ -63,7 +63,13 @@ export async function generateProviderRequest(config: ProviderConfig, messages: 
     const body = JSON.stringify({model:config.model,stream:false,messages:messages.map(m=>({role:m.role,content:m.content,...(m.toolCalls ? {tool_calls:m.toolCalls}:{}),...(m.toolCallId ? {tool_call_id:m.toolCallId}:{}),...(m.name ? {name:m.name}:{})})),...(tools.length ? {tools}:{}),max_tokens:2048});
     if (Buffer.byteLength(body) > 1024*1024) throw new ProviderProtocolError();
     const raw = await new Promise<string>((resolve,reject)=>{
-      const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url,{method:"POST",agent:false,signal:combined,lookup:(_host,_options,callback)=>callback(null,addresses[0]!.address,addresses[0]!.family),headers:{Authorization:`Bearer ${config.apiKey}`,"Content-Type":"application/json","Content-Length":Buffer.byteLength(body),Accept:"application/json"}},response=>{
+      const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url,{method:"POST",agent:false,signal:combined,lookup:(_host,options,callback)=>{
+            // Resolve only to addresses already validated by the endpoint policy.
+            const familyFiltered=options.family===4||options.family===6?addresses.filter(a=>a.family===options.family):[];
+            const pinned=familyFiltered.length?familyFiltered:addresses;
+            if(options.all) callback(null,pinned.map(a=>({address:a.address,family:a.family})));
+            else { const first=pinned[0]!; callback(null,first.address,first.family); }
+          },headers:{Authorization:`Bearer ${config.apiKey}`,"Content-Type":"application/json","Content-Length":Buffer.byteLength(body),Accept:"application/json"}},response=>{
         if (response.statusCode !== 200 || !response.headers["content-type"]?.toLowerCase().includes("application/json")) { response.destroy(); reject(new ProviderTransportError()); return; }
         const chunks: Buffer[] = []; let bytes = 0;
         response.on("data",(chunk:Buffer)=>{bytes += chunk.length;if(bytes > 1024*1024){reject(new ProviderProtocolError());response.destroy();}else chunks.push(chunk);});

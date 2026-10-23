@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
+import { getDefaultAutoSelectFamily, setDefaultAutoSelectFamily } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { AiProvider, ProviderProtocolError, ProviderTransportError, type ProviderConfig } from "../src/ai/ai-provider.js";
 import { decryptAiSecret, encryptAiSecret, rewrapAiEnvelope, type AiAadContext } from "../src/ai/ai-crypto.js";
@@ -50,6 +51,37 @@ describe("AI provider safety",()=>{
     {...valid,choices:[{message:{role:"assistant",content:null,tool_calls:[{id:"c",type:"function",function:{name:"flexserver_check",arguments:"[]"}}]},finish_reason:"tool_calls"}]},
   ])("rejects invalid or unauthorized response %#",async body=>{
     await expect(new AiProvider().check(await provider(body))).rejects.toBeInstanceOf(ProviderProtocolError);
+  });
+});
+
+describe("AI provider hostname transport",()=>{
+  async function hostnameProvider(body: unknown): Promise<ProviderConfig> {
+    const serve=()=>createServer((request,response)=>{request.resume();response.writeHead(200,{"Content-Type":"application/json"});response.end(JSON.stringify(body));});
+    const ipv6=serve(), ipv4=serve(); servers.push(ipv4);
+    let port=0;
+    await new Promise<void>(resolve=>{
+      const degraded=()=>{ipv6.off("error",degraded);resolve();};
+      ipv6.once("error",degraded);
+      ipv6.listen({port:0,host:"::1",ipv6Only:true},()=>{servers.push(ipv6);ipv6.off("error",degraded);const bound=ipv6.address();if(bound&&typeof bound!=="string")port=bound.port;resolve();});
+    });
+    await new Promise<void>((resolve,reject)=>{
+      ipv4.once("error",reject);
+      ipv4.listen({port,host:"127.0.0.1"},()=>{ipv4.off("error",reject);resolve();});
+    });
+    const address=ipv4.address(); if(!address||typeof address==="string") throw new Error("Missing listener");
+    return {endpoint:`http://localhost:${address.port}`,apiKey:"synthetic-test-key",model:"synthetic",allowPrivateEndpoint:true};
+  }
+  it("pins hostname resolution through the lookup callback under modern autoSelectFamily defaults",async()=>{
+    const config=await hostnameProvider(valid);
+    const previous=getDefaultAutoSelectFamily(); setDefaultAutoSelectFamily(true);
+    try { expect(await new AiProvider().check(config)).toEqual({ok:true}); }
+    finally { setDefaultAutoSelectFamily(previous); }
+  });
+  it("rejects hostname loopback without explicit opt-in before connection",async()=>{
+    const config=await hostnameProvider(valid); config.allowPrivateEndpoint=false;
+    const previous=getDefaultAutoSelectFamily(); setDefaultAutoSelectFamily(true);
+    try { await expect(new AiProvider().check(config)).rejects.toBeInstanceOf(ProviderTransportError); }
+    finally { setDefaultAutoSelectFamily(previous); }
   });
 });
 

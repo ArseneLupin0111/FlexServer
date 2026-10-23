@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -76,6 +76,7 @@ export function AssistantSettingsModal({
     ok: boolean;
     message: string;
   } | null>(null);
+  const checkRunIdRef = useRef(0);
 
   // Policy state
   const [aiEnabled, setAiEnabled] = useState(false);
@@ -92,8 +93,11 @@ export function AssistantSettingsModal({
   const [policyError, setPolicyError] = useState<string | null>(null);
   const [policySuccess, setPolicySuccess] = useState<string | null>(null);
 
-  // Sync state on open/load
+  // Sync state on open/load. A pending check belongs to the previous
+  // lifecycle/config snapshot and must not repaint a result afterwards.
   useEffect(() => {
+    checkRunIdRef.current += 1;
+    setCheckResult(null);
     if (providerSettings) {
       setEndpoint(providerSettings.endpoint || "");
       setModel(providerSettings.model || "");
@@ -101,9 +105,10 @@ export function AssistantSettingsModal({
       setApiKey("");
       setProviderError(null);
       setProviderSuccess(null);
-      setCheckResult(null);
     }
   }, [providerSettings, open]);
+  // No late check response may land after unmount.
+  useEffect(() => () => { checkRunIdRef.current += 1; }, []);
   useEffect(() => {
     if (open) {
       setActiveTab("provider");
@@ -133,14 +138,36 @@ export function AssistantSettingsModal({
         (providerSettings.endpoint && providerSettings.endpoint.trim().length > 0)),
   );
 
+  // Checks use saved settings only — never unsaved drafts or credentials.
+  const savedConfigComplete = Boolean(
+    providerSettings &&
+      providerSettings.endpoint.trim().length > 0 &&
+      providerSettings.model.trim().length > 0 &&
+      providerSettings.hasApiKey === true,
+  );
+  const draftMatchesSaved = Boolean(
+    providerSettings &&
+      endpoint.trim() === providerSettings.endpoint.trim() &&
+      model.trim() === providerSettings.model.trim() &&
+      allowPrivate === (providerSettings.allowPrivateEndpoint === true) &&
+      apiKey.trim().length === 0,
+  );
+  const canCheckProvider = savedConfigComplete && draftMatchesSaved;
 
   if (!open) return null;
+
+  // Supersedes any in-flight check so a late response cannot repaint a stale result.
+  function invalidateCheckResult() {
+    checkRunIdRef.current += 1;
+    setCheckResult(null);
+  }
 
   async function handleSaveProvider() {
     if (savingProvider || busy) return;
     setSavingProvider(true);
     setProviderError(null);
     setProviderSuccess(null);
+    invalidateCheckResult();
     try {
       const patch: UpdateAiSettings = {
         endpoint: endpoint.trim(),
@@ -163,16 +190,19 @@ export function AssistantSettingsModal({
   }
 
   async function handleCheckProvider() {
-    if (checkingProvider || busy) return;
+    if (checkingProvider || busy || !canCheckProvider) return;
+    const runId = ++checkRunIdRef.current;
     setCheckingProvider(true);
     setCheckResult(null);
     try {
       await onCheckProvider();
+      if (checkRunIdRef.current !== runId) return;
       setCheckResult({
         ok: true,
         message: "Synthetic tool check succeeded. Endpoint is operational.",
       });
     } catch (err) {
+      if (checkRunIdRef.current !== runId) return;
       setCheckResult({
         ok: false,
         message:
@@ -321,7 +351,10 @@ export function AssistantSettingsModal({
                   <Input
                     type="url"
                     value={endpoint}
-                    onChange={(e) => setEndpoint(e.target.value)}
+                    onChange={(e) => {
+                      setEndpoint(e.target.value);
+                      invalidateCheckResult();
+                    }}
                     placeholder="https://api.openai.com"
                     className="h-8 font-mono text-xs"
                   />
@@ -335,7 +368,10 @@ export function AssistantSettingsModal({
                   <Input
                     type="text"
                     value={model}
-                    onChange={(e) => setModel(e.target.value)}
+                    onChange={(e) => {
+                      setModel(e.target.value);
+                      invalidateCheckResult();
+                    }}
                     placeholder="gpt-4o"
                     className="h-8 font-mono text-xs"
                   />
@@ -358,7 +394,10 @@ export function AssistantSettingsModal({
                     <Input
                       type={showApiKey ? "text" : "password"}
                       value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
+                      onChange={(e) => {
+                        setApiKey(e.target.value);
+                        invalidateCheckResult();
+                      }}
                       placeholder={
                         providerSettings?.hasApiKey
                           ? "•••••••••••••••••••••••• (Leave blank to keep current)"
@@ -392,7 +431,10 @@ export function AssistantSettingsModal({
                   </div>
                   <Switch
                     checked={allowPrivate}
-                    onCheckedChange={setAllowPrivate}
+                    onCheckedChange={(next) => {
+                      setAllowPrivate(next);
+                      invalidateCheckResult();
+                    }}
                     aria-label="Allow private endpoint"
                   />
                 </div>
@@ -413,7 +455,7 @@ export function AssistantSettingsModal({
                     type="button"
                     variant="outline"
                     size="sm"
-                    disabled={checkingProvider || busy}
+                    disabled={checkingProvider || busy || !canCheckProvider}
                     onClick={() => void handleCheckProvider()}
                     className="text-xs"
                   >
@@ -425,6 +467,14 @@ export function AssistantSettingsModal({
                     Check Endpoint
                   </Button>
                 </div>
+
+                {!canCheckProvider ? (
+                  <div className="text-[11px] text-warn">
+                    {savedConfigComplete
+                      ? "The check runs against the saved configuration, not this draft. Save your changes first (leave the API key blank to keep the stored key)."
+                      : "A complete saved configuration (endpoint, model, and API key) is required before a check can run."}
+                  </div>
+                ) : null}
 
                 {checkResult ? (
                   <div

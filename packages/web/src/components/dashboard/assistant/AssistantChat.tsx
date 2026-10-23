@@ -323,7 +323,7 @@ export function AssistantChat({
                 aria-label="Clarification answer"
                 rows={2}
                 disabled={sendingClarification || busy}
-                className="w-full resize-none rounded-[12px] border border-line bg-ink p-2.5 text-xs text-text placeholder:text-dim focus:border-dim/60 focus:outline-none disabled:opacity-50"
+                className="w-full resize-none rounded-[12px] border border-line bg-ink p-2.5 text-xs text-text placeholder:text-dim focus:border-white/25 focus:outline-none disabled:opacity-50"
               />
               <div className="flex justify-end">
                 <Button
@@ -391,7 +391,7 @@ export function AssistantChat({
 
       {/* Composer: never clipped; only the log above scrolls */}
       <div className="shrink-0 border-t border-line bg-panel px-4 pb-4 pt-3">
-        <div className="mx-auto w-full max-w-3xl rounded-2xl border border-line bg-raised/50 px-3 pb-2 pt-2.5 focus-within:ring-1 focus-within:ring-dim/50">
+        <div className="mx-auto w-full max-w-3xl rounded-2xl border border-line bg-raised/50 px-3 pb-2 pt-2.5 focus-within:ring-1 focus-within:ring-white/15">
           <textarea
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
@@ -404,7 +404,7 @@ export function AssistantChat({
                   ? "AI Assistant is explicitly disabled by policy."
                   : !providerReady
                     ? "Connect a provider in Settings to enable the Assistant."
-                    : "Ask the assistant or propose an operation (Shift+Enter for newline)..."
+                    : "Ask the assistant or propose an operation..."
             }
             aria-label="Message"
             rows={2}

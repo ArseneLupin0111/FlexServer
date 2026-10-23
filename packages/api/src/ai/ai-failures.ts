@@ -51,6 +51,13 @@ export function aiHttpStatusFor(code: AiErrorCode): number {
   return AI_HTTP_STATUS[code];
 }
 
+/** Runtime guard for the stable wire-code union (AI_HTTP_STATUS is the
+ * exhaustive registry). Loosely-typed carriers such as AiPolicyError.code
+ * must pass this before their code is reused. */
+export function isAiErrorCode(value: unknown): value is AiErrorCode {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(AI_HTTP_STATUS, value);
+}
+
 export class AiAssistantError extends Error {
   readonly code: AiErrorCode;
   readonly status: number;

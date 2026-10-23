@@ -397,7 +397,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     }
   }
 
-  // Check provider connectivity
+  // Check uses saved global settings; rethrow so the modal never reports false success.
   async function handleCheckProvider() {
     try {
       await checkAiProvider();
@@ -405,6 +405,8 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       setRootError(
         err instanceof Error ? err.message : "Provider check failed.",
       );
+      // Modal caller surfaces its own error state; never report false success.
+      throw err;
     }
   }
 

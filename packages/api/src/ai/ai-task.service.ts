@@ -6,13 +6,13 @@ import type { AiRepository } from "../persistence/repositories/ai.persistence.js
 import { AiPersistenceConflictError } from "../persistence/repositories/ai.persistence.js";
 import type { AppConfig } from "../config/app-config.js";
 import { MetricService } from "../metrics/metric.service.js";
-import { AiPolicyService } from "./ai-policy.service.js";
-import { AiAssistantError } from "./ai-failures.js";
+import { AiPolicyService, AiPolicyError } from "./ai-policy.service.js";
+import { AiAssistantError, isAiErrorCode } from "./ai-failures.js";
 import { createAiTaskSchema, taskInputSchema, approvePlanSchema } from "./ai.schemas.js";
-import { decryptAiSecret, loadAiKeyring } from "./ai-crypto.js";
+import { decryptAiSecret, loadAiKeyring, AiCryptoUnavailableError } from "./ai-crypto.js";
 import { redactString } from "../common/redaction.js";
 import { AI_PROVIDER_KEY_CONTEXT } from "./ai-routes.service.js";
-import { AiProvider, type ProviderMessage, type ProviderTool } from "./ai-provider.js";
+import { AiProvider, type ProviderMessage, type ProviderTool, ProviderProtocolError, ProviderTransportError, ProviderKeyRequiredError } from "./ai-provider.js";
 import type { AiTask, AiPlan, AiHostCommandKind } from "./ai.models.js";
 import { DashboardSessionService } from "../auth/dashboard-session.service.js";
 import { DockerMonitoringService } from "../docker/docker-monitoring.service.js";
@@ -31,6 +31,14 @@ const tools: ProviderTool[] = [
   ...readTools,
 ];
 const terminal = new Set(["succeeded", "failed", "cancelled", "expired"]);
+/** Snapshot failure code: recognized errors keep their stable wire code;
+ * anything else falls back to provider_unavailable — never a raw error string. */
+function snapshotFailureCode(error: unknown): string {
+  if (error instanceof AiAssistantError) return error.code;
+  if (error instanceof AiPolicyError && isAiErrorCode(error.code)) return error.code;
+  if (error instanceof ProviderProtocolError || error instanceof ProviderTransportError || error instanceof ProviderKeyRequiredError || error instanceof AiCryptoUnavailableError) return error.code;
+  return "provider_unavailable";
+}
 const publicTask = (task: AiTask): AiTask => ({ id: task.id, conversationId: task.conversationId, vpsId: task.vpsId, state: task.state, revision: task.revision, requestSummary: task.requestSummary, summary: task.summary, clarificationPrompt: task.clarificationPrompt, plan: task.plan, usage: task.usage, error: task.error, capabilityMetadata: task.capabilityMetadata, createdAt: task.createdAt, updatedAt: task.updatedAt, expiresAt: task.expiresAt });
 
 @Injectable()
@@ -258,7 +266,7 @@ export class AiTaskService implements OnModuleDestroy {
         expectedRevision: current.revision,
         state: cancelled ? "cancelled" : "failed",
         error: {
-          code: cancelled ? "cancelled" : error instanceof AiAssistantError ? error.code : "provider_unavailable",
+          code: cancelled ? "cancelled" : snapshotFailureCode(error),
           message: cancelled ? "Task cancelled" : "AI task could not complete",
         },
       });

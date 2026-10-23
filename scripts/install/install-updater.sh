@@ -64,9 +64,10 @@
 #   6. Writes three hardened systemd units:
 #        vps-updater.service       unprivileged pull-only daemon
 #        vps-updater-apply.path    watches stateDir/pending
-#        vps-updater-apply.service root oneshot, FIXED argv, empty
-#                                  CapabilityBoundingSet — the daemon can
-#                                  never pass commands, paths or units
+#        vps-updater-apply.service root oneshot, FIXED argv, bounded
+#                                  CapabilityBoundingSet (CAP_DAC_OVERRIDE
+#                                  CAP_CHOWN) — the daemon can never pass
+#                                  commands, paths or units
 #   7. Enables the daemon and the path unit. Never touches
 #      vps-manager-agent.service beyond what the helper itself restarts.
 #   8. Installs flexserverctl.py to /usr/local/bin/flexserverctl (root:root
@@ -693,10 +694,10 @@ else
   chmod 0640 "$CONFIG_FILE"
 fi
 
-# State layout. The privileged helper runs with an empty
-# CapabilityBoundingSet (uid 0 only, no CAP_DAC_OVERRIDE), so every path it
-# writes must be root-owned; the daemon-owned dirs are group-writable by
-# vps-updater so root (as owner) and the daemon (as group) can both use them.
+# State layout. The privileged helper runs with bounded capabilities
+# (uid 0 with CAP_DAC_OVERRIDE and CAP_CHOWN for DAC traversal and ownership
+# preservation across non-root directories), while daemon-owned dirs are
+# group-writable by vps-updater so root and the daemon can both use them.
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "  [DRY-RUN] Would create ${STATE_DIR}/{pending,results,staging} (root:${SERVICE_USER} 0770)"
   echo "  [DRY-RUN] Would create ${STATE_DIR}/helper/{,backups} (root:root 0755)"
@@ -811,15 +812,16 @@ ExecStart=${BINARY_DEST} helper -config ${CONFIG_FILE}
 TimeoutStartSec=300s
 UMask=0022
 
-# Hardening: root uid but no capabilities (every path it writes is
-# root-owned), no config/token visibility, no kernel/clock access.
+# Hardening: root uid with minimal bounded capabilities (CAP_DAC_OVERRIDE
+# and CAP_CHOWN to traverse/mutate legacy target binaries and locks across
+# non-root user directory ownership), no config/token visibility, no kernel/clock access.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=${STATE_DIR} /usr/local/bin /run/vps-manager-agent /etc/tmpfiles.d ${AGENT_STATE_DIR}/docker-applications
 ProtectHome=read-only
 ReadOnlyPaths=/etc/vps-manager-agent/config.json
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN
 AmbientCapabilities=
 ProtectKernelTunables=true
 ProtectKernelModules=true

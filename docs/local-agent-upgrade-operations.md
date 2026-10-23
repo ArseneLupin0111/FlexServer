@@ -237,3 +237,11 @@ Operational verification exercises real binary compilation, CLI signature verifi
 1. **Signature and manifest verification:** Confirm that tampered payloads, unknown signing keys, or mismatched SHA-256 digests fail closed before binary staging.
 2. **Staging and rootfs extraction:** Verify that unprivileged staging directories unpack archives with stripped path prefixes and correct file modes without privilege escalation.
 3. **Atomic swap and rollback execution:** Confirm that service supervision restarts the agent under the target binary, and if post-restart heartbeat validation fails, the privileged helper restores the previous generation from backup and suppresses the failed build ID until operator retry.
+
+### Remote fleet updater installation and systemd activation
+
+Remote host provisioning uses `scripts/install/install-fleet-updater.sh` to install the pull-only updater binary, configure authentication credentials and pinned keys, and register systemd units:
+
+1. **Systemd availability detection:** The installer probes systemd via `systemctl is-system-running` and handles operational states including `degraded` (which exits non-zero on boot completed with degraded units), `running`, `starting`, `initializing`, and `maintenance`. On degraded hosts, the installer proceeds with `daemon-reload`, `enable`, and `restart` rather than silently skipping unit activation.
+2. **Strict failure propagation:** Activation commands (`systemctl daemon-reload`, `systemctl enable`, and `systemctl restart` for `vps-updater-apply.path` and `vps-updater.service`) fail loudly. Failures are not masked with `|| true`; any failure halts installation with exit status 1, cleans up ephemeral token files, and suppresses the success report.
+3. **Non-systemd and container environments:** Environments where systemctl is absent or reports `offline` cleanly skip unit enable/restart without error. The `--skip-systemd` flag allows explicit bypass for container and non-systemd target hosts.

@@ -326,17 +326,20 @@ run chmod 0755 "$TMP_BIN"
 run mv -f "$TMP_BIN" "$BINARY_DEST"
 
 # Symlink to /usr/local/bin/vps-updater for easy operator access
-if [[ "$BINARY_DEST" != "/usr/local/bin/vps-updater" ]]; then
-  run mkdir -p /usr/local/bin
-  run ln -sf "$BINARY_DEST" /usr/local/bin/vps-updater
+OPERATOR_SYMLINK_PATH="${FLEET_UPDATER_SYMLINK_PATH:-/usr/local/bin/vps-updater}"
+if [[ "$BINARY_DEST" != "$OPERATOR_SYMLINK_PATH" ]]; then
+  run mkdir -p "$(dirname "$OPERATOR_SYMLINK_PATH")"
+  run ln -sf "$BINARY_DEST" "$OPERATOR_SYMLINK_PATH"
 fi
 
 echo "[Install] Installing systemd units..."
-DAEMON_UNIT_PATH="/etc/systemd/system/vps-updater.service"
-PATH_UNIT_PATH="/etc/systemd/system/vps-updater-apply.path"
-APPLY_UNIT_PATH="/etc/systemd/system/vps-updater-apply.service"
+SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+DAEMON_UNIT_PATH="${SYSTEMD_UNIT_DIR}/vps-updater.service"
+PATH_UNIT_PATH="${SYSTEMD_UNIT_DIR}/vps-updater-apply.path"
+APPLY_UNIT_PATH="${SYSTEMD_UNIT_DIR}/vps-updater-apply.service"
 
 if [[ "$DRY_RUN" == "false" ]]; then
+  run mkdir -p "$SYSTEMD_UNIT_DIR"
   cat > "$DAEMON_UNIT_PATH" <<UNIT
 [Unit]
 Description=VPS Manager Fleet Updater (pull-only)
@@ -404,7 +407,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=${STATE_DIR} $(dirname "${AGENT_BINARY}") ${AGENT_STATE_DIR}/docker-applications /run/vps-manager-agent /etc/tmpfiles.d
 ProtectHome=read-only
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN
 AmbientCapabilities=
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -423,8 +426,31 @@ UNIT
   chmod 0644 "$DAEMON_UNIT_PATH" "$PATH_UNIT_PATH" "$APPLY_UNIT_PATH"
 fi
 
+is_systemd_available() {
+  if ! command -v systemctl &>/dev/null; then
+    return 1
+  fi
+  local state
+  state="$(systemctl is-system-running 2>/dev/null || true)"
+  state="$(echo "$state" | tr -d '[:space:]')"
+  case "$state" in
+    running|degraded|starting|initializing|maintenance)
+      return 0
+      ;;
+    offline)
+      return 1
+      ;;
+    *)
+      if [[ -d /run/systemd/system ]]; then
+        return 0
+      fi
+      return 1
+      ;;
+  esac
+}
+
 if [[ "$SKIP_SYSTEMD" == "false" && "$DRY_RUN" == "false" ]]; then
-  if command -v systemctl &>/dev/null && systemctl is-system-running &>/dev/null; then
+  if is_systemd_available; then
     journal_path="$STATE_DIR/helper/journal.json"
     if [[ -f "$journal_path" ]]; then
       wait_seconds=0
@@ -438,10 +464,34 @@ if [[ "$SKIP_SYSTEMD" == "false" && "$DRY_RUN" == "false" ]]; then
       done
     fi
     echo "[Install] Reloading systemd and enabling/restarting services..."
-    systemctl daemon-reload
-    systemctl enable vps-updater-apply.path vps-updater.service || true
-    systemctl restart vps-updater-apply.path || true
-    systemctl restart vps-updater.service || true
+    if ! systemctl daemon-reload; then
+      echo "Error: systemctl daemon-reload failed" >&2
+      if [[ -n "$TOKEN_FILE" && -f "$TOKEN_FILE" ]]; then
+        rm -f "$TOKEN_FILE"
+      fi
+      exit 1
+    fi
+    if ! systemctl enable vps-updater-apply.path vps-updater.service; then
+      echo "Error: systemctl enable failed for vps-updater units" >&2
+      if [[ -n "$TOKEN_FILE" && -f "$TOKEN_FILE" ]]; then
+        rm -f "$TOKEN_FILE"
+      fi
+      exit 1
+    fi
+    if ! systemctl restart vps-updater-apply.path; then
+      echo "Error: systemctl restart failed for vps-updater-apply.path" >&2
+      if [[ -n "$TOKEN_FILE" && -f "$TOKEN_FILE" ]]; then
+        rm -f "$TOKEN_FILE"
+      fi
+      exit 1
+    fi
+    if ! systemctl restart vps-updater.service; then
+      echo "Error: systemctl restart failed for vps-updater.service" >&2
+      if [[ -n "$TOKEN_FILE" && -f "$TOKEN_FILE" ]]; then
+        rm -f "$TOKEN_FILE"
+      fi
+      exit 1
+    fi
   else
     echo "[Install] Systemd not active in environment; skipping systemctl enable."
   fi

@@ -35,6 +35,7 @@ INSTALL_UPDATER="${REPO_ROOT}/scripts/install/install-updater.sh"
 INSTALL_LOCAL="${REPO_ROOT}/scripts/install/install-local-agent.sh"
 INSTALL_SH="${REPO_ROOT}/scripts/install/install.sh"
 INSTALL_FLEET_UPDATER="${REPO_ROOT}/scripts/install/install-fleet-updater.sh"
+TEST_FLEET_ACTIVATION="${REPO_ROOT}/scripts/tests/test-fleet-updater-activation.sh"
 PREPARE_UPDATER="${REPO_ROOT}/scripts/install/prepare-agent-updater.sh"
 DEPLOY_SH="${REPO_ROOT}/scripts/deploy.sh"
 AGENT_DIR="${REPO_ROOT}/packages/agent"
@@ -47,7 +48,7 @@ fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1" >&2; }
 
 # ── 1. Syntax ─────────────────────────────────────────────────────────────
 
-for f in "$INSTALL_UPDATER" "$INSTALL_LOCAL" "$INSTALL_SH" "$INSTALL_FLEET_UPDATER" "$PREPARE_UPDATER" "$DEPLOY_SH" "${BASH_SOURCE[0]}"; do
+for f in "$INSTALL_UPDATER" "$INSTALL_LOCAL" "$INSTALL_SH" "$INSTALL_FLEET_UPDATER" "$TEST_FLEET_ACTIVATION" "$PREPARE_UPDATER" "$DEPLOY_SH" "${BASH_SOURCE[0]}"; do
   if [[ -f "$f" ]]; then
     if bash -n "$f"; then pass "$(basename "$f") syntax OK"; else fail "$(basename "$f") syntax"; fi
   fi
@@ -141,10 +142,10 @@ JSON
   if [[ -n "$OUT" ]] \
     && printf '%s' "$OUT" | grep -Fq 'User=root' \
     && printf '%s' "$OUT" | grep -Fq 'ExecStart=/usr/local/lib/vps-manager-agent/vps-updater helper -config /etc/vps-updater/config.json' \
-    && printf '%s' "$OUT" | grep -Fq 'CapabilityBoundingSet='; then
-    pass "generated helper unit uses fixed argv and empty capability bounding set"
+    && printf '%s' "$OUT" | grep -Fq 'CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN'; then
+    pass "generated helper unit uses fixed argv and bounded capability bounding set (CAP_DAC_OVERRIDE CAP_CHOWN)"
   else
-    fail "helper unit must run fixed argv as root with empty capabilities"
+    fail "helper unit must run fixed argv as root with bounded capabilities (CAP_DAC_OVERRIDE CAP_CHOWN)"
   fi
 
   if [[ -n "$OUT" ]] \
@@ -334,6 +335,13 @@ if printf '%s' "$FLEET_SIGNED_OUT" | grep -Fq '"fleetReleasePublicKeyFile"' && p
   pass "install-fleet-updater signed mode includes fleetReleasePublicKeyFile and agentStateDir"
 else
   fail "install-fleet-updater signed mode must include fleetReleasePublicKeyFile and agentStateDir: $FLEET_SIGNED_OUT"
+fi
+
+# 4b. install-fleet-updater systemd activation and failure propagation regression
+if bash "$TEST_FLEET_ACTIVATION"; then
+  pass "install-fleet-updater systemd activation regression suite passed"
+else
+  fail "install-fleet-updater systemd activation regression suite failed"
 fi
 
 # 5. prepare-agent-updater architecture validation

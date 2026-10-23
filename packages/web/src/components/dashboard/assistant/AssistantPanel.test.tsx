@@ -537,6 +537,66 @@ describe("AssistantPanel conversation sync", () => {
     expect(within(getChatLog()).queryByText(latestRequest)).toBeNull();
   });
 
+  it("keeps the operator's question above the live summary when the client clock runs ahead of the server", async () => {
+    // Client clock is 2 minutes ahead of every server timestamp below.
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-01-01T00:02:00.000Z") });
+    try {
+      mockAssistantLoaded({ tasks: [], conversationDetail: null });
+      const request = "List running containers";
+      const summary = "Found 6 running containers.";
+      vi.mocked(createVpsAiTask).mockResolvedValue(
+        makeTask({
+          id: "task-new",
+          conversationId: "conv-new",
+          state: "planning",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:05.000Z",
+          requestSummary: request,
+          summary: undefined,
+        }),
+      );
+
+      renderPanel();
+      await screen.findByText(/how can the assistant help\?/i);
+
+      fireEvent.change(screen.getByPlaceholderText(/ask the assistant/i), {
+        target: { value: request },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+      await waitFor(() => {
+        expect(createVpsAiTask).toHaveBeenCalledTimes(1);
+      });
+
+      await act(async () => {
+        streamHarness.latestOptions?.onSnapshot?.(
+          makeTask({
+            id: "task-new",
+            conversationId: "conv-new",
+            state: "succeeded",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:20.000Z",
+            requestSummary: request,
+            summary,
+          }),
+        );
+      });
+
+      // Document order: the question must precede the AI summary (the
+      // optimistic turn is reconciled to the server task's createdAt).
+      const chat = getChatLog();
+      await waitFor(() => {
+        const question = within(chat).getByText(request);
+        const answer = within(chat).getByText(summary);
+        expect(
+          question.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("projects a final summary that arrives only via the refreshed task list", async () => {
     const summary = "Pruned 3 images after the refresh completed.";
     mockAssistantLoaded({

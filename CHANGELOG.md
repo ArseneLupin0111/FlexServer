@@ -4,6 +4,8 @@
 
 - Rebuild the dashboard Assistant around the conversation: a full-width chat that synthesizes missing request/summary turns, an optional collapsible task inspector, and safe Markdown rendering for assistant responses and summaries (GFM tables and fenced code, sanitized links, no remote images or raw HTML).
 - Keep conversation state stable across manual refreshes, history selection, New Chat, and task creation; stale async loads are fenced with sequence guards and refreshed tasks reconcile by revision so a New Chat stays empty and refreshed summaries are not shadowed.
+- Fix live-response ordering: each optimistic operator turn is reconciled to the server task's timestamp and task binding when the task is created (and clarification answers when the input is accepted), plus a user-before-assistant tie-break, so client clock skew can no longer render the AI summary above the operator's question before a reload.
+- Densify the chat surface in the style of a modern chat client: right-aligned lime-tinted operator bubbles, assistant replies rendered as open Markdown beside a compact bot marker, a pill composer with an inline circular send control, suggestion chips on the empty state, and rounded clarification cards — using literal corner radii so the square-surface theme tokens remain untouched.
 - Document the AI VPS Assistant capability in the README capabilities table and add an AI Assistant capability tab (illustrative chat preview) plus an FAQ entry to the landing page.
 
 ## Unreleased — Landing page

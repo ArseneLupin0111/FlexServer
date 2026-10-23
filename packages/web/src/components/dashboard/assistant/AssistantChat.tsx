@@ -39,6 +39,47 @@ const ROLE_LABELS: Record<AiConversationMessage["role"], string> = {
   system: "System",
 };
 
+const SUGGESTIONS = [
+  "Summarize host health",
+  "List running containers",
+  "Explain recent disk usage",
+];
+
+function EvidenceDisclosure({
+  evidence,
+}: {
+  evidence: NonNullable<AiConversationMessage["evidence"]>;
+}) {
+  return (
+    <details className="group mt-1.5 min-w-0 border border-line bg-ink/30 text-xs">
+      <summary className="flex cursor-pointer select-none items-center justify-between gap-2 p-2.5 font-medium text-dim transition-colors hover:bg-raised/40 hover:text-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal list-none [&::-webkit-details-marker]:hidden">
+        <span>Observed evidence ({evidence.length})</span>
+        <ChevronDown
+          className="h-3.5 w-3.5 shrink-0 text-dim transition-transform duration-150 group-open:rotate-180"
+          aria-hidden="true"
+        />
+      </summary>
+      <div className="space-y-2 border-t border-line p-2.5">
+        {evidence.map((ev, i) => (
+          <div key={i}>
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <span className="font-semibold text-text">{ev.title}</span>
+              <span className="tnum text-[10px] text-dim">
+                {ev.type} • {new Date(ev.timestamp).toLocaleTimeString()}
+              </span>
+            </div>
+            {ev.data ? (
+              <pre className="mt-1 max-h-40 overflow-auto border border-line bg-ink p-2 font-mono text-[10px] leading-relaxed text-dim">
+                {JSON.stringify(ev.data, null, 2)}
+              </pre>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 export function AssistantChat({
   messages,
   activeTask,
@@ -144,11 +185,13 @@ export function AssistantChat({
         aria-label="Assistant messages"
         aria-live="polite"
         onScroll={handleLogScroll}
-        className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-4 [scrollbar-width:thin]"
+        className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-4 py-5 [scrollbar-width:thin]"
       >
         {messages.length === 0 && !isAwaitingInput ? (
           <div className="flex h-full min-h-[14rem] flex-col items-center justify-center p-6 text-center">
-            <Bot className="h-8 w-8 text-signal opacity-70" aria-hidden="true" />
+            <div className="flex h-11 w-11 items-center justify-center rounded-[12px] border border-signal/30 bg-signal/10">
+              <Bot className="h-6 w-6 text-signal" aria-hidden="true" />
+            </div>
             <p className="mt-3 text-sm font-semibold text-text">
               How can the Assistant help?
             </p>
@@ -156,81 +199,109 @@ export function AssistantChat({
               Ask about metrics or inventory. Changes require plan approval; shell
               and file access stay off unless explicitly enabled.
             </p>
+            <div className="mt-4 flex max-w-lg flex-wrap items-center justify-center gap-2">
+              {SUGGESTIONS.map((suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  disabled={!(aiEnabled && providerReady) || busy}
+                  onClick={() => setInputText(suggestion)}
+                  className="rounded-full border border-line bg-raised/50 px-3.5 py-2 text-xs text-dim transition-colors hover:border-signal/50 hover:text-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal disabled:opacity-50"
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
           </div>
         ) : null}
 
         {messages.map((msg) => (
           <article
             key={msg.id}
-            className="mx-auto w-full min-w-0 max-w-3xl"
+            className={`mx-auto flex w-full min-w-0 max-w-3xl ${
+              msg.role === "user" ? "justify-end" : "gap-3"
+            }`}
             aria-label={`${ROLE_LABELS[msg.role]} message`}
           >
-            <div className="mb-1 flex items-baseline gap-2 text-[11px] text-dim">
-              <span className="font-semibold uppercase tracking-[0.06em]">
-                {ROLE_LABELS[msg.role]}
-              </span>
-              <time className="tnum" dateTime={msg.createdAt}>
-                {new Date(msg.createdAt).toLocaleTimeString()}
-              </time>
-            </div>
-
             {msg.role === "user" ? (
-              <div className="border border-line bg-raised/40 p-3">
-                <AssistantMarkdown content={msg.content} />
+              // Operator: right-aligned bubble; alignment identifies the
+              // sender, so no name header is needed.
+              <div className="flex min-w-0 w-fit max-w-[85%] flex-col items-end">
+                <div className="w-full rounded-2xl rounded-br-[6px] border border-signal/30 bg-signal/15 px-4 py-2.5">
+                  <AssistantMarkdown content={msg.content} />
+                </div>
+                {msg.evidence && msg.evidence.length > 0 ? (
+                  <div className="w-full">
+                    <EvidenceDisclosure evidence={msg.evidence} />
+                  </div>
+                ) : null}
+                <time
+                  className="tnum mt-1 text-[10px] text-dim"
+                  dateTime={msg.createdAt}
+                >
+                  {new Date(msg.createdAt).toLocaleTimeString()}
+                </time>
               </div>
             ) : msg.role === "system" ? (
-              <AssistantMarkdown content={msg.content} className="amd-quiet" />
+              <div className="mx-auto min-w-0 w-fit max-w-xl rounded-[10px] border border-line bg-raised/30 px-3 py-2 text-xs">
+                <AssistantMarkdown content={msg.content} className="amd-quiet" />
+              </div>
             ) : (
-              <AssistantMarkdown content={msg.content} />
-            )}
-
-            {msg.evidence && msg.evidence.length > 0 ? (
-              <details className="group mt-1.5 border border-line bg-ink/30 text-xs">
-                <summary className="flex cursor-pointer select-none items-center justify-between gap-2 p-2.5 font-medium text-dim transition-colors hover:bg-raised/40 hover:text-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal list-none [&::-webkit-details-marker]:hidden">
-                  <span>
-                    Observed evidence ({msg.evidence.length})
-                  </span>
-                  <ChevronDown
-                    className="h-3.5 w-3.5 shrink-0 text-dim transition-transform duration-150 group-open:rotate-180"
-                    aria-hidden="true"
-                  />
-                </summary>
-                <div className="space-y-2 border-t border-line p-2.5">
-                  {msg.evidence.map((ev, i) => (
-                    <div key={i}>
-                      <div className="flex flex-wrap items-baseline justify-between gap-2">
-                        <span className="font-semibold text-text">{ev.title}</span>
-                        <span className="tnum text-[10px] text-dim">
-                          {ev.type} • {new Date(ev.timestamp).toLocaleTimeString()}
-                        </span>
-                      </div>
-                      {ev.data ? (
-                        <pre className="mt-1 max-h-40 overflow-auto border border-line bg-ink p-2 font-mono text-[10px] leading-relaxed text-dim">
-                          {JSON.stringify(ev.data, null, 2)}
-                        </pre>
-                      ) : null}
-                    </div>
-                  ))}
+              <>
+                {/* Assistant: open text with a compact avatar marker; no
+                    boxed card so long Markdown answers read at full width. */}
+                <div
+                  className="mt-4 flex h-7 w-7 shrink-0 items-center justify-center rounded-[10px] border border-line bg-raised"
+                  aria-hidden="true"
+                >
+                  <Bot className="h-4 w-4 text-signal" />
                 </div>
-              </details>
-            ) : null}
+                <div className="min-w-0 flex-1">
+                  <div className="mb-1 flex items-baseline gap-2 text-[11px] text-dim">
+                    <span className="font-semibold uppercase tracking-[0.06em]">
+                      {ROLE_LABELS[msg.role]}
+                    </span>
+                    <time className="tnum" dateTime={msg.createdAt}>
+                      {new Date(msg.createdAt).toLocaleTimeString()}
+                    </time>
+                  </div>
+                  <AssistantMarkdown content={msg.content} />
+                  {msg.evidence && msg.evidence.length > 0 ? (
+                    <EvidenceDisclosure evidence={msg.evidence} />
+                  ) : null}
+                </div>
+              </>
+            )}
           </article>
         ))}
 
         {/* Pending feedback while a task runs */}
         {isTaskRunning ? (
-          <p className="flex items-center gap-2 text-xs text-dim">
-            <LoaderCircle
-              className="h-3.5 w-3.5 animate-spin text-signal"
+          <div className="mx-auto flex w-full min-w-0 max-w-3xl gap-3">
+            <div
+              className="mt-4 flex h-7 w-7 shrink-0 items-center justify-center rounded-[10px] border border-line bg-raised"
               aria-hidden="true"
-            />
-            Assistant is working — execution details appear in the task inspector.
-          </p>
+            >
+              <Bot className="h-4 w-4 text-signal" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="mb-1 flex items-baseline gap-2 text-[11px] text-dim">
+                <span className="font-semibold uppercase tracking-[0.06em]">Assistant</span>
+              </div>
+              <p className="flex items-center gap-2 text-xs text-dim">
+                <LoaderCircle
+                  className="h-3.5 w-3.5 animate-spin text-signal"
+                  aria-hidden="true"
+                />
+                Assistant is working — execution details appear in the task inspector.
+              </p>
+            </div>
+          </div>
         ) : null}
 
         {/* Clarification input when the task awaits operator input */}
         {isAwaitingInput ? (
-          <div className="space-y-3 border border-info/40 bg-info/10 p-4">
+          <div className="mx-auto w-full min-w-0 max-w-3xl space-y-3 rounded-2xl border border-info/40 bg-info/10 p-4">
             <div className="flex items-center gap-2 text-xs font-semibold text-info">
               <HelpCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
               <span>Clarification Required</span>
@@ -252,7 +323,7 @@ export function AssistantChat({
                 aria-label="Clarification answer"
                 rows={2}
                 disabled={sendingClarification || busy}
-                className="w-full resize-none border border-line bg-ink p-2 text-xs text-text placeholder:text-dim focus:border-signal focus:outline-none disabled:opacity-50"
+                className="w-full resize-none rounded-[12px] border border-line bg-ink p-2.5 text-xs text-text placeholder:text-dim focus:border-signal focus:outline-none disabled:opacity-50"
               />
               <div className="flex justify-end">
                 <Button
@@ -319,8 +390,8 @@ export function AssistantChat({
       ) : null}
 
       {/* Composer: never clipped; only the log above scrolls */}
-      <div className="shrink-0 border-t border-line bg-panel p-3">
-        <div className="relative mx-auto w-full max-w-3xl">
+      <div className="shrink-0 border-t border-line bg-panel px-4 pb-4 pt-3">
+        <div className="mx-auto w-full max-w-3xl rounded-2xl border border-line bg-raised/50 px-3 pb-2 pt-2.5 transition-colors focus-within:border-signal/60">
           <textarea
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
@@ -336,19 +407,22 @@ export function AssistantChat({
                     : "Ask the assistant or propose an operation (Shift+Enter for newline)..."
             }
             aria-label="Message"
-            rows={3}
+            rows={2}
             maxLength={32768}
-            className="w-full resize-none border border-line bg-ink p-3 pb-8 text-xs text-text placeholder:text-dim focus:border-signal focus:outline-none disabled:opacity-50 [scrollbar-width:thin]"
+            className="w-full resize-none bg-transparent px-1 text-sm leading-relaxed text-text placeholder:text-dim focus:outline-none disabled:opacity-50 [scrollbar-width:thin]"
           />
 
-          <div className="absolute bottom-2 right-2 flex items-center gap-2">
-            {inputText.length > 0 ? <span className="tnum text-[10px] text-dim">
-              {inputText.length.toLocaleString()}/32,768
-            </span> : null}
-            <Button
+          <div className="flex items-center justify-between gap-2 pt-1.5">
+            <span
+              className="tnum text-[10px] text-dim"
+              aria-hidden="true"
+            >
+              {inputText.length > 0
+                ? `${inputText.length.toLocaleString()}/32,768`
+                : "Shift+Enter for newline"}
+            </span>
+            <button
               type="button"
-              size="sm"
-              variant="default"
               onClick={() => void handleSend()}
               disabled={
                 !inputText.trim() ||
@@ -357,15 +431,15 @@ export function AssistantChat({
                 isTaskRunning ||
                 !(aiEnabled && providerReady)
               }
-              className="h-7 px-2.5 text-xs font-semibold"
+              aria-label="Send"
+              className="flex h-8 w-8 items-center justify-center rounded-full bg-signal text-ink transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal focus-visible:ring-offset-2 focus-visible:ring-offset-panel disabled:opacity-40"
             >
               {sending ? (
-                <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />
               ) : (
-                <Send className="h-3.5 w-3.5" aria-hidden="true" />
+                <Send className="h-4 w-4" aria-hidden="true" />
               )}
-              <span className="ml-1.5">Send</span>
-            </Button>
+            </button>
           </div>
         </div>
       </div>

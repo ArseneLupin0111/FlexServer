@@ -279,8 +279,9 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     setBusyTaskId(null);
 
     // Optimistically add user turn to local chat
+    const optimisticId = `local-${Date.now()}`;
     const optimisticMessage: AiConversationMessage = {
-      id: `local-${Date.now()}`,
+      id: optimisticId,
       conversationId: activeConversationId || "pending",
       role: "user",
       content: requestText,
@@ -295,6 +296,18 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         idempotencyKey,
         conversationId: activeConversationId || undefined,
       });
+
+      // Reconcile the optimistic turn with server truth: adopt the task's
+      // server-side timestamp and task binding. Otherwise client clock skew
+      // can sort the operator's question after the task's synthesized
+      // summary, and the requestSummary fallback cannot dedupe by taskId.
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === optimisticId
+            ? { ...m, taskId: newTask.id, createdAt: newTask.createdAt }
+            : m,
+        ),
+      );
 
       // Switch to new task
       setTasks((prev) => [newTask, ...prev]);
@@ -341,9 +354,10 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     setRootError(null);
 
     // Optimistic user turn
+    const optimisticId = `local-${Date.now()}`;
     const optimisticMessage: AiConversationMessage = {
-      id: `local-${Date.now()}`,
-      conversationId: activeConversationId || "pending",
+      id: optimisticId,
+      conversationId: activeConversationId || activeTask?.conversationId || "pending",
       role: "user",
       content: input,
       createdAt: new Date().toISOString(),
@@ -355,6 +369,15 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         input,
       });
       setActiveTask(updated);
+      // Server-side timestamp keeps the answer ordered before the reply it
+      // triggers even when the client clock runs ahead of the server.
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === optimisticId
+            ? { ...m, taskId: updated.id, createdAt: updated.updatedAt }
+            : m,
+        ),
+      );
     } finally {
       setActionBusy(false);
     }
@@ -610,7 +633,13 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     // Chronological merge so an old task's summary never jumps past later
     // turns; synthesized turns carry the task's own createdAt/updatedAt.
     const merged = [...messages, ...projected, ...summaries];
-    merged.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    merged.sort((a, b) => {
+      const byTime = a.createdAt.localeCompare(b.createdAt);
+      if (byTime !== 0) return byTime;
+      // Identical timestamps: the operator's turn precedes the reply.
+      if (a.role !== b.role) return a.role === "user" ? -1 : 1;
+      return 0;
+    });
     return merged;
   }, [messages, tasks, activeTask, activeConversationId]);
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — Workspace header de-duplication and chat focus polish
+
+- Render the workspace host identity banner and its live CPU/RAM/Disk/Load/Net strip on the Overview section only, instead of repeating it above every workspace tab; other sections keep their own subpage headings and rely on the Overview and fleet rail for host state.
+- Replace the lime focus border on the Assistant composer and clarification input with a neutral focus treatment (subtle ring / dim border) so clicking into the chat box no longer highlights it in signal green.
+
 ## Unreleased — AI assistant conversation workspace
 
 - Rebuild the dashboard Assistant around the conversation: a full-width chat that synthesizes missing request/summary turns, an optional collapsible task inspector, and safe Markdown rendering for assistant responses and summaries (GFM tables and fenced code, sanitized links, no remote images or raw HTML).

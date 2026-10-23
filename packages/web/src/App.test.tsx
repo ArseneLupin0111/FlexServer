@@ -1679,6 +1679,9 @@ describe("React dashboard", () => {
       renderApp(["/vps/vps-1/jobs"]);
 
       expect(await screen.findByText("Jobs for web-01")).toBeInTheDocument();
+      // The identity banner/resource strip lives on the Overview only.
+      expect(screen.queryByRole("heading", { name: "web-01", exact: true })).not.toBeInTheDocument();
+      expect(screen.queryByText("root@10.0.0.1:22")).not.toBeInTheDocument();
     });
 
     it("renders workspace metrics page for /vps/:id/metrics", async () => {

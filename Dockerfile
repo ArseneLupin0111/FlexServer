@@ -67,6 +67,16 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -trimpath -buildvcs=false \
     -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${BUILD_ID}" \
     -o /out/vps-updater-linux-arm64 ./cmd/vps-updater
+# Go trimpath builds do not retain linker flags as searchable build metadata.
+# Package checksum-bound identity for the API's existing companion reader.
+RUN BUILD_ID=$(/usr/local/bin/agent-build-id --root .) && \
+    printf '%s' "$AGENT_VERSION" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$' && \
+    for arch in amd64 arm64; do \
+        binary="/out/vps-agent-linux-$arch"; \
+        sha=$(sha256sum "$binary" | cut -d ' ' -f 1) && \
+        printf '{"os":"linux","arch":"%s","version":"%s","buildId":"%s","sha256":"%s"}\n' \
+            "$arch" "$AGENT_VERSION" "$BUILD_ID" "$sha" > "$binary.json" || exit 1; \
+    done
 RUN mkdir -p /out/ai-rootfs/bin /out/ai-rootfs/usr/bin /out/ai-rootfs/dev /out/ai-rootfs/proc /out/ai-rootfs/sys /out/ai-rootfs/tmp /out/ai-rootfs/etc && \
     chmod 1777 /out/ai-rootfs/tmp && \
     cp /bin/busybox /out/ai-rootfs/bin/busybox && \
@@ -104,6 +114,8 @@ COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-agent-linux-amd6
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-updater-linux-amd64 /app/agent/vps-updater-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-agent-linux-arm64 /app/agent/vps-agent-linux-arm64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-updater-linux-arm64 /app/agent/vps-updater-linux-arm64
+COPY --from=agent-builder --chown=app:app --chmod=0644 /out/vps-agent-linux-amd64.json /app/agent/vps-agent-linux-amd64.json
+COPY --from=agent-builder --chown=app:app --chmod=0644 /out/vps-agent-linux-arm64.json /app/agent/vps-agent-linux-arm64.json
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-pty-linux-amd64 /app/agent/host-pty-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/local-agent-rotator-linux-amd64 /app/agent/local-agent-rotator-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-files-linux-amd64 /app/agent/host-files-linux-amd64

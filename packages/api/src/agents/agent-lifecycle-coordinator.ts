@@ -38,14 +38,6 @@ export class AgentLifecycleCoordinator {
       throw new ConflictException(
         "An agent lifecycle operation is already in progress for this VPS",
       );
-    if (
-      operation === "update" &&
-      (s.activities.job > 0 || s.activities.terminal > 0)
-    ) {
-      throw new ConflictException(
-        "Cannot perform agent update while activity is in progress for this VPS",
-      );
-    }
     s.lifecycle = operation;
     if (operation === "uninstall" && s.ingests)
       await new Promise<void>((resolve) => s.waiters.push(resolve));

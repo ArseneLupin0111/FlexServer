@@ -12,27 +12,16 @@ import (
 func TestHostLockSystemUpgradeMutualExclusion(t *testing.T) {
 	stateDir := t.TempDir()
 
-	// 1. Regular scope blocks system:upgrade
+	// 1. Regular scope is active (simulating busy host workload)
 	err := AcquireHostScopeAt(stateDir, "project:test-proj", "compose-operation", "comp-1", false, time.Minute)
 	if err != nil {
 		t.Fatalf("acquire regular scope: %v", err)
 	}
 
-	err = AcquireHostScopeAt(stateDir, LockScopeUpgrade, "updater-helper", "job-1", true, 0)
-	if err == nil || !strings.Contains(err.Error(), "scope_busy") {
-		t.Fatalf("expected scope_busy when acquiring system:upgrade while regular scope active, got: %v", err)
-	}
-
-	// Release regular scope
-	err = ReleaseHostScopeAt(stateDir, "project:test-proj", "compose-operation", "comp-1")
-	if err != nil {
-		t.Fatalf("release regular scope: %v", err)
-	}
-
-	// 2. Now system:upgrade succeeds
+	// 2. Under immediate disruptive update policy, system:upgrade succeeds even with active workload
 	err = AcquireHostScopeAt(stateDir, LockScopeUpgrade, "updater-helper", "job-1", true, 0)
 	if err != nil {
-		t.Fatalf("acquire system:upgrade: %v", err)
+		t.Fatalf("expected system:upgrade to succeed immediately with active regular scope, got: %v", err)
 	}
 
 	// 3. system:upgrade blocks every other scope
@@ -192,8 +181,8 @@ func TestHostLockMutatingComposeDeadOwnerRetained(t *testing.T) {
 		t.Fatalf("write stale registry: %v", err)
 	}
 
-	// Acquiring system:upgrade MUST still be blocked because crashed compose mutating lock requires explicit reconcile!
-	err := AcquireHostScopeAt(stateDir, LockScopeUpgrade, "updater-helper", "job-check", true, 0)
+	// Acquiring the same project scope MUST still be blocked because crashed compose mutating lock requires explicit reconcile!
+	err := AcquireHostScopeAt(stateDir, "project:crashed-proj", "compose-operation", "comp-check", true, time.Minute)
 	if err == nil || !strings.Contains(err.Error(), "scope_busy") {
 		t.Fatalf("expected scope_busy for crashed mutating compose row, got: %v", err)
 	}

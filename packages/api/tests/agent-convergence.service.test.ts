@@ -173,30 +173,29 @@ describe("AgentConvergenceService (JSON Repository)", () => {
     ).rejects.toThrowError(LocalUpgradeUniqueViolationError);
   });
 
-  it("busy/offline oldest host => another ready host proceeds", async () => {
+  it("offline oldest host => another ready host proceeds", async () => {
     // Two VPS in stable order: vps-01 (older/first) and vps-02 (second)
     await addTestVps(vpsStore, "vps-01", "VPS 1");
     await addTestVps(vpsStore, "vps-02", "VPS 2");
 
-    // vps-01 is busy
+    // vps-01 is offline (stale updater heartbeat)
     await setAgentOnline(agentRepo, "vps-01", BUILD_ID_OLD);
     await agentRepo.upsertSystemInfo(fakeSystemInfo("vps-01", "x86_64"));
     await upgradeRepo.recordUpdaterHeartbeat({
       vpsId: "vps-01",
-      lastSeenAt: new Date().toISOString(),
+      lastSeenAt: new Date(Date.now() - 600_000).toISOString(),
       protocolVersion: 3,
-      idle: false,
-      busyReason: "pty_active",
     });
 
-    // vps-02 is ready and idle
+    // vps-02 is ready and online (even if busy)
     await setAgentOnline(agentRepo, "vps-02", BUILD_ID_OLD);
     await agentRepo.upsertSystemInfo(fakeSystemInfo("vps-02", "x86_64"));
     await upgradeRepo.recordUpdaterHeartbeat({
       vpsId: "vps-02",
       lastSeenAt: new Date().toISOString(),
       protocolVersion: 3,
-      idle: true,
+      idle: false,
+      busyReason: "pty_active",
     });
 
     const bundled = makeFakeBundled(BUILD_ID_V1);
@@ -224,15 +223,57 @@ describe("AgentConvergenceService (JSON Repository)", () => {
 
     await convergence.tick();
 
-    // vps-01 should not get a job because it is busy
+    // vps-01 should not get a job because it is offline
     const jobs1 = await upgradeRepo.listByVps("vps-01");
     expect(jobs1.length).toBe(0);
 
-    // vps-02 should get a job created!
+    // vps-02 should get a job created immediately even though busy!
     const jobs2 = await upgradeRepo.listByVps("vps-02");
     expect(jobs2.length).toBe(1);
     expect(jobs2[0].releaseBuildId).toBe(BUILD_ID_V1);
     expect(jobs2[0].state).toBe("queued");
+  });
+
+  it("busy installed host is scheduled immediately on startup tick", async () => {
+    await addTestVps(vpsStore, "vps-busy", "Busy VPS");
+    await setAgentOnline(agentRepo, "vps-busy", BUILD_ID_OLD);
+    await agentRepo.upsertSystemInfo(fakeSystemInfo("vps-busy", "x86_64"));
+    await upgradeRepo.recordUpdaterHeartbeat({
+      vpsId: "vps-busy",
+      lastSeenAt: new Date().toISOString(),
+      protocolVersion: 3,
+      idle: false,
+      busyReason: "long_running_job",
+    });
+
+    const bundled = makeFakeBundled(BUILD_ID_V1);
+    const localUpgradeService = new LocalUpgradeService(
+      baseConfig,
+      upgradeRepo,
+      agentRepo,
+      vpsStore,
+      bundled,
+      auditService,
+      coordinator,
+    );
+    const convergence = new AgentConvergenceService(
+      baseConfig,
+      upgradeRepo,
+      agentRepo,
+      vpsStore,
+      bundled,
+      localUpgradeService,
+      auditService,
+      undefined,
+      coordinator,
+    );
+
+    await convergence.tick();
+
+    const jobs = await upgradeRepo.listByVps("vps-busy");
+    expect(jobs.length).toBe(1);
+    expect(jobs[0].state).toBe("queued");
+    expect(jobs[0].releaseBuildId).toBe(BUILD_ID_V1);
   });
 
   it("terminal CAS and suppression survive process restart", async () => {
@@ -583,7 +624,7 @@ describe("AgentConvergenceService (JSON Repository)", () => {
     expect(status.automation.state).toBe("incompatible");
   });
 
-  it("deferred pre-swap attempt -> host becomes idle -> creates new attempt", async () => {
+  it("deferred pre-swap attempt -> host reconnects -> creates new attempt", async () => {
     await addTestVps(vpsStore, "vps-01", "VPS 1");
     await setAgentOnline(agentRepo, "vps-01", BUILD_ID_OLD);
     await agentRepo.upsertSystemInfo(fakeSystemInfo("vps-01", "x86_64"));
@@ -622,25 +663,24 @@ describe("AgentConvergenceService (JSON Repository)", () => {
     expect(initialJobs.length).toBe(1);
     expect(initialJobs[0].state).toBe("queued");
 
-    // Host becomes busy -> job is deferred
+    // Host becomes offline -> job is deferred
     await upgradeRepo.recordUpdaterHeartbeat({
       vpsId: "vps-01",
-      lastSeenAt: new Date().toISOString(),
+      lastSeenAt: new Date(Date.now() - 600_000).toISOString(),
       protocolVersion: 3,
-      idle: false,
-      busyReason: "pty_active",
     });
     await convergence.tick();
 
     const deferredJob = await upgradeRepo.get(initialJobs[0].id);
     expect(deferredJob?.state).toBe("deferred");
 
-    // Host becomes idle again -> tick creates a fresh attempt with a unique attempt key!
+    // Host reconnects (even while busy) -> tick creates a fresh attempt with a unique attempt key!
     await upgradeRepo.recordUpdaterHeartbeat({
       vpsId: "vps-01",
       lastSeenAt: new Date().toISOString(),
       protocolVersion: 3,
-      idle: true,
+      idle: false,
+      busyReason: "pty_active",
     });
     await convergence.tick();
 
@@ -928,7 +968,7 @@ describe("AgentConvergenceService (JSON Repository)", () => {
     expect(jobsAfterK2.find((j) => j.retryRequestKey === "K2")).toBeDefined();
   });
 
-  it("queued job on host becoming busy/offline is safely deferred without failure suppression", async () => {
+  it("queued job on busy host is not deferred; defers safely when offline without failure suppression", async () => {
     await addTestVps(vpsStore, "vps-01", "VPS 1");
     await setAgentOnline(agentRepo, "vps-01", BUILD_ID_OLD);
     await agentRepo.upsertSystemInfo(fakeSystemInfo("vps-01", "x86_64"));
@@ -968,7 +1008,7 @@ describe("AgentConvergenceService (JSON Repository)", () => {
     const queuedJob = jobs[0];
     expect(queuedJob.state).toBe("queued");
 
-    // Host becomes busy with activity
+    // Host becomes busy with activity - queued job must NOT be deferred
     await upgradeRepo.recordUpdaterHeartbeat({
       vpsId: "vps-01",
       lastSeenAt: new Date().toISOString(),
@@ -977,15 +1017,163 @@ describe("AgentConvergenceService (JSON Repository)", () => {
       busyReason: "docker_build",
     });
 
-    // Next convergence tick defers the queued job
+    // Next convergence tick keeps the queued job
+    await convergence.tick();
+    const jobStillQueued = await upgradeRepo.get(queuedJob.id);
+    expect(jobStillQueued?.state).toBe("queued");
+
+    // When host goes offline (stale updater heartbeat), queued job is deferred
+    await upgradeRepo.recordUpdaterHeartbeat({
+      vpsId: "vps-01",
+      lastSeenAt: new Date(Date.now() - 600_000).toISOString(),
+      protocolVersion: 3,
+    });
     await convergence.tick();
 
     const jobAfter = await upgradeRepo.get(queuedJob.id);
     expect(jobAfter?.state).toBe("deferred");
+    expect(jobAfter?.result?.reason).toBe("updater_offline");
 
     // Target is NOT suppressed!
     const conv = await upgradeRepo.getConvergence("vps-01");
     expect(conv?.suppressedBuildId ?? null).toBeNull();
+  });
+
+  it("refreshes remote updater via ensureBundled once per process on target agent build mismatch before candidate scheduling", async () => {
+    await addTestVps(vpsStore, "vps-remote-refresh", "Remote VPS");
+    await setAgentOnline(agentRepo, "vps-remote-refresh", BUILD_ID_OLD);
+    await agentRepo.upsertSystemInfo(fakeSystemInfo("vps-remote-refresh", "x86_64"));
+    await upgradeRepo.recordUpdaterHeartbeat({
+      vpsId: "vps-remote-refresh",
+      lastSeenAt: new Date().toISOString(),
+      protocolVersion: 3,
+      idle: false,
+      busyReason: "pty_active",
+    });
+
+    const fakeProvisioning = {
+      ensureBundled: vi.fn().mockResolvedValue({
+        vpsId: "vps-remote-refresh",
+        status: "enrolled",
+        reason: null,
+      }),
+    };
+
+    const bundled = makeFakeBundled(BUILD_ID_V1);
+    const localUpgradeService = new LocalUpgradeService(
+      baseConfig,
+      upgradeRepo,
+      agentRepo,
+      vpsStore,
+      bundled,
+      auditService,
+      coordinator,
+    );
+
+    const convergence = new AgentConvergenceService(
+      baseConfig,
+      upgradeRepo,
+      agentRepo,
+      vpsStore,
+      bundled,
+      localUpgradeService,
+      auditService,
+      fakeProvisioning as never,
+      coordinator,
+    );
+
+    // First tick triggers ensureBundled to refresh the remote updater and defers job scheduling
+    await convergence.tick();
+    expect(fakeProvisioning.ensureBundled).toHaveBeenCalledWith("vps-remote-refresh");
+    const jobsTick1 = await upgradeRepo.listByVps("vps-remote-refresh");
+    expect(jobsTick1.length).toBe(0);
+
+    // Next tick: host was refreshed in this process, so candidate job is scheduled immediately without second refresh
+    await convergence.tick();
+    expect(fakeProvisioning.ensureBundled).toHaveBeenCalledTimes(1);
+    const jobsTick2 = await upgradeRepo.listByVps("vps-remote-refresh");
+    expect(jobsTick2.length).toBe(1);
+    expect(jobsTick2[0].state).toBe("queued");
+  });
+
+  it("refreshes remote updater via ensureBundled when queued job already exists on remote host", async () => {
+    await addTestVps(vpsStore, "vps-queued-refresh", "Queued Remote VPS");
+    await setAgentOnline(agentRepo, "vps-queued-refresh", BUILD_ID_OLD);
+    await agentRepo.upsertSystemInfo(fakeSystemInfo("vps-queued-refresh", "x86_64"));
+    await upgradeRepo.recordUpdaterHeartbeat({
+      vpsId: "vps-queued-refresh",
+      lastSeenAt: new Date().toISOString(),
+      protocolVersion: 3,
+      idle: false,
+      busyReason: "deploy_running",
+    });
+
+    const now = new Date().toISOString();
+    await upgradeRepo.create({
+      id: "lug_queued_preexisting",
+      vpsId: "vps-queued-refresh",
+      state: "queued",
+      progress: null,
+      releaseId: BUILD_ID_V1,
+      releaseVersion: "1.0.0",
+      releaseBuildId: BUILD_ID_V1,
+      targetSha256: SHA256_V1,
+      targetUrl: "/api/local-updater/jobs/lug_queued_preexisting/artifact",
+      manifestRaw: "",
+      targetArch: "amd64",
+      actor: "convergence",
+      fencingToken: 1,
+      reclaimCount: 0,
+      claimedAt: null,
+      leaseExpiresAt: null,
+      deadlineAt: new Date(Date.now() + 600000).toISOString(),
+      error: null,
+      result: null,
+      revision: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const fakeProvisioning = {
+      ensureBundled: vi.fn().mockResolvedValue({
+        vpsId: "vps-queued-refresh",
+        status: "enrolled",
+        reason: null,
+      }),
+    };
+
+    const bundled = makeFakeBundled(BUILD_ID_V1);
+    const localUpgradeService = new LocalUpgradeService(
+      baseConfig,
+      upgradeRepo,
+      agentRepo,
+      vpsStore,
+      bundled,
+      auditService,
+      coordinator,
+    );
+
+    const convergence = new AgentConvergenceService(
+      baseConfig,
+      upgradeRepo,
+      agentRepo,
+      vpsStore,
+      bundled,
+      localUpgradeService,
+      auditService,
+      fakeProvisioning as never,
+      coordinator,
+    );
+
+    await convergence.tick();
+    expect(fakeProvisioning.ensureBundled).toHaveBeenCalledWith("vps-queued-refresh");
+
+    // Second tick does not repeatedly call ensureBundled
+    await convergence.tick();
+    expect(fakeProvisioning.ensureBundled).toHaveBeenCalledTimes(1);
+
+    const job = await upgradeRepo.get("lug_queued_preexisting");
+    expect(job?.state).toBe("queued");
   });
 });
 

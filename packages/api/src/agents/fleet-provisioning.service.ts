@@ -534,80 +534,18 @@ export class FleetProvisioningService {
 
       const scriptExec = cmdParts.join(" ");
 
-      // Execute readiness gate check, helper refresh, and updater install under the SAME host registry flock as admissions!
-      // This eliminates the check-then-start race where an admission begins between readiness inspection and helper restart.
+      // Serialize concurrent updater installations on the same host using a dedicated update mutex
       const execStatements = [
         `reg_dir=${shellQuote(`${resolvedAgentStateDir}/docker-applications`)};`,
         `mkdir -p "$reg_dir" 2>/dev/null || true;`,
         `chmod 0755 "$reg_dir" 2>/dev/null || true;`,
-        `lock_f="$reg_dir/exclusion.json.lock";`,
-        `excl_f="$reg_dir/exclusion.json";`,
+        `lock_f="$reg_dir/fleet-updater.lock";`,
         `touch "$lock_f" 2>/dev/null || true;`,
         `chmod 0664 "$lock_f" 2>/dev/null || true;`,
         `exec 9<>"$lock_f";`,
         `if ! flock -x -w 5 9 2>/dev/null; then`,
-        `  echo "GATE_BUSY: Registry lock is held by active workload";`,
-        `  exit 0;`,
-        `fi;`,
-        `gate_status="ok";`,
-        `gate_reason="";`,
-        `if [ -f "$excl_f" ] && grep -Eq '"scope"[[:space:]]*:[[:space:]]*"(terminal:|ai:|system:upgrade|project:|container:)' "$excl_f" 2>/dev/null; then`,
-        `  gate_status="busy"; gate_reason="Active workload in exclusion registry";`,
-        `fi;`,
-        `if [ "$gate_status" = "ok" ]; then`,
-        `  for pty_dir in /run/flexserver/host-pty /var/run/flexserver/host-pty; do`,
-        `    if [ -d "$pty_dir" ]; then`,
-        `      sock="";`,
-        `      if [ -S "$pty_dir/host-pty.sock" ]; then sock="$pty_dir/host-pty.sock";`,
-        `      elif [ -S "$pty_dir/pty.sock" ]; then sock="$pty_dir/pty.sock"; fi;`,
-        `      if [ -n "$sock" ]; then`,
-        `        marker="$pty_dir/active_sessions";`,
-        `        if [ ! -f "$marker" ]; then`,
-        `          gate_status="busy"; gate_reason="PTY socket present but active_sessions marker missing"; break;`,
-        `        fi;`,
-        `        if [ ! -r "$marker" ]; then`,
-        `          gate_status="busy"; gate_reason="PTY active_sessions marker is unreadable"; break;`,
-        `        fi;`,
-        `        val=$(head -n 1 "$marker" | tr -d '\\r\\n[:space:]');`,
-        `        case "$val" in`,
-        `          ''|*[!0-9]*)`,
-        `            gate_status="busy"; gate_reason="PTY active_sessions marker is non-numeric ($val)"; break ;;`,
-        `          *)`,
-        `            if [ "$val" -gt 0 ]; then`,
-        `              gate_status="busy"; gate_reason="Active PTY sessions ($val)"; break;`,
-        `            fi ;;`,
-        `        esac;`,
-        `      fi;`,
-        `    fi;`,
-        `  done;`,
-        `fi;`,
-        `if [ "$gate_status" = "ok" ]; then`,
-        `  for cg_base in /sys/fs/cgroup/flexserver-ai /sys/fs/cgroup/vps-ai; do`,
-        `    if [ -e "$cg_base" ]; then`,
-        `      if [ ! -d "$cg_base" ] || [ ! -r "$cg_base" ]; then`,
-        `        gate_status="busy"; gate_reason="AI cgroup base directory $cg_base is not readable"; break;`,
-        `      fi;`,
-        `      for child in "$cg_base"/*; do`,
-        `        if [ -d "$child" ]; then`,
-        `          procs_file="$child/cgroup.procs";`,
-        `          if [ ! -f "$procs_file" ] || [ ! -r "$procs_file" ]; then`,
-        `            gate_status="busy"; gate_reason="AI cgroup child $child/cgroup.procs is missing or unreadable"; break;`,
-        `          fi;`,
-        `          pids=$(cat "$procs_file" | tr -d '\\r\\n[:space:]');`,
-        `          if [ -n "$pids" ]; then`,
-        `            gate_status="busy"; gate_reason="AI tasks active in cgroup $(basename "$child")"; break;`,
-        `          fi;`,
-        `        fi;`,
-        `      done;`,
-        `      if [ "$gate_status" = "busy" ]; then break; fi;`,
-        `    fi;`,
-        `  done;`,
-        `fi;`,
-        `if [ "$gate_status" = "busy" ]; then`,
-        `  echo "GATE_BUSY: $gate_reason";`,
-        `  flock -u 9 2>/dev/null || true;`,
-        `  exec 9>&-;`,
-        `  exit 0;`,
+        `  echo "Error: update lock held by concurrent update" >&2;`,
+        `  exit 1;`,
         `fi;`,
         ...helperRefreshParts,
         scriptExec,
@@ -624,22 +562,7 @@ export class FleetProvisioningService {
         `else echo "Error: root or passwordless sudo required" >&2; exit 1; fi`,
       ].join("\n");
 
-      const execResult = await this.ssh.execCommand(vps, privilegedCmd, auth, 60_000);
-      if (execResult.stdout.includes("GATE_BUSY:")) {
-        if (isNewCredential && credentialId) {
-          await this.agentRepo.revokeCredential(credentialId).catch(() => undefined);
-        }
-        const reasonMatch = execResult.stdout.match(/GATE_BUSY:\s*(.*)/);
-        const reason = reasonMatch
-          ? reasonMatch[1].trim()
-          : "Host helpers are active or evidence unreadable (terminal/AI activity gate not ready)";
-        return {
-          vpsId,
-          status: "needs_access",
-          reason,
-          message: reason,
-        };
-      }
+      await this.ssh.execCommand(vps, privilegedCmd, auth, 60_000);
       await this.audit.record({
         actor: "system",
         action: "fleet.updater.provision",
@@ -698,8 +621,7 @@ export class FleetProvisioningService {
         msg.includes("All configured authentication methods failed") ||
         msg.includes("host key") ||
         msg.includes("Host key") ||
-        msg.includes("verification failed") ||
-        msg.includes("actively busy");
+        msg.includes("verification failed");
 
       const sanitizedReason = this.sanitizeErrorReason(msg);
 
@@ -728,9 +650,6 @@ export class FleetProvisioningService {
     }
     if (raw.includes("All configured authentication methods failed") || raw.includes("Permission denied")) {
       return "SSH authentication failed: invalid credentials or rejected key";
-    }
-    if (raw.includes("actively busy")) {
-      return "Host helpers are actively busy (active terminal or AI session in progress)";
     }
     if (raw.includes("not found") && raw.includes("binary")) {
       return "Fleet updater binary not found for host architecture";

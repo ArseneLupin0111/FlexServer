@@ -520,7 +520,8 @@ describe("LocalAgentUpdate terminal results", () => {
         }),
       );
     render(<LocalAgentUpdate vps={vps} />);
-    expect(await screen.findByText(/Upgrade was deferred because the host was actively running tasks/)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Upgrade agent" })).toBeEnabled();
+    expect(screen.getByText("Update available")).toBeInTheDocument();
   });
 
   it("renders a superseded terminal result", async () => {
@@ -685,16 +686,16 @@ describe("Remote agent update in Settings (consolidated contracts)", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows waiting notice when host automation state is waiting_busy", async () => {
+  it("shows waiting notice when host automation state is waiting_connection", async () => {
     handler = (url) => {
       if (url.includes("/agent-update")) {
         return ok(
           status({
             automation: {
-              state: "waiting_busy",
-              reason: "Host has active docker task running",
+              state: "waiting_connection",
+              reason: "Agent heartbeat is stale or disconnected.",
               targetBuildId: TARGET_BUILD,
-              retryAllowed: true,
+              retryAllowed: false,
             },
           }),
         );
@@ -704,12 +705,8 @@ describe("Remote agent update in Settings (consolidated contracts)", () => {
 
     render(<LocalAgentUpdate vps={remoteVps} />);
 
-    expect(
-      await screen.findByText(
-        "Server is busy with active tasks. Update will automatically apply when the host becomes idle.",
-      ),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Waiting (busy)")).toBeInTheDocument();
+    expect(await screen.findByText("Waiting (offline)")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Upgrade agent" })).toBeDisabled();
   });
 
   it("shows setup guidance when automation state is needs_access", async () => {

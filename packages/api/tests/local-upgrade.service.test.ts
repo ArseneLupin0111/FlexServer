@@ -2,6 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ConflictException } from "@nestjs/common";
+import { AgentLifecycleCoordinator } from "../src/agents/agent-lifecycle-coordinator.js";
 import type { AppConfig } from "../src/config/app-config.js";
 import type { AgentCredential } from "../src/agents/agent.models.js";
 import { AuditService } from "../src/audit/audit.service.js";
@@ -85,6 +87,7 @@ afterEach(async () => {
 function makeService(
   mode: "local" | "demo" = "local",
   bundledOverrides?: Partial<BundledAgentService>,
+  coordinator?: AgentLifecycleCoordinator,
 ) {
   const config: AppConfig = {
     ...baseConfig,
@@ -117,6 +120,7 @@ function makeService(
     vpsRepo,
     bundledAgent,
     new AuditService(config, createJsonAuditRepository(join(tempDir, "data", "audit.json"))),
+    coordinator,
   );
   return { service, catalog, bundledAgent };
 }
@@ -342,17 +346,14 @@ describe("createJob validation", () => {
     );
   });
 
-  it("rejects when the host is busy with ongoing work", async () => {
+  it("allows job creation even when the host is busy with ongoing work", async () => {
     await localVps();
     const { service } = makeService();
     await touchHeartbeat(LOCAL_VPS_ID, 3, false, "deploy_running");
     await upsertBuild(BASELINE_SHA);
-    const err = await expectHttpError(
-      service.createJob(LOCAL_VPS_ID, { releaseId: RELEASE_SHA }),
-      409,
-      "host_busy",
-    );
-    expect(err.message).toMatch(/deploy_running/);
+    const result = await service.createJob(LOCAL_VPS_ID, { releaseId: RELEASE_SHA });
+    expect(result.created).toBe(true);
+    expect(result.job.state).toBe("queued");
   });
 
   it("rejects when the updater is not reporting", async () => {
@@ -712,7 +713,7 @@ describe("claim", () => {
     expect(claimed).toBeNull();
   });
 
-  it("defers a queued bundled job when the updater reports idle === false", async () => {
+  it("claims a queued bundled job even when the updater reports idle === false", async () => {
     await localVps();
     const cred = await credential();
     const { service, catalog } = makeService();
@@ -723,14 +724,12 @@ describe("claim", () => {
       idle: false,
       busyReason: "deploy_running",
     });
-    expect(claimed).toBeNull();
-
-    const deferred = await lugRepo.get(job.id);
-    expect(deferred?.state).toBe("deferred");
-    expect(deferred?.result?.outcome).toBe("deferred");
+    expect(claimed).not.toBeNull();
+    expect(claimed?.job.id).toBe(job.id);
+    expect(claimed?.job.state).toBe("claimed");
   });
 
-  it("defers queued bundled job when claim omits idle evidence (fail-closed)", async () => {
+  it("claims a queued bundled job when claim omits idle evidence", async () => {
     await localVps();
     const cred = await credential();
     const { service, catalog } = makeService();
@@ -739,12 +738,10 @@ describe("claim", () => {
     await upsertBuild(BASELINE_SHA);
     const { job } = await service.createJob(LOCAL_VPS_ID, { releaseId: RELEASE_SHA });
 
-    // Claim without explicit idle evidence defers the queued bundled job
     const claimed = await service.claim(cred, 3);
-    expect(claimed).toBeNull();
-    const deferred = await lugRepo.get(job.id);
-    expect(deferred?.state).toBe("deferred");
-    expect(deferred?.result?.outcome).toBe("deferred");
+    expect(claimed).not.toBeNull();
+    expect(claimed?.job.id).toBe(job.id);
+    expect(claimed?.job.state).toBe("claimed");
   });
 });
 
@@ -1178,6 +1175,43 @@ describe("getAgentUpdate", () => {
     expect(view.compatibility.compatible).toBe(true);
     expect(view.updater).toMatchObject({ installed: true, healthy: true });
     expect(view.job?.id).toBe(job.id);
+  });
+
+  it("reports automation pending and available when host is busy, and transitions to updating upon claim", async () => {
+    await localVps();
+    const coordinator = new AgentLifecycleCoordinator();
+    const { service, catalog } = makeService("local", undefined, coordinator);
+    vi.mocked(catalog.getCompatibleRelease).mockResolvedValue(okRelease() as never);
+    vi.mocked(catalog.getReleaseById).mockResolvedValue(okRelease() as never);
+    await upsertBuild(BASELINE_SHA);
+    await touchHeartbeat(LOCAL_VPS_ID, 3, false, "docker_build");
+
+    // Acquire active activity on host (e.g. running job)
+    const releaseActivity = coordinator.tryAcquireActivity(LOCAL_VPS_ID, "job");
+
+    const viewBefore = await service.getAgentUpdate(LOCAL_VPS_ID);
+    expect(viewBefore.state).toBe("available");
+    expect(viewBefore.automation.state).toBe("pending");
+
+    // Create job while host is busy
+    const { job } = await service.createJob(LOCAL_VPS_ID, { releaseId: RELEASE_SHA });
+    expect(job.state).toBe("queued");
+
+    // Claim job while host is busy
+    const cred = await credential();
+    const claimed = await service.claim(cred, 3, { idle: false, busyReason: "docker_build" });
+    expect(claimed).not.toBeNull();
+    expect(claimed?.job.state).toBe("claimed");
+
+    // Automation state is updating
+    const viewAfterClaim = await service.getAgentUpdate(LOCAL_VPS_ID);
+    expect(viewAfterClaim.automation.state).toBe("updating");
+
+    // New activities are blocked during update
+    expect(() => coordinator.tryAcquireActivity(LOCAL_VPS_ID, "job")).toThrow(ConflictException);
+
+    // Existing activity completes cleanly
+    releaseActivity();
   });
 });
 

@@ -227,7 +227,7 @@ export function computeAutomationState(params: {
   agentFresh: boolean;
   updaterFresh: boolean;
   updaterInstalled: boolean;
-  updaterIdle: boolean;
+  updaterIdle?: boolean;
   busyReason: string | null;
   installedBuildId: string | null;
   activeJob: LocalUpgradeJob | null;
@@ -318,16 +318,6 @@ export function computeAutomationState(params: {
     return {
       state: "waiting_connection",
       reason: !agentFresh ? "agent_offline" : "updater_offline",
-      targetBuildId,
-      retryAllowed: false,
-    };
-  }
-
-  // 6. busy ("waiting_busy")
-  if (!updaterIdle) {
-    return {
-      state: "waiting_busy",
-      reason: busyReason ?? "host_busy",
       targetBuildId,
       retryAllowed: false,
     };
@@ -603,16 +593,6 @@ export class LocalUpgradeService {
         },
       });
     }
-    if (updaterHeartbeat.idle !== true) {
-      throw new ConflictException({
-        error: {
-          message: updaterHeartbeat.busyReason
-            ? `Host is busy: ${updaterHeartbeat.busyReason}`
-            : "Host is busy; wait for ongoing work to finish before updating the agent",
-          code: "host_busy",
-        },
-      });
-    }
 
     const agentState = await this.agents.getState(vpsId);
     const systemInfo = await this.agents.getSystemInfo(vpsId);
@@ -849,36 +829,6 @@ export class LocalUpgradeService {
         job.leaseExpiresAt != null && nowMs <= Date.parse(job.leaseExpiresAt);
       if (leaseValid) {
         return { job, requiresReconcile: isPostSwapState(job.state) };
-      }
-      // Only safely pre-lease: a queued bundled job requires fresh idle evidence.
-      // In-flight active attempts (claimed/downloading/verifying/staging/restarting)
-      // must NOT be blocked or deferred on claim - Go reports final pre-swap check.
-      if (job.state === "queued" && !job.manifestRaw) {
-        if (evidence?.idle !== true) {
-          const reason =
-            typeof evidence?.busyReason === "string"
-              ? evidence.busyReason
-              : "host_busy_at_claim";
-          await this.commitTerminal(
-            job,
-            {
-              state: "deferred",
-              completedAt: new Date(nowMs).toISOString(),
-              error: null,
-              result: {
-                outcome: "deferred",
-                reason,
-                completedAt: new Date(nowMs).toISOString(),
-              },
-            },
-            {
-              action: "local_agent_upgrade.deferred",
-              result: "success",
-              metadata: { reason },
-            },
-          );
-          return null;
-        }
       }
       let releaseCoordinatorFence: (() => void) | undefined;
       if (job.state === "queued" && this.coordinator) {

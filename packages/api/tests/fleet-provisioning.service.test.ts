@@ -1,8 +1,9 @@
-import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { AppConfig } from "../src/config/app-config.js";
 import { FleetProvisioningService, type Architecture } from "../src/agents/fleet-provisioning.service.js";
@@ -42,7 +43,7 @@ describe("FleetProvisioningService", () => {
   let credentialsStore: Map<string, AgentCredentialRecord>;
   let executedCommands: string[];
   let uploadedFiles: Map<string, Buffer | string>;
-
+  let dummyScript: string;
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "fleet-prov-test-"));
     const vpsPath = join(tempDir, "vps.json");
@@ -53,7 +54,7 @@ describe("FleetProvisioningService", () => {
     await mkdir(dummyBinDir, { recursive: true });
     const dummyUpdaterAmd64 = join(dummyBinDir, "vps-updater-linux-amd64");
     const dummyUpdaterArm64 = join(dummyBinDir, "vps-updater-linux-arm64");
-    const dummyScript = join(dummyBinDir, "install-fleet-updater.sh");
+    dummyScript = join(dummyBinDir, "install-fleet-updater.sh");
     await writeFile(dummyUpdaterAmd64, Buffer.from("mock-updater-amd64-binary"));
     await writeFile(dummyUpdaterArm64, Buffer.from("mock-updater-arm64-binary"));
     await writeFile(dummyScript, "#!/bin/sh\necho mock installer");
@@ -307,38 +308,49 @@ describe("FleetProvisioningService", () => {
       expect(result.reason).toMatch(/root or passwordless sudo required/i);
     });
 
-    it("returns needs_access when host gate readiness reports busy PTY helper", async () => {
+    it("provisions immediately and executes installer even when host registry has active workloads", async () => {
+      const hostStateDir = join(tempDir, "remote-host-busy");
+      const regDir = join(hostStateDir, "docker-applications");
+      await mkdir(regDir, { recursive: true });
+
+      // Simulate active busy exclusion registry on remote host
+      await writeFile(
+        join(regDir, "exclusion.json"),
+        JSON.stringify({
+          scopes: [
+            { scope: "terminal:active-session-1" },
+            { scope: "ai:workload-running" },
+          ],
+        }),
+      );
+
+      const markerFile = join(hostStateDir, "installer_executed.marker");
+      // Set dummy installer to write markerFile upon execution
+      const installerPath = service.resolveInstallerScriptPath();
+      await writeFile(
+        installerPath,
+        `#!/bin/sh\necho "MOCK_INSTALLER_EXECUTED" > "${markerFile}"\nexit 0\n`,
+      );
+      await chmod(installerPath, 0o755);
       const vps = await vpsRepo.create({
-        name: "remote-busy-gate",
+        name: "remote-busy-workload",
         host: "192.168.1.103",
         port: 22,
         username: "admin",
       });
 
-      mockSsh.execCommand.mockImplementation(async (_vps: unknown, cmd: string) => {
-        executedCommands.push(cmd);
-        if (cmd === "uname -m") return { stdout: "x86_64\n", stderr: "" };
-        if (cmd.includes("PRIV_OK") || cmd.includes("PRIV_FAILED")) {
-          return { stdout: "PRIV_OK\n", stderr: "" };
-        }
-        if (cmd.includes("GATE_BUSY") || cmd.includes("gate_status=")) {
-          return { stdout: "GATE_BUSY: Active PTY sessions (2)\n", stderr: "" };
-        }
-        return { stdout: "", stderr: "" };
+      mockSsh.makeDirectory.mockImplementation(async (_vps: unknown, dir: string) => {
+        await mkdir(dir, { recursive: true });
       });
 
-      const result = await service.ensureBundled(vps.id);
-      expect(result.status).toBe("needs_access");
-      expect(result.reason).toMatch(/Active PTY sessions/i);
-    });
-
-    it("returns needs_access when PTY socket exists but marker is missing or non-numeric", async () => {
-      const vps = await vpsRepo.create({
-        name: "remote-unreadable-gate",
-        host: "192.168.1.103b",
-        port: 22,
-        username: "admin",
-      });
+      mockSsh.uploadFile.mockImplementation(
+        async (_vps: unknown, remotePath: string, content: Buffer | string) => {
+          uploadedFiles.set(remotePath, content);
+          await mkdir(dirname(remotePath), { recursive: true });
+          await writeFile(remotePath, content);
+          await chmod(remotePath, 0o755);
+        },
+      );
 
       mockSsh.execCommand.mockImplementation(async (_vps: unknown, cmd: string) => {
         executedCommands.push(cmd);
@@ -346,49 +358,80 @@ describe("FleetProvisioningService", () => {
         if (cmd.includes("PRIV_OK") || cmd.includes("PRIV_FAILED")) {
           return { stdout: "PRIV_OK\n", stderr: "" };
         }
-        if (cmd.includes("GATE_BUSY") || cmd.includes("gate_status=")) {
-          return { stdout: "GATE_BUSY: PTY socket present but active_sessions marker missing\n", stderr: "" };
+        if (cmd.includes("cat /etc/vps-updater/config.json")) {
+          return { stdout: "", stderr: "" };
+        }
+        if (cmd.includes("AGENT_BIN=") || cmd.includes("AGENT_STATE_DIR=")) {
+          return {
+            stdout: [
+              `AGENT_BIN=${hostStateDir}/vps-agent`,
+              `AGENT_STATE_DIR=${hostStateDir}`,
+              "HAS_HOST_PTY=0",
+              "HAS_AI_HELPER=0",
+            ].join("\n") + "\n",
+            stderr: "",
+          };
+        }
+        if (cmd.includes("flock -x -w 5 9")) {
+          const res = spawnSync("bash", ["-c", cmd], { encoding: "utf8" });
+          if (res.status !== 0) {
+            throw new Error(res.stderr.trim() || res.stdout.trim() || `Exit ${res.status}`);
+          }
+          return { stdout: res.stdout, stderr: res.stderr };
         }
         return { stdout: "", stderr: "" };
       });
 
       const result = await service.ensureBundled(vps.id);
-      expect(result.status).toBe("needs_access");
-      expect(result.reason).toMatch(/active_sessions marker missing/i);
+      expect(result.status).toBe("enrolled");
+      expect(result.reason).toBeNull();
+      expect(existsSync(markerFile)).toBe(true);
+
+      const command = executedCommands.find((cmd) => cmd.includes("flock -x -w 5 9"));
+      expect(command).toBeDefined();
+      expect(command).toContain("fleet-updater.lock");
+      expect(command).not.toContain("active_sessions");
+      expect(command).not.toContain("cgroup.procs");
+      expect(command).not.toContain("GATE_BUSY");
     });
 
-    it("returns needs_access when AI cgroup has active tasks or is unreadable", async () => {
-      const vps = await vpsRepo.create({
-        name: "remote-ai-busy-gate",
-        host: "192.168.1.103c",
-        port: 22,
-        username: "admin",
-      });
+    it("ensures flock failure stops installer execution rather than proceeding", async () => {
+      const hostStateDir = join(tempDir, "remote-host-flock");
+      const regDir = join(hostStateDir, "docker-applications");
+      await mkdir(regDir, { recursive: true });
 
-      mockSsh.execCommand.mockImplementation(async (_vps: unknown, cmd: string) => {
-        executedCommands.push(cmd);
-        if (cmd === "uname -m") return { stdout: "x86_64\n", stderr: "" };
-        if (cmd.includes("PRIV_OK") || cmd.includes("PRIV_FAILED")) {
-          return { stdout: "PRIV_OK\n", stderr: "" };
-        }
-        if (cmd.includes("GATE_BUSY") || cmd.includes("gate_status=")) {
-          return { stdout: "GATE_BUSY: AI tasks active in cgroup task-42\n", stderr: "" };
-        }
-        return { stdout: "", stderr: "" };
-      });
+      const lockFile = join(regDir, "fleet-updater.lock");
+      await writeFile(lockFile, "");
 
-      const result = await service.ensureBundled(vps.id);
-      expect(result.status).toBe("needs_access");
-      expect(result.reason).toMatch(/AI tasks active in cgroup/i);
-    });
+      const markerFile = join(hostStateDir, "installer_should_not_run.marker");
+      const installerPath = service.resolveInstallerScriptPath();
+      await writeFile(
+        installerPath,
+        `#!/bin/sh\necho "SHOULD_NOT_RUN" > "${markerFile}"\nexit 0\n`,
+      );
+      await chmod(installerPath, 0o755);
 
-    it("returns needs_access when registry flock is held by active workload", async () => {
       const vps = await vpsRepo.create({
         name: "remote-flock-busy",
-        host: "192.168.1.103d",
+        host: "192.168.1.104b",
         port: 22,
         username: "admin",
       });
+
+      mockSsh.makeDirectory.mockImplementation(async (_vps: unknown, dir: string) => {
+        await mkdir(dir, { recursive: true });
+      });
+
+      mockSsh.uploadFile.mockImplementation(
+        async (_vps: unknown, remotePath: string, content: Buffer | string) => {
+          uploadedFiles.set(remotePath, content);
+          await mkdir(dirname(remotePath), { recursive: true });
+          await writeFile(remotePath, content);
+          await chmod(remotePath, 0o755);
+        },
+      );
+      // Pre-acquire exclusive flock on fleet-updater.lock so the installer flock check times out
+      const blocker = spawn("flock", ["-x", lockFile, "sleep", "10"]);
 
       mockSsh.execCommand.mockImplementation(async (_vps: unknown, cmd: string) => {
         executedCommands.push(cmd);
@@ -396,42 +439,39 @@ describe("FleetProvisioningService", () => {
         if (cmd.includes("PRIV_OK") || cmd.includes("PRIV_FAILED")) {
           return { stdout: "PRIV_OK\n", stderr: "" };
         }
-        if (cmd.includes("flock -x -w 5 9") || cmd.includes("GATE_BUSY")) {
-          return { stdout: "GATE_BUSY: Registry lock is held by active workload\n", stderr: "" };
+        if (cmd.includes("cat /etc/vps-updater/config.json")) {
+          return { stdout: "", stderr: "" };
+        }
+        if (cmd.includes("AGENT_BIN=") || cmd.includes("AGENT_STATE_DIR=")) {
+          return {
+            stdout: [
+              `AGENT_BIN=${hostStateDir}/vps-agent`,
+              `AGENT_STATE_DIR=${hostStateDir}`,
+              "HAS_HOST_PTY=0",
+              "HAS_AI_HELPER=0",
+            ].join("\n") + "\n",
+            stderr: "",
+          };
+        }
+        if (cmd.includes("flock -x -w 5 9")) {
+          const res = spawnSync("bash", ["-c", cmd], { encoding: "utf8" });
+          if (res.status !== 0) {
+            throw new Error(res.stderr.trim() || res.stdout.trim() || `Exit ${res.status}`);
+          }
+          return { stdout: res.stdout, stderr: res.stderr };
         }
         return { stdout: "", stderr: "" };
       });
 
-      const result = await service.ensureBundled(vps.id);
-      expect(result.status).toBe("needs_access");
-      expect(result.reason).toMatch(/Registry lock is held by active workload/i);
+      try {
+        const result = await service.ensureBundled(vps.id);
+        expect(result.status).toBe("failed");
+        expect(result.reason).toMatch(/update lock held by concurrent update/i);
+        expect(existsSync(markerFile)).toBe(false);
+      } finally {
+        blocker.kill();
+      }
     });
-
-    it("returns needs_access when active workload exists in exclusion.json", async () => {
-      const vps = await vpsRepo.create({
-        name: "remote-excl-busy",
-        host: "192.168.1.103e",
-        port: 22,
-        username: "admin",
-      });
-
-      mockSsh.execCommand.mockImplementation(async (_vps: unknown, cmd: string) => {
-        executedCommands.push(cmd);
-        if (cmd === "uname -m") return { stdout: "x86_64\n", stderr: "" };
-        if (cmd.includes("PRIV_OK") || cmd.includes("PRIV_FAILED")) {
-          return { stdout: "PRIV_OK\n", stderr: "" };
-        }
-        if (cmd.includes("exclusion.json") || cmd.includes("GATE_BUSY")) {
-          return { stdout: "GATE_BUSY: Active workload in exclusion registry\n", stderr: "" };
-        }
-        return { stdout: "", stderr: "" };
-      });
-
-      const result = await service.ensureBundled(vps.id);
-      expect(result.status).toBe("needs_access");
-      expect(result.reason).toMatch(/Active workload in exclusion registry/i);
-    });
-
     it("provisions successfully in bundled mode without needing release public key", async () => {
       const vps = await vpsRepo.create({
         name: "remote-ready",
@@ -451,7 +491,7 @@ describe("FleetProvisioningService", () => {
       expect(installCmd).toContain("--agent-binary '/home/admin/.vps-manager-agent/vps-agent'");
       expect(installCmd).toContain("--agent-state-dir '/var/lib/vps-manager-agent'");
       expect(installCmd).toContain("flock -x -w 5 9");
-      expect(installCmd).toContain("exclusion.json.lock");
+      expect(installCmd).toContain("fleet-updater.lock");
       expect(installCmd).not.toContain("--pubkey-file");
     });
   });

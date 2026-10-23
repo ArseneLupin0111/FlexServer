@@ -247,7 +247,7 @@ func TestHelperRejectsMissingDeadlines(t *testing.T) {
 	}
 }
 
-func TestHelperDefersWhenHostBusyBeforeSwap(t *testing.T) {
+func TestHelperAppliesImmediatelyWhenHostBusyBeforeSwap(t *testing.T) {
 	rel := newRelease(t, []byte("new-agent-binary-content"), "https://example.com/agent")
 	events := &eventLog{}
 	installSeams(t, events, rel.buildID)
@@ -289,8 +289,106 @@ func TestHelperDefersWhenHostBusyBeforeSwap(t *testing.T) {
 	if err := os.MkdirAll(lockDir, 0o755); err != nil {
 		t.Fatalf("mkdir lockDir: %v", err)
 	}
+	// Active compose operation simulates busy host workload
 	lockFile := filepath.Join(lockDir, "exclusion.json")
 	lockContent := `[{"scope":"project:myproj","holder":{"kind":"compose-operation","id":"op-1"},"mutating":true}]`
+	writeFile(t, lockFile, []byte(lockContent), 0o644)
+
+	cfg := &Config{
+		APIBase:          server.URL,
+		Credential:       "vma_test_root_cred",
+		AgentBinary:      agentBin,
+		AgentUnit:        "vps-agent.service",
+		StateDir:         stateDir,
+		AgentStateDir:    agentStateDir,
+		HelperTimeoutSec: 30,
+	}
+	cfg.EnableTestOverrides()
+	if err := cfg.NormalizeAndValidate(); err != nil {
+		t.Fatalf("NormalizeAndValidate: %v", err)
+	}
+
+	stg := stagingDir(stateDir, faultJobID)
+	if err := os.MkdirAll(stg, 0o755); err != nil {
+		t.Fatalf("mkdir stg: %v", err)
+	}
+	metaBytes, _ := json.Marshal(map[string]interface{}{
+		"jobId": faultJobID, "buildId": rel.buildID, "sha256": targetSha, "size": len(rel.content),
+	})
+	writeFile(t, filepath.Join(stg, "artifact.bin"), rel.content, 0o755)
+	writeFile(t, filepath.Join(stg, "meta.json"), metaBytes, 0o644)
+
+	writePending(t, cfg, actionApply, faultJobID)
+	if err := RunHelper(context.Background(), cfg); err != nil {
+		t.Fatalf("RunHelper: %v", err)
+	}
+	res := readResultT(t, cfg, actionApply, faultJobID)
+	if res.Outcome != "restarted" {
+		t.Fatalf("outcome = %q, want restarted (detail: %s)", res.Outcome, res.Detail)
+	}
+
+	currentContent, err := os.ReadFile(agentBin)
+	if err != nil {
+		t.Fatalf("read agent binary: %v", err)
+	}
+	if string(currentContent) != string(rel.content) {
+		t.Fatalf("agent binary not updated, got %q, want %q", string(currentContent), string(rel.content))
+	}
+
+	hj, err := LoadHelperJournal(cfg.StateDir)
+	if err != nil {
+		t.Fatalf("LoadHelperJournal: %v", err)
+	}
+	if hj == nil || hj.Phase != hjRestarted {
+		t.Fatalf("helper journal should be hjRestarted, got %+v", hj)
+	}
+}
+
+func TestHelperDefersWhenConcurrentUpgradeInProgress(t *testing.T) {
+	rel := newRelease(t, []byte("new-agent-binary-content"), "https://example.com/agent")
+	events := &eventLog{}
+	installSeams(t, events, rel.buildID)
+
+	stateDir := t.TempDir()
+	binDir := t.TempDir()
+	agentBin := filepath.Join(binDir, "vps-agent")
+	writeFile(t, agentBin, []byte("old-binary"), 0o755)
+
+	h := sha256.Sum256(rel.content)
+	targetSha := hex.EncodeToString(h[:])
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"job": map[string]interface{}{
+					"jobId":           faultJobID,
+					"phase":           "restarting",
+					"state":           "staging",
+					"targetSha256":    targetSha,
+					"targetSizeBytes": len(rel.content),
+					"leaseExpiresAt":  time.Now().Add(5 * time.Minute).Format(time.RFC3339),
+					"phaseDeadlineAt": time.Now().Add(5 * time.Minute).Format(time.RFC3339),
+					"deadlineAt":      time.Now().Add(5 * time.Minute).Format(time.RFC3339),
+					"release": map[string]interface{}{
+						"releaseId":    rel.buildID,
+						"buildId":      rel.buildID,
+						"targetSha256": targetSha,
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	agentStateDir := t.TempDir()
+	lockDir := filepath.Join(agentStateDir, "docker-applications")
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		t.Fatalf("mkdir lockDir: %v", err)
+	}
+	// Active system:upgrade scope held by another job simulates concurrent upgrade
+	lockFile := filepath.Join(lockDir, "exclusion.json")
+	lockContent := `[{"scope":"system:upgrade","holder":{"kind":"updater-helper","id":"other-job"},"mutating":true}]`
 	writeFile(t, lockFile, []byte(lockContent), 0o644)
 
 	cfg := &Config{

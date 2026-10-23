@@ -26,59 +26,39 @@ func TestHelperUpgradeFenceBlocksActivityAndDefers(t *testing.T) {
 
 	jobID := "test_fence_job_1"
 
-	// 1. Hold an active terminal scope
+	// 1. Hold an active terminal scope (host is busy)
 	err := applications.AcquireHostScopeAt(stateDir, "terminal:session-123", "host-pty", "session-123", true, 0)
 	if err != nil {
 		t.Fatalf("acquire terminal scope: %v", err)
 	}
 
-	// 2. Attempting to acquire upgrade fence should fail with scope_busy
+	// 2. Immediate update policy: acquireUpgradeFence succeeds even while terminal is active
 	err = acquireUpgradeFence(cfg, jobID)
+	if err != nil {
+		t.Fatalf("expected acquireUpgradeFence to succeed while terminal active, got: %v", err)
+	}
+
+	// 3. Update-vs-update serialization: concurrent upgrade for a different job must fail
+	err = acquireUpgradeFence(cfg, "test_fence_job_2")
 	if err == nil || !strings.Contains(err.Error(), "scope_busy") {
-		t.Fatalf("expected scope_busy while terminal active, got: %v", err)
+		t.Fatalf("expected scope_busy for concurrent upgrade job, got: %v", err)
 	}
 
-	// 3. DetectHostIdle should report busy
-	idle, reason := DetectHostIdle(cfg)
-	if idle {
-		t.Fatalf("expected host to be busy, got idle")
-	}
-	if !strings.Contains(reason, "terminal") && !strings.Contains(reason, "exclusion") {
-		t.Fatalf("expected busy reason to mention terminal or exclusion, got: %s", reason)
-	}
-
-	// 4. Release terminal scope
-	err = applications.ReleaseHostScopeAt(stateDir, "terminal:session-123", "host-pty", "session-123")
-	if err != nil {
-		t.Fatalf("release terminal scope: %v", err)
-	}
-
-	// 5. Upgrade fence can now be acquired
-	err = acquireUpgradeFence(cfg, jobID)
-	if err != nil {
-		t.Fatalf("acquire upgrade fence: %v", err)
-	}
-
-	// 6. While upgrade fence is held, terminal acquisition must fail
+	// 4. While upgrade fence is held, new terminal acquisition must fail
 	err = applications.AcquireHostScopeAt(stateDir, "terminal:session-456", "host-pty", "session-456", true, 0)
 	if err == nil || !strings.Contains(err.Error(), "scope_busy") {
 		t.Fatalf("expected scope_busy for new terminal while upgrade fence active, got: %v", err)
 	}
 
-	// 7. DetectHostIdle with CurrentJobID set to jobID should NOT block on its own upgrade fence
-	cfg.CurrentJobID = jobID
-	idle, reason = DetectHostIdle(cfg)
-	if !idle {
-		t.Fatalf("DetectHostIdle must ignore own upgrade fence, got busy: %s", reason)
-	}
-
-	// 8. Release upgrade fence
+	// 5. Release upgrade fence
 	err = releaseUpgradeFence(cfg, jobID)
 	if err != nil {
 		t.Fatalf("release upgrade fence: %v", err)
 	}
 
-	// 9. Terminal acquisition now succeeds again
+	// 6. Release terminal scope
+	_ = applications.ReleaseHostScopeAt(stateDir, "terminal:session-123", "host-pty", "session-123")
+	// 7. Terminal acquisition now succeeds again after upgrade fence is released
 	err = applications.AcquireHostScopeAt(stateDir, "terminal:session-456", "host-pty", "session-456", true, 0)
 	if err != nil {
 		t.Fatalf("terminal acquisition after fence release: %v", err)

@@ -50,7 +50,7 @@ Deploy pulls by immutable digest (`name@sha256:...` references recorded from `Re
 
 After publishing, the workflow can deploy over SSH if deployment secrets are configured.
 
-Local and remote host agent updates use the bundled agent and updater binaries packaged directly in the deployed API container (`/app/agent/vps-agent-linux-amd64` and `/app/agent/vps-agent-linux-arm64`). Deployment via `scripts/deploy.sh` prepares the host updater using `scripts/install/prepare-agent-updater.sh`, and `AgentConvergenceService` automatically converges installed agents to the deployment-bundled target when the host is idle, without requiring manual release selection or updater enrollment. Busy or offline hosts defer safely until idle, missing host access is reported as `needs_access`, and failed targets are suppressed per host until manually retried.
+Local and remote host agent updates use the bundled agent and updater binaries packaged directly in the deployed API container (`/app/agent/vps-agent-linux-amd64` and `/app/agent/vps-agent-linux-arm64`). Deployment via `scripts/deploy.sh` prepares the host updater using `scripts/install/prepare-agent-updater.sh`, and `AgentConvergenceService` starts convergence at API startup without waiting for agent idle or requiring manual release selection or enrollment. Active terminal sessions, AI tasks, and Compose operations do not defer bundled updates and may be interrupted by agent/helper restarts. Offline hosts wait for connectivity, missing host access is reported as `needs_access`, and failed targets are suppressed per host until manually retried. Integrity checks, update serialization, heartbeat confirmation, and rollback remain enforced.
 
 ## Runtime topology
 
@@ -106,7 +106,7 @@ Optional repository variables can override generated server `.env` values:
 
 ### Local agent updates and optional release catalog
 
-Host agent upgrades do not require external catalog variables or manual signing keys. The API container bundles architecture-specific agent and updater binaries directly. Deployment automatically prepares the host updater via `scripts/install/prepare-agent-updater.sh`, keeping host updaters updated to protocol 3 while preserving credentials, configuration, and state. The deployment convergence service automatically converges idle managed agents to the deployed build identity. Optional Ed25519-signed release manifests are reserved exclusively for AI runtime components (`ai-executor`, `ai-host-helper`, `ai-rootfs`, `ai-profiles`); signed rollouts for `agent` and `updater` components are rejected in favor of deployment-bundled convergence.
+Host agent upgrades do not require external catalog variables or manual signing keys. The API container bundles architecture-specific agent and updater binaries directly. Deployment automatically prepares the host updater via `scripts/install/prepare-agent-updater.sh`, preserving credentials, configuration, and state. The convergence service updates connected managed agents to the deployed build identity without an idle wait; unchanged agent identities do not trigger restarts. Optional Ed25519-signed release manifests are reserved exclusively for AI runtime components (`ai-executor`, `ai-host-helper`, `ai-rootfs`, `ai-profiles`); signed rollouts for `agent` and `updater` components are rejected in favor of deployment-bundled convergence.
 
 ## Server requirements
 

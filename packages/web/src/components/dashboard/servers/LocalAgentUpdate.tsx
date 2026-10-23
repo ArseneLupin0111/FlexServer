@@ -6,7 +6,6 @@ import {
   Clock,
   Info,
   LoaderCircle,
-  PauseCircle,
 } from "lucide-react";
 import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
@@ -37,7 +36,7 @@ import { DashboardContext } from "../../../context/DashboardContext";
  * Consolidated for all managed hosts (local and remote):
  * - Reads deployment target and automation state from GET /api/vps/:id/agent-update.
  * - Triggers update/retry directly via POST /api/vps/:id/agent-update with Idempotency-Key.
- * - No confirmation wizard: busy/offline states enqueue intent and display waiting.
+ * - No confirmation wizard: offline states enqueue intent and display waiting.
  * - Displays active progress, verified/unverified rollback results, and setup guidance.
  * - Collapsible technical details for inspection.
  * - Disables duplicate clicks while request is inflight; retransmits same key on retry.
@@ -52,7 +51,6 @@ const AUTOMATION_CHIPS: Record<
 > = {
   current: { label: "Up to date", variant: "ready" },
   pending: { label: "Update available", variant: "pending" },
-  waiting_busy: { label: "Waiting (busy)", variant: "pending" },
   waiting_connection: { label: "Waiting (offline)", variant: "pending" },
   updating: { label: "Updating", variant: "pending" },
   needs_access: { label: "Needs access", variant: "destructive" },
@@ -86,7 +84,7 @@ const PHASE_LABELS: Record<LocalAgentUpgradeState, string> = {
   rolled_back: "Rolled back",
   rollback_unverified: "Rollback unverified",
   failed: "Upgrade failed",
-  deferred: "Deferred while busy",
+  deferred: "Deferred",
   superseded: "Superseded by newer deployment",
 };
 
@@ -389,7 +387,6 @@ export function LocalAgentUpdate({ vps, variant = "card", jobs: propsJobs }: Loc
     auto.state !== "current" &&
     (auto.retryAllowed ||
       auto.state === "pending" ||
-      auto.state === "waiting_busy" ||
       auto.state === "failed" ||
       auto.state === "needs_access" ||
       status?.state === "available");
@@ -497,7 +494,7 @@ export function LocalAgentUpdate({ vps, variant = "card", jobs: propsJobs }: Loc
     } else if (resultJob.state === "deferred") {
       liveContent = (
         <div className="border border-line bg-raised/30 p-2.5 text-xs text-dim">
-          <span>Upgrade was deferred because the host was actively running tasks. It will resume when idle.</span>
+          <span>Upgrade was deferred (host may be offline). Update will resume automatically.</span>
         </div>
       );
     } else if (resultJob.state === "superseded") {
@@ -581,12 +578,6 @@ export function LocalAgentUpdate({ vps, variant = "card", jobs: propsJobs }: Loc
       {liveContent}
 
       {/* Automation Waiting notices */}
-      {auto.state === "waiting_busy" && !liveContent ? (
-        <div className="flex items-center gap-2 border border-warn/30 bg-warn/10 p-2.5 text-xs text-warn">
-          <PauseCircle size={14} className="shrink-0" />
-          <span>Server is busy with active tasks. Update will automatically apply when the host becomes idle.</span>
-        </div>
-      ) : null}
 
       {auto.state === "waiting_connection" && !liveContent ? (
         <div className="flex items-center gap-2 border border-line bg-raised/20 p-2.5 text-xs text-dim">

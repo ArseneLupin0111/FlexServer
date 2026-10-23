@@ -507,22 +507,17 @@ func handleApply(ctx context.Context, cfg *Config, auth JobAuthorizer, jobID str
 		}
 		return res
 	}
-	// Acquire upgrade fence before final idle check:
 	cfg.CurrentJobID = jobID
 	if err := acquireUpgradeFence(cfg, jobID); err != nil {
 		res.Outcome = "deferred"
-		res.Detail = "host busy before swap: acquire upgrade fence: " + err.Error()
+		res.Detail = "concurrent upgrade in progress: acquire upgrade fence: " + err.Error()
 		return res
 	}
 
-	// Final idle check before swap: safely abandon pre-swap if host activity began.
-	if idle, reason := DetectHostIdle(cfg); !idle {
-		_ = releaseUpgradeFence(cfg, jobID)
-		res.Outcome = "deferred"
-		res.Detail = "host busy before swap: " + reason
-		return res
-	}
-
+	// Bundled policy: updates proceed immediately even when workloads are
+	// active. The exclusive upgrade fence acquired above serializes this
+	// mutation against every other updater; host activity no longer defers.
+	//
 	// Backups and the helper journal live under the helper root: fail closed
 	// if it was swapped for a symlink since the entry check.
 	if err := requireSecureDir(helperRoot(cfg.StateDir)); err != nil {
@@ -1287,18 +1282,16 @@ func handleApplyFleet(ctx context.Context, cfg *Config, auth JobAuthorizer, apiJ
 	cfg.CurrentJobID = jobID
 	if err := acquireUpgradeFence(cfg, jobID); err != nil {
 		res.Outcome = "deferred"
-		res.Detail = "host busy before swap: acquire upgrade fence: " + err.Error()
+		res.Detail = "concurrent upgrade in progress: acquire upgrade fence: " + err.Error()
 		return res
 	}
-
-	// Final idle check before swap: safely abandon pre-swap if host activity began.
+	// Fleet rollout safety gate: signed AI runtime / fleet components defer on host activity.
 	if idle, reason := DetectHostIdle(cfg); !idle {
 		_ = releaseUpgradeFence(cfg, jobID)
 		res.Outcome = "deferred"
 		res.Detail = "host busy before swap: " + reason
 		return res
 	}
-
 	if err := requireSecureDir(helperRoot(cfg.StateDir)); err != nil {
 		_ = releaseUpgradeFence(cfg, jobID)
 		res.Outcome, res.Detail = "verify_failed", err.Error()

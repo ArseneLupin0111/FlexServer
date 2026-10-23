@@ -226,7 +226,6 @@ export type AgentConvergenceRecord = {
 export type AgentAutomationState =
   | "current"
   | "pending"
-  | "waiting_busy"
   | "waiting_connection"
   | "updating"
   | "needs_access"

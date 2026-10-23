@@ -44,6 +44,7 @@ export class AgentConvergenceService
   private timer: NodeJS.Timeout | null = null;
   private currentTick: Promise<void> | null = null;
   private activeSetupVpsId: string | null = null;
+  private readonly refreshedHosts = new Set<string>();
 
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -260,41 +261,9 @@ export class AgentConvergenceService
 
         // Missing updater: bootstrap via provisioning asynchronously single-flight
         if (!updaterHeartbeat) {
-          const canAttemptSetup =
-            !conv?.nextSetupAttemptAt ||
-            Date.parse(conv.nextSetupAttemptAt) <= nowMs;
-          if (canAttemptSetup && this.provisioning && this.activeSetupVpsId === null) {
-            this.activeSetupVpsId = vps.id;
-            const targetVpsId = vps.id;
-            const nextAttemptAt = new Date(nowMs + 60_000).toISOString();
-            this.provisioning
-              .ensureBundled(targetVpsId)
-              .then(async (provResult) => {
-                const setupState =
-                  provResult.status === "enrolled"
-                    ? "ready"
-                    : provResult.status === "needs_access"
-                    ? "needs_access"
-                    : "failed";
-                await this.repository.updateConvergence(targetVpsId, {
-                  setupState,
-                  setupReason: provResult.reason ?? null,
-                  nextSetupAttemptAt: setupState === "ready" ? null : nextAttemptAt,
-                });
-              })
-              .catch(async (err: unknown) => {
-                await this.repository.updateConvergence(targetVpsId, {
-                  setupState: "failed",
-                  setupReason:
-                    err instanceof Error ? err.message : "bootstrap_failed",
-                  nextSetupAttemptAt: nextAttemptAt,
-                });
-              })
-              .finally(() => {
-                if (this.activeSetupVpsId === targetVpsId) {
-                  this.activeSetupVpsId = null;
-                }
-              });
+          const isRemoteHost = vps.kind !== "local" && vps.managedBy !== "system";
+          if (isRemoteHost) {
+            this.triggerRemoteUpdaterRefresh(vps.id, conv, nowMs);
           }
           continue;
         }
@@ -351,22 +320,24 @@ export class AgentConvergenceService
                   UPDATER_HEALTH_TTL_MS,
                 )
               : false;
-            const isIdle = updaterHeartbeat?.idle === true;
-
-            if (!isAgentFresh || !isUpdaterFresh || !isIdle) {
+            if (!isAgentFresh || !isUpdaterFresh) {
               const reason = !isAgentFresh
                 ? "agent_offline"
-                : !isUpdaterFresh
-                ? "updater_offline"
-                : updaterHeartbeat?.busyReason ?? "host_busy";
+                : "updater_offline";
               await this.localUpgradeService.deferJob(activeJob.id, reason);
+            } else {
+              // Remote queued job: ensure remote updater is refreshed once per process before claim/execution
+              const isRemoteHost = vps.kind !== "local" && vps.managedBy !== "system";
+              if (isRemoteHost && this.provisioning && !this.refreshedHosts.has(vps.id)) {
+                this.triggerRemoteUpdaterRefresh(vps.id, conv, nowMs);
+              }
             }
           }
           // Active job present, skip creating another for this host
           continue;
         }
 
-        // Freshness and idle checks
+        // Freshness checks
         const isAgentFresh = agentState?.lastSeenAt
           ? isFreshTimestamp(agentState.lastSeenAt)
           : false;
@@ -381,10 +352,6 @@ export class AgentConvergenceService
           continue;
         }
 
-        if (updaterHeartbeat?.idle !== true) {
-          // Host busy
-          continue;
-        }
 
         // Check if already on the target build
         if (agentState.buildId === bundled.buildId) {
@@ -404,6 +371,16 @@ export class AgentConvergenceService
           conv?.suppressedBuildId === bundled.buildId &&
           !(conv?.retryBuildId === bundled.buildId && conv?.retryKey);
         if (isSuppressed) {
+          continue;
+        }
+
+        // Target agent build mismatch detected.
+        // Ensure remote updater is refreshed once per API process via provisioning
+        // before scheduling candidate job, replacing old protocol3 updaters that idle-block.
+        const isRemoteHost = vps.kind !== "local" && vps.managedBy !== "system";
+        if (isRemoteHost && this.provisioning && !this.refreshedHosts.has(vps.id)) {
+          this.triggerRemoteUpdaterRefresh(vps.id, conv, nowMs);
+          // Defer candidate job creation until remote updater refresh completes in this process
           continue;
         }
 
@@ -439,5 +416,62 @@ export class AgentConvergenceService
     } finally {
       // Tick complete
     }
+  }
+
+  private triggerRemoteUpdaterRefresh(
+    vpsId: string,
+    conv: AgentConvergenceRecord | undefined,
+    nowMs: number,
+  ): boolean {
+    if (!this.provisioning || this.refreshedHosts.has(vpsId)) {
+      return false;
+    }
+    const canAttemptSetup =
+      !conv?.nextSetupAttemptAt ||
+      Date.parse(conv.nextSetupAttemptAt) <= nowMs;
+    if (!canAttemptSetup || this.activeSetupVpsId !== null) {
+      return false;
+    }
+    this.activeSetupVpsId = vpsId;
+    const targetVpsId = vpsId;
+    const nextAttemptAt = new Date(nowMs + 60_000).toISOString();
+    this.provisioning
+      .ensureBundled(targetVpsId)
+      .then(async (provResult) => {
+        if (provResult.status === "enrolled") {
+          this.refreshedHosts.add(targetVpsId);
+        }
+        const setupState =
+          provResult.status === "enrolled"
+            ? "ready"
+            : provResult.status === "needs_access"
+            ? "needs_access"
+            : "failed";
+        await this.repository.updateConvergence(targetVpsId, {
+          setupState,
+          setupReason: provResult.reason ?? null,
+          nextSetupAttemptAt: setupState === "ready" ? null : nextAttemptAt,
+        });
+      })
+      .catch(async (err: unknown) => {
+        await this.repository.updateConvergence(targetVpsId, {
+          setupState: "failed",
+          setupReason:
+            err instanceof Error ? err.message : "bootstrap_failed",
+          nextSetupAttemptAt: nextAttemptAt,
+        });
+      })
+      .finally(() => {
+        const wasEnrolled = this.refreshedHosts.has(targetVpsId);
+        if (this.activeSetupVpsId === targetVpsId) {
+          this.activeSetupVpsId = null;
+        }
+        if (wasEnrolled) {
+          setImmediate(() => {
+            void this.tick();
+          });
+        }
+      });
+    return true;
   }
 }

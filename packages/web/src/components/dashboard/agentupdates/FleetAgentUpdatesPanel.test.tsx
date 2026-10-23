@@ -115,8 +115,8 @@ const mockFleetData: FleetAgentUpdatesData = {
         state: "available",
         job: null,
         automation: {
-          state: "waiting_busy",
-          reason: "Server has active job executing.",
+          state: "waiting_connection",
+          reason: "Agent heartbeat is stale or disconnected.",
           targetBuildId: BUILD_TARGET,
           retryAllowed: true,
         },
@@ -269,7 +269,7 @@ describe("FleetAgentUpdatesPanel", () => {
     expect(screen.getByRole("tab", { name: /Total Hosts/ })).toHaveTextContent("6");
     expect(screen.getByRole("tab", { name: /Up to Date/ })).toHaveTextContent("1");
     expect(screen.getByRole("tab", { name: /Updating/ })).toHaveTextContent("1");
-    expect(screen.getByRole("tab", { name: /Waiting/ })).toHaveTextContent("2"); // pending (1) + waiting_busy (1)
+    expect(screen.getByRole("tab", { name: /Waiting/ })).toHaveTextContent("2"); // pending (1) + waiting_connection (1)
     expect(screen.getByRole("tab", { name: /Needs Access/ })).toHaveTextContent("1");
     expect(screen.getByRole("tab", { name: /Failed/ })).toHaveTextContent("1");
 
@@ -395,9 +395,9 @@ describe("FleetAgentUpdatesPanel", () => {
     const headers = new Headers((postCall![1] as RequestInit).headers);
     expect(headers.get("Idempotency-Key")).toBeTruthy();
 
-    // Success notice displayed
+    // Row state updates to updating
     expect(
-      await screen.findByText("Update request accepted for prod-web-01. Agent will update when idle."),
-    ).toBeInTheDocument();
+      await screen.findByRole("button", { name: "Updating… agent on prod-web-01" }),
+    ).toBeDisabled();
   });
 });

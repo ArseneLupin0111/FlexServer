@@ -6,7 +6,6 @@ import {
   CheckCircle2,
   Clock,
   LoaderCircle,
-  PauseCircle,
   RefreshCw,
   Search,
   Server,
@@ -32,7 +31,7 @@ import { formatDate, freshnessLabel } from "../../../lib/dashboard-formatters";
  * - Authoritative state comes from GET /api/agent-updates.
  * - Shows status for every managed host against the current deployment target.
  * - Per-host Update/Retry action via POST /api/vps/:id/agent-update with Idempotency-Key.
- * - Handles waiting_busy, waiting_connection, needs_access, failed, updating, current.
+ * - Handles waiting_connection, needs_access, failed, updating, current.
  */
 
 const POLL_INTERVAL_MS = 15_000;
@@ -59,12 +58,6 @@ const AUTOMATION_CONFIG: Record<
     variant: "pending",
     icon: Clock,
     badgeClass: "border-info/40 bg-info/10 text-info",
-  },
-  waiting_busy: {
-    label: "Waiting (busy)",
-    variant: "pending",
-    icon: PauseCircle,
-    badgeClass: "border-warn/40 bg-warn/10 text-warn",
   },
   waiting_connection: {
     label: "Waiting (offline)",
@@ -117,7 +110,7 @@ const PHASE_LABELS: Record<LocalAgentUpgradeState, string> = {
   rolled_back: "Rolled back",
   rollback_unverified: "Rollback unverified",
   failed: "Upgrade failed",
-  deferred: "Deferred while busy",
+  deferred: "Deferred",
   superseded: "Superseded by newer deployment",
 };
 
@@ -268,7 +261,7 @@ export function FleetAgentUpdatesPanel() {
       });
       setActionNotice({
         kind: "success",
-        message: `Update request accepted for ${hostName}. Agent will update when idle.`,
+        message: `Update request accepted for ${hostName}. Agent will update automatically.`,
       });
     } catch (err: unknown) {
       setActionNotice({
@@ -299,7 +292,7 @@ export function FleetAgentUpdatesPanel() {
       const st = item.automation.state;
       if (st === "current") current++;
       else if (st === "updating") updating++;
-      else if (st === "waiting_busy" || st === "waiting_connection" || st === "pending") waiting++;
+      else if (st === "waiting_connection" || st === "pending") waiting++;
       else if (st === "needs_access") needsAccess++;
       else if (st === "failed" || st === "incompatible" || st === "release_unavailable") failed++;
     }
@@ -321,7 +314,6 @@ export function FleetAgentUpdatesPanel() {
       if (statusFilter === "updating" && st !== "updating") return false;
       if (
         statusFilter === "waiting" &&
-        st !== "waiting_busy" &&
         st !== "waiting_connection" &&
         st !== "pending"
       ) {
@@ -358,7 +350,7 @@ export function FleetAgentUpdatesPanel() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight text-text">Agent Deployment Updates</h1>
           <p className="mt-1 text-xs text-dim">
-            Managed agents converge to this deployment&apos;s bundled artifact automatically. Hosts update when idle with verified rollback.
+            Managed agents converge to this deployment&apos;s bundled artifact automatically. Hosts update automatically with verified rollback.
           </p>
         </div>
         <div className="flex items-center gap-2">

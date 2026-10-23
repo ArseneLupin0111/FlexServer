@@ -599,7 +599,6 @@ export type LocalAgentUpgradeJob = {
 export type AgentUpdateAutomationState =
   | "current"
   | "pending"
-  | "waiting_busy"
   | "waiting_connection"
   | "updating"
   | "needs_access"

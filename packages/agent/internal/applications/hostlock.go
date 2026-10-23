@@ -251,23 +251,26 @@ func acquireScopeAt(stateDir, scope, holderKind, holderID string, mutating bool,
 
 		// 2. Check mutual exclusion and exact owner reentry
 		if scope == LockScopeUpgrade {
-			// system:upgrade mutual exclusion with EVERY active scope
+			// Update-vs-update serialization: only conflict with other active upgrade scopes.
+			// Workload-busy scopes (compose, terminal, etc.) do not block immediate upgrades under disruptive update policy.
 			for i := range rows {
-				if rows[i].Scope == LockScopeUpgrade && rows[i].Holder.ID == holderID && rows[i].Holder.Kind == holderKind {
-					// Exact owner reentry
-					rows[i].Holder.GrantedAtUnix = now
-					rows[i].Holder.PID = pid
-					rows[i].Holder.ProcessStartTime = startTime
-					rows[i].Mutating = rows[i].Mutating || mutating
-					if rows[i].Mutating {
-						rows[i].ExpiresAtUnix = 0
-					} else {
-						rows[i].ExpiresAtUnix = now + int64(ttl.Seconds())
+				if rows[i].Scope == LockScopeUpgrade {
+					if rows[i].Holder.ID == holderID && rows[i].Holder.Kind == holderKind {
+						// Exact owner reentry
+						rows[i].Holder.GrantedAtUnix = now
+						rows[i].Holder.PID = pid
+						rows[i].Holder.ProcessStartTime = startTime
+						rows[i].Mutating = rows[i].Mutating || mutating
+						if rows[i].Mutating {
+							rows[i].ExpiresAtUnix = 0
+						} else {
+							rows[i].ExpiresAtUnix = now + int64(ttl.Seconds())
+						}
+						return rows, nil
 					}
-					return rows, nil
+					// Another upgrade is active: serialize simultaneous updates
+					return rows, fmt.Errorf("scope_busy:%s:%s", rows[i].Holder.Kind, rows[i].Holder.ID)
 				}
-				// Any active row (whether another scope or different upgrade holder) conflicts
-				return rows, fmt.Errorf("scope_busy:%s:%s", rows[i].Holder.Kind, rows[i].Holder.ID)
 			}
 			// Admitted
 			expiresAt := int64(0)

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — Distilled AI Assistant settings modal
+
+- Simplify the Assistant settings modal so configuration reads at a glance: remove the three dense scope banners in favor of one-line tab intros, drop per-switch descriptions in favor of short row titles plus a single "actions run only after you approve the exact plan" note, collapse path scopes and service profiles behind a native disclosure, merge host-execution facts into one inline row with runtime details behind a disclosure, and move Check Endpoint beside the save action in the provider footer. All switches, gating, safety copy, and test contracts are unchanged.
+
 ## Unreleased — Workspace header de-duplication and chat focus polish
 
 - Render the workspace host identity banner and its live CPU/RAM/Disk/Load/Net strip on the Overview section only, instead of repeating it above every workspace tab; other sections keep their own subpage headings and rely on the Overview and fleet rail for host state.

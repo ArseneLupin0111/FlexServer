@@ -490,8 +490,11 @@ describe("AssistantPanel conversation sync", () => {
     renderPanel();
     await screen.findByText("Latest conversation marker");
 
-    fireEvent.click(screen.getByRole("button", { name: /^history$/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /older session/i }));
+    // The history column is visible by default; selecting the older
+    // conversation must not reset to the latest one after ?taskId= is set.
+    const historyToggle = screen.getByRole("button", { name: /^history$/i });
+    expect(historyToggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(screen.getByRole("button", { name: /older session/i }));
 
     // Selecting the older conversation writes ?taskId=task-old; the panel
     // must keep the older conversation, not reset to the latest one.
@@ -501,6 +504,13 @@ describe("AssistantPanel conversation sync", () => {
     const chat = getChatLog();
     expect(within(chat).queryByText("Latest conversation marker")).toBeNull();
     expect(within(chat).getByText(oldSummary)).toBeInTheDocument();
+
+    // The History header button toggles the left column.
+    fireEvent.click(screen.getByRole("button", { name: /^history$/i }));
+    expect(screen.getByRole("button", { name: /^history$/i })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("button", { name: /older session/i })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^history$/i }));
+    expect(screen.getByRole("button", { name: /older session/i })).toBeInTheDocument();
   });
 
   it("keeps a new chat empty across a manual refresh", async () => {
@@ -535,6 +545,66 @@ describe("AssistantPanel conversation sync", () => {
     // latest conversation on refresh.
     expect(screen.getByText(/how can the assistant help\?/i)).toBeInTheDocument();
     expect(within(getChatLog()).queryByText(latestRequest)).toBeNull();
+  });
+
+  it("keeps the operator's question above the live summary when the client clock runs ahead of the server", async () => {
+    // Client clock is 2 minutes ahead of every server timestamp below.
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-01-01T00:02:00.000Z") });
+    try {
+      mockAssistantLoaded({ tasks: [], conversationDetail: null });
+      const request = "List running containers";
+      const summary = "Found 6 running containers.";
+      vi.mocked(createVpsAiTask).mockResolvedValue(
+        makeTask({
+          id: "task-new",
+          conversationId: "conv-new",
+          state: "planning",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:05.000Z",
+          requestSummary: request,
+          summary: undefined,
+        }),
+      );
+
+      renderPanel();
+      await screen.findByText(/how can the assistant help\?/i);
+
+      fireEvent.change(screen.getByPlaceholderText(/ask the assistant/i), {
+        target: { value: request },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+      await waitFor(() => {
+        expect(createVpsAiTask).toHaveBeenCalledTimes(1);
+      });
+
+      await act(async () => {
+        streamHarness.latestOptions?.onSnapshot?.(
+          makeTask({
+            id: "task-new",
+            conversationId: "conv-new",
+            state: "succeeded",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:20.000Z",
+            requestSummary: request,
+            summary,
+          }),
+        );
+      });
+
+      // Document order: the question must precede the AI summary (the
+      // optimistic turn is reconciled to the server task's createdAt).
+      const chat = getChatLog();
+      await waitFor(() => {
+        const question = within(chat).getByText(request);
+        const answer = within(chat).getByText(summary);
+        expect(
+          question.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("projects a final summary that arrives only via the refreshed task list", async () => {

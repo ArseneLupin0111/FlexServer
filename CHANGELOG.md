@@ -1,9 +1,24 @@
 # Changelog
 
+## Unreleased — Assistant history column
+
+- Replace the Assistant history overlay drawer with a conversation column pinned left of the chat (visible by default; the History header button toggles it with `aria-expanded`). On wide screens it is a 240px sidebar; on narrow screens it stacks above the chat with its own scroll. Selecting a conversation keeps the column open, and the delete-per-conversation control moves into each row.
+
+## Unreleased — Distilled AI Assistant settings modal
+
+- Simplify the Assistant settings modal so configuration reads at a glance: remove the three dense scope banners in favor of one-line tab intros, drop per-switch descriptions in favor of short row titles plus a single "actions run only after you approve the exact plan" note, collapse path scopes and service profiles behind a native disclosure, merge host-execution facts into one inline row with runtime details behind a disclosure, and move Check Endpoint beside the save action in the provider footer. All switches, gating, safety copy, and test contracts are unchanged.
+
+## Unreleased — Workspace header de-duplication and chat focus polish
+
+- Render the workspace host identity banner and its live CPU/RAM/Disk/Load/Net strip on the Overview section only, instead of repeating it above every workspace tab; other sections keep their own subpage headings and rely on the Overview and fleet rail for host state.
+- Replace the lime focus border on the Assistant composer and clarification input with a neutral focus treatment (subtle ring / dim border) so clicking into the chat box no longer highlights it in signal green.
+
 ## Unreleased — AI assistant conversation workspace
 
 - Rebuild the dashboard Assistant around the conversation: a full-width chat that synthesizes missing request/summary turns, an optional collapsible task inspector, and safe Markdown rendering for assistant responses and summaries (GFM tables and fenced code, sanitized links, no remote images or raw HTML).
 - Keep conversation state stable across manual refreshes, history selection, New Chat, and task creation; stale async loads are fenced with sequence guards and refreshed tasks reconcile by revision so a New Chat stays empty and refreshed summaries are not shadowed.
+- Fix live-response ordering: each optimistic operator turn is reconciled to the server task's timestamp and task binding when the task is created (and clarification answers when the input is accepted), plus a user-before-assistant tie-break, so client clock skew can no longer render the AI summary above the operator's question before a reload.
+- Densify the chat surface in the style of a modern chat client: right-aligned lime-tinted operator bubbles, assistant replies rendered as open Markdown beside a compact bot marker, a pill composer with an inline circular send control, suggestion chips on the empty state, and rounded clarification cards — using literal corner radii so the square-surface theme tokens remain untouched.
 - Document the AI VPS Assistant capability in the README capabilities table and add an AI Assistant capability tab (illustrative chat preview) plus an FAQ entry to the landing page.
 
 ## Unreleased — Landing page

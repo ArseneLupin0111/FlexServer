@@ -13,6 +13,7 @@ export type AssistantHeaderProps = {
   activeTask: AiTask | null;
   onOpenSettings: () => void;
   onOpenHistory: () => void;
+  historyOpen?: boolean;
   onRefresh?: () => void;
   refreshing?: boolean;
   onNewConversation?: () => void;
@@ -24,6 +25,7 @@ export function AssistantHeader({
   capability,
   onOpenSettings,
   onOpenHistory,
+  historyOpen,
   onRefresh,
   refreshing = false,
   onNewConversation,
@@ -59,7 +61,15 @@ export function AssistantHeader({
             <Bot className="mr-1.5 h-3.5 w-3.5" />New Chat
           </Button>
         ) : null}
-        <Button type="button" variant="outline" size="sm" onClick={onOpenHistory} className="min-h-9 text-xs">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onOpenHistory}
+          aria-expanded={historyOpen}
+          aria-controls="assistant-history-column"
+          className="min-h-9 text-xs"
+        >
           <History className="mr-1.5 h-3.5 w-3.5" />History
         </Button>
         <Button type="button" variant="outline" size="sm" onClick={onOpenSettings} className="min-h-9 text-xs">

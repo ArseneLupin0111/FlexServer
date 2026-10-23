@@ -2,14 +2,12 @@ import { useState, useEffect, useRef } from "react";
 import {
   AlertCircle,
   CheckCircle2,
+  ChevronDown,
   Cpu,
   Eye,
   EyeOff,
   Globe,
-  HardDrive,
-  Layers,
   LoaderCircle,
-  Lock,
   RefreshCw,
   Server,
   Shield,
@@ -271,7 +269,8 @@ export function AssistantSettingsModal({
           <button
             type="button"
             onClick={onClose}
-            className="text-dim hover:text-text p-1"
+            className="p-1 text-dim hover:text-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal"
+            aria-label="Close settings"
             title="Close dialog"
           >
             <X className="h-4 w-4" />
@@ -303,7 +302,7 @@ export function AssistantSettingsModal({
             }`}
           >
             <Server className="h-3.5 w-3.5" />
-            <span>Advanced permissions</span>
+            <span>Permissions</span>
           </button>
 
           <button
@@ -316,7 +315,7 @@ export function AssistantSettingsModal({
             }`}
           >
             <Cpu className="h-3.5 w-3.5" />
-            <span>Host execution</span>
+            <span>Execution</span>
           </button>
         </div>
 
@@ -325,11 +324,10 @@ export function AssistantSettingsModal({
           {/* TAB 1: GLOBAL PROVIDER SETTINGS */}
           {activeTab === "provider" ? (
             <div className="space-y-4">
-              <div className="border border-line bg-ink/40 p-3 text-xs text-dim">
-                <span className="font-semibold text-text">Scope: System-Wide (All Hosts).</span>{" "}
-                Configures the active LLM provider endpoint. API keys are write-only,
-                encrypted on disk with dedicated AI keyring, and never returned in responses.
-              </div>
+              <p className="text-[11px] text-dim">
+                Applies to every host. Keys are encrypted at rest and never
+                displayed again.
+              </p>
 
               {providerSuccess ? (
                 <div className="flex items-center gap-2 border border-signal/40 bg-signal/10 p-3 text-xs text-signal">
@@ -347,7 +345,7 @@ export function AssistantSettingsModal({
 
               <div className="space-y-3">
                 <div className="space-y-1">
-                  <Label className="text-xs text-text">Endpoint Base URL</Label>
+                  <Label className="text-xs text-text">Endpoint</Label>
                   <Input
                     type="url"
                     value={endpoint}
@@ -359,12 +357,12 @@ export function AssistantSettingsModal({
                     className="h-8 font-mono text-xs"
                   />
                   <p className="text-[11px] text-dim">
-                    OpenAI-compatible chat completion endpoint. Must be HTTPS for remote hosts.
+                    OpenAI-compatible. HTTPS for remote hosts.
                   </p>
                 </div>
 
                 <div className="space-y-1">
-                  <Label className="text-xs text-text">Model Identifier</Label>
+                  <Label className="text-xs text-text">Model</Label>
                   <Input
                     type="text"
                     value={model}
@@ -379,7 +377,7 @@ export function AssistantSettingsModal({
 
                 <div className="space-y-1">
                   <div className="flex items-center justify-between">
-                    <Label className="text-xs text-text">API Key</Label>
+                    <Label className="text-xs text-text">API key</Label>
                     {providerSettings?.hasApiKey ? (
                       <span className="text-[11px] text-signal font-mono">
                         Key configured
@@ -409,6 +407,7 @@ export function AssistantSettingsModal({
                       type="button"
                       onClick={() => setShowApiKey(!showApiKey)}
                       className="absolute right-2 top-2 text-dim hover:text-text"
+                      aria-label={showApiKey ? "Hide API key" : "Show API key"}
                     >
                       {showApiKey ? (
                         <EyeOff className="h-4 w-4" />
@@ -422,11 +421,11 @@ export function AssistantSettingsModal({
                 <div className="flex items-center justify-between border border-line bg-ink/30 p-3">
                   <div className="space-y-0.5 pr-4">
                     <div className="text-xs font-semibold text-text">
-                      Allow Private / Loopback Endpoint
+                      Allow private endpoint
                     </div>
                     <div className="text-[11px] text-dim">
-                      Permits local staging loopback (127.0.0.1 / [::1]). Link-local and
-                      cloud metadata (169.254.x.x) remain strictly blocked.
+                      Loopback (127.0.0.1) allowed; cloud metadata IPs stay
+                      blocked.
                     </div>
                   </div>
                   <Switch
@@ -440,61 +439,50 @@ export function AssistantSettingsModal({
                 </div>
               </div>
 
-              {/* Provider Check box */}
-              <div className="border border-line bg-ink/30 p-3 space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <div className="font-semibold text-text">
-                      Synthetic Endpoint Verification
-                    </div>
-                    <div className="text-[11px] text-dim">
-                      Sends a synthetic tool call without VPS context to verify provider credentials and protocol.
-                    </div>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    disabled={checkingProvider || busy || !canCheckProvider}
-                    onClick={() => void handleCheckProvider()}
-                    className="text-xs"
-                  >
-                    {checkingProvider ? (
-                      <LoaderCircle className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-                    )}
-                    Check Endpoint
-                  </Button>
-                </div>
-
-                {!canCheckProvider ? (
-                  <div className="text-[11px] text-warn">
+              {!canCheckProvider ? (
+                <div className="flex items-start gap-1.5 text-[11px] text-warn">
+                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span>
                     {savedConfigComplete
-                      ? "The check runs against the saved configuration, not this draft. Save your changes first (leave the API key blank to keep the stored key)."
-                      : "A complete saved configuration (endpoint, model, and API key) is required before a check can run."}
-                  </div>
-                ) : null}
+                      ? "The check runs against the saved configuration — save your changes first."
+                      : "A complete saved configuration (endpoint, model, and key) is required."}
+                  </span>
+                </div>
+              ) : null}
 
-                {checkResult ? (
-                  <div
-                    className={`flex items-center gap-2 border p-2 text-[11px] ${
-                      checkResult.ok
-                        ? "border-signal/40 bg-signal/10 text-signal"
-                        : "border-crit/40 bg-crit/10 text-crit"
-                    }`}
-                  >
-                    {checkResult.ok ? (
-                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                    ) : (
-                      <XCircle className="h-3.5 w-3.5 shrink-0" />
-                    )}
-                    <span>{checkResult.message}</span>
-                  </div>
-                ) : null}
-              </div>
+              {checkResult ? (
+                <div
+                  className={`flex items-center gap-2 border p-2 text-[11px] ${
+                    checkResult.ok
+                      ? "border-signal/40 bg-signal/10 text-signal"
+                      : "border-crit/40 bg-crit/10 text-crit"
+                  }`}
+                >
+                  {checkResult.ok ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                  ) : (
+                    <XCircle className="h-3.5 w-3.5 shrink-0" />
+                  )}
+                  <span>{checkResult.message}</span>
+                </div>
+              ) : null}
 
-              <div className="flex justify-end pt-2">
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={checkingProvider || busy || !canCheckProvider}
+                  onClick={() => void handleCheckProvider()}
+                  className="text-xs"
+                >
+                  {checkingProvider ? (
+                    <LoaderCircle className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                  )}
+                  Check Endpoint
+                </Button>
                 <Button
                   type="button"
                   variant="default"
@@ -515,11 +503,9 @@ export function AssistantSettingsModal({
           {/* TAB 2: HOST POLICY & SCOPES */}
           {activeTab === "policy" ? (
             <div className="space-y-4">
-              <div className="border border-line bg-ink/40 p-3 text-xs text-dim">
-                <span className="font-semibold text-text">Scope: Per-VPS Isolation (Optional).</span>{" "}
-                Controls tool invocation boundaries and egress disclosure for this host.
-                Modifying policy immediately invalidates all active pending plans.
-              </div>
+              <p className="text-[11px] text-dim">
+                Applies to this host. Saving invalidates pending plans.
+              </p>
 
               {policySuccess ? (
                 <div className="flex items-center gap-2 border border-signal/40 bg-signal/10 p-3 text-xs text-signal">
@@ -535,13 +521,13 @@ export function AssistantSettingsModal({
                 </div>
               ) : null}
 
-              <div className="space-y-3">
+              <div className="space-y-2">
                 {/* Master Switch */}
                 <div className="flex items-center justify-between border border-line bg-ink/30 p-3">
                   <div>
-                    <div className="font-semibold text-text">Enable AI Assistant on VPS</div>
+                    <div className="font-semibold text-text">Enable AI Assistant</div>
                     <div className="text-[11px] text-dim">
-                      Master kill switch for assistant interaction with this host.
+                      Turns the Assistant on or off for this host.
                     </div>
                   </div>
                   <Switch
@@ -551,19 +537,13 @@ export function AssistantSettingsModal({
                   />
                 </div>
 
-                {/* Tool Scopes */}
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-dim pt-2">
-                  Tool Capability Permissions
+                <h3 className="pt-2 text-xs font-semibold uppercase tracking-wider text-dim">
+                  Tools
                 </h3>
 
                 <div className="space-y-2">
                   <div className="flex items-center justify-between border border-line bg-panel p-2.5">
-                    <div>
-                      <div className="font-semibold text-text">Read-Only Tools</div>
-                      <div className="text-[11px] text-dim">
-                        Query metrics, inspect inventory, and read event histories.
-                      </div>
-                    </div>
+                    <div className="font-semibold text-text">Read-only inspection</div>
                     <Switch
                       checked={readEnabled}
                       onCheckedChange={setReadEnabled}
@@ -572,12 +552,7 @@ export function AssistantSettingsModal({
                   </div>
 
                   <div className="flex items-center justify-between border border-line bg-panel p-2.5">
-                    <div>
-                      <div className="font-semibold text-text">Docker Mutation Tools</div>
-                      <div className="text-[11px] text-dim">
-                        Start, stop, restart, or inspect container state (requires exact approval).
-                      </div>
-                    </div>
+                    <div className="font-semibold text-text">Docker actions</div>
                     <Switch
                       checked={dockerEnabled}
                       onCheckedChange={setDockerEnabled}
@@ -586,12 +561,7 @@ export function AssistantSettingsModal({
                   </div>
 
                   <div className="flex items-center justify-between border border-line bg-panel p-2.5">
-                    <div>
-                      <div className="font-semibold text-text">Compose Mutation Tools</div>
-                      <div className="text-[11px] text-dim">
-                        Deploy, update, or restart Compose stacks (requires exact approval).
-                      </div>
-                    </div>
+                    <div className="font-semibold text-text">Compose actions</div>
                     <Switch
                       checked={composeEnabled}
                       onCheckedChange={setComposeEnabled}
@@ -600,12 +570,7 @@ export function AssistantSettingsModal({
                   </div>
 
                   <div className="flex items-center justify-between border border-line bg-panel p-2.5">
-                    <div>
-                      <div className="font-semibold text-text">Shell Execution Tools</div>
-                      <div className="text-[11px] text-dim">
-                        Run bounded commands in confined executor container (requires exact approval).
-                      </div>
-                    </div>
+                    <div className="font-semibold text-text">Shell execution</div>
                     <Switch
                       checked={shellEnabled}
                       onCheckedChange={setShellEnabled}
@@ -614,19 +579,18 @@ export function AssistantSettingsModal({
                   </div>
                 </div>
 
-                {/* Data Egress */}
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-dim pt-2">
-                  Data Egress Disclosures
+                <p className="text-[11px] text-dim">
+                  Docker, Compose, and shell actions run only after you approve
+                  the exact plan.
+                </p>
+
+                <h3 className="pt-2 text-xs font-semibold uppercase tracking-wider text-dim">
+                  Data egress
                 </h3>
 
                 <div className="space-y-2">
                   <div className="flex items-center justify-between border border-line bg-panel p-2.5">
-                    <div>
-                      <div className="font-semibold text-text">Send Logs to Provider</div>
-                      <div className="text-[11px] text-dim">
-                        Permit redacted container log excerpts in context turns.
-                      </div>
-                    </div>
+                    <div className="font-semibold text-text">Send logs to provider</div>
                     <Switch
                       checked={sendLogs}
                       onCheckedChange={setSendLogs}
@@ -635,11 +599,8 @@ export function AssistantSettingsModal({
                   </div>
 
                   <div className="flex items-center justify-between border border-line bg-panel p-2.5">
-                    <div>
-                      <div className="font-semibold text-text">Send File Excerpts to Provider</div>
-                      <div className="text-[11px] text-dim">
-                        Permit text file inspection snippets within allowed paths.
-                      </div>
+                    <div className="font-semibold text-text">
+                      Send file contents to provider
                     </div>
                     <Switch
                       checked={sendFiles}
@@ -648,51 +609,62 @@ export function AssistantSettingsModal({
                     />
                   </div>
                 </div>
+                <p className="text-[11px] text-dim">
+                  Both stay off unless enabled; content is redacted before it
+                  leaves the API.
+                </p>
 
-                {/* Path Scopes */}
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-dim pt-2">
-                  Path & Profile Allowances
-                </h3>
-
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div className="space-y-1">
-                    <Label className="text-xs text-text">File Read Path Scopes</Label>
-                    <textarea
-                      value={readScopesText}
-                      onChange={(e) => setReadScopesText(e.target.value)}
-                      placeholder="/etc/nginx&#10;/var/log"
-                      rows={3}
-                      className="w-full resize-none border border-line bg-ink p-2 font-mono text-xs text-text focus:border-signal focus:outline-none"
+                {/* Advanced scopes behind progressive disclosure */}
+                <details className="group border border-line bg-panel">
+                  <summary className="flex cursor-pointer select-none items-center justify-between p-2.5 font-semibold text-dim transition-colors hover:text-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal list-none [&::-webkit-details-marker]:hidden">
+                    <span>Path scopes &amp; service profiles</span>
+                    <ChevronDown
+                      className="h-3.5 w-3.5 shrink-0 transition-transform duration-150 group-open:rotate-180"
+                      aria-hidden="true"
                     />
-                    <p className="text-[10px] text-dim">One path prefix per line.</p>
-                  </div>
+                  </summary>
+                  <div className="space-y-3 border-t border-line p-3">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div className="space-y-1">
+                        <Label className="text-xs text-text">File read paths</Label>
+                        <textarea
+                          value={readScopesText}
+                          onChange={(e) => setReadScopesText(e.target.value)}
+                          placeholder="/etc/nginx&#10;/var/log"
+                          rows={3}
+                          className="w-full resize-none border border-line bg-ink p-2 font-mono text-xs text-text focus:border-signal focus:outline-none"
+                        />
+                        <p className="text-[10px] text-dim">One path prefix per line.</p>
+                      </div>
 
-                  <div className="space-y-1">
-                    <Label className="text-xs text-text">File Write Path Scopes</Label>
-                    <textarea
-                      value={writeScopesText}
-                      onChange={(e) => setWriteScopesText(e.target.value)}
-                      placeholder="/tmp&#10;/var/www"
-                      rows={3}
-                      className="w-full resize-none border border-line bg-ink p-2 font-mono text-xs text-text focus:border-signal focus:outline-none"
-                    />
-                    <p className="text-[10px] text-dim">Protected files remain rejected.</p>
-                  </div>
-                </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-text">File write paths</Label>
+                        <textarea
+                          value={writeScopesText}
+                          onChange={(e) => setWriteScopesText(e.target.value)}
+                          placeholder="/tmp&#10;/var/www"
+                          rows={3}
+                          className="w-full resize-none border border-line bg-ink p-2 font-mono text-xs text-text focus:border-signal focus:outline-none"
+                        />
+                        <p className="text-[10px] text-dim">Protected files remain rejected.</p>
+                      </div>
+                    </div>
 
-                <div className="space-y-1">
-                  <Label className="text-xs text-text">Authorized Service Profiles</Label>
-                  <textarea
-                    value={profilesText}
-                    onChange={(e) => setProfilesText(e.target.value)}
-                    placeholder="systemd&#10;docker"
-                    rows={2}
-                    className="w-full resize-none border border-line bg-ink p-2 font-mono text-xs text-text focus:border-signal focus:outline-none"
-                  />
-                  <p className="text-[10px] text-dim">
-                    Named root-helper service profiles available to the assistant.
-                  </p>
-                </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs text-text">Service profiles</Label>
+                      <textarea
+                        value={profilesText}
+                        onChange={(e) => setProfilesText(e.target.value)}
+                        placeholder="systemd&#10;docker"
+                        rows={2}
+                        className="w-full resize-none border border-line bg-ink p-2 font-mono text-xs text-text focus:border-signal focus:outline-none"
+                      />
+                      <p className="text-[10px] text-dim">
+                        Named root-helper profiles the assistant may manage.
+                      </p>
+                    </div>
+                  </div>
+                </details>
               </div>
 
               <div className="flex justify-end pt-2">
@@ -707,7 +679,7 @@ export function AssistantSettingsModal({
                   {savingPolicy ? (
                     <LoaderCircle className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                   ) : null}
-                  Save Host Policy
+                  Save permissions
                 </Button>
               </div>
             </div>
@@ -715,16 +687,13 @@ export function AssistantSettingsModal({
 
           {/* TAB 3: HOST CAPABILITY */}
           {activeTab === "capability" ? (
-            <div className="space-y-4">
-              <div className="border border-line bg-ink/40 p-3 text-xs text-dim">
-                <span className="font-semibold text-text">Host Confinement & Runtime Telemetry (Optional).</span>{" "}
-                Reported by the installed agent daemon and verified before dispatching plan operations.
-              </div>
+            <div className="space-y-3">
+              <p className="text-[11px] text-dim">Reported by the host agent.</p>
 
               {capability ? (
-                <div className="space-y-3">
+                <>
                   <div className="flex items-center justify-between border border-line bg-panel p-3">
-                    <span className="font-semibold text-text">Execution Support</span>
+                    <span className="font-semibold text-text">Execution support</span>
                     <Badge
                       variant="outline"
                       className={
@@ -743,78 +712,79 @@ export function AssistantSettingsModal({
                   </div>
 
                   {capability.reason ? (
-                    <div className="border border-line bg-ink/30 p-3 text-xs">
-                      <div className="text-[11px] uppercase tracking-wider text-dim">
-                        Reason:
-                      </div>
-                      <div className="mt-1 text-text">{capability.reason}</div>
-                    </div>
+                    <div className="text-xs text-dim">{capability.reason}</div>
                   ) : null}
 
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                    <div className="border border-line bg-panel p-3">
-                      <div className="text-[11px] text-dim">cgroup v2</div>
-                      <div className="mt-1 font-mono font-semibold text-text">
-                        {capability.cgroupV2Available ? "Available" : "Missing"}
-                      </div>
-                    </div>
-                    <div className="border border-line bg-panel p-3">
-                      <div className="text-[11px] text-dim">Namespaces</div>
-                      <div className="mt-1 font-mono font-semibold text-text">
-                        {capability.namespacesAvailable ? "Available" : "Missing"}
-                      </div>
-                    </div>
-                    <div className="border border-line bg-panel p-3">
-                      <div className="text-[11px] text-dim">Seccomp</div>
-                      <div className="mt-1 font-mono font-semibold text-text">
-                        {capability.seccompAvailable ? "Available" : "Missing"}
-                      </div>
-                    </div>
+                  <div className="flex flex-wrap gap-x-5 gap-y-1.5 border border-line bg-panel p-3 text-xs">
+                    <span className="text-dim">
+                      cgroup v2{" "}
+                      <span className="font-semibold text-text">
+                        {capability.cgroupV2Available ? "available" : "missing"}
+                      </span>
+                    </span>
+                    <span className="text-dim">
+                      Namespaces{" "}
+                      <span className="font-semibold text-text">
+                        {capability.namespacesAvailable ? "available" : "missing"}
+                      </span>
+                    </span>
+                    <span className="text-dim">
+                      Seccomp{" "}
+                      <span className="font-semibold text-text">
+                        {capability.seccompAvailable ? "available" : "missing"}
+                      </span>
+                    </span>
                   </div>
 
-                  <div className="space-y-2 border border-line bg-panel p-3 font-mono text-xs">
-                    <div className="flex justify-between">
-                      <span className="text-dim">Protocol Version:</span>
-                      <span className="text-text">{capability.protocolVersion}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-dim">Agent Version:</span>
-                      <span className="text-text">{capability.agentVersion || "Unknown"}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-dim">Rootfs Digest:</span>
-                      <span className="text-text select-all">
-                        {capability.rootfsDigest
-                          ? `${capability.rootfsDigest.slice(0, 24)}…`
-                          : "None"}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-dim">Freshness:</span>
-                      <span className="text-text">
-                        {new Date(capability.freshness).toLocaleString()}
-                      </span>
-                    </div>
-                  </div>
-
-                  {capability.profiles && capability.profiles.length > 0 ? (
-                    <div className="border border-line bg-panel p-3">
-                      <div className="text-[11px] uppercase tracking-wider text-dim">
-                        Available Service Profiles:
-                      </div>
-                      <div className="mt-1.5 flex flex-wrap gap-1.5">
-                        {capability.profiles.map((p) => (
-                          <span
-                            key={p}
-                            className="border border-line bg-raised/50 px-2 py-0.5 font-mono text-[11px] text-text"
-                          >
-                            {p}
+                  <details className="group border border-line bg-panel">
+                    <summary className="flex cursor-pointer select-none items-center justify-between p-2.5 font-semibold text-dim transition-colors hover:text-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal list-none [&::-webkit-details-marker]:hidden">
+                      <span>Runtime details</span>
+                      <ChevronDown
+                        className="h-3.5 w-3.5 shrink-0 transition-transform duration-150 group-open:rotate-180"
+                        aria-hidden="true"
+                      />
+                    </summary>
+                    <div className="space-y-3 border-t border-line p-3 font-mono text-xs">
+                      <div className="space-y-2">
+                        <div className="flex justify-between">
+                          <span className="text-dim">Protocol</span>
+                          <span className="text-text">{capability.protocolVersion}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-dim">Agent</span>
+                          <span className="text-text">{capability.agentVersion || "Unknown"}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-dim">Rootfs</span>
+                          <span className="select-all text-text">
+                            {capability.rootfsDigest
+                              ? `${capability.rootfsDigest.slice(0, 24)}…`
+                              : "None"}
                           </span>
-                        ))}
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-dim">Freshness</span>
+                          <span className="text-text">
+                            {new Date(capability.freshness).toLocaleString()}
+                          </span>
+                        </div>
                       </div>
+
+                      {capability.profiles && capability.profiles.length > 0 ? (
+                        <div className="flex flex-wrap gap-1.5 font-sans">
+                          {capability.profiles.map((p) => (
+                            <span
+                              key={p}
+                              className="border border-line bg-raised/50 px-2 py-0.5 font-mono text-[11px] text-text"
+                            >
+                              {p}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
-                  ) : null}
-                </div>
+                  </details>
+                </>
               ) : (
                 <div className="p-6 text-center text-xs text-dim">
                   Capability information not yet collected for this VPS.
@@ -822,19 +792,6 @@ export function AssistantSettingsModal({
               )}
             </div>
           ) : null}
-        </div>
-
-        {/* Footer */}
-        <div className="flex justify-end border-t border-line p-3">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={onClose}
-            className="text-xs"
-          >
-            Close
-          </Button>
         </div>
       </div>
     </div>

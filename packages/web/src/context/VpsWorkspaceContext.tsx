@@ -242,6 +242,12 @@ export function VpsWorkspaceLayout() {
   const netRx = latestMetric?.networkRx;
   const netTx = latestMetric?.networkTx;
 
+  // The identity banner and live resource strip stay on the workspace
+  // Overview only; every section duplicates its own context via the
+  // subpage heading, and the fleet rail already carries host state.
+  const isOverview =
+    location.pathname.replace(/\/+$/, "") === `/vps/${vpsId}`;
+
   return (
     <VpsWorkspaceContext.Provider value={workspaceValue}>
       <div className="min-w-0">
@@ -255,7 +261,9 @@ export function VpsWorkspaceLayout() {
           </Link>
         </div>
 
-        {/* Persistent Host Identity Banner & Compact Resource Strip */}
+        {/* Persistent Host Identity Banner & Compact Resource Strip
+            (Overview only — de-duplicated from other workspace sections) */}
+        {isOverview ? (
         <div className="mb-4 border border-line bg-panel p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
@@ -406,6 +414,7 @@ export function VpsWorkspaceLayout() {
             </div>
           </div>
         </div>
+        ) : null}
 
         {/* Workspace Horizontal Navigation Tabs */}
         <div className="relative border-b border-line">

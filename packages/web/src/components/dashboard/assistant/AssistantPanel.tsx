@@ -44,7 +44,7 @@ import { AssistantChat } from "./AssistantChat";
 import { AssistantTaskPanel } from "./AssistantTaskPanel";
 import { AssistantApprovalDialog } from "./AssistantApprovalDialog";
 import { AssistantSettingsModal } from "./AssistantSettingsModal";
-import { AssistantHistoryDrawer } from "./AssistantHistoryDrawer";
+import { AssistantHistoryColumn } from "./AssistantHistoryColumn";
 import { Button } from "../../ui/button";
 
 export type AssistantPanelProps = {
@@ -89,7 +89,9 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   // Dialogs
   const [approvalDialogOpen, setApprovalDialogOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
-  const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
+  // Conversation history renders as a column left of the chat; the History
+  // header button toggles it (default visible).
+  const [historyOpen, setHistoryOpen] = useState(true);
   const [taskDetailsOpen, setTaskDetailsOpen] = useState(false);
 
   // Loading & Error
@@ -279,8 +281,9 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     setBusyTaskId(null);
 
     // Optimistically add user turn to local chat
+    const optimisticId = `local-${Date.now()}`;
     const optimisticMessage: AiConversationMessage = {
-      id: `local-${Date.now()}`,
+      id: optimisticId,
       conversationId: activeConversationId || "pending",
       role: "user",
       content: requestText,
@@ -295,6 +298,18 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         idempotencyKey,
         conversationId: activeConversationId || undefined,
       });
+
+      // Reconcile the optimistic turn with server truth: adopt the task's
+      // server-side timestamp and task binding. Otherwise client clock skew
+      // can sort the operator's question after the task's synthesized
+      // summary, and the requestSummary fallback cannot dedupe by taskId.
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === optimisticId
+            ? { ...m, taskId: newTask.id, createdAt: newTask.createdAt }
+            : m,
+        ),
+      );
 
       // Switch to new task
       setTasks((prev) => [newTask, ...prev]);
@@ -341,9 +356,10 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     setRootError(null);
 
     // Optimistic user turn
+    const optimisticId = `local-${Date.now()}`;
     const optimisticMessage: AiConversationMessage = {
-      id: `local-${Date.now()}`,
-      conversationId: activeConversationId || "pending",
+      id: optimisticId,
+      conversationId: activeConversationId || activeTask?.conversationId || "pending",
       role: "user",
       content: input,
       createdAt: new Date().toISOString(),
@@ -355,6 +371,15 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         input,
       });
       setActiveTask(updated);
+      // Server-side timestamp keeps the answer ordered before the reply it
+      // triggers even when the client clock runs ahead of the server.
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === optimisticId
+            ? { ...m, taskId: updated.id, createdAt: updated.updatedAt }
+            : m,
+        ),
+      );
     } finally {
       setActionBusy(false);
     }
@@ -483,7 +508,6 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     const seq = ++convSeqRef.current;
     setActiveConversationId(conv.id);
     activeConversationRef.current = conv.id;
-    setHistoryDrawerOpen(false);
     try {
       const detail = await getVpsAiConversation(vps.id, conv.id);
       // A newer selection (or "New Chat") superseded this fetch.
@@ -610,7 +634,13 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     // Chronological merge so an old task's summary never jumps past later
     // turns; synthesized turns carry the task's own createdAt/updatedAt.
     const merged = [...messages, ...projected, ...summaries];
-    merged.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    merged.sort((a, b) => {
+      const byTime = a.createdAt.localeCompare(b.createdAt);
+      if (byTime !== 0) return byTime;
+      // Identical timestamps: the operator's turn precedes the reply.
+      if (a.role !== b.role) return a.role === "user" ? -1 : 1;
+      return 0;
+    });
     return merged;
   }, [messages, tasks, activeTask, activeConversationId]);
 
@@ -633,7 +663,8 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         capability={capability}
         activeTask={activeTask}
         onOpenSettings={() => setSettingsModalOpen(true)}
-        onOpenHistory={() => setHistoryDrawerOpen(true)}
+        onOpenHistory={() => setHistoryOpen((open) => !open)}
+        historyOpen={historyOpen}
         onRefresh={() => {
           setRefreshing(true);
           void loadInitialData("refresh");
@@ -719,35 +750,52 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         </div>
       ) : null}
 
-      <div className={`grid min-h-0 min-w-0 flex-1 gap-3 ${taskDetailsOpen && activeTask ? "grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,24rem)]" : "grid-cols-1"}`}>
-        <div className={`min-h-0 min-w-0 ${taskDetailsOpen && activeTask ? "h-[32rem] xl:h-full" : "h-full"}`}>
-          <AssistantChat
-            messages={chatMessages}
-            activeTask={activeTask}
-            onSendMessage={handleSendMessage}
-            onSubmitClarification={handleSubmitClarification}
-            onSelectBusyTask={handleSelectTask}
-            busyTaskId={busyTaskId}
-            busy={actionBusy}
-            aiEnabled={aiEnabled}
-            providerReady={providerReady}
-          />
-        </div>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 xl:flex-row">
+        {/* Conversation history column (left of the chat) */}
+        {historyOpen ? (
+          <div
+            id="assistant-history-column"
+            className="max-h-44 min-h-0 shrink-0 xl:h-auto xl:max-h-none xl:w-60"
+          >
+            <AssistantHistoryColumn
+              conversations={conversations}
+              onSelectConversation={handleSelectConversation}
+              onDeleteConversation={handleDeleteConversation}
+              activeConversationId={activeConversationId}
+            />
+          </div>
+        ) : null}
 
-        <div id="assistant-task-details" hidden={!taskDetailsOpen || !activeTask} className="h-[28rem] min-h-0 min-w-0 xl:h-full">
-          <AssistantTaskPanel
-            task={activeTask}
-            streamState={streamState}
-            outputChunks={outputChunks}
-            hasGap={hasGap}
-            isTruncated={isTruncated}
-            onClearOutput={clearOutput}
-            onReconnectStream={reconnect}
-            onOpenApproval={() => setApprovalDialogOpen(true)}
-            onCancelTask={handleCancelTask}
-            onReconcileTask={handleReconcileTask}
-            busy={actionBusy}
-          />
+        <div className={`grid min-h-0 min-w-0 flex-1 gap-3 ${taskDetailsOpen && activeTask ? "grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,24rem)]" : "grid-cols-1"}`}>
+          <div className={`min-h-0 min-w-0 ${taskDetailsOpen && activeTask ? "h-[32rem] xl:h-full" : "h-full"}`}>
+            <AssistantChat
+              messages={chatMessages}
+              activeTask={activeTask}
+              onSendMessage={handleSendMessage}
+              onSubmitClarification={handleSubmitClarification}
+              onSelectBusyTask={handleSelectTask}
+              busyTaskId={busyTaskId}
+              busy={actionBusy}
+              aiEnabled={aiEnabled}
+              providerReady={providerReady}
+            />
+          </div>
+
+          <div id="assistant-task-details" hidden={!taskDetailsOpen || !activeTask} className="h-[28rem] min-h-0 min-w-0 xl:h-full">
+            <AssistantTaskPanel
+              task={activeTask}
+              streamState={streamState}
+              outputChunks={outputChunks}
+              hasGap={hasGap}
+              isTruncated={isTruncated}
+              onClearOutput={clearOutput}
+              onReconnectStream={reconnect}
+              onOpenApproval={() => setApprovalDialogOpen(true)}
+              onCancelTask={handleCancelTask}
+              onReconcileTask={handleReconcileTask}
+              busy={actionBusy}
+            />
+          </div>
         </div>
       </div>
 
@@ -775,16 +823,6 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         onSavePolicy={handleSavePolicy}
         onCheckProvider={handleCheckProvider}
         busy={actionBusy}
-      />
-
-      {/* Conversation History Drawer */}
-      <AssistantHistoryDrawer
-        open={historyDrawerOpen}
-        onClose={() => setHistoryDrawerOpen(false)}
-        conversations={conversations}
-        onSelectConversation={handleSelectConversation}
-        onDeleteConversation={handleDeleteConversation}
-        activeConversationId={activeConversationId}
       />
     </div>
   );

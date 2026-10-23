@@ -618,7 +618,7 @@ export class FleetProvisioningService {
 
       const privilegedCmd = [
         `if [ "$(id -u)" -eq 0 ]; then`,
-        `  ${execStatements};`,
+        `  ${execStatements}`,
         `elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then`,
         `  sudo -n sh -c ${shellQuote(execStatements)};`,
         `else echo "Error: root or passwordless sudo required" >&2; exit 1; fi`,

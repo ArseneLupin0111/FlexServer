@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -218,6 +219,24 @@ describe("FleetProvisioningService", () => {
   });
 
   describe("ensureBundled", () => {
+    it("generates a provisioning command accepted by bash and POSIX sh", async () => {
+      const vps = await vpsRepo.create({
+        name: "azure-student",
+        host: "192.0.2.10",
+        port: 22,
+        username: "admin",
+      });
+
+      await service.ensureBundled(vps.id);
+      const command = executedCommands.find((cmd) => cmd.includes("flock -x -w 5 9"));
+      expect(command).toBeDefined();
+      for (const shell of ["bash", "sh"]) {
+        const parsed = spawnSync(shell, ["-n"], { input: command!, encoding: "utf8" });
+        expect(parsed.stderr).toBe("");
+        expect(parsed.status).toBe(0);
+      }
+    });
+
     it("returns failed when VPS is not found", async () => {
       const result = await service.ensureBundled("nonexistent");
       expect(result.status).toBe("failed");

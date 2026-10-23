@@ -2,6 +2,7 @@
 
 ## Unreleased — Automatic agent deployment convergence and legacy upgrader cutover
 
+- Fix remote fleet provisioning shell composition so the root/passwordless-sudo wrapper does not append a second semicolon to the completion marker; validate generated commands with Bash and POSIX sh to prevent deployment convergence incorrectly reporting `needs_access` on a syntax error.
 - Remove legacy SSH-push `AgentUpgraderService` and `POST /api/vps/:id/upgrade-agent` endpoint in favor of unified pull-only updater convergence for all managed hosts (local and remote).
 - Discontinue external agent release manifest polling and channel imports in `FleetService`; remove legacy agent enrollment, cohort assignment, and manual rollout dispatch paths.
 - Preserve signed Ed25519 manifests and verifier for AI runtime components (`ai-executor`, `ai-host-helper`, `ai-rootfs`, `ai-profiles`); reject new signed rollout requests containing `agent` or `updater` artifacts with `400 Bad Request`.

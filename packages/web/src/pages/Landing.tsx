@@ -1032,27 +1032,6 @@ export function LandingPage() {
                 <p className="hero-lead-text">
                   Monitor hosts, inspect containers, and run SSH jobs. One self-hosted workspace.
                 </p>
-                <div className="hero-cta-row">
-                  <a
-                    href={DEPLOY_URL}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="landing-btn landing-btn-primary"
-                  >
-                    Deploy Guide
-                    <ArrowUpRight size={16} aria-hidden="true" />
-                  </a>
-
-                  <a
-                    href={REPO_URL}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="landing-btn landing-btn-secondary"
-                  >
-                    View Source
-                    <ArrowUpRight size={16} aria-hidden="true" />
-                  </a>
-                </div>
               </div>
             </div>
 

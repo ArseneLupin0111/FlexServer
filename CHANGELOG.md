@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — Landing page
+
+- Remove duplicate Deploy Guide and View Source buttons from the landing hero; retain the top navigation actions.
+
 ## Unreleased — Automatic agent deployment convergence and legacy upgrader cutover
 
 - Fix `scripts/install/install-fleet-updater.sh` and `scripts/install/install-updater.sh` systemd unit generation for `vps-updater-apply.service` by configuring `CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN`. This enables the privileged root helper to traverse and write to legacy user-owned agent home directories (e.g. `/home/<user>/.vps-manager-agent` with mode 0750/0700) within its `ReadWritePaths` mount without broad privilege relaxation, while retaining `NoNewPrivileges=true`, `ProtectSystem=strict`, and `ProtectHome=read-only`. Add regression coverage in `scripts/tests/test-fleet-updater-activation.sh` and update `scripts/tests/test-updater.sh` assertions.

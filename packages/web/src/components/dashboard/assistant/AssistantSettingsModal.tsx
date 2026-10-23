@@ -269,7 +269,8 @@ export function AssistantSettingsModal({
           <button
             type="button"
             onClick={onClose}
-            className="text-dim hover:text-text p-1"
+            className="p-1 text-dim hover:text-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal"
+            aria-label="Close settings"
             title="Close dialog"
           >
             <X className="h-4 w-4" />
@@ -791,19 +792,6 @@ export function AssistantSettingsModal({
               )}
             </div>
           ) : null}
-        </div>
-
-        {/* Footer */}
-        <div className="flex justify-end border-t border-line p-3">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={onClose}
-            className="text-xs"
-          >
-            Close
-          </Button>
         </div>
       </div>
     </div>

@@ -3,6 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Activity,
   ArrowUpRight,
+  Bot,
   Check,
   ChevronDown,
   Container,
@@ -69,6 +70,13 @@ const FEATURES: FeatureItem[] = [
     shortTitle: "Jobs",
     desc: "Run SSH jobs and review their output.",
     icon: TerminalSquare,
+  },
+  {
+    id: "assistant",
+    title: "AI Assistant",
+    shortTitle: "Assistant",
+    desc: "Ask about a host in chat. Changes run only after approval.",
+    icon: Bot,
   },
   {
     id: "history",
@@ -268,6 +276,65 @@ function SshPreview() {
 
         <div className="preview-watermark-row">
           <span>Standard OpenSSH protocol dispatch without non-standard cloud relays</span>
+          <span className="preview-sample-badge">Illustrative preview · sample data</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AssistantPreview() {
+  return (
+    <div className="showcase-preview-card">
+      <div className="preview-chrome">
+        <div className="preview-title-box">
+          <Bot size={14} className="landing-inline-icon" aria-hidden="true" />
+          <span>vps-prod-01 · AI Assistant</span>
+        </div>
+        <span className="chrome-pill">Read-only · Approval-gated</span>
+      </div>
+
+      <div className="preview-body-content">
+        <div className="assistant-chat-list">
+          <div className="assistant-bubble is-operator">
+            <span className="assistant-role">Operator</span>
+            <p>Why did memory climb on this host last night?</p>
+          </div>
+
+          <div className="assistant-bubble is-assistant">
+            <span className="assistant-role">Assistant</span>
+            <p>Page cache grew after the 02:00 backup job. The working set stayed stable:</p>
+            <div className="assistant-mini-table" role="table" aria-label="Sample memory readings">
+              <div role="row" className="is-head">
+                <span role="columnheader">Window</span>
+                <span role="columnheader">Used</span>
+                <span role="columnheader">Cache</span>
+              </div>
+              <div role="row">
+                <span role="cell">01:40</span>
+                <span role="cell" className="tnum">2.9 GB</span>
+                <span role="cell" className="tnum">0.8 GB</span>
+              </div>
+              <div role="row">
+                <span role="cell">02:10</span>
+                <span role="cell" className="tnum">3.1 GB</span>
+                <span role="cell" className="tnum">1.9 GB</span>
+              </div>
+            </div>
+            <code className="assistant-code">free -h # verify live readings</code>
+          </div>
+
+          <div className="assistant-action-row">
+            <div className="assistant-action-meta">
+              <strong>Proposed plan · 1 step</strong>
+              <span>docker restart node-worker</span>
+            </div>
+            <span className="chrome-pill">Awaiting approval</span>
+          </div>
+        </div>
+
+        <div className="preview-watermark-row">
+          <span>Responses render as formatted Markdown in the conversation; secrets are redacted before egress</span>
           <span className="preview-sample-badge">Illustrative preview · sample data</span>
         </div>
       </div>
@@ -1108,6 +1175,7 @@ export function LandingPage() {
                     {activeFeature.id === "health" && <HealthPreview />}
                     {activeFeature.id === "docker" && <DockerPreview />}
                     {activeFeature.id === "ssh" && <SshPreview />}
+                    {activeFeature.id === "assistant" && <AssistantPreview />}
                     {activeFeature.id === "history" && <HistoryPreview />}
                     {activeFeature.id === "storage" && <StoragePreview />}
                     {activeFeature.id === "security" && <SecurityPreview />}
@@ -1362,6 +1430,16 @@ export function LandingPage() {
                 </summary>
                 <div className="landing-faq-answer">
                   Container state is separate from host health. Read-only logs require a compatible agent and Docker permissions.
+                </div>
+              </details>
+
+              <details className="landing-faq-item">
+                <summary className="landing-faq-question" tabIndex={0}>
+                  <span>What can the AI assistant do on my hosts?</span>
+                  <ChevronDown size={18} aria-hidden="true" />
+                </summary>
+                <div className="landing-faq-answer">
+                  Connect your own provider endpoint and key. The assistant reads cached metrics and inventory to answer questions in chat; Docker or Compose changes run only after you approve the exact plan. Shell execution and log or file egress stay off by default.
                 </div>
               </details>
 

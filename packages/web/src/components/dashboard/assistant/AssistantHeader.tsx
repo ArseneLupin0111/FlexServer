@@ -1,22 +1,7 @@
-import {
-  Activity,
-  Bot,
-  Clock,
-  History,
-  Layers,
-  RefreshCw,
-  Settings,
-  ShieldAlert,
-  ShieldCheck,
-} from "lucide-react";
+import { Bot, History, Layers, RefreshCw, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
-import type {
-  AiCapability,
-  AiPolicy,
-  AiProviderSettings,
-  AiTask,
-} from "../../../lib/ai-api";
+import type { AiCapability, AiPolicy, AiProviderSettings, AiTask } from "../../../lib/ai-api";
 import type { VpsRecord } from "../../../lib/api";
 import { vpsDisplayName } from "../../../lib/dashboard-formatters";
 
@@ -36,177 +21,55 @@ export type AssistantHeaderProps = {
 export function AssistantHeader({
   vps,
   providerSettings,
-  policy,
   capability,
-  activeTask,
   onOpenSettings,
   onOpenHistory,
   onRefresh,
   refreshing = false,
   onNewConversation,
 }: AssistantHeaderProps) {
-  const isSupported = capability?.supported === true;
-  const hasProvider =
-    providerSettings &&
-    providerSettings.endpoint.length > 0 &&
-    providerSettings.model.length > 0;
-
-  const usage = activeTask?.usage;
+  const supported = capability?.supported === true;
+  const hasProvider = Boolean(providerSettings?.endpoint && providerSettings?.model);
 
   return (
-    <header className="border border-line bg-panel p-4">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        {/* Host identity & status badges */}
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div className="flex items-center gap-2">
-            <Bot className="h-5 w-5 text-signal" />
-            <h1 className="text-base font-semibold tracking-tight text-text">
-              AI Assistant
-            </h1>
-            <span className="text-xs text-dim">for {vpsDisplayName(vps)}</span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-1.5 pl-2">
-            {/* Capability badge */}
-            {capability ? (
-              <Badge
-                variant="outline"
-                className={
-                  isSupported
-                    ? "border-signal/40 bg-signal/10 text-signal"
-                    : "border-crit/40 bg-crit/10 text-crit"
-                }
-                title={capability.reason || (isSupported ? "Execution supported" : "Execution unavailable")}
-              >
-                {isSupported ? (
-                  <ShieldCheck className="mr-1 h-3 w-3" />
-                ) : (
-                  <ShieldAlert className="mr-1 h-3 w-3" />
-                )}
-                {isSupported ? "Supported" : "Unsupported"}
-              </Badge>
-            ) : null}
-
-            {/* Provider model badge */}
-            {hasProvider ? (
-              <Badge
-                variant="outline"
-                className="border-line bg-raised/30 text-dim font-mono text-[11px]"
-                title={`Endpoint: ${providerSettings.endpoint}`}
-              >
-                <Layers className="mr-1 h-3 w-3 text-text" />
-                {providerSettings.model}
-              </Badge>
-            ) : (
-              <Badge
-                variant="outline"
-                className="border-warn/40 bg-warn/10 text-warn text-[11px]"
-              >
-                Provider Unconfigured
-              </Badge>
-            )}
-
-            {/* Active task indicator */}
-            {activeTask ? (
-              <Badge
-                variant="outline"
-                className={
-                  activeTask.state === "executing" || activeTask.state === "planning"
-                    ? "border-signal/40 bg-signal/10 text-signal animate-pulse"
-                    : activeTask.state === "awaiting_approval"
-                      ? "border-warn/40 bg-warn/10 text-warn"
-                      : activeTask.state === "uncertain"
-                        ? "border-crit/40 bg-crit/10 text-crit"
-                        : "border-line bg-raised/40 text-text"
-                }
-              >
-                <Activity className="mr-1 h-3 w-3" />
-                Task: {activeTask.state.replace("_", " ")}
-              </Badge>
-            ) : null}
-          </div>
+    <header className="flex min-w-0 flex-wrap items-center justify-between gap-4 py-1">
+      <div className="min-w-0 space-y-2">
+        <h2 className="flex items-center gap-2 text-lg font-semibold tracking-tight text-text">
+          <Bot className="h-5 w-5 shrink-0 text-signal" aria-hidden="true" />
+          <span>Assistant <span className="font-normal text-dim">for {vpsDisplayName(vps)}</span></span>
+        </h2>
+        <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-dim">
+          {hasProvider && providerSettings ? (
+            <span className="inline-flex min-w-0 items-center gap-1.5" title={providerSettings.model}>
+              <Layers className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span className="break-all">{providerSettings.model}</span>
+            </span>
+          ) : <span className="text-warn">Provider not configured</span>}
+          {capability ? (
+            <Badge variant="outline" className="max-w-full border-line bg-transparent text-dim normal-case tracking-normal" title={capability.reason || (supported ? "Execution supported" : "Execution unavailable")}>
+              {supported ? <ShieldCheck className="mr-1 h-3 w-3 shrink-0" /> : <ShieldAlert className="mr-1 h-3 w-3 shrink-0" />}
+              {supported ? "Execution supported" : "Execution unavailable"}
+            </Badge>
+          ) : null}
         </div>
-
-        {/* Telemetry usage & action triggers */}
-        <div className="flex flex-wrap items-center gap-2">
-          {usage ? (
-            <div
-              className="flex items-center gap-3 border border-line bg-ink/50 px-3 py-1.5 font-mono text-xs text-dim"
-              title={usage.estimated ? "Usage figures are conservative estimates" : "Exact provider usage"}
-            >
-              <div className="flex items-center gap-1.5">
-                <Clock className="h-3 w-3 text-text" />
-                <span>
-                  Tokens:{" "}
-                  <strong className="text-text font-normal">
-                    {usage.inputTokens.toLocaleString()} in / {usage.outputTokens.toLocaleString()} out
-                    {usage.estimated ? " ~" : ""}
-                  </strong>
-                </span>
-              </div>
-              <span className="text-line">|</span>
-              <span>
-                Calls:{" "}
-                <strong className="text-text font-normal">
-                  {usage.toolCalls} ({usage.rounds} rds)
-                </strong>
-              </span>
-            </div>
-          ) : null}
-
-          {onRefresh ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={onRefresh}
-              disabled={refreshing}
-              className="text-xs"
-            >
-              <RefreshCw
-                className={`mr-1.5 h-3.5 w-3.5 ${
-                  refreshing ? "animate-spin text-signal" : ""
-                }`}
-              />
-              Refresh
-            </Button>
-          ) : null}
-
-          {onNewConversation ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={onNewConversation}
-              className="text-xs"
-            >
-              <Bot className="mr-1.5 h-3.5 w-3.5" />
-              New Chat
-            </Button>
-          ) : null}
-
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={onOpenHistory}
-            className="text-xs"
-          >
-            <History className="mr-1.5 h-3.5 w-3.5" />
-            History
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        {onNewConversation ? (
+          <Button type="button" size="sm" onClick={onNewConversation} className="min-h-9 text-xs font-semibold">
+            <Bot className="mr-1.5 h-3.5 w-3.5" />New Chat
           </Button>
-
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={onOpenSettings}
-            className="text-xs"
-          >
-            <Settings className="mr-1.5 h-3.5 w-3.5" />
-            Settings
+        ) : null}
+        <Button type="button" variant="outline" size="sm" onClick={onOpenHistory} className="min-h-9 text-xs">
+          <History className="mr-1.5 h-3.5 w-3.5" />History
+        </Button>
+        <Button type="button" variant="outline" size="sm" onClick={onOpenSettings} className="min-h-9 text-xs">
+          <Settings className="mr-1.5 h-3.5 w-3.5" />Settings
+        </Button>
+        {onRefresh ? (
+          <Button type="button" variant="ghost" size="sm" onClick={onRefresh} disabled={refreshing} aria-label="Refresh" title="Refresh assistant" className="h-9 w-9 px-0">
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin motion-reduce:animate-none" : ""}`} />
           </Button>
-        </div>
+        ) : null}
       </div>
     </header>
   );

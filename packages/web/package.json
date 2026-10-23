@@ -7,7 +7,7 @@
     "dev": "vite --config vite.config.ts",
     "build": "vite build --config vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run src/App.test.tsx src/components/dashboard/settings/SettingsPanel.test.tsx src/components/dashboard/terminal/commandGuard.test.tsx src/components/dashboard/terminal/TerminalPanel.test.tsx src/context/VpsWorkspaceContext.test.tsx src/components/dashboard/servers/DockerMetricsPanel.test.tsx src/components/dashboard/servers/LocalAgentUpdate.test.tsx src/components/dashboard/servers/AgentLifecycleStatus.test.tsx src/components/dashboard/docker/DockerContainerManagementPanel.test.tsx src/components/dashboard/files/FilesPanel.test.tsx src/components/dashboard/assistant/AssistantPanel.test.tsx src/components/dashboard/assistant/AssistantSettingsModal.test.tsx --config vite.config.ts"
+    "test": "vitest run src/App.test.tsx src/components/dashboard/settings/SettingsPanel.test.tsx src/components/dashboard/terminal/commandGuard.test.tsx src/components/dashboard/terminal/TerminalPanel.test.tsx src/context/VpsWorkspaceContext.test.tsx src/components/dashboard/servers/DockerMetricsPanel.test.tsx src/components/dashboard/servers/LocalAgentUpdate.test.tsx src/components/dashboard/servers/AgentLifecycleStatus.test.tsx src/components/dashboard/docker/DockerContainerManagementPanel.test.tsx src/components/dashboard/files/FilesPanel.test.tsx src/components/dashboard/assistant/AssistantPanel.test.tsx src/components/dashboard/assistant/AssistantMarkdown.test.tsx src/components/dashboard/assistant/AssistantSettingsModal.test.tsx --config vite.config.ts"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.18",
@@ -22,8 +22,10 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "motion": "^14.1.0",
+    "react-markdown": "^10.1.0",
     "react-router-dom": "^7.18.1",
     "recharts": "^3.10.1",
+    "remark-gfm": "^4.0.1",
     "vaul": "^1.1.2"
   }
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — AI assistant conversation workspace
+
+- Rebuild the dashboard Assistant around the conversation: a full-width chat that synthesizes missing request/summary turns, an optional collapsible task inspector, and safe Markdown rendering for assistant responses and summaries (GFM tables and fenced code, sanitized links, no remote images or raw HTML).
+- Keep conversation state stable across manual refreshes, history selection, New Chat, and task creation; stale async loads are fenced with sequence guards and refreshed tasks reconcile by revision so a New Chat stays empty and refreshed summaries are not shadowed.
+- Document the AI VPS Assistant capability in the README capabilities table and add an AI Assistant capability tab (illustrative chat preview) plus an FAQ entry to the landing page.
+
 ## Unreleased — Landing page
 
 - Remove duplicate Deploy Guide and View Source buttons from the landing hero; retain the top navigation actions.

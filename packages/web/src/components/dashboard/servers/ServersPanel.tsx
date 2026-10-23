@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { LayoutGrid, List, Plus, Search, Layers } from "lucide-react";
+import { LayoutGrid, List, Plus, Search } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
@@ -32,12 +32,6 @@ export function ServersPanel(props: ServersPanelProps) {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button asChild variant="outline" className="h-8 shrink-0">
-            <Link to="/vps/updates">
-              <Layers size={14} className="mr-1.5" />
-              <span>Fleet updates</span>
-            </Link>
-          </Button>
           <Button asChild className="h-8 shrink-0">
             <Link to="/vps/new">
               <Plus size={15} />

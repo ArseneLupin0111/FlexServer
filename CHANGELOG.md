@@ -13,6 +13,7 @@
 - Document deployment automation via `scripts/deploy.sh` and `scripts/install/prepare-agent-updater.sh`, missing-access remediation (`needs_access`) with asynchronous retry; note that arm64 cross-build ELF headers and scoped download authorization are verified, while native arm64 restart and full live multi-host E2E scenarios (wrapper with saved-SSH bootstrap, unchanged-PID / no-job on README/web-only deploys, and offline sequencing) were not verified in this run (waived due to Windows environment).
 - Fix clean-checkout CI fixtures for updater binaries and VPS service dependencies; remove obsolete legacy upgrade UI assertions. Run convergence PostgreSQL coverage only with an explicit test database URL and include it in both database CI jobs. Mark deployment/bootstrap entrypoints executable in Git.
 - Package SHA-256-bound companion metadata for both deployment agent architectures so trimpath-built binaries resolve as available without relying on embedded linker-flag strings; retain ELF, identity, and checksum validation.
+- Remove standalone Fleet Update dashboard UI, navigation links (FleetSidebar, FleetDrawer, ServersPanel), and routes (`/vps/updates`, `/vps/agent-updates`, `/agent-updates`, `/updates`); consolidate agent update status inspection, live job monitoring, and upgrade/retry actions exclusively within each VPS Settings via `LocalAgentUpdate` while preserving backend convergence and per-VPS upgrade APIs.
 
 ## Unreleased — Fleet CI regression fixes
 

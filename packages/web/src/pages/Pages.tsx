@@ -4,7 +4,7 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { DashboardShell } from "../components/layout/DashboardShell";
-import { ServersPanel, FleetAgentUpdatesPanel } from "../components/dashboard/DashboardPanels";
+import { ServersPanel } from "../components/dashboard/DashboardPanels";
 import { useDashboard, type DashboardCtx } from "../context/DashboardContext";
 import { vpsDisplayName } from "../lib/dashboard-formatters";
 
@@ -237,11 +237,6 @@ function CreateVpsFormInline({ ctx }: { ctx: DashboardCtx }) {
   );
 }
 
-// ── Fleet agent updates page ──────────────────────────────────────────
-
-export function FleetAgentUpdatesPage() {
-  return <FleetAgentUpdatesPanel />;
-}
 
 // ── 404 page ────────────────────────────────────────────────────────
 

@@ -8,4 +8,3 @@ export { SettingsPanel } from "./settings/SettingsPanel";
 export { FilesPanel } from "./files/FilesPanel";
 export { SftpSettingsCard } from "./files/SftpSettingsCard";
 export { AssistantPanel } from "./assistant/AssistantPanel";
-export { FleetAgentUpdatesPanel } from "./agentupdates/FleetAgentUpdatesPanel";

@@ -500,7 +500,6 @@ export function deleteVps(id: string) {
 //   GET  /api/vps/:id/agent-update
 //   POST /api/vps/:id/agent-update  (+ Idempotency-Key)
 //   GET  /api/vps/:id/local-agent-upgrades/:jobId
-//   GET  /api/agent-updates
 export type AgentUpdateInstalled = {
   version: string | null;
   buildId: string | null;
@@ -926,18 +925,3 @@ export function listVpsAuditEvents(
   return request<AuditEvent[]>(`${vpsPath(id)}/audit${query}`);
 }
 
-// ── Fleet Agent Updates (Deployment Convergence) ──────────────────────
-
-export type FleetAgentUpdateHost = {
-  vpsId: string;
-  name: string;
-  update: AgentUpdateView;
-};
-
-export type FleetAgentUpdatesData = {
-  hosts: FleetAgentUpdateHost[];
-};
-
-export function getFleetAgentUpdates(signal?: AbortSignal) {
-  return request<FleetAgentUpdatesData>("/api/agent-updates", { signal });
-}

@@ -17,7 +17,6 @@ import {
 } from "./context/VpsWorkspaceContext";
 import {
   DashboardLayout,
-  FleetAgentUpdatesPage,
   NotFoundPage,
   VpsListPage,
   VpsNewPage,
@@ -161,10 +160,6 @@ export default function DashboardApp() {
       <Routes>
         <Route element={<DashboardLayout />}>
           <Route path="/vps" element={<VpsListPage />} />
-          <Route path="/vps/updates" element={<FleetAgentUpdatesPage />} />
-          <Route path="/vps/agent-updates" element={<FleetAgentUpdatesPage />} />
-          <Route path="/agent-updates" element={<FleetAgentUpdatesPage />} />
-          <Route path="/updates" element={<FleetAgentUpdatesPage />} />
           <Route path="/vps/new" element={<VpsNewPage />} />
           <Route path="/vps/:vpsId" element={<VpsWorkspaceLayout />}>
             <Route index element={<VpsWorkspaceOverviewPage />} />

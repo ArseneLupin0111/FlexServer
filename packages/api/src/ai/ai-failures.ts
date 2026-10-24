@@ -9,6 +9,9 @@
 export type AiErrorCode =
   | "ai_disabled"
   | "provider_unavailable"
+  | "provider_rate_limit"
+  | "provider_context_overflow"
+  | "provider_response_truncated"
   | "provider_revision_changed"
   | "capability_unavailable"
   | "task_busy"
@@ -29,6 +32,9 @@ export type AiErrorCode =
 const AI_HTTP_STATUS: Record<AiErrorCode, number> = {
   ai_disabled: 403,
   provider_unavailable: 502,
+  provider_rate_limit: 429,
+  provider_context_overflow: 413,
+  provider_response_truncated: 502,
   provider_revision_changed: 409,
   capability_unavailable: 409,
   task_busy: 409,

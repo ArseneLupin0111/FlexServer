@@ -57,7 +57,7 @@ export const readTools: ProviderTool[] = [
     function: {
       name: "container_logs",
       description:
-        "Read recent bounded logs for a Docker container. Requires policy log egress grant (sendLogsToProvider). Ephemeral and secret-redacted.",
+        "Read recent bounded logs for a Docker container. Requires policy log egress grant (sendLogsToProvider). Secret-redacted, bounded evidence may be retained in conversation history.",
       parameters: {
         type: "object",
         properties: {

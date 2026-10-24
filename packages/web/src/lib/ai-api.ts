@@ -93,6 +93,10 @@ export type AiTask = {
   conversationId: string;
   vpsId: string;
   state: AiTaskState;
+  // Transient operation flag: true only while the backend's summarization
+  // (auto-compaction) provider call is in progress. Never inferred from
+  // `state`; unset/false means no compaction is active.
+  compacting?: boolean;
   revision: number;
   requestSummary: string;
   summary?: string;
@@ -195,6 +199,8 @@ export type AiConversationMessage = {
 export type AiConversationDetail = {
   conversation: AiConversation;
   messages: AiConversationMessage[];
+  total?: number;
+  remaining?: number;
 };
 
 export type CreateAiTaskRequest = {
@@ -228,6 +234,9 @@ export type AiTaskPreview = {
 export type AiErrorCode =
   | "ai_disabled"
   | "provider_unavailable"
+  | "provider_rate_limit"
+  | "provider_context_overflow"
+  | "provider_response_truncated"
   | "provider_revision_changed"
   | "capability_unavailable"
   | "task_busy"
@@ -470,9 +479,11 @@ export function getVpsAiConversation(
   vpsId: string,
   conversationId: string,
   signal?: AbortSignal,
+  offset = 0,
+  limit = 200,
 ): Promise<AiConversationDetail> {
   return request<AiConversationDetail>(
-    `${vpsAiRoot(vpsId)}/conversations/${encodeURIComponent(conversationId)}`,
+    `${vpsAiRoot(vpsId)}/conversations/${encodeURIComponent(conversationId)}?offset=${offset}&limit=${limit}`,
     { method: "GET", signal },
   );
 }

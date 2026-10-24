@@ -4,11 +4,16 @@ import { join } from "node:path";
 import { createDatabasePool } from "../../db/pool.js";
 import type { Pool, PoolClient } from "pg";
 import { loadAiKeyring, rewrapAiEnvelope } from "../../ai/ai-crypto.js";
+import { redactString } from "../../common/redaction.js";
 import {
+  AI_CHECKPOINT_SUMMARY_MAX_BYTES,
+  AI_HISTORY_DEFAULT_PAGE,
+  AI_HISTORY_MAX_PAGE,
   AI_TERMINAL_TASK_STATES,
   AiPersistenceConflictError,
-  type AiConversationAppendMessageInput,
   type AiCapabilityUpsertInput,
+  type AiCheckpointAdvanceInput,
+  type AiConversationAppendMessageInput,
   type AiOutboxCommandExpect,
   type AiPlanApprovalInput,
   type AiPolicyUpdateInput,
@@ -17,7 +22,7 @@ import {
   type AiTaskCreateInput,
   type AiTaskTransitionInput,
 } from "./ai.persistence.js";
-import type { AiConversation, AiConversationMessage, AiAuditEvent, AiCapability, AiExecutionBlob, AiExecutionReceipt, AiHostCommand, AiOutboxEntry, AiPlan, AiPolicy, AiProviderSettingsInternal, AiTask, AiTaskState, AiTaskUsage } from "../../ai/ai.models.js";
+import type { AiConversation, AiConversationCheckpoint, AiConversationMessage, AiAuditEvent, AiCapability, AiExecutionBlob, AiExecutionReceipt, AiHostCommand, AiOutboxEntry, AiPlan, AiPolicy, AiProviderSettingsInternal, AiTask, AiTaskState, AiTaskUsage } from "../../ai/ai.models.js";
 import {
   readJsonFile,
   readModifyWriteJsonFile,
@@ -57,7 +62,12 @@ export type StoredAiState = {
   policies: AiPolicy[];
   capabilities: Record<string, AiCapability>;
   auditEvents: AiAuditEventRow[];
+  /** Per-conversation compaction checkpoints; optional because documents
+   *  persisted before this field existed load without it (back-compat). */
+  checkpoints?: StoredAiCheckpoint[];
 };
+
+export type StoredAiCheckpoint = AiConversationCheckpoint & { vpsId: string };
 
 export type AiAuditEventRow = {
   createdAt: string;
@@ -79,6 +89,7 @@ const emptyAiState = (): StoredAiState => ({
   policies: [],
   capabilities: {},
   auditEvents: [],
+  checkpoints: [],
 });
 
 const defaultUsage = (): AiTaskUsage => ({
@@ -358,6 +369,43 @@ const sortedRecords = <T extends { updatedAt: string }>(records: T[]): T[] =>
 const sortedReceipts = (receipts: (AiExecutionReceipt & { updatedAt: string })[]) =>
   sortedRecords(receipts).map(({ updatedAt: _updatedAt, ...receipt }) => receipt);
 
+/** Durable conversation order is pure append order: the position of a
+ *  message in state.messages. Every writer only ever push-appends and
+ *  deletions filter in place, so array position is the durable insertion
+ *  sequence in both the JSON document and the ai_state_journal jsonb row
+ *  (jsonb preserves array element order). createdAt is deliberately NOT a
+ *  sort key: a backdated append (createdAt earlier than existing messages)
+ *  must land AFTER the committed checkpoint boundary in history order, not
+ *  be silently swallowed into the covered prefix. */
+const orderedConversationMessages = (
+  state: StoredAiState,
+  conversationId: string,
+): (AiConversationMessage & { vpsId: string })[] =>
+  state.messages.filter((message) => message.conversationId === conversationId);
+
+/** Checkpoints array accessor that normalizes older state documents in place. */
+const checkpointsOf = (state: StoredAiState): StoredAiCheckpoint[] =>
+  (state.checkpoints ??= []);
+
+const findCheckpoint = (
+  state: StoredAiState,
+  vpsId: string,
+  conversationId: string,
+): StoredAiCheckpoint | undefined =>
+  checkpointsOf(state).find(
+    (c) => c.conversationId === conversationId && c.vpsId === vpsId,
+  );
+
+/** Public task snapshot: the "compacting" operation flag must never be
+ *  visible on a terminal task, even if stale state claims otherwise. */
+const snapshotTask = (task: StoredTask): AiTask => {
+  if (task.compacting === undefined || !isTerminalState(task.state)) {
+    return task as AiTask;
+  }
+  const { compacting: _compacting, ...terminal } = task;
+  return terminal as AiTask;
+};
+
 
 // ── Adapter-core: build the entire AiRepository surface over one abstract
 //    serialized transaction. The JSON driver runs it under the file lock;
@@ -418,6 +466,10 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
         state.messages = state.messages.filter(
           (m) => m.conversationId !== conversationId,
         );
+        // Invariant 2: deleting a conversation removes its checkpoint too.
+        state.checkpoints = checkpointsOf(state).filter(
+          (c) => !(c.conversationId === conversationId && c.vpsId === vpsId),
+        );
         // Chat deletion preserves all audit events, and appends a record of the deletion
         state.auditEvents.push({
           createdAt: new Date().toISOString(),
@@ -452,6 +504,7 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
           role: input.role,
           content: input.content,
           evidence: input.evidence,
+          restrictedSources: input.restrictedSources,
           createdAt,
         };
         state.messages.push({ ...message, vpsId: input.vpsId });
@@ -468,6 +521,109 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
         .slice(-Math.max(limit, 0))
         .map(({ vpsId: _vpsId, ...message }) => message);
+    },
+
+    async listConversationHistory(conversationId, options) {
+      const state = await exec((s) => s);
+      const limit = Math.min(
+        Math.max(options?.limit ?? AI_HISTORY_DEFAULT_PAGE, 0),
+        AI_HISTORY_MAX_PAGE,
+      );
+      const offset = Math.max(options?.offset ?? 0, 0);
+      const ordered = orderedConversationMessages(state, conversationId);
+      const page = ordered.slice(offset, offset + limit);
+      return {
+        messages: page.map(({ vpsId: _vpsId, ...message }) => message),
+        total: ordered.length,
+        remaining: Math.max(0, ordered.length - offset - page.length),
+      };
+    },
+
+    async getConversationCheckpoint(vpsId, conversationId) {
+      const state = await exec((s) => s);
+      const checkpoint = findCheckpoint(state, vpsId, conversationId);
+      if (!checkpoint) return undefined;
+      // "Latest valid": a checkpoint whose covered boundary no longer
+      // resolves inside its own conversation is not usable context.
+      const boundaryResolves = orderedConversationMessages(
+        state,
+        conversationId,
+      ).some((m) => m.id === checkpoint.coveredMessageId);
+      if (!boundaryResolves) return undefined;
+      const { vpsId: _vpsId, ...valid } = checkpoint;
+      return valid;
+    },
+
+    async saveConversationCheckpoint(input) {
+      const now = isoNow(input.now);
+      return exec((state) => {
+        assertConversation(state, input.vpsId, input.conversationId);
+        // Redact before storage, then validate the redacted result.
+        const summary = redactString(input.summary).trim();
+        if (summary.length === 0) {
+          throw new AiPersistenceConflictError(
+            "checkpoint_conflict",
+            "checkpoint summary is empty",
+          );
+        }
+        if (Buffer.byteLength(summary, "utf8") > AI_CHECKPOINT_SUMMARY_MAX_BYTES) {
+          throw new AiPersistenceConflictError(
+            "checkpoint_conflict",
+            `checkpoint summary exceeds ${AI_CHECKPOINT_SUMMARY_MAX_BYTES} bytes`,
+          );
+        }
+        const existing = findCheckpoint(state, input.vpsId, input.conversationId);
+        const currentRevision = existing?.revision ?? 0;
+        if (currentRevision !== input.expectedRevision) {
+          throw new AiPersistenceConflictError(
+            "checkpoint_conflict",
+            `checkpoint revision ${currentRevision} != expected ${input.expectedRevision}`,
+          );
+        }
+        const ordered = orderedConversationMessages(state, input.conversationId);
+        const boundaryIndex = ordered.findIndex(
+          (m) => m.id === input.coveredMessageId,
+        );
+        if (boundaryIndex === -1) {
+          throw new AiPersistenceConflictError(
+            "checkpoint_conflict",
+            `covered boundary ${input.coveredMessageId} is not a message of conversation ${input.conversationId}`,
+          );
+        }
+        if (existing) {
+          const currentBoundaryIndex = ordered.findIndex(
+            (m) => m.id === existing.coveredMessageId,
+          );
+          if (currentBoundaryIndex !== -1 && boundaryIndex < currentBoundaryIndex) {
+            throw new AiPersistenceConflictError(
+              "checkpoint_conflict",
+              `covered boundary cannot rewind before ${existing.coveredMessageId}`,
+            );
+          }
+        }
+        const boundaryMessage = ordered[boundaryIndex]!;
+        const checkpoint: StoredAiCheckpoint = {
+          conversationId: input.conversationId,
+          vpsId: input.vpsId,
+          revision: currentRevision + 1,
+          summary,
+          coveredMessageId: boundaryMessage.id,
+          coveredMessageCount: boundaryIndex + 1,
+          coveredThrough: boundaryMessage.createdAt,
+          summaryModel: input.summaryModel,
+          restrictedSources: input.restrictedSources,
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+        };
+        const rows = checkpointsOf(state);
+        const index = rows.findIndex(
+          (c) => c.conversationId === input.conversationId && c.vpsId === input.vpsId,
+        );
+        if (index === -1) rows.push(checkpoint);
+        else rows[index] = checkpoint;
+        const { vpsId: _vpsId, ...saved } = checkpoint;
+        return saved;
+      });
     },
 
     async createTask(input) {
@@ -503,7 +659,7 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
     async getTask(vpsId, taskId) {
       const state = await exec((s) => s);
       const task = state.tasks.find((t) => t.id === taskId && t.vpsId === vpsId);
-      return task ? (task as AiTask) : undefined;
+      return task ? snapshotTask(task) : undefined;
     },
 
     async getActiveTask(vpsId) {
@@ -522,6 +678,7 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
           const copy = { ...task } as Partial<StoredTask>;
           delete copy.idempotencyKey;
           delete copy.initiatingSessionId;
+          if (isTerminalState(task.state)) delete copy.compacting;
           return copy as AiTask;
         });
     },
@@ -566,9 +723,16 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
           ownerLeaseExpiresAt: input.ownerLease
             ? new Date(Date.now() + input.ownerLease.leaseSeconds * 1000).toISOString()
             : task.ownerLeaseExpiresAt,
+          // "Auto-compact" operation flag: tri-state input, but never carried
+          // into a terminal state — summarization never outlives its task.
+          compacting:
+            input.compacting !== undefined
+              ? input.compacting || undefined
+              : task.compacting,
           revision: nextRevision,
           updatedAt: now,
         };
+        if (isTerminalState(next.state)) delete next.compacting;
         assertActiveTransition(state, next, input.ownerLease);
         const index = state.tasks.findIndex((t) => t.id === input.id);
         state.tasks[index!] = next;

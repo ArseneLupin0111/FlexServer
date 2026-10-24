@@ -85,6 +85,9 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   const [conversations, setConversations] = useState<AiConversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AiConversationMessage[]>([]);
+  const [olderMessagesAvailable, setOlderMessagesAvailable] = useState(false);
+  const [oldestMessageOffset, setOldestMessageOffset] = useState(0);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
 
   // Dialogs
   const [approvalDialogOpen, setApprovalDialogOpen] = useState(false);
@@ -149,6 +152,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   // manual refresh reuses the same seq-guarded path without a full reload.
   const loadInitialData = useCallback(async (mode: "initial" | "refresh" = "refresh") => {
     const seq = ++loadSeqRef.current;
+    if (mode === "initial") convSeqRef.current += 1;
     // Captured before any await: a conversation action (history select /
     // New Chat) during the fetches supersedes this load's selection.
     const convSeq = convSeqRef.current;
@@ -161,6 +165,9 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       setActiveTask(null);
       setActiveConversationId(null);
       setMessages([]);
+      setOlderMessagesAvailable(false);
+      setOldestMessageOffset(0);
+      setLoadingOlderMessages(false);
       activeConversationRef.current = undefined;
     }
     try {
@@ -234,11 +241,19 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       if (preferredConvId) {
         setActiveConversationId(preferredConvId);
         if (mode === "initial") activeConversationRef.current = preferredConvId;
-        const detail = await getVpsAiConversation(vps.id, preferredConvId).catch(() => null);
+        const first = await getVpsAiConversation(vps.id, preferredConvId, undefined, 0, 1).catch(() => null);
+        let start = first ? Math.max(0, (first.total ?? first.messages.length) - 200) : 0;
+        let detail = first ? await getVpsAiConversation(vps.id, preferredConvId, undefined, start).catch(() => null) : null;
+        if (detail?.remaining) {
+          start += detail.remaining;
+          detail = await getVpsAiConversation(vps.id, preferredConvId, undefined, start).catch(() => null);
+        }
         // Superseded by a newer load, a conversation selection, or New Chat.
         if (seq !== loadSeqRef.current || convSeqRef.current !== convSeq) return;
         if (detail) {
           setMessages(detail.messages || []);
+          setOlderMessagesAvailable(start > 0);
+          setOldestMessageOffset(start);
         }
       }
     } catch (err) {
@@ -514,17 +529,53 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     const seq = ++convSeqRef.current;
     setActiveConversationId(conv.id);
     activeConversationRef.current = conv.id;
+    setMessages([]);
+    setOlderMessagesAvailable(false);
+    setOldestMessageOffset(0);
+    setLoadingOlderMessages(false);
     try {
-      const detail = await getVpsAiConversation(vps.id, conv.id);
+      const first = await getVpsAiConversation(vps.id, conv.id, undefined, 0, 1);
+      let start = Math.max(0, (first.total ?? first.messages.length) - 200);
+      let detail = await getVpsAiConversation(vps.id, conv.id, undefined, start);
+      if (detail.remaining) {
+        start += detail.remaining;
+        detail = await getVpsAiConversation(vps.id, conv.id, undefined, start);
+      }
       // A newer selection (or "New Chat") superseded this fetch.
       if (seq !== convSeqRef.current) return;
       setMessages(detail.messages || []);
+      setOlderMessagesAvailable(start > 0);
+      setOldestMessageOffset(start);
       const lastMsgWithTask = [...detail.messages].reverse().find((m) => m.taskId);
       if (lastMsgWithTask?.taskId) {
         handleSelectTask(lastMsgWithTask.taskId);
       }
     } catch {
       // Ignored
+    }
+  }
+
+  async function handleLoadOlderMessages() {
+    if (!activeConversationId || !olderMessagesAvailable || loadingOlderMessages) return;
+    const conversationId = activeConversationId;
+    const seq = convSeqRef.current;
+    setLoadingOlderMessages(true);
+    try {
+      const start = Math.max(0, oldestMessageOffset - 200);
+      const page = await getVpsAiConversation(vps.id, conversationId, undefined, start, oldestMessageOffset - start);
+      if (seq !== convSeqRef.current || activeConversationRef.current !== conversationId) return;
+      setMessages(previous => {
+        const known = new Set(previous.map(message => message.id));
+        return [...page.messages.filter(message => !known.has(message.id)), ...previous];
+      });
+      setOlderMessagesAvailable(start > 0);
+      setOldestMessageOffset(start);
+    } catch (error) {
+      if (seq === convSeqRef.current && activeConversationRef.current === conversationId) {
+        setRootError(error instanceof Error ? error.message : "Could not load older messages.");
+      }
+    } finally {
+      if (seq === convSeqRef.current) setLoadingOlderMessages(false);
     }
   }
 
@@ -536,6 +587,9 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     setActiveConversationId(null);
     activeConversationRef.current = null;
     setMessages([]);
+    setOlderMessagesAvailable(false);
+    setOldestMessageOffset(0);
+    setLoadingOlderMessages(false);
     setActiveTaskId(null);
     setActiveTask(null);
     clearOutput();
@@ -549,10 +603,16 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   async function handleDeleteConversation(convId: string) {
     await deleteVpsAiConversation(vps.id, convId);
     setConversations((prev) => prev.filter((c) => c.id !== convId));
-    if (activeConversationId === convId) {
+    if (activeConversationRef.current === convId) {
+      convSeqRef.current += 1;
       setActiveConversationId(null);
       activeConversationRef.current = null;
       setMessages([]);
+      setOlderMessagesAvailable(false);
+      setOldestMessageOffset(0);
+      setLoadingOlderMessages(false);
+      setActiveTaskId(null);
+      setActiveTask(null);
     }
   }
 
@@ -806,6 +866,18 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
             <span className={`font-medium ${activeTask.state === "failed" || activeTask.state === "uncertain" ? "text-crit" : activeTask.state === "awaiting_approval" ? "text-warn" : "text-dim"}`}>
               {activeTask.state.replace(/_/g, " ")}
             </span>
+            {activeTask.compacting === true ? (
+              <span
+                role="status"
+                className="inline-flex items-center gap-1 text-dim"
+              >
+                <LoaderCircle
+                  className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
+                  aria-hidden="true"
+                />
+                Auto-compact
+              </span>
+            ) : null}
             {activeTask.state === "awaiting_approval" ? (
               <Button size="sm" onClick={() => setApprovalDialogOpen(true)} className="text-xs">Review Plan</Button>
             ) : null}
@@ -862,7 +934,13 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         ) : null}
 
         <div className={`grid min-h-0 min-w-0 flex-1 gap-3 ${taskDetailsOpen && activeTask ? "grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,24rem)]" : "grid-cols-1"}`}>
-          <div className={`min-h-0 min-w-0 ${taskDetailsOpen && activeTask ? "h-[32rem] xl:h-full" : "h-full"}`}>
+          <div className={`flex min-h-0 min-w-0 flex-col ${taskDetailsOpen && activeTask ? "h-[32rem] xl:h-full" : "h-full"}`}>
+            {olderMessagesAvailable ? (
+              <Button type="button" variant="ghost" size="sm" disabled={loadingOlderMessages} onClick={() => void handleLoadOlderMessages()} className="shrink-0 self-center text-xs">
+                {loadingOlderMessages ? "Loading…" : "Load older messages"}
+              </Button>
+            ) : null}
+            <div className="min-h-0 flex-1">
             <AssistantChat
               messages={chatMessages}
               activeTask={activeTask}
@@ -874,6 +952,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
               aiEnabled={aiEnabled}
               providerReady={providerReady}
             />
+            </div>
           </div>
 
           <div id="assistant-task-details" hidden={!taskDetailsOpen || !activeTask} className="h-[28rem] min-h-0 min-w-0 xl:h-full">

@@ -70,6 +70,17 @@ export type AppConfig = {
   ai: {
     enabled: boolean;
     keyringFile: string;
+    /** Per-request fallback context window (tokens); model overrides take precedence. */
+    contextWindowTokens: number;
+    /** Exact model ID to context-window token override. */
+    contextWindowTokensByModel: Record<string, number>;
+    /** Output/headroom reserved inside the context window; proactive compaction
+     * targets window minus reserve for the projected prompt. */
+    contextReserveTokens: number;
+    /** Verbatim recent-tail token target kept after compaction. */
+    contextTailTokens: number;
+    /** Cumulative per-task token consumption cap (including compact calls). */
+    maxCumulativeTaskTokens: number;
   };
   fleet: {
     publicKeyFile?: string;
@@ -193,6 +204,31 @@ const envSchema = z.object({
     (value) => (value === "" ? undefined : value),
     z.string().trim().optional(),
   ),
+  APP_AI_CONTEXT_WINDOW_TOKENS: z.coerce
+    .number()
+    .int()
+    .min(16_000)
+    .max(2_000_000)
+    .default(128_000),
+  APP_AI_CONTEXT_MODEL_WINDOWS: z.string().default("{}"),
+  APP_AI_CONTEXT_RESERVE_TOKENS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(1_000_000)
+    .default(20_000),
+  APP_AI_CONTEXT_TAIL_TOKENS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(1_000_000)
+    .default(20_000),
+  APP_AI_MAX_CUMULATIVE_TASK_TOKENS: z.coerce
+    .number()
+    .int()
+    .min(16_000)
+    .max(100_000_000)
+    .default(1_000_000),
   COMPOSE_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(30).max(3_600).default(120),
   COMPOSE_INVENTORY_MAX_BYTES: z.coerce.number().int().min(64 * 1024).max(8 * 1024 * 1024).default(512 * 1024),
   COMPOSE_PREVIEW_TTL_SECONDS: z.coerce.number().int().min(60).max(3_600).default(300),
@@ -291,6 +327,53 @@ export function parseAppConfig(
     throw new Error("DATABASE_URL is required when STORAGE_DRIVER=postgres");
   }
 
+  let modelWindows: Record<string, number>;
+  try {
+    const parsedWindows: unknown = JSON.parse(parsed.APP_AI_CONTEXT_MODEL_WINDOWS);
+    if (!parsedWindows || typeof parsedWindows !== "object" || Array.isArray(parsedWindows)) throw new Error();
+    modelWindows = Object.create(null) as Record<string, number>;
+    for (const [model, window] of Object.entries(parsedWindows)) {
+      if (!model.trim() || model.length > 256 || !Number.isInteger(window) || typeof window !== "number" || window < 16_000 || window > 2_000_000) throw new Error();
+      modelWindows[model] = window;
+    }
+  } catch {
+    throw new Error("APP_AI_CONTEXT_MODEL_WINDOWS must be a JSON object of model IDs to integer windows between 16000 and 2000000");
+  }
+  // AI context budget: reserve and tail must leave a usable prompt budget inside
+  // the window, and a task must be able to afford at least one full-window request.
+  if (parsed.APP_AI_CONTEXT_RESERVE_TOKENS < 2_048) {
+    throw new Error("APP_AI_CONTEXT_RESERVE_TOKENS must cover provider max output tokens (2048)");
+  }
+  for (const [model, window] of Object.entries(modelWindows)) {
+    if (parsed.APP_AI_CONTEXT_RESERVE_TOKENS + parsed.APP_AI_CONTEXT_TAIL_TOKENS >= window) {
+      throw new Error(`APP_AI_CONTEXT_MODEL_WINDOWS window for ${model} must exceed reserve plus tail`);
+    }
+    if (parsed.APP_AI_MAX_CUMULATIVE_TASK_TOKENS < window) {
+      throw new Error(`APP_AI_MAX_CUMULATIVE_TASK_TOKENS must cover the window for ${model}`);
+    }
+  }
+  if (parsed.APP_AI_CONTEXT_RESERVE_TOKENS >= parsed.APP_AI_CONTEXT_WINDOW_TOKENS) {
+    throw new Error(
+      "APP_AI_CONTEXT_RESERVE_TOKENS must be smaller than APP_AI_CONTEXT_WINDOW_TOKENS",
+    );
+  }
+  if (
+    parsed.APP_AI_CONTEXT_TAIL_TOKENS >=
+    parsed.APP_AI_CONTEXT_WINDOW_TOKENS - parsed.APP_AI_CONTEXT_RESERVE_TOKENS
+  ) {
+    throw new Error(
+      "APP_AI_CONTEXT_TAIL_TOKENS must be smaller than the prompt budget (APP_AI_CONTEXT_WINDOW_TOKENS minus APP_AI_CONTEXT_RESERVE_TOKENS)",
+    );
+  }
+  if (
+    parsed.APP_AI_MAX_CUMULATIVE_TASK_TOKENS <
+    parsed.APP_AI_CONTEXT_WINDOW_TOKENS
+  ) {
+    throw new Error(
+      "APP_AI_MAX_CUMULATIVE_TASK_TOKENS must be at least APP_AI_CONTEXT_WINDOW_TOKENS",
+    );
+  }
+
   return {
     mode: parsed.APP_MODE,
     enableWebTerminal: parsed.ENABLE_WEB_TERMINAL,
@@ -371,6 +454,11 @@ export function parseAppConfig(
     ai: {
       enabled: parsed.APP_AI_ENABLED,
       keyringFile: aiKeyringFile,
+      contextWindowTokens: parsed.APP_AI_CONTEXT_WINDOW_TOKENS,
+      contextWindowTokensByModel: modelWindows,
+      contextReserveTokens: parsed.APP_AI_CONTEXT_RESERVE_TOKENS,
+      contextTailTokens: parsed.APP_AI_CONTEXT_TAIL_TOKENS,
+      maxCumulativeTaskTokens: parsed.APP_AI_MAX_CUMULATIVE_TASK_TOKENS,
     },
     localFilesSocketPath: parsed.LOCAL_FILES_SOCKET_PATH,
     terminal: {

@@ -54,7 +54,12 @@ export class AiPolicyController {
   @Get("conversations")
   conversations(@Req() req: Request, @Param("id") id: string) { return this.tasks.conversations(req, id); }
   @Get("conversations/:conversationId")
-  conversation(@Req() req: Request, @Param("id") id: string, @Param("conversationId") conversationId: string) { return this.tasks.conversation(req, id, conversationId); }
+  conversation(@Req() req: Request, @Param("id") id: string, @Param("conversationId") conversationId: string, @Query("offset") rawOffset?: string, @Query("limit") rawLimit?: string) {
+    const offset = rawOffset === undefined ? 0 : Number(rawOffset);
+    const limit = rawLimit === undefined ? 200 : Number(rawLimit);
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new HttpException("Invalid conversation page", 400);
+    return this.tasks.conversation(req, id, conversationId, { offset, limit });
+  }
   @Delete("conversations/:conversationId")
   deleteConversation(@Req() req: Request, @Param("id") id: string, @Param("conversationId") conversationId: string) { return this.tasks.deleteConversation(req, id, conversationId); }
   @Get("capability")

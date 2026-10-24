@@ -89,9 +89,15 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   // Dialogs
   const [approvalDialogOpen, setApprovalDialogOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
-  // Conversation history renders as a column left of the chat; the History
-  // header button toggles it (default visible).
-  const [historyOpen, setHistoryOpen] = useState(true);
+  // Conversation history: persistent column left of the chat on wide
+  // screens; on narrow screens it becomes a slide-over drawer (OpenAI-style
+  // mobile chat), so the chat itself keeps the full viewport height.
+  const [historyOpen, setHistoryOpen] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(min-width: 80rem)").matches,
+  );
   const [taskDetailsOpen, setTaskDetailsOpen] = useState(false);
 
   // Loading & Error
@@ -644,6 +650,58 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     return merged;
   }, [messages, tasks, activeTask, activeConversationId]);
 
+  // Fill the panel from its real position to the viewport bottom instead of
+  // a magic 100dvh offset: surrounding chrome (workspace tabs, banner,
+  // status rows) differs per section and shifts the panel's top edge.
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [panelHeight, setPanelHeight] = useState<number | null>(null);
+  const [isWide, setIsWide] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(min-width: 80rem)").matches,
+  );
+
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    const BOTTOM_GAP = 16;
+    // Wide screens keep a generous floor; narrow (app-like chat) screens fit
+    // the viewport exactly with only a small degenerate-height floor.
+    const MIN_HEIGHT = isWide ? 32 * 16 : 18 * 16;
+    const update = () => {
+      const docTop = el.getBoundingClientRect().top + window.scrollY;
+      const next = Math.max(window.innerHeight - docTop - BOTTOM_GAP, MIN_HEIGHT);
+      setPanelHeight((prev) => (prev === next ? prev : next));
+    };
+    update();
+    window.addEventListener("resize", update);
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(update);
+      observer.observe(document.documentElement);
+    }
+    return () => {
+      window.removeEventListener("resize", update);
+      observer?.disconnect();
+    };
+  }, [loading, isWide]);
+
+  // Below xl the chat and the task inspector stack naturally instead of
+  // being forced into one viewport height. Crossing the breakpoint also
+  // resets the history surface to its per-mode default (column vs drawer).
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(min-width: 80rem)");
+    const apply = () => {
+      setIsWide(query.matches);
+      setHistoryOpen(query.matches);
+    };
+    apply();
+    query.addEventListener("change", apply);
+    return () => query.removeEventListener("change", apply);
+  }, []);
+
   if (loading) {
     return (
       <div className="flex h-96 flex-col items-center justify-center space-y-3 p-8 text-center text-xs text-dim">
@@ -654,7 +712,15 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   }
 
   return (
-    <div className={`flex min-h-[32rem] min-w-0 flex-col gap-3 ${taskDetailsOpen && activeTask ? "h-auto xl:h-[calc(100dvh-18rem)]" : "h-[calc(100dvh-18rem)]"}`}>
+    <div
+      ref={panelRef}
+      style={
+        panelHeight !== null && !(taskDetailsOpen && activeTask && !isWide)
+          ? { height: `${panelHeight}px` }
+          : undefined
+      }
+      className="flex min-h-[32rem] min-w-0 flex-col gap-3"
+    >
       {/* Global Header */}
       <AssistantHeader
         vps={vps}
@@ -751,18 +817,47 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       ) : null}
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 xl:flex-row">
-        {/* Conversation history column (left of the chat) */}
-        {historyOpen ? (
-          <div
-            id="assistant-history-column"
-            className="max-h-44 min-h-0 shrink-0 xl:h-auto xl:max-h-none xl:w-60"
-          >
+        {/* Wide screens: persistent conversation column left of the chat */}
+        {historyOpen && isWide ? (
+          <div id="assistant-history-column" className="min-h-0 w-60 shrink-0">
             <AssistantHistoryColumn
               conversations={conversations}
               onSelectConversation={handleSelectConversation}
               onDeleteConversation={handleDeleteConversation}
               activeConversationId={activeConversationId}
             />
+          </div>
+        ) : null}
+
+        {/* Narrow screens: the history column becomes a slide-over drawer
+            so the chat keeps the full viewport height (mobile chat layout) */}
+        {historyOpen && !isWide ? (
+          <div
+            className="fixed inset-0 z-40 xl:hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Conversation history"
+          >
+            <button
+              type="button"
+              aria-label="Close history"
+              onClick={() => setHistoryOpen(false)}
+              className="absolute inset-0 bg-ink/80"
+            />
+            <div
+              id="assistant-history-column"
+              className="absolute bottom-0 left-0 top-0 flex w-[85%] max-w-xs flex-col bg-panel"
+            >
+              <AssistantHistoryColumn
+                conversations={conversations}
+                onSelectConversation={(conv) => {
+                  void handleSelectConversation(conv);
+                  setHistoryOpen(false);
+                }}
+                onDeleteConversation={handleDeleteConversation}
+                activeConversationId={activeConversationId}
+              />
+            </div>
           </div>
         ) : null}
 

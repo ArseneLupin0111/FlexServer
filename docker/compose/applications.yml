@@ -3,7 +3,7 @@
 # The source is mandatory and must be outside the project, DATA_DIR and PRIVATE_DIR.
 # No Docker socket or workload directories are mounted into the API.
 # Usage:
-#   docker compose -f docker-compose.yml -f docker-compose.applications.yml up -d
+#   docker compose -f docker-compose.yml -f docker/compose/applications.yml up -d
 services:
   api:
     environment:

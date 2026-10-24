@@ -261,10 +261,40 @@ export function VpsWorkspaceLayout() {
           </Link>
         </div>
 
-        {/* Persistent Host Identity Banner & Compact Resource Strip
-            (Overview only — de-duplicated from other workspace sections) */}
+        {/* Workspace Horizontal Navigation Tabs (above the Overview-only
+            banner so tab positions never shift between sections) */}
+        <div className="relative border-b border-line">
+          <div className="overflow-x-auto [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1 [&::-webkit-scrollbar-track]:bg-panel [&::-webkit-scrollbar-thumb]:bg-line hover:[&::-webkit-scrollbar-thumb]:bg-dim/40">
+            <nav
+              aria-label={`${displayName} workspace sections`}
+              className="flex w-max min-w-full items-center pr-4"
+            >
+              {workspaceSubPages.map((page) => (
+                <NavLink
+                  key={page.to || "overview"}
+                  end={page.end}
+                  to={page.to || ""}
+                  className={({ isActive }) =>
+                    [
+                      "-mb-px inline-flex min-h-11 shrink-0 items-center whitespace-nowrap border-b-2 px-4 py-3 text-[13px] font-medium transition-colors duration-160 ease-out focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-signal",
+                      isActive
+                        ? "border-signal bg-raised/20 font-semibold text-signal"
+                        : "border-transparent text-dim hover:bg-raised/30 hover:text-text",
+                    ].join(" ")
+                  }
+                >
+                  {page.label}
+                </NavLink>
+              ))}
+            </nav>
+          </div>
+        </div>
+
+        {/* Host Identity Banner & Compact Resource Strip
+            (Overview only, below the tabs — de-duplicated from other
+            workspace sections without shifting the tab bar) */}
         {isOverview ? (
-        <div className="mb-4 border border-line bg-panel p-4">
+        <div className="mt-4 mb-4 border border-line bg-panel p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2.5">
@@ -415,34 +445,6 @@ export function VpsWorkspaceLayout() {
           </div>
         </div>
         ) : null}
-
-        {/* Workspace Horizontal Navigation Tabs */}
-        <div className="relative border-b border-line">
-          <div className="overflow-x-auto [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1 [&::-webkit-scrollbar-track]:bg-panel [&::-webkit-scrollbar-thumb]:bg-line hover:[&::-webkit-scrollbar-thumb]:bg-dim/40">
-            <nav
-              aria-label={`${displayName} workspace sections`}
-              className="flex w-max min-w-full items-center pr-4"
-            >
-              {workspaceSubPages.map((page) => (
-                <NavLink
-                  key={page.to || "overview"}
-                  end={page.end}
-                  to={page.to || ""}
-                  className={({ isActive }) =>
-                    [
-                      "-mb-px inline-flex min-h-11 shrink-0 items-center whitespace-nowrap border-b-2 px-4 py-3 text-[13px] font-medium transition-colors duration-160 ease-out focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-signal",
-                      isActive
-                        ? "border-signal bg-raised/20 font-semibold text-signal"
-                        : "border-transparent text-dim hover:bg-raised/30 hover:text-text",
-                    ].join(" ")
-                  }
-                >
-                  {page.label}
-                </NavLink>
-              ))}
-            </nav>
-          </div>
-        </div>
 
         {/* Smooth 240ms Animated Content Transition */}
         <AnimatePresence mode="wait">

@@ -644,6 +644,47 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     return merged;
   }, [messages, tasks, activeTask, activeConversationId]);
 
+  // Fill the panel from its real position to the viewport bottom instead of
+  // a magic 100dvh offset: surrounding chrome (workspace tabs, banner,
+  // status rows) differs per section and shifts the panel's top edge.
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [panelHeight, setPanelHeight] = useState<number | null>(null);
+  const [isWide, setIsWide] = useState(false);
+
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    const BOTTOM_GAP = 16;
+    const MIN_HEIGHT = 32 * 16;
+    const update = () => {
+      const docTop = el.getBoundingClientRect().top + window.scrollY;
+      const next = Math.max(window.innerHeight - docTop - BOTTOM_GAP, MIN_HEIGHT);
+      setPanelHeight((prev) => (prev === next ? prev : next));
+    };
+    update();
+    window.addEventListener("resize", update);
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(update);
+      observer.observe(document.documentElement);
+    }
+    return () => {
+      window.removeEventListener("resize", update);
+      observer?.disconnect();
+    };
+  }, [loading]);
+
+  // Below xl the chat and the task inspector stack naturally instead of
+  // being forced into one viewport height.
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(min-width: 80rem)");
+    const apply = () => setIsWide(query.matches);
+    apply();
+    query.addEventListener("change", apply);
+    return () => query.removeEventListener("change", apply);
+  }, []);
+
   if (loading) {
     return (
       <div className="flex h-96 flex-col items-center justify-center space-y-3 p-8 text-center text-xs text-dim">
@@ -654,7 +695,15 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   }
 
   return (
-    <div className={`flex min-h-[32rem] min-w-0 flex-col gap-3 ${taskDetailsOpen && activeTask ? "h-auto xl:h-[calc(100dvh-18rem)]" : "h-[calc(100dvh-18rem)]"}`}>
+    <div
+      ref={panelRef}
+      style={
+        panelHeight !== null && !(taskDetailsOpen && activeTask && !isWide)
+          ? { height: `${panelHeight}px` }
+          : undefined
+      }
+      className="flex min-h-[32rem] min-w-0 flex-col gap-3"
+    >
       {/* Global Header */}
       <AssistantHeader
         vps={vps}

@@ -51,7 +51,7 @@ function EvidenceDisclosure({
   evidence: NonNullable<AiConversationMessage["evidence"]>;
 }) {
   return (
-    <details className="group mt-1.5 min-w-0 border border-line bg-ink/30 text-xs">
+    <details className="group mt-1.5 min-w-0 bg-ink/30 text-xs sm:border sm:border-line">
       <summary className="flex cursor-pointer select-none items-center justify-between gap-2 p-2.5 font-medium text-dim transition-colors hover:bg-raised/40 hover:text-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal list-none [&::-webkit-details-marker]:hidden">
         <span>Observed evidence ({evidence.length})</span>
         <ChevronDown
@@ -176,7 +176,7 @@ export function AssistantChat({
   return (
     <section
       aria-label="Conversation"
-      className="flex h-full min-h-0 min-w-0 flex-col border border-line bg-panel"
+      className="flex h-full min-h-0 min-w-0 flex-col sm:border sm:border-line sm:bg-panel"
     >
       {/* Messages timeline: the only scrollable area of the chat */}
       <div
@@ -185,7 +185,7 @@ export function AssistantChat({
         aria-label="Assistant messages"
         aria-live="polite"
         onScroll={handleLogScroll}
-        className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-4 py-5 [scrollbar-width:thin]"
+        className="min-h-0 flex-1 space-y-6 overflow-y-auto overscroll-contain px-1 py-5 sm:space-y-3 sm:px-4 [scrollbar-width:thin]"
       >
         {messages.length === 0 && !isAwaitingInput ? (
           <div className="flex h-full min-h-[14rem] flex-col items-center justify-center p-6 text-center">
@@ -227,7 +227,7 @@ export function AssistantChat({
               // Operator: right-aligned bubble; alignment identifies the
               // sender, so no name header is needed.
               <div className="flex min-w-0 w-fit max-w-[85%] flex-col items-end">
-                <div className="w-full rounded-2xl rounded-br-[6px] border border-signal/30 bg-signal/15 px-4 py-2.5">
+                <div className="w-full rounded-2xl rounded-br-[6px] bg-signal/15 px-4 py-2.5 sm:border sm:border-signal/30">
                   <AssistantMarkdown content={msg.content} />
                 </div>
                 {msg.evidence && msg.evidence.length > 0 ? (
@@ -243,7 +243,7 @@ export function AssistantChat({
                 </time>
               </div>
             ) : msg.role === "system" ? (
-              <div className="mx-auto min-w-0 w-fit max-w-xl rounded-[10px] border border-line bg-raised/30 px-3 py-2 text-xs">
+              <div className="mx-auto min-w-0 w-fit max-w-xl rounded-[10px] bg-raised/30 px-3 py-2 text-xs sm:border sm:border-line">
                 <AssistantMarkdown content={msg.content} className="amd-quiet" />
               </div>
             ) : (
@@ -251,7 +251,7 @@ export function AssistantChat({
                 {/* Assistant: open text with a compact avatar marker; no
                     boxed card so long Markdown answers read at full width. */}
                 <div
-                  className="mt-4 flex h-7 w-7 shrink-0 items-center justify-center rounded-[10px] border border-line bg-raised"
+                  className="mt-4 hidden h-7 w-7 shrink-0 items-center justify-center rounded-[10px] border border-line bg-raised sm:flex"
                   aria-hidden="true"
                 >
                   <Bot className="h-4 w-4 text-signal" />
@@ -279,7 +279,7 @@ export function AssistantChat({
         {isTaskRunning ? (
           <div className="mx-auto flex w-full min-w-0 max-w-3xl gap-3">
             <div
-              className="mt-4 flex h-7 w-7 shrink-0 items-center justify-center rounded-[10px] border border-line bg-raised"
+              className="mt-4 hidden h-7 w-7 shrink-0 items-center justify-center rounded-[10px] border border-line bg-raised sm:flex"
               aria-hidden="true"
             >
               <Bot className="h-4 w-4 text-signal" />
@@ -390,8 +390,8 @@ export function AssistantChat({
       ) : null}
 
       {/* Composer: never clipped; only the log above scrolls */}
-      <div className="shrink-0 border-t border-line bg-panel px-4 pb-4 pt-3">
-        <div className="mx-auto w-full max-w-3xl rounded-2xl border border-line bg-raised/50 px-3 pb-2 pt-2.5">
+      <div className="shrink-0 px-1 pb-1 pt-3 sm:border-t sm:border-line sm:bg-panel sm:px-4 sm:pb-4">
+        <div className="mx-auto w-full max-w-3xl rounded-2xl bg-raised/50 px-3 pb-2 pt-2.5 sm:border sm:border-line">
           <textarea
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
@@ -412,7 +412,7 @@ export function AssistantChat({
             className="w-full resize-none rounded-lg bg-transparent px-1 text-sm leading-relaxed text-text placeholder:text-dim focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0 disabled:opacity-50 [scrollbar-width:thin]"
           />
 
-          <div className="flex items-center justify-between gap-2 pt-1.5">
+          <div className="flex items-center justify-end gap-2 pt-1.5 sm:justify-between">
             <span
               className="tnum hidden text-[10px] text-dim sm:inline"
               aria-hidden="true"

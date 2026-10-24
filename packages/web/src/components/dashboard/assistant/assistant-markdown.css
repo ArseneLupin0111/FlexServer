@@ -168,6 +168,21 @@
   font-size: 0.75rem;
 }
 
+@media (max-width: 639px) {
+  .amd-body :not(pre) > code,
+  .amd-body pre,
+  .amd-table-wrap {
+    border: 0;
+  }
+
+  .amd-table th,
+  .amd-table td {
+    border: 0;
+    border-bottom: 1px solid hsl(var(--line));
+    padding: 0.625rem 0.5rem;
+  }
+}
+
 /* Quiet variant for system notices */
 .amd-body.amd-quiet {
   color: hsl(var(--dim));

@@ -638,6 +638,419 @@ describe("AssistantPanel conversation sync", () => {
   });
 });
 
+describe("AssistantPanel auto-compact indicator", () => {
+  it("shows only the minimal Auto-compact status while the live snapshot flags compaction, then clears it", async () => {
+    mockAssistantLoaded({
+      tasks: [makeTask({ state: "executing", summary: undefined })],
+      conversationDetail: {
+        conversation: makeConversation(),
+        messages: [makeMessage({ id: "m-1", role: "user" })],
+      },
+    });
+
+    renderPanel();
+    await screen.findByText("Please prune unused docker images");
+
+    // No compaction flag yet: no indicator, no status region.
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByText("Auto-compact")).toBeNull();
+
+    await act(async () => {
+      streamHarness.latestOptions?.onSnapshot?.(
+        makeTask({ state: "executing", summary: undefined, compacting: true }),
+      );
+    });
+
+    const indicator = screen.getByRole("status");
+    expect(indicator).toHaveTextContent("Auto-compact");
+    // Minimal, non-intrusive: a single inline text indicator, not a modal or
+    // a status paragraph beyond the label itself.
+    expect(screen.queryByText(/compacting conversation/i)).toBeNull();
+    // Existing task state row is preserved alongside the indicator.
+    expect(screen.getByText("executing")).toBeInTheDocument();
+
+    await act(async () => {
+      streamHarness.latestOptions?.onSnapshot?.(
+        makeTask({ state: "executing", summary: undefined, compacting: false }),
+      );
+    });
+
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByText("Auto-compact")).toBeNull();
+  });
+
+  it("never infers Auto-compact from the planning state when the transient flag is absent", async () => {
+    mockAssistantLoaded({
+      tasks: [makeTask({ state: "planning", summary: undefined })],
+      conversationDetail: {
+        conversation: makeConversation(),
+        messages: [makeMessage({ id: "m-1", role: "user" })],
+      },
+    });
+
+    renderPanel();
+    await screen.findByText("Please prune unused docker images");
+
+    expect(screen.getByText("planning")).toBeInTheDocument();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByText("Auto-compact")).toBeNull();
+  });
+});
+
+// Conversation pagination: latest-200 window and older pages.
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+function makeWindowedMessages(
+  conversationId: string,
+  total: number,
+): AiConversationMessage[] {
+  const base = Date.UTC(2026, 0, 1, 0, 0, 0);
+  return Array.from({ length: total }, (_, index) =>
+    makeMessage({
+      id: `m-${String(index).padStart(3, "0")}`,
+      conversationId,
+      taskId: undefined,
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: `Paged message ${index}`,
+      createdAt: new Date(base + index * 1000).toISOString(),
+    }),
+  );
+}
+
+function makeLabeledMessages(
+  conversationId: string,
+  label: string,
+  count: number,
+): AiConversationMessage[] {
+  const base = Date.UTC(2026, 0, 2, 0, 0, 0);
+  return Array.from({ length: count }, (_, index) =>
+    makeMessage({
+      id: `${label.toLowerCase()}-${index}`,
+      conversationId,
+      taskId: undefined,
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: `${label} message ${index + 1}`,
+      createdAt: new Date(base + index * 1000).toISOString(),
+    }),
+  );
+}
+
+// Boots the boot-time transports for a host whose only conversation holds
+// `total` messages; pageOf serves exact [offset, offset+limit) windows like
+// the real API.
+function setupWindowedConversationHost(total: number) {
+  const conversation = makeConversation({ id: "conv-paged", title: "Paged Session" });
+  const messages = makeWindowedMessages(conversation.id, total);
+  vi.mocked(getAiSettings).mockResolvedValue(savedSettings);
+  vi.mocked(getVpsAiPolicy).mockResolvedValue(enabledPolicy);
+  vi.mocked(getVpsAiCapability).mockRejectedValue(new Error("capability unavailable"));
+  vi.mocked(listVpsAiTasks).mockResolvedValue([]);
+  vi.mocked(listVpsAiConversations).mockResolvedValue([conversation]);
+  const pageOf = (offset: number, limit: number): AiConversationDetail => ({
+    conversation,
+    messages: messages.slice(offset, offset + limit),
+    total: messages.length,
+  });
+  return { conversation, pageOf };
+}
+
+// Two-conversation host (A is the initial selection: first in the list, no
+// tasks) for selection-vs-pagination races.
+function setupTwoConversationHost(titleA: string, titleB: string) {
+  const conversationA = makeConversation({ id: "conv-a", title: titleA });
+  const conversationB = makeConversation({ id: "conv-b", title: titleB });
+  vi.mocked(getAiSettings).mockResolvedValue(savedSettings);
+  vi.mocked(getVpsAiPolicy).mockResolvedValue(enabledPolicy);
+  vi.mocked(getVpsAiCapability).mockRejectedValue(new Error("capability unavailable"));
+  vi.mocked(listVpsAiTasks).mockResolvedValue([]);
+  vi.mocked(listVpsAiConversations).mockResolvedValue([conversationA, conversationB]);
+  return { conversationA, conversationB };
+}
+
+describe("AssistantPanel conversation pagination", () => {
+  it("initially renders only the latest 200 messages and offers the older window", async () => {
+    const { conversation, pageOf } = setupWindowedConversationHost(350);
+    vi.mocked(getVpsAiConversation).mockImplementation(
+      async (_vpsId, _conversationId, _signal, offset = 0, limit = 200) =>
+        pageOf(offset, limit),
+    );
+
+    renderPanel();
+
+    expect(await screen.findByText("Paged message 349")).toBeInTheDocument();
+    const chat = getChatLog();
+    expect(within(chat).getByText("Paged message 150")).toBeInTheDocument();
+    expect(within(chat).queryByText("Paged message 149")).toBeNull();
+    expect(within(chat).getAllByRole("article")).toHaveLength(200);
+    expect(
+      screen.getByRole("button", { name: /load older messages/i }),
+    ).toBeInTheDocument();
+
+    // Wire protocol: a 1-message probe for the total, then the latest
+    // window at offset total-200 (window size comes from the transport's
+    // default limit of 200).
+    const calls = vi.mocked(getVpsAiConversation).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.[1]).toBe(conversation.id);
+    expect(calls[0]?.[3]).toBe(0);
+    expect(calls[0]?.[4]).toBe(1);
+    expect(calls[1]?.[3]).toBe(150);
+    expect(calls[1]?.[4]).toBeUndefined();
+  });
+
+  it("refreshes the latest page when a message arrives between the total probe and page request", async () => {
+    const { conversation, pageOf } = setupWindowedConversationHost(350);
+    let appended = false;
+    vi.mocked(getVpsAiConversation).mockImplementation(async (_vpsId, _conversationId, _signal, offset = 0, limit = 200) => {
+      if (limit === 1) return pageOf(0, 1);
+      if (!appended) {
+        appended = true;
+        return { ...pageOf(offset, limit), remaining: 1 };
+      }
+      return {
+        ...pageOf(offset + 1, limit - 1),
+        messages: [...pageOf(offset + 1, limit - 1).messages, makeMessage({ id: "newest", taskId: undefined, content: "Fresh tail message" })],
+        total: 351,
+        remaining: 0,
+      };
+    });
+    renderPanel();
+    await screen.findByText("Fresh tail message");
+    expect(vi.mocked(getVpsAiConversation).mock.calls.map(call => call[3])).toEqual([0, 150, 151]);
+  });
+
+  it("prepends the older window on demand, dedupes overlap, and retires the pager when history is exhausted", async () => {
+    const { conversation, pageOf } = setupWindowedConversationHost(350);
+    const olderPage = deferred<AiConversationDetail>();
+    vi.mocked(getVpsAiConversation).mockImplementation(
+      async (_vpsId, conversationId, _signal, offset = 0, limit = 200) => {
+        // Hold the [0, 150) window back so the in-flight UI is observable.
+        if (conversationId === conversation.id && offset === 0 && limit === 150) {
+          return olderPage.promise;
+        }
+        return pageOf(offset, limit);
+      },
+    );
+
+    renderPanel();
+    await screen.findByText("Paged message 349");
+
+    fireEvent.click(screen.getByRole("button", { name: /load older messages/i }));
+
+    const busyButton = await screen.findByRole("button", { name: /loading/i });
+    expect(busyButton).toBeDisabled();
+    const calls = vi.mocked(getVpsAiConversation).mock.calls;
+    expect(calls).toHaveLength(3);
+    // The request covers exactly the unread window [0, oldestMessageOffset).
+    expect(calls[2]?.[1]).toBe(conversation.id);
+    expect(calls[2]?.[3]).toBe(0);
+    expect(calls[2]?.[4]).toBe(150);
+
+    // The server echoes the boundary message already on screen (overlap);
+    // it must end up rendered exactly once overall.
+    const boundaryEcho = pageOf(150, 1).messages;
+    await act(async () => {
+      olderPage.resolve({
+        ...pageOf(0, 150),
+        messages: [...pageOf(0, 150).messages, ...boundaryEcho],
+      });
+    });
+
+    const chat = getChatLog();
+    await waitFor(() => {
+      expect(within(chat).getByText("Paged message 0")).toBeInTheDocument();
+    });
+    expect(within(chat).getAllByText("Paged message 150")).toHaveLength(1);
+    expect(within(chat).getAllByRole("article")).toHaveLength(350);
+    // Offset 0 reached: no older window remains.
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull();
+    });
+  });
+
+  it("pages through successive older windows down to the conversation start, including a partial final page", async () => {
+    const { pageOf } = setupWindowedConversationHost(450);
+    vi.mocked(getVpsAiConversation).mockImplementation(
+      async (_vpsId, _conversationId, _signal, offset = 0, limit = 200) =>
+        pageOf(offset, limit),
+    );
+
+    renderPanel();
+    await screen.findByText("Paged message 449");
+    let chat = getChatLog();
+    expect(within(chat).queryByText("Paged message 249")).toBeNull();
+    expect(within(chat).getAllByRole("article")).toHaveLength(200);
+
+    // Second window: [50, 250).
+    fireEvent.click(screen.getByRole("button", { name: /load older messages/i }));
+    expect(await screen.findByText("Paged message 50")).toBeInTheDocument();
+    chat = getChatLog();
+    expect(within(chat).queryByText("Paged message 49")).toBeNull();
+    expect(within(chat).getAllByRole("article")).toHaveLength(400);
+    expect(
+      screen.getByRole("button", { name: /load older messages/i }),
+    ).toBeInTheDocument();
+
+    // Final partial window: [0, 50) exhausts the history.
+    fireEvent.click(screen.getByRole("button", { name: /load older messages/i }));
+    expect(await screen.findByText("Paged message 0")).toBeInTheDocument();
+    chat = getChatLog();
+    expect(within(chat).getAllByRole("article")).toHaveLength(450);
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull();
+    });
+
+    const windows = vi.mocked(getVpsAiConversation).mock.calls.map((call) => [
+      call[3] ?? 0,
+      call[4] ?? 200,
+    ]);
+    expect(windows).toEqual([
+      [0, 1], // total probe
+      [250, 200], // latest window (450 - 200)
+      [50, 200], // older window 1
+      [0, 50], // older window 2 (partial)
+    ]);
+  });
+});
+
+describe("AssistantPanel selection and reset races", () => {
+  it("keeps a New Chat empty when a superseded history selection resolves late", async () => {
+    const { conversationA, conversationB } = setupTwoConversationHost(
+      "Session A",
+      "Session B",
+    );
+    const messagesA = makeLabeledMessages(conversationA.id, "Session A", 3);
+    const messagesB = makeLabeledMessages(conversationB.id, "Session B", 3);
+    const lateSelectionPage = deferred<AiConversationDetail>();
+    vi.mocked(getVpsAiConversation).mockImplementation(
+      async (_vpsId, conversationId, _signal, offset = 0, limit = 200) => {
+        if (conversationId === conversationA.id) {
+          return {
+            conversation: conversationA,
+            messages: messagesA,
+            total: messagesA.length,
+          };
+        }
+        // Session B: the 1-message probe resolves immediately; the full
+        // page is held back so "New Chat" can supersede it mid-flight.
+        if (limit === 1) {
+          return {
+            conversation: conversationB,
+            messages: messagesB.slice(-1),
+            total: messagesB.length,
+          };
+        }
+        return lateSelectionPage.promise;
+      },
+    );
+
+    renderPanel();
+    await screen.findByText("Session A message 3");
+
+    fireEvent.click(screen.getByRole("button", { name: /^history$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /session b/i }));
+    // Both Session B requests (probe + page) started before the reset.
+    await waitFor(() => {
+      expect(
+        vi.mocked(getVpsAiConversation).mock.calls.filter(
+          (call) => call[1] === conversationB.id,
+        ),
+      ).toHaveLength(2);
+    });
+
+    // Supersede the in-flight selection with an explicit New Chat reset.
+    fireEvent.click(screen.getByRole("button", { name: /new chat/i }));
+    expect(await screen.findByText(/how can the assistant help\?/i)).toBeInTheDocument();
+
+    await act(async () => {
+      lateSelectionPage.resolve({
+        conversation: conversationB,
+        messages: messagesB,
+        total: messagesB.length,
+      });
+    });
+
+    // The late page must not resurrect Session B into the empty new chat.
+    expect(screen.getByText(/how can the assistant help\?/i)).toBeInTheDocument();
+    const chat = getChatLog();
+    expect(within(chat).queryByText("Session B message 1")).toBeNull();
+    expect(within(chat).queryByText("Session A message 3")).toBeNull();
+  });
+
+  it("does not prepend a late older page into a different conversation selected mid-flight", async () => {
+    const { conversationA, conversationB } = setupTwoConversationHost(
+      "Paged Session",
+      "Session B",
+    );
+    const messagesA = makeWindowedMessages(conversationA.id, 350);
+    const messagesB = makeLabeledMessages(conversationB.id, "Session B", 3);
+    const lateOlderPage = deferred<AiConversationDetail>();
+    vi.mocked(getVpsAiConversation).mockImplementation(
+      async (_vpsId, conversationId, _signal, offset = 0, limit = 200) => {
+        if (conversationId === conversationA.id) {
+          if (offset === 0 && limit === 1) {
+            return {
+              conversation: conversationA,
+              messages: messagesA.slice(0, 1),
+              total: messagesA.length,
+            };
+          }
+          // Older window for Session A stays in flight across the switch.
+          if (offset === 0 && limit === 150) {
+            return lateOlderPage.promise;
+          }
+          return {
+            conversation: conversationA,
+            messages: messagesA.slice(offset, offset + limit),
+            total: messagesA.length,
+          };
+        }
+        return {
+          conversation: conversationB,
+          messages: messagesB,
+          total: messagesB.length,
+        };
+      },
+    );
+
+    renderPanel();
+    await screen.findByText("Paged message 349");
+    expect(within(getChatLog()).queryByText("Paged message 149")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /load older messages/i }));
+    expect(await screen.findByRole("button", { name: /loading/i })).toBeDisabled();
+
+    // Switch to another conversation while the older page is in flight.
+    fireEvent.click(screen.getByRole("button", { name: /^history$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /session b/i }));
+    await screen.findByText("Session B message 3");
+
+    await act(async () => {
+      lateOlderPage.resolve({
+        conversation: conversationA,
+        messages: messagesA.slice(0, 150),
+        total: messagesA.length,
+      });
+    });
+
+    // Session A's late page must neither prepend into Session B nor
+    // resurface the pager for a conversation without an older window.
+    const chat = getChatLog();
+    expect(within(chat).queryByText("Paged message 0")).toBeNull();
+    expect(within(chat).queryByText("Paged message 349")).toBeNull();
+    expect(within(chat).getByText("Session B message 3")).toBeInTheDocument();
+    expect(within(chat).getAllByRole("article")).toHaveLength(3);
+    expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull();
+  });
+});
+
 describe("AssistantPanel chat markdown rendering", () => {
   it("renders markdown in assistant chat messages as semantic HTML instead of literal markup", async () => {
     const markdown = [

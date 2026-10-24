@@ -1,4 +1,4 @@
-import { mkdtemp, rm, readFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -22,6 +22,8 @@ import {
   type AiTaskCreateInput,
 } from "../src/persistence/repositories/ai.persistence.js";
 import type {
+  AiConversationCheckpoint,
+  AiConversationMessage,
   AiExecutionReceipt,
   AiHostCommand,
   AiOutboxEntry,
@@ -1484,6 +1486,657 @@ describe("createJsonAiRepository behavioral regressions", () => {
         loadedKeyring2,
       );
       expect(decryptedBlob).toBe(secretPayload);
+    });
+  });
+});
+
+describe("compaction checkpoints, bounded history and compacting flag", () => {
+  let tempDir: string;
+  let repoPath: string;
+  let repo: AiRepository;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "ai-checkpoint-test-"));
+    repoPath = join(tempDir, "ai-state.json");
+    repo = createJsonAiRepository(repoPath);
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  const seedConversation = async (
+    vpsId: string,
+    title: string,
+    messageCount: number,
+    baseTime = Date.parse("2026-10-24T10:00:00.000Z"),
+  ) => {
+    const conversation = await repo.createConversation(vpsId, title);
+    const tag = conversation.id.slice(0, 8);
+    const messages: AiConversationMessage[] = [];
+    for (let i = 0; i < messageCount; i++) {
+      messages.push(
+        await repo.appendMessage({
+          id: `msg-${tag}-${i}`,
+          conversationId: conversation.id,
+          vpsId,
+          role: i % 2 === 0 ? "user" : "assistant",
+          content: `turn ${i}`,
+          createdAt: new Date(baseTime + i).toISOString(),
+        }),
+      );
+    }
+    return { conversation, messages };
+  };
+
+  it("saves, redacts and chains checkpoints with atomic compare/advance", async () => {
+    const vpsId = "vps-checkpoint-basic";
+    const { conversation, messages } = await seedConversation(vpsId, "Checkpointed", 6);
+
+    expect(await repo.getConversationCheckpoint(vpsId, conversation.id)).toBeUndefined();
+
+    const first = await repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "user asked to rotate password=hunter2 and key sk-abcdefghijklmnopqrstuvwxyz12",
+      coveredMessageId: messages[2]!.id,
+      expectedRevision: 0,
+      summaryModel: "model-a",
+      now: "2026-10-24T11:00:00.000Z",
+    });
+
+    expect(first.revision).toBe(1);
+    expect(first.conversationId).toBe(conversation.id);
+    expect(first.coveredMessageId).toBe(messages[2]!.id);
+    expect(first.coveredMessageCount).toBe(3);
+    expect(first.coveredThrough).toBe(messages[2]!.createdAt);
+    expect(first.summaryModel).toBe("model-a");
+    // Redaction happens before storage
+    expect(first.summary).not.toContain("hunter2");
+    expect(first.summary).not.toContain("sk-abcdefghijklmnopqrstuvwxyz12");
+    expect(first.summary).toContain("[REDACTED]");
+    expect(first.createdAt).toBe("2026-10-24T11:00:00.000Z");
+
+    // Stale CAS: advancing again with the already-used revision fails and
+    // preserves the previous checkpoint.
+    await expect(repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "stale chain summary",
+      coveredMessageId: messages[4]!.id,
+      expectedRevision: 0,
+    })).rejects.toMatchObject({
+      name: "AiPersistenceConflictError",
+      code: "checkpoint_conflict",
+    });
+    const afterStale = await repo.getConversationCheckpoint(vpsId, conversation.id);
+    expect(afterStale?.revision).toBe(1);
+    expect(afterStale?.summary).toBe(first.summary);
+
+    // Additive advance on the correct revision chains the boundary forward.
+    const second = await repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "chained summary covering turns 3-5",
+      coveredMessageId: messages[5]!.id,
+      expectedRevision: first.revision,
+      summaryModel: "model-b",
+      now: "2026-10-24T12:00:00.000Z",
+    });
+    expect(second.revision).toBe(2);
+    expect(second.coveredMessageId).toBe(messages[5]!.id);
+    expect(second.coveredMessageCount).toBe(6);
+    expect(second.coveredThrough).toBe(messages[5]!.createdAt);
+    expect(second.createdAt).toBe(first.createdAt);
+    expect(second.updatedAt).toBe("2026-10-24T12:00:00.000Z");
+
+    const latest = await repo.getConversationCheckpoint(vpsId, conversation.id);
+    expect(latest?.revision).toBe(2);
+    expect(latest?.summary).toBe("chained summary covering turns 3-5");
+
+    // Boundary cannot rewind before the committed boundary.
+    await expect(repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "rewind attempt",
+      coveredMessageId: messages[1]!.id,
+      expectedRevision: second.revision,
+    })).rejects.toMatchObject({ code: "checkpoint_conflict" });
+    expect(await repo.getConversationCheckpoint(vpsId, conversation.id)).toMatchObject({
+      revision: 2,
+      coveredMessageId: messages[5]!.id,
+    });
+  });
+
+  it("rejects invalid summaries and boundaries, and isolates by vps/conversation", async () => {
+    const vpsA = "vps-checkpoint-a";
+    const vpsB = "vps-checkpoint-b";
+    const { conversation: convA, messages: messagesA } = await seedConversation(vpsA, "Conv A", 3);
+    const { conversation: convB, messages: messagesB } = await seedConversation(vpsB, "Conv B", 3);
+
+    // Empty / whitespace-only summaries
+    for (const summary of ["", "   \n\t "]) {
+      await expect(repo.saveConversationCheckpoint({
+        vpsId: vpsA,
+        conversationId: convA.id,
+        summary,
+        coveredMessageId: messagesA[0]!.id,
+        expectedRevision: 0,
+      })).rejects.toMatchObject({ code: "checkpoint_conflict" });
+    }
+
+    // Oversized summary (>64 KiB)
+    await expect(repo.saveConversationCheckpoint({
+      vpsId: vpsA,
+      conversationId: convA.id,
+      summary: "x".repeat(64 * 1024 + 1),
+      coveredMessageId: messagesA[0]!.id,
+      expectedRevision: 0,
+    })).rejects.toMatchObject({ code: "checkpoint_conflict" });
+    expect(await repo.getConversationCheckpoint(vpsA, convA.id)).toBeUndefined();
+
+    // Boundary must be a message of the SAME conversation
+    await expect(repo.saveConversationCheckpoint({
+      vpsId: vpsA,
+      conversationId: convA.id,
+      summary: "cross-conversation boundary",
+      coveredMessageId: messagesB[2]!.id,
+      expectedRevision: 0,
+    })).rejects.toMatchObject({ code: "checkpoint_conflict" });
+    await expect(repo.saveConversationCheckpoint({
+      vpsId: vpsA,
+      conversationId: convA.id,
+      summary: "unknown boundary",
+      coveredMessageId: "msg-does-not-exist",
+      expectedRevision: 0,
+    })).rejects.toMatchObject({ code: "checkpoint_conflict" });
+
+    // Conversation lookup is vps-scoped
+    await expect(repo.saveConversationCheckpoint({
+      vpsId: vpsB,
+      conversationId: convA.id,
+      summary: "wrong vps",
+      coveredMessageId: messagesB[0]!.id,
+      expectedRevision: 0,
+    })).rejects.toMatchObject({ code: "conversation_conflict" });
+    expect(await repo.getConversationCheckpoint(vpsB, convA.id)).toBeUndefined();
+
+    // Checkpoints on B stay independent of A
+    const onB = await repo.saveConversationCheckpoint({
+      vpsId: vpsB,
+      conversationId: convB.id,
+      summary: "summary for B",
+      coveredMessageId: messagesB[1]!.id,
+      expectedRevision: 0,
+    });
+    expect(onB.coveredMessageCount).toBe(2);
+    expect(await repo.getConversationCheckpoint(vpsA, convA.id)).toBeUndefined();
+
+    // Deleting the conversation removes its checkpoint (invariant 2)
+    expect(await repo.deleteConversation(vpsB, convB.id)).toBe(true);
+    expect(await repo.getConversationCheckpoint(vpsB, convB.id)).toBeUndefined();
+  });
+
+  it("admits exactly one of two concurrent checkpoint advances on the same revision", async () => {
+    const vpsId = "vps-checkpoint-race";
+    const { conversation, messages } = await seedConversation(vpsId, "Race Conv", 4);
+    const first = await repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "first summary",
+      coveredMessageId: messages[1]!.id,
+      expectedRevision: 0,
+    });
+
+    const settled = await Promise.allSettled([
+      repo.saveConversationCheckpoint({
+        vpsId, conversationId: conversation.id,
+        summary: "racing summary one", coveredMessageId: messages[2]!.id,
+        expectedRevision: first.revision,
+      }),
+      repo.saveConversationCheckpoint({
+        vpsId, conversationId: conversation.id,
+        summary: "racing summary two", coveredMessageId: messages[3]!.id,
+        expectedRevision: first.revision,
+      }),
+    ]);
+
+    const wins = settled.filter((r) => r.status === "fulfilled");
+    const conflicts = settled.filter((r) => r.status === "rejected");
+    expect(wins).toHaveLength(1);
+    expect(conflicts).toHaveLength(1);
+    expect((conflicts[0] as PromiseRejectedResult).reason).toMatchObject({
+      code: "checkpoint_conflict",
+    });
+    const winner = (wins[0] as PromiseFulfilledResult<AiConversationCheckpoint>).value;
+    expect(winner.revision).toBe(2);
+    expect(await repo.getConversationCheckpoint(vpsId, conversation.id)).toMatchObject({
+      revision: 2,
+      summary: winner.summary,
+    });
+  });
+
+  it("returns full ordered history beyond the 200-message listMessages cap", async () => {
+    const vpsId = "vps-history";
+    const otherVps = "vps-history-other";
+    const { conversation } = await seedConversation(vpsId, "Long Conv", 205);
+    await seedConversation(otherVps, "Other Conv", 5);
+
+    const legacy = await repo.listMessages(conversation.id);
+    expect(legacy).toHaveLength(200); // legacy reader silently drops the head
+
+    const page = await repo.listConversationHistory(conversation.id);
+    expect(page.total).toBe(205);
+    expect(page.messages).toHaveLength(205);
+    expect(page.remaining).toBe(0);
+    expect(page.messages[0]!.content).toBe("turn 0");
+    expect(page.messages[204]!.content).toBe("turn 204");
+    for (let i = 1; i < page.messages.length; i++) {
+      expect(page.messages[i]!.createdAt >= page.messages[i - 1]!.createdAt).toBe(true);
+    }
+
+    // Explicit paging: bounded slices with exact totals, nothing silently lost.
+    const firstSlice = await repo.listConversationHistory(conversation.id, { limit: 50, offset: 0 });
+    expect(firstSlice.messages).toHaveLength(50);
+    expect(firstSlice.total).toBe(205);
+    expect(firstSlice.remaining).toBe(155);
+    expect(firstSlice.messages[0]!.content).toBe("turn 0");
+
+    const secondSlice = await repo.listConversationHistory(conversation.id, { limit: 50, offset: 50 });
+    expect(secondSlice.messages[0]!.content).toBe("turn 50");
+    expect(secondSlice.remaining).toBe(105);
+
+    const tail = await repo.listConversationHistory(conversation.id, { limit: 200, offset: 200 });
+    expect(tail.messages.map((m) => m.content)).toEqual(["turn 200", "turn 201", "turn 202", "turn 203", "turn 204"]);
+    expect(tail.remaining).toBe(0);
+
+    // Paging past the end is empty, not an error
+    const past = await repo.listConversationHistory(conversation.id, { limit: 10, offset: 500 });
+    expect(past.messages).toHaveLength(0);
+    expect(past.remaining).toBe(0);
+
+    // Unknown conversation: empty page, zero totals
+    const unknown = await repo.listConversationHistory("conv-unknown");
+    expect(unknown).toMatchObject({ messages: [], total: 0, remaining: 0 });
+  });
+
+  it("orders history by durable append order even when createdAt values collide", async () => {
+    const vpsId = "vps-history-ties";
+    const conversation = await repo.createConversation(vpsId, "Tied timestamps");
+    const sameInstant = "2026-10-24T10:00:00.000Z";
+    const appended: AiConversationMessage[] = [];
+    for (let i = 0; i < 5; i++) {
+      appended.push(await repo.appendMessage({
+        id: `tie-${i}`,
+        conversationId: conversation.id,
+        vpsId,
+        role: i % 2 === 0 ? "user" : "assistant",
+        content: `tied ${i}`,
+        createdAt: sameInstant,
+      }));
+    }
+    const page = await repo.listConversationHistory(conversation.id);
+    expect(page.messages.map((m) => m.id)).toEqual(appended.map((m) => m.id));
+    // Boundary counting must respect the same durable order
+    const checkpoint = await repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "covers the first three tied messages",
+      coveredMessageId: "tie-2",
+      expectedRevision: 0,
+    });
+    expect(checkpoint.coveredMessageCount).toBe(3);
+  });
+
+  it("treats a backdated append after a committed checkpoint as uncovered tail, never silently covered", async () => {
+    const vpsId = "vps-history-backdated";
+    const baseTime = Date.parse("2026-10-24T10:00:00.000Z");
+    const conversation = await repo.createConversation(vpsId, "Backdated Conv");
+    for (let i = 0; i < 3; i++) {
+      await repo.appendMessage({
+        id: `seed-${i}`,
+        conversationId: conversation.id,
+        vpsId,
+        role: i % 2 === 0 ? "user" : "assistant",
+        content: `seed ${i}`,
+        createdAt: new Date(baseTime + i * 1000).toISOString(),
+      });
+    }
+    const checkpoint = await repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "covers the three chronological seeds",
+      coveredMessageId: "seed-2",
+      expectedRevision: 0,
+    });
+    expect(checkpoint.coveredMessageCount).toBe(3);
+
+    // Append AFTER the checkpoint committed, but backdated BEFORE every seed.
+    const backdated = await repo.appendMessage({
+      id: "msg-backdated",
+      conversationId: conversation.id,
+      vpsId,
+      role: "assistant",
+      content: "late write with an early clock",
+      createdAt: new Date(baseTime - 3600_000).toISOString(),
+    });
+    expect(backdated.createdAt < "2026-10-24T10:00:00.000Z").toBe(true);
+
+    // History order is durable append order: the backdated append lands
+    // after the committed boundary instead of sorting into the covered prefix.
+    const page = await repo.listConversationHistory(conversation.id);
+    expect(page.messages.map((m) => m.id)).toEqual([
+      "seed-0", "seed-1", "seed-2", "msg-backdated",
+    ]);
+    expect(page.total).toBe(4);
+
+    // The committed boundary is unchanged: exactly the backdated append is
+    // uncovered (previously the createdAt sort made it silently covered).
+    const stable = await repo.getConversationCheckpoint(vpsId, conversation.id);
+    expect(stable).toMatchObject({
+      revision: 1,
+      coveredMessageId: "seed-2",
+      coveredMessageCount: 3,
+    });
+    expect(page.total - (stable?.coveredMessageCount ?? 0)).toBe(1);
+
+    // Advancing over the backdated append is a forward move (append index
+    // 3 > 2), not a rewind; rewinding to an earlier boundary stays rejected.
+    const advanced = await repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "now also covers the backdated append",
+      coveredMessageId: "msg-backdated",
+      expectedRevision: stable!.revision,
+    });
+    expect(advanced.revision).toBe(2);
+    expect(advanced.coveredMessageCount).toBe(4);
+    // coveredThrough is the boundary message's createdAt, even when that
+    // walks the wall clock backwards for backdated appends.
+    expect(advanced.coveredThrough).toBe(backdated.createdAt);
+    await expect(repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "rewind to a seed boundary",
+      coveredMessageId: "seed-1",
+      expectedRevision: advanced.revision,
+    })).rejects.toMatchObject({ code: "checkpoint_conflict" });
+    expect(await repo.getConversationCheckpoint(vpsId, conversation.id)).toMatchObject({
+      revision: 2,
+      coveredMessageId: "msg-backdated",
+    });
+  });
+
+  it("preserves append order and the checkpoint boundary across a JSON restart", async () => {
+    const vpsId = "vps-history-restart";
+    const baseTime = Date.parse("2026-10-24T10:00:00.000Z");
+    const conversation = await repo.createConversation(vpsId, "Restart Conv");
+    for (let i = 0; i < 3; i++) {
+      await repo.appendMessage({
+        id: `r-${i}`,
+        conversationId: conversation.id,
+        vpsId,
+        role: i % 2 === 0 ? "user" : "assistant",
+        content: `restart ${i}`,
+        createdAt: new Date(baseTime + i * 1000).toISOString(),
+      });
+    }
+    await repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "covers the first two turns",
+      coveredMessageId: "r-1",
+      expectedRevision: 0,
+    });
+    const backdated = await repo.appendMessage({
+      id: "r-backdated",
+      conversationId: conversation.id,
+      vpsId,
+      role: "assistant",
+      content: "appended late, clocked early",
+      createdAt: new Date(baseTime - 60_000).toISOString(),
+    });
+
+    // Simulate a process restart: a fresh repository instance over the same
+    // file must reproduce the exact durable append order and boundary.
+    const reopened = createJsonAiRepository(repoPath);
+    const before = await repo.listConversationHistory(conversation.id);
+    const after = await reopened.listConversationHistory(conversation.id);
+    expect(after.messages.map((m) => m.id)).toEqual(before.messages.map((m) => m.id));
+    expect(after.messages.map((m) => m.id)).toEqual([
+      "r-0", "r-1", "r-2", "r-backdated",
+    ]);
+
+    const checkpoint = await reopened.getConversationCheckpoint(vpsId, conversation.id);
+    expect(checkpoint).toMatchObject({
+      revision: 1,
+      coveredMessageId: "r-1",
+      coveredMessageCount: 2,
+    });
+
+    // CAS advance chains across the restart boundary, including over the
+    // backdated tail; rewind protection is preserved after reload.
+    const advanced = await reopened.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "restart-safe advance over the backdated tail",
+      coveredMessageId: "r-backdated",
+      expectedRevision: checkpoint!.revision,
+    });
+    expect(advanced.coveredMessageCount).toBe(4);
+    expect(advanced.coveredThrough).toBe(backdated.createdAt);
+    await expect(reopened.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "post-restart rewind attempt",
+      coveredMessageId: "r-2",
+      expectedRevision: advanced.revision,
+    })).rejects.toMatchObject({ code: "checkpoint_conflict" });
+  });
+
+  it("persists per-message and checkpoint restricted-source provenance", async () => {
+    const vpsId = "vps-restricted-sources";
+    const conversation = await repo.createConversation(vpsId, "Provenance Conv");
+    const plain = await repo.appendMessage({
+      id: "msg-plain",
+      conversationId: conversation.id,
+      vpsId,
+      role: "user",
+      content: "no restricted data",
+    });
+    const logBacked = await repo.appendMessage({
+      id: "msg-log-backed",
+      conversationId: conversation.id,
+      vpsId,
+      role: "assistant",
+      content: "analysis derived from service logs and config files",
+      restrictedSources: ["logs", "files"],
+    });
+
+    // Per-message provenance round-trips; absence stays absent.
+    expect(plain.restrictedSources).toBeUndefined();
+    expect(logBacked.restrictedSources).toEqual(["logs", "files"]);
+    const history = await repo.listConversationHistory(conversation.id);
+    expect(history.messages[0]!.restrictedSources).toBeUndefined();
+    expect(history.messages[1]!.restrictedSources).toEqual(["logs", "files"]);
+
+    // Checkpoint provenance: optional on save, then recorded per advance.
+    const first = await repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "covers only the unrestricted turn",
+      coveredMessageId: "msg-plain",
+      expectedRevision: 0,
+    });
+    expect(first.restrictedSources).toBeUndefined();
+    expect((await repo.getConversationCheckpoint(vpsId, conversation.id))?.restrictedSources).toBeUndefined();
+
+    const second = await repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "chained summary that absorbed log- and file-derived content",
+      coveredMessageId: "msg-log-backed",
+      expectedRevision: first.revision,
+      restrictedSources: ["logs"],
+    });
+    expect(second.restrictedSources).toEqual(["logs"]);
+    expect(await repo.getConversationCheckpoint(vpsId, conversation.id)).toMatchObject({
+      revision: 2,
+      restrictedSources: ["logs"],
+    });
+
+    // Each advance restates its own provenance: an unrestricted advance
+    // replaces the previous marker rather than accumulating it.
+    await repo.appendMessage({
+      id: "msg-plain-tail",
+      conversationId: conversation.id,
+      vpsId,
+      role: "user",
+      content: "fully unrestricted follow-up",
+      createdAt: new Date(Date.parse("2026-10-24T12:00:00.000Z")).toISOString(),
+    });
+    const third = await repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "unrestricted chain",
+      coveredMessageId: "msg-plain-tail",
+      expectedRevision: second.revision,
+    });
+    expect(third.restrictedSources).toBeUndefined();
+
+    // Provenance survives a JSON restart.
+    const reopened = createJsonAiRepository(repoPath);
+    const reloaded = await reopened.getConversationCheckpoint(vpsId, conversation.id);
+    expect(reloaded?.restrictedSources).toBeUndefined();
+    const reloadedHistory = await reopened.listConversationHistory(conversation.id);
+    expect(reloadedHistory.messages[1]!.restrictedSources).toEqual(["logs", "files"]);
+  });
+
+  it("persists the compacting operation flag and clears it on terminal transitions", async () => {
+    const vpsId = "vps-compacting";
+    const conversation = await repo.createConversation(vpsId, "Compacting Conv");
+    const { task } = await repo.createTask({
+      id: `task-compacting-${randomUUID()}`,
+      conversationId: conversation.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "Run with compaction",
+      idempotencyKey: "idem-compacting",
+      initiatingSessionId: "session-compacting",
+    });
+
+    expect(task.compacting).toBeUndefined();
+    expect((await repo.getTask(vpsId, task.id))?.compacting).toBeUndefined();
+
+    const flagged = await repo.updateTask({
+      id: task.id,
+      expectedRevision: 1,
+      compacting: true,
+    });
+    expect(flagged.compacting).toBe(true);
+    expect((await repo.getTask(vpsId, task.id))?.compacting).toBe(true);
+    expect((await repo.getActiveTask(vpsId))?.compacting).toBe(true);
+    expect((await repo.listTasks(vpsId)).find((t) => t.id === task.id)?.compacting).toBe(true);
+
+    // Explicit clear while still active
+    const cleared = await repo.updateTask({
+      id: task.id,
+      expectedRevision: 2,
+      compacting: false,
+    });
+    expect(cleared.compacting).toBeUndefined();
+    expect((await repo.getTask(vpsId, task.id))?.compacting).toBeUndefined();
+
+    // Set again, then terminate: the terminal snapshot never shows it
+    await repo.updateTask({ id: task.id, expectedRevision: 3, compacting: true });
+    const terminal = await repo.updateTask({
+      id: task.id,
+      expectedRevision: 4,
+      state: "succeeded",
+      compacting: true,
+      summary: "done",
+    });
+    expect(terminal.compacting).toBeUndefined();
+    expect((await repo.getTask(vpsId, task.id))?.compacting).toBeUndefined();
+    expect((await repo.listTasks(vpsId)).find((t) => t.id === task.id)?.compacting).toBeUndefined();
+  });
+
+  it("hides a stale persisted compacting flag on terminal tasks in public snapshots", async () => {
+    // Simulates a crashed writer that left compacting=true behind on a
+    // terminal task: stored state keeps it, snapshots must not expose it.
+    const vpsId = "vps-compacting-stale";
+    const conversation = await repo.createConversation(vpsId, "Stale Conv");
+    const { task } = await repo.createTask({
+      id: `task-stale-${randomUUID()}`,
+      conversationId: conversation.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "Will go terminal mid-compact",
+      idempotencyKey: "idem-stale-compacting",
+      initiatingSessionId: "session-stale",
+    });
+    await repo.updateTask({ id: task.id, expectedRevision: 1, compacting: true });
+    await repo.updateTask({ id: task.id, expectedRevision: 2, state: "failed" });
+
+    // Hand-forge the stale stored row (public APIs refuse to produce it).
+    const rawState = JSON.parse(await readFile(repoPath, "utf8")) as {
+      tasks: { id: string; compacting?: boolean }[];
+    };
+    const stored = rawState.tasks.find((t) => t.id === task.id);
+    expect(stored).toBeDefined();
+    stored!.compacting = true;
+    await writeFile(repoPath, `${JSON.stringify(rawState, null, 2)}\n`);
+
+    expect((await repo.getTask(vpsId, task.id))?.compacting).toBeUndefined();
+    expect((await repo.listTasks(vpsId)).find((t) => t.id === task.id)?.compacting).toBeUndefined();
+  });
+
+  it("accepts structured evidence fields and normalizes pre-checkpoint state documents", async () => {
+    const vpsId = "vps-evidence";
+    const conversation = await repo.createConversation(vpsId, "Evidence Conv");
+    const message = await repo.appendMessage({
+      id: "msg-evidence",
+      conversationId: conversation.id,
+      vpsId,
+      role: "assistant",
+      content: "observed service state",
+      evidence: [{
+        type: "service_status",
+        timestamp: "2026-10-24T10:05:00.000Z",
+        title: "docker service status",
+        data: { active: true },
+        host: "host-1",
+        source: "systemd",
+        status: "succeeded",
+        truncated: false,
+      }],
+    });
+    expect(message.evidence?.[0]).toMatchObject({
+      host: "host-1",
+      source: "systemd",
+      status: "succeeded",
+      truncated: false,
+    });
+
+    // Rewrite the state document in the pre-checkpoint shape (no checkpoints
+    // array); reads and the first checkpoint advance must still work.
+    const rawState = JSON.parse(await readFile(repoPath, "utf8")) as Record<string, unknown>;
+    delete rawState.checkpoints;
+    await writeFile(repoPath, `${JSON.stringify(rawState, null, 2)}\n`);
+
+    expect(await repo.getConversationCheckpoint(vpsId, conversation.id)).toBeUndefined();
+    const checkpoint = await repo.saveConversationCheckpoint({
+      vpsId,
+      conversationId: conversation.id,
+      summary: "summary written into a normalized legacy document",
+      coveredMessageId: "msg-evidence",
+      expectedRevision: 0,
+    });
+    expect(checkpoint.revision).toBe(1);
+    expect(checkpoint.coveredMessageCount).toBe(1);
+    expect(await repo.getConversationCheckpoint(vpsId, conversation.id)).toMatchObject({
+      revision: 1,
+      coveredMessageId: "msg-evidence",
     });
   });
 });

@@ -77,6 +77,9 @@ export type AiTask = {
     protocolVersion: number;
     rootfsDigest?: string;
   };
+  /** True only while a compaction summarization round is actually underway
+   * (UI "Auto-compact" status); cleared on every terminal transition. */
+  compacting?: boolean;
   initiatingSessionId?: string;
   ownerInstanceId?: string;
   ownerLeaseExpiresAt?: string;
@@ -147,7 +150,15 @@ export type AiConversationMessageEvidence = {
   timestamp: string;
   title: string;
   data?: unknown;
+  /** Structured provenance for bounded tool evidence (host the observation
+   * came from, source kind, terminal status, and whether it was truncated). */
+  host?: string;
+  source?: string;
+  status?: string;
+  truncated?: boolean;
 };
+
+export type AiRestrictedEvidenceSource = "logs" | "files";
 
 export type AiConversationMessage = {
   id: string;
@@ -156,7 +167,32 @@ export type AiConversationMessage = {
   role: "user" | "assistant" | "system";
   content: string;
   evidence?: AiConversationMessageEvidence[];
+  restrictedSources?: AiRestrictedEvidenceSource[];
   createdAt: string;
+};
+
+/** Redacted, additive compaction checkpoint for one conversation
+ * (docs/ai-assistant-context-compaction-plan.md invariant 2). The covered
+ * boundary is the LAST message id included in the summary; the uncompressed
+ * tail is every durable message ordered AFTER it. */
+export type AiConversationCheckpoint = {
+  conversationId: string;
+  /** 1-based, monotonic per conversation; CAS token for advance. */
+  revision: number;
+  /** Already redacted before storage; summaries chain additively. */
+  summary: string;
+  /** Exclusive boundary: last message id whose content the summary covers. */
+  coveredMessageId: string;
+  /** Number of durable messages covered through the boundary. */
+  coveredMessageCount: number;
+  /** createdAt of the boundary message; freshness/provenance marker. */
+  coveredThrough: string;
+  /** Model that produced the summary, for provenance across model switches. */
+  summaryModel?: string;
+  /** Sources whose data may be present in this summary; missing provenance is not safe to replay. */
+  restrictedSources?: AiRestrictedEvidenceSource[];
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type AiHostCommandKind =

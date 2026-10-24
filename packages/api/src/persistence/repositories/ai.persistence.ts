@@ -4,6 +4,7 @@ import type {
   AiAuditEvent,
   AiCapability,
   AiConversation,
+  AiConversationCheckpoint,
   AiConversationMessage,
   AiConversationMessageEvidence,
   AiExecutionBlob,
@@ -13,6 +14,7 @@ import type {
   AiPlan,
   AiPolicy,
   AiProviderSettingsInternal,
+  AiRestrictedEvidenceSource,
   AiTask,
   AiTaskState,
   AiTaskUsage,
@@ -24,6 +26,7 @@ export type { AiTaskState };
 export type AiPersistenceConflictCode =
   | "task_conflict"
   | "conversation_conflict"
+  | "checkpoint_conflict"
   | "settings_conflict"
   | "policy_conflict"
   | "approval_conflict"
@@ -70,6 +73,10 @@ export type AiTaskTransitionInput = {
   expiresAt?: string | null;
   /** Owner lease — required whenever state becomes/executes 'executing'; extends existing lease otherwise */
   ownerLease?: { ownerInstanceId: string; leaseSeconds: number } | null;
+  /** True while a compaction summarization round is underway (UI "Auto-compact");
+   *  undefined keeps the current flag, false clears it. Force-cleared on any
+   *  transition to a terminal state. Never authorizes anything by itself. */
+  compacting?: boolean;
   now?: string;
 };
 
@@ -90,8 +97,41 @@ export type AiConversationAppendMessageInput = {
   role: "user" | "assistant" | "system";
   content: string;
   evidence?: AiConversationMessageEvidence[];
+  restrictedSources?: AiRestrictedEvidenceSource[];
   createdAt?: string;
 };
+
+/** Atomic compare-and-advance of a conversation's compaction checkpoint
+ *  (docs/ai-assistant-context-compaction-plan.md invariant 2/4).
+ *  Summary is redacted before storage; empty/whitespace or >64KiB summaries
+ *  are rejected; a CAS mismatch keeps the previous checkpoint intact. */
+export type AiCheckpointAdvanceInput = {
+  vpsId: string;
+  conversationId: string;
+  /** Chain summary covering everything through coveredMessageId. */
+  summary: string;
+  /** Exclusive covered boundary: LAST durable message id included in summary. */
+  coveredMessageId: string;
+  /** CAS — revision of the checkpoint this advance extends; 0 = expect none yet. */
+  expectedRevision: number;
+  /** Model that produced the summary (provenance across model switches). */
+  summaryModel?: string;
+  restrictedSources?: AiRestrictedEvidenceSource[];
+  now?: string;
+};
+
+/** Bounded, lossless history page for one conversation (oldest -> newest). */
+export type AiConversationHistoryPage = {
+  messages: AiConversationMessage[];
+  /** Total durable messages in the conversation. */
+  total: number;
+  /** Messages available after this page (total - offset - messages.length). */
+  remaining: number;
+};
+
+export const AI_CHECKPOINT_SUMMARY_MAX_BYTES = 64 * 1024;
+export const AI_HISTORY_DEFAULT_PAGE = 1000;
+export const AI_HISTORY_MAX_PAGE = 10_000;
 
 export type AiCapabilityUpsertInput = AiCapability & { now?: string };
 
@@ -138,6 +178,28 @@ export interface AiRepository {
   deleteConversation(vpsId: string, conversationId: string): Promise<boolean>;
   appendMessage(input: AiConversationAppendMessageInput): Promise<AiConversationMessage>;
   listMessages(conversationId: string, limit?: number): Promise<AiConversationMessage[]>;
+  /** Bounded, lossless paged history: all durable messages oldest->newest with
+   *  total/remaining so no message is silently dropped by a per-call cap. */
+  listConversationHistory(
+    conversationId: string,
+    options?: { limit?: number; offset?: number },
+  ): Promise<AiConversationHistoryPage>;
+
+  // ─── compaction checkpoints ─────────────────────────────────────
+  /** Latest valid checkpoint (undefined when absent, or when its covered
+   *  boundary no longer resolves to a stored message of the conversation). */
+  getConversationCheckpoint(
+    vpsId: string,
+    conversationId: string,
+  ): Promise<AiConversationCheckpoint | undefined>;
+  /** Atomic compare-and-advance. Verifies conversation isolation, expected
+   *  revision (0 = first), boundary existence and monotonic order, redacts
+   *  and bounds the summary, then commits revision+1. Conflicts throw
+   *  AiPersistenceConflictError("checkpoint_conflict"); the previous
+   *  checkpoint survives every failure. */
+  saveConversationCheckpoint(
+    input: AiCheckpointAdvanceInput,
+  ): Promise<AiConversationCheckpoint>;
 
   // ─── tasks / admission ──────────────────────────────────────────
   createTask(input: AiTaskCreateInput): Promise<{ task: AiTask; replay: boolean }>;

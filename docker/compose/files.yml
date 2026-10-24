@@ -7,7 +7,7 @@
 # Neither the Docker daemon socket nor the host root filesystem is ever mounted.
 #
 # Usage:
-#   docker compose -f docker-compose.yml -f docker-compose.files.yml up -d
+#   docker compose -f docker-compose.yml -f docker/compose/files.yml up -d
 #
 services:
   api:

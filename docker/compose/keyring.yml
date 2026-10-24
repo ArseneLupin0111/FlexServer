@@ -6,7 +6,7 @@
 # mode 0600, owned by the same UID:GID. Provision separately before enabling.
 #
 # Usage:
-#   docker compose -f docker-compose.yml -f docker-compose.keyring.yml up -d
+#   docker compose -f docker-compose.yml -f docker/compose/keyring.yml up -d
 #
 services:
   api:

@@ -116,7 +116,7 @@ To prevent unauthorized binary substitution, privilege escalation, and unintende
     # Install local agent and host-pty daemon on host:
     sudo ./scripts/install/install-local-agent.sh --binary packages/agent/dist/vps-agent-linux-amd64 --config /etc/vps-manager-agent/config.json --install-host-pty
     # Launch Docker Compose with the opt-in host PTY socket mount:
-    docker compose -f docker-compose.yml -f docker-compose.terminal.yml up -d
+    docker compose -f docker-compose.yml -f docker/compose/terminal.yml up -d
     ```
   - **Process Lifecycle and Descendant Cleanup**:
     - On Linux: Host PTY processes are allocated in their own session/process group (`setpgid`). Closing the session issues `SIGTERM` to the entire negative PID group (`syscall.Kill(-pid, syscall.SIGTERM)`).
@@ -209,7 +209,7 @@ In containerized production deployments:
 - The API container runs with `SSH_KEY_ENCRYPTION_KEY_FILE=/etc/flexserver/ssh-keyring.json` defined in `.env` and `docker-compose.yml`.
 - Permissions are strictly restricted: host directory `/etc/flexserver` has mode `0750` owned by the API runtime UID:GID (`100:101`), and `/etc/flexserver/ssh-keyring.json` has mode `0600` owned by the API runtime UID:GID.
 - An idempotent host bootstrapper script is provided at `scripts/install/bootstrap-ssh-keyring.sh`.
-- For standalone Docker Compose setups, the optional override `docker-compose.keyring.yml` mounts `/etc/flexserver` into the API container without breaking demo mode when unmounted.
+- For standalone Docker Compose setups, the optional override `docker/compose/keyring.yml` mounts `/etc/flexserver` into the API container without breaking demo mode when unmounted.
 
 ## AI Keyring Deployment & Container Wiring
 
@@ -238,14 +238,14 @@ For a source checkout, the commands are `npm run manage-compose-keys -- --help` 
 The Compose keyring override is opt-in and separate from demo defaults:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.keyring.yml up -d
+docker compose -f docker-compose.yml -f docker/compose/keyring.yml up -d
 ```
 
 This mounts `/etc/flexserver` read-only into the API container and sets `COMPOSE_KEYRING_FILE=/etc/flexserver/compose-keyring.json`. Provision the keyring separately; the override does not create it. For one-shot initialization or rotation only, stop the API and use the admin override to mount the same directory read-write:
 
 ```bash
 docker compose stop api
-docker compose -f docker-compose.yml -f docker-compose.keyring.yml -f docker-compose.keyring-admin.yml run --rm --no-deps api node dist/scripts/manage-compose-keys.js init
+docker compose -f docker-compose.yml -f docker/compose/keyring.yml -f docker/compose/keyring-admin.yml run --rm --no-deps api node dist/scripts/manage-compose-keys.js init
 docker compose up -d
 ```
 

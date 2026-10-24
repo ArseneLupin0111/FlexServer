@@ -159,14 +159,14 @@ The API image includes the compiled CLI at `node dist/scripts/manage-compose-key
 For a standalone deployment, the read-only keyring override keeps the normal API read-only:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.keyring.yml up -d
+docker compose -f docker-compose.yml -f docker/compose/keyring.yml up -d
 ```
 
 To initialize or rotate, stop all API writers, use the separate admin override for a one-shot command, then restart with the read-only configuration:
 
 ```bash
 docker compose stop api
-docker compose -f docker-compose.yml -f docker-compose.keyring.yml -f docker-compose.keyring-admin.yml run --rm --no-deps api node dist/scripts/manage-compose-keys.js init
+docker compose -f docker-compose.yml -f docker/compose/keyring.yml -f docker/compose/keyring-admin.yml run --rm --no-deps api node dist/scripts/manage-compose-keys.js init
 docker compose up -d
 ```
 

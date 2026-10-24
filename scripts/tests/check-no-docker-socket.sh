@@ -94,7 +94,7 @@ else
 fi
 
 # Optional feature overrides must preserve the same API socket isolation.
-for override in docker-compose.applications.yml docker-compose.files.yml docker-compose.terminal.yml; do
+for override in docker/compose/applications.yml docker/compose/files.yml docker/compose/terminal.yml; do
   if [[ -f "${REPO_ROOT}/${override}" ]]; then
     fail_if_match "$override" <"${REPO_ROOT}/${override}"
     fail_if_group_add "$override" <"${REPO_ROOT}/${override}"

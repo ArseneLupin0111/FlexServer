@@ -7,7 +7,7 @@
 # The Docker daemon socket (/var/run/docker.sock) is NEVER mounted.
 #
 # Usage:
-#   docker compose -f docker-compose.yml -f docker-compose.terminal.yml up -d
+#   docker compose -f docker-compose.yml -f docker/compose/terminal.yml up -d
 #
 services:
   api:

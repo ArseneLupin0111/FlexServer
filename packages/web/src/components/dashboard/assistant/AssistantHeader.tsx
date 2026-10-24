@@ -48,17 +48,17 @@ export function AssistantHeader({
             </span>
           ) : <span className="text-warn">Provider not configured</span>}
           {capability ? (
-            <Badge variant="outline" className="max-w-full border-line bg-transparent text-dim normal-case tracking-normal" title={capability.reason || (supported ? "Execution supported" : "Execution unavailable")}>
+            <Badge variant="outline" className="max-w-full border-transparent bg-transparent px-0 text-dim normal-case tracking-normal sm:border-line sm:px-2.5" title={capability.reason || (supported ? "Execution supported" : "Execution unavailable")}>
               {supported ? <ShieldCheck className="mr-1 h-3 w-3 shrink-0" /> : <ShieldAlert className="mr-1 h-3 w-3 shrink-0" />}
               {supported ? "Execution supported" : "Execution unavailable"}
             </Badge>
           ) : null}
         </div>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-1 sm:gap-2">
         {onNewConversation ? (
-          <Button type="button" size="sm" onClick={onNewConversation} className="min-h-9 text-xs font-semibold">
-            <Bot className="mr-1.5 h-3.5 w-3.5" />New Chat
+          <Button type="button" size="sm" onClick={onNewConversation} className="min-h-11 gap-1 px-2 text-xs font-semibold sm:min-h-9 sm:gap-2 sm:px-3">
+            <Bot className="h-3.5 w-3.5 sm:mr-1.5" />New Chat
           </Button>
         ) : null}
         <Button
@@ -68,15 +68,15 @@ export function AssistantHeader({
           onClick={onOpenHistory}
           aria-expanded={historyOpen}
           aria-controls="assistant-history-column"
-          className="min-h-9 text-xs"
+          className="min-h-11 gap-1 border-transparent px-2 text-xs sm:min-h-9 sm:gap-2 sm:border-line sm:px-3"
         >
-          <History className="mr-1.5 h-3.5 w-3.5" />History
+          <History className="h-3.5 w-3.5 sm:mr-1.5" />History
         </Button>
-        <Button type="button" variant="outline" size="sm" onClick={onOpenSettings} className="min-h-9 text-xs">
-          <Settings className="mr-1.5 h-3.5 w-3.5" />Settings
+        <Button type="button" variant="outline" size="sm" onClick={onOpenSettings} className="min-h-11 min-w-11 border-transparent px-3 text-xs sm:min-h-9 sm:min-w-0 sm:border-line">
+          <Settings className="h-3.5 w-3.5 sm:mr-1.5" /><span className="sr-only sm:not-sr-only">Settings</span>
         </Button>
         {onRefresh ? (
-          <Button type="button" variant="ghost" size="sm" onClick={onRefresh} disabled={refreshing} aria-label="Refresh" title="Refresh assistant" className="h-9 w-9 px-0">
+          <Button type="button" variant="ghost" size="sm" onClick={onRefresh} disabled={refreshing} aria-label="Refresh" title="Refresh assistant" className="h-11 w-11 px-0 sm:h-9 sm:w-9">
             <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin motion-reduce:animate-none" : ""}`} />
           </Button>
         ) : null}

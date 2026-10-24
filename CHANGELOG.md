@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — Mobile chat layout
+
+- Rework the Assistant for narrow screens into an app-like chat: the conversation history column no longer stacks above the chat — it becomes a full-height slide-over drawer (backdrop, closed by default, opens from the History button, closes on selection) while the chat keeps the full viewport height. The measured panel height uses an 18rem mobile floor instead of the desktop 32rem floor, and the Shift+Enter/counter hint row hides on touch-sized screens. Wide screens keep the persistent left column unchanged.
+
 ## Unreleased — Assistant history column
 
 - Replace the Assistant history overlay drawer with a conversation column pinned left of the chat (visible by default; the History header button toggles it with `aria-expanded`). On wide screens it is a 240px sidebar; on narrow screens it stacks above the chat with its own scroll. Selecting a conversation keeps the column open, and the delete-per-conversation control moves into each row.

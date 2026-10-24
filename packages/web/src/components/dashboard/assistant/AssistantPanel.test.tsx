@@ -490,9 +490,12 @@ describe("AssistantPanel conversation sync", () => {
     renderPanel();
     await screen.findByText("Latest conversation marker");
 
-    // The history column is visible by default; selecting the older
-    // conversation must not reset to the latest one after ?taskId= is set.
+    // Narrow viewport (jsdom): history is a drawer, closed by default. The
+    // History button opens it; selecting a conversation must not reset to
+    // the latest one after ?taskId= is set, and closes the drawer.
     const historyToggle = screen.getByRole("button", { name: /^history$/i });
+    expect(historyToggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(historyToggle);
     expect(historyToggle).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(screen.getByRole("button", { name: /older session/i }));
 
@@ -505,12 +508,13 @@ describe("AssistantPanel conversation sync", () => {
     expect(within(chat).queryByText("Latest conversation marker")).toBeNull();
     expect(within(chat).getByText(oldSummary)).toBeInTheDocument();
 
-    // The History header button toggles the left column.
-    fireEvent.click(screen.getByRole("button", { name: /^history$/i }));
+    // Selecting from the drawer closes it; the History button re-opens it.
     expect(screen.getByRole("button", { name: /^history$/i })).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("button", { name: /older session/i })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /^history$/i }));
     expect(screen.getByRole("button", { name: /older session/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^history$/i }));
+    expect(screen.queryByRole("button", { name: /older session/i })).toBeNull();
   });
 
   it("keeps a new chat empty across a manual refresh", async () => {

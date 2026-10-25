@@ -160,12 +160,13 @@ export function AssistantSettingsModal({
   >({});
   const [oauthErrors, setOauthErrors] = useState<Record<string, string | null>>({});
 
-  // Policy state
+  // Policy state. shellEnabled is owned by the Settings "Agent" card
+  // (execmode plan Q6) and is deliberately omitted from this modal's PATCH so
+  // unrelated policy saves can never overwrite the card's value.
   const [aiEnabled, setAiEnabled] = useState(false);
   const [readEnabled, setReadEnabled] = useState(false);
   const [dockerEnabled, setDockerEnabled] = useState(false);
   const [composeEnabled, setComposeEnabled] = useState(false);
-  const [shellEnabled, setShellEnabled] = useState(false);
   const [sendLogs, setSendLogs] = useState(false);
   const [sendFiles, setSendFiles] = useState(false);
   const [readScopesText, setReadScopesText] = useState("");
@@ -203,7 +204,6 @@ export function AssistantSettingsModal({
       setReadEnabled(policy.readEnabled === true);
       setDockerEnabled(policy.dockerActionsEnabled === true);
       setComposeEnabled(policy.composeActionsEnabled === true);
-      setShellEnabled(policy.shellEnabled === true);
       setSendLogs(policy.sendLogsToProvider === true);
       setSendFiles(policy.sendFilesToProvider === true);
       setReadScopesText((policy.fileReadScopes || []).join("\n"));
@@ -527,7 +527,6 @@ export function AssistantSettingsModal({
         readEnabled,
         dockerActionsEnabled: dockerEnabled,
         composeActionsEnabled: composeEnabled,
-        shellEnabled,
         sendLogsToProvider: sendLogs,
         sendFilesToProvider: sendFiles,
         fileReadScopes: readScopes,
@@ -1251,20 +1250,12 @@ export function AssistantSettingsModal({
                       aria-label="Compose mutation tools"
                     />
                   </div>
-
-                  <div className="flex items-center justify-between border border-line bg-panel p-2.5">
-                    <div className="font-semibold text-text">Shell execution</div>
-                    <Switch
-                      checked={shellEnabled}
-                      onCheckedChange={setShellEnabled}
-                      aria-label="Shell execution tools"
-                    />
-                  </div>
                 </div>
 
                 <p className="text-[11px] text-dim">
-                  Docker, Compose, and shell actions run only after you approve
-                  the exact plan.
+                  Docker and Compose actions run only after you approve the
+                  exact plan. Shell execution is controlled by the Agent card in
+                  the host Settings.
                 </p>
 
                 <h3 className="pt-2 text-xs font-semibold uppercase tracking-wider text-dim">

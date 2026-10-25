@@ -13,7 +13,10 @@ const path = z.string().min(1).max(1024).refine(value => value.startsWith("/") &
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const profile = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/);
 const schemas = {
-  shell: z.object({ script: z.string().min(1).max(32768), timeoutSeconds: z.number().int().min(1).max(120) }).strict(),
+  // execMode is optional model input (absent → the active policy decides;
+  // default policy is sandbox). propose() stamps it from the policy so the
+  // encrypted payload, args and plan.execMode always agree.
+  shell: z.object({ script: z.string().min(1).max(32768), timeoutSeconds: z.number().int().min(1).max(120), execMode: z.enum(["sandbox", "privileged"]).optional() }).strict(),
   file_read: z.object({ path, scope: path, maxBytes: z.number().int().min(1).max(262144) }).strict(),
   file_apply: z.object({ path, scope: path, content: z.string().max(262144), expectedPreImageDigest: digest, postImageDigest: digest, mode: z.number().int().min(0).max(511), createNoReplace: z.boolean() }).strict(),
   service_status: z.object({ profileId: profile, service: z.string().max(128) }).strict(),
@@ -37,14 +40,18 @@ export const hostTools: ProviderTool[] = Object.entries(schemas)
         properties: Object.fromEntries(
           Object.entries(schema.shape).map(([key]) => [
             key,
-            key === "timeoutSeconds" || key === "mode" || key === "maxBytes"
-              ? { type: "integer" }
-              : key === "createNoReplace" || key === "reloadService" || key === "restoreService"
-                ? { type: "boolean" }
-                : { type: "string" },
+            key === "execMode"
+              ? { type: "string", enum: ["sandbox", "privileged"], default: "sandbox" }
+              : key === "timeoutSeconds" || key === "mode" || key === "maxBytes"
+                ? { type: "integer" }
+                : key === "createNoReplace" || key === "reloadService" || key === "restoreService"
+                  ? { type: "boolean" }
+                  : { type: "string" },
           ]),
         ),
-        required: Object.keys(schema.shape),
+        // execMode stays optional for the model (absent = policy decides);
+        // every other shell/file/config field is required.
+        required: Object.keys(schema.shape).filter((key) => key !== "execMode"),
         additionalProperties: false,
       },
     },
@@ -57,6 +64,14 @@ export class AiHostPlanService {
     const parsed = schemas[kind].safeParse(input);
     if (!parsed.success) throw new AiAssistantError("policy_denied");
     const payload: Record<string, unknown> = parsed.data;
+    if (kind === "shell") {
+      // Execution mode is policy-dictated, never model-dictated (execmode
+      // plan): callers reject model-supplied execMode values that differ from
+      // the policy before this, so stamping here keeps the encrypted payload,
+      // the approval-visible args and plan.execMode in agreement ("sandbox"
+      // under the default policy).
+      payload.execMode = policy.execMode;
+    }
     this.authorize(kind, payload, policy);
     const stepId = randomUUID();
     const id = randomUUID();
@@ -77,6 +92,7 @@ export class AiHostPlanService {
     if (!policy.aiEnabled) throw new AiAssistantError("policy_denied");
     if (kind === "file_read" && !policy.readEnabled) throw new AiAssistantError("policy_denied");
     if (kind === "shell" && !policy.shellEnabled) throw new AiAssistantError("policy_denied");
+    if (kind === "shell" && payload.execMode !== undefined && payload.execMode !== policy.execMode) throw new AiAssistantError("policy_denied");
     for (const field of ["script", "content", "candidateContent"]) {
       const value = payload[field];
       if (typeof value === "string" && Buffer.byteLength(value, "utf8") > (field === "script" ? 32768 : 262144)) throw new AiAssistantError("policy_denied");

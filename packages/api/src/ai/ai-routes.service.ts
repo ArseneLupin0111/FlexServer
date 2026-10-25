@@ -1,11 +1,11 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, UnauthorizedException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional, ServiceUnavailableException, UnauthorizedException } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type { Request } from "express";
 import { APP_CONFIG, AI_REPOSITORY, VPS_REPOSITORY } from "../tokens.js";
 import type { AppConfig } from "../config/app-config.js";
 import type { VpsRepository } from "../persistence/repositories/vps.repository.js";
 import { AiPersistenceConflictError, type AiRepository } from "../persistence/repositories/ai.persistence.js";
-import { aiProviderKeyAad } from "../persistence/repositories/ai.repository.js";
+import { aiProviderKeyAad, defaultAiPolicy } from "../persistence/repositories/ai.repository.js";
 import { redactString } from "../common/redaction.js";
 import { decryptAiSecret, encryptAiSecret, loadAiKeyring } from "./ai-crypto.js";
 import { AiProvider, fetchProviderModels } from "./ai-provider.js";
@@ -13,6 +13,7 @@ import { generateCodexRequest } from "./ai-codex-provider.js";
 import type { AiProviderProfile, AiProviderProfileInternal } from "./ai.models.js";
 import { updateAiPolicySchema, updateAiSettingsSchema, providerProfileWriteSchema, codexOauthExchangeSchema } from "./ai.schemas.js";
 import { AiCodexOauthService, CodexOauthReloginRequiredError, CodexOauthStateError } from "./ai-codex-oauth.service.js";
+import { AiBundleOrchestrationService } from "./ai-bundle-install.service.js";
 
 // Global provider credentials have a reserved, non-task AAD identity.
 export const AI_PROVIDER_KEY_CONTEXT = { vpsId: "global", taskId: "provider", field: "providerApiKey", version: 1 } as const;
@@ -40,6 +41,11 @@ export class AiRoutesService {
     @Inject(AI_REPOSITORY) private readonly repository: AiRepository,
     @Inject(VPS_REPOSITORY) private readonly vps: VpsRepository,
     @Inject(AiCodexOauthService) private readonly codexOauth: AiCodexOauthService,
+    // Optional (PR #37 lesson): hand-built test/module configs may not wire
+    // the AI bundle orchestration; bundle routes then degrade gracefully.
+    @Optional()
+    @Inject(AiBundleOrchestrationService)
+    private readonly bundleOrchestrator?: AiBundleOrchestrationService,
   ) {}
 
   private authorize(request: Request): void {
@@ -273,13 +279,80 @@ export class AiRoutesService {
   async policy(request: Request, vpsId: string) {
     this.authorize(request);
     if (!await this.vps.get(vpsId)) throw new NotFoundException("VPS not found");
-    return await this.repository.getAiPolicy(vpsId) ?? { vpsId, aiEnabled: true, readEnabled: true, dockerActionsEnabled: true, composeActionsEnabled: true, shellEnabled: false, fileReadScopes: [], fileWriteScopes: [], serviceProfileIds: [], sendLogsToProvider: false, sendFilesToProvider: false, revision: 0, updatedAt: new Date(0).toISOString() };
+    return await this.repository.getAiPolicy(vpsId) ?? defaultAiPolicy(vpsId);
+  }
+
+  /** GET /api/vps/:id/ai/bundle — bundled AI artifacts + per-VPS install
+   * state (pinned shape, see AiBundleView). Degrades to available=false with
+   * a reason when the orchestration is not wired or the bundle is missing. */
+  async bundle(request: Request, vpsId: string) {
+    this.authorize(request);
+    if (!await this.vps.get(vpsId)) throw new NotFoundException("VPS not found");
+    if (!this.bundleOrchestrator) {
+      return {
+        available: false,
+        reason: "AI bundle orchestration is not available in this deployment",
+        bundleId: null,
+        installed: false,
+        lastInstalledBundleId: null,
+        lastJob: null,
+        capability: { supported: false, privilegedSupported: false },
+      };
+    }
+    return this.bundleOrchestrator.getBundleView(vpsId);
+  }
+
+  /** POST /api/vps/:id/ai/bundle/install — deliberate "Install/Update AI
+   * bundle" action; idempotent while a job is pending/running, 503 when the
+   * bundle is unavailable. */
+  async installBundle(request: Request, vpsId: string) {
+    this.authorize(request);
+    if (!await this.vps.get(vpsId)) throw new NotFoundException("VPS not found");
+    if (!this.bundleOrchestrator) {
+      throw new ServiceUnavailableException("AI bundle orchestration is not available in this deployment");
+    }
+    return this.bundleOrchestrator.installBundle(vpsId, "manual");
   }
 
   async updatePolicy(request: Request, vpsId: string, body: unknown) {
     const current = await this.policy(request, vpsId);
     const parsed = updateAiPolicySchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException("Invalid AI policy");
-    return this.repository.updateAiPolicy({ vpsId, patch: parsed.data, expectedRevision: current.revision });
+    const { execMode, acknowledgePrivileged, ...patch } = parsed.data;
+    // Privileged execution (execmode plan Q4) is gated by a one-time risk
+    // acknowledgment: this request must carry `acknowledgePrivileged` OR the
+    // policy must already hold a retained acknowledgment. Sandbox is free.
+    if (execMode === "privileged" && acknowledgePrivileged !== true && current.privilegedAcknowledgedAt === null) {
+      throw new BadRequestException("Privileged execution requires acknowledging the risk first (acknowledgePrivileged)");
+    }
+    // A fresh acknowledgment is recorded with the authenticated admin's
+    // session identity; prior ones are refreshed only on explicit re-ack and
+    // never cleared (switching back to sandbox keeps them).
+    const acknowledgmentPatch =
+      execMode === "privileged" && acknowledgePrivileged === true
+        ? { privilegedAcknowledgedAt: new Date().toISOString(), privilegedAcknowledgedBy: request.dashboardSessionId ?? null }
+        : {};
+    const updated = await this.repository.updateAiPolicy({
+      vpsId,
+      patch: { ...patch, ...(execMode ? { execMode } : {}), ...acknowledgmentPatch },
+      expectedRevision: current.revision,
+    });
+    // Q8 deliberate-action trigger: AFTER a successful persist, the first AI
+    // bundle install is scheduled only on an explicit enable action (AI
+    // off→on, shell off→on, or an execMode change) and only when the bundle
+    // is present but not yet installed on the host. Fire-and-forget with
+    // error containment; never scheduled from GETs; convergence (Q7) owns
+    // later version updates.
+    if (
+      this.bundleOrchestrator &&
+      ((!current.aiEnabled && updated.aiEnabled) ||
+        (!current.shellEnabled && updated.shellEnabled) ||
+        current.execMode !== updated.execMode)
+    ) {
+      void this.bundleOrchestrator
+        .maybeInstallAfterDeliberateAction(vpsId)
+        .catch(() => {});
+    }
+    return updated;
   }
 }

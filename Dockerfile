@@ -66,7 +66,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
     -trimpath -buildvcs=false \
     -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${BUILD_ID}" \
-    -o /out/vps-updater-linux-arm64 ./cmd/vps-updater
+    -o /out/vps-updater-linux-arm64 ./cmd/vps-updater && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+    -trimpath -buildvcs=false \
+    -o /out/ai-executor-linux-arm64 ./cmd/ai-executor && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+    -trimpath -buildvcs=false \
+    -o /out/ai-host-helper-linux-arm64 ./cmd/ai-host-helper
 # Go trimpath builds do not retain linker flags as searchable build metadata.
 # Package checksum-bound identity for the API's existing companion reader.
 RUN BUILD_ID=$(/usr/local/bin/agent-build-id --root .) && \
@@ -77,26 +83,12 @@ RUN BUILD_ID=$(/usr/local/bin/agent-build-id --root .) && \
         printf '{"os":"linux","arch":"%s","version":"%s","buildId":"%s","sha256":"%s"}\n' \
             "$arch" "$AGENT_VERSION" "$BUILD_ID" "$sha" > "$binary.json" || exit 1; \
     done
-RUN mkdir -p /out/ai-rootfs/bin /out/ai-rootfs/usr/bin /out/ai-rootfs/dev /out/ai-rootfs/proc /out/ai-rootfs/sys /out/ai-rootfs/tmp /out/ai-rootfs/etc && \
-    chmod 1777 /out/ai-rootfs/tmp && \
-    cp /bin/busybox /out/ai-rootfs/bin/busybox && \
-    chmod 0755 /out/ai-rootfs/bin/busybox && \
-    for tool in sh ps cat ls sleep pwd echo wc head tail grep du stat dd md5sum sha256sum true false date env split uniq cut awk find sort tr yes readlink basename dirname mktemp bzip2 gzip mkdir touch rm cp mv ln chmod chown test "["; do \
-        ln -sf /bin/busybox /out/ai-rootfs/bin/$tool; \
-    done && \
-    tar -czf /out/ai-rootfs-linux-amd64.tar.gz -C /out/ai-rootfs . && \
-    ROOTFS_SHA=$(sha256sum /out/ai-rootfs-linux-amd64.tar.gz | awk '{print $1}') && \
-    echo "{\"version\":1,\"rootfsSha256\":\"$ROOTFS_SHA\",\"files\":[" > /out/ai-rootfs-linux-amd64.manifest.json && \
-    first=1; for f in /out/ai-rootfs/bin/*; do \
-        [ $first -eq 0 ] && echo "," >> /out/ai-rootfs-linux-amd64.manifest.json; \
-        first=0; \
-        rel="/bin/$(basename $f)"; \
-        fsha=$(sha256sum $f | awk '{print $1}'); \
-        echo "  {\"path\":\"$rel\",\"sha256\":\"$fsha\",\"mode\":493}" >> /out/ai-rootfs-linux-amd64.manifest.json; \
-    done && \
-    echo "]}" >> /out/ai-rootfs-linux-amd64.manifest.json && \
-    mkdir -p /out/ai-profiles && \
-    cp profiles/nginx.json /out/ai-profiles/nginx.json
+# The AI sandbox rootfs tarballs and manifests (ai-rootfs-linux-{amd64,arm64}.*)
+# are NOT built here: they are produced by CI (scripts/agent/build-rootfs.mjs,
+# which extracts a pinned, digest-verified busybox via Docker) into
+# packages/agent/dist before `docker build` runs, and are COPYed from the build
+# context into /app/agent/ai/ in the api-runtime stage below. A local build must
+# run that script first; the COPY of a missing artifact fails the build by design.
 FROM node:24-alpine AS api-runtime
 ENV NODE_ENV=production \
     AGENT_BINARY_PATH=/app/agent/vps-agent-linux-amd64 \
@@ -119,11 +111,19 @@ COPY --from=agent-builder --chown=app:app --chmod=0644 /out/vps-agent-linux-arm6
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-pty-linux-amd64 /app/agent/host-pty-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/local-agent-rotator-linux-amd64 /app/agent/local-agent-rotator-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-files-linux-amd64 /app/agent/host-files-linux-amd64
-COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-executor-linux-amd64 /app/agent/ai-executor-linux-amd64
-COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-host-helper-linux-amd64 /app/agent/ai-host-helper-linux-amd64
-COPY --from=agent-builder --chown=app:app --chmod=0644 /out/ai-rootfs-linux-amd64.tar.gz /app/agent/ai-rootfs-linux-amd64.tar.gz
-COPY --from=agent-builder --chown=app:app --chmod=0644 /out/ai-rootfs-linux-amd64.manifest.json /app/agent/ai-rootfs-linux-amd64.manifest.json
-COPY --from=agent-builder --chown=app:app /out/ai-profiles /app/agent/ai-profiles
+# AI bundle (install/update orchestration): binaries built in agent-builder,
+# rootfs tarballs + manifests produced by CI via scripts/agent/build-rootfs.mjs,
+# committed service profiles and the AI installer from the repo.
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-executor-linux-amd64 /app/agent/ai/ai-executor-linux-amd64
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-executor-linux-arm64 /app/agent/ai/ai-executor-linux-arm64
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-host-helper-linux-amd64 /app/agent/ai/ai-host-helper-linux-amd64
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-host-helper-linux-arm64 /app/agent/ai/ai-host-helper-linux-arm64
+COPY --chown=app:app --chmod=0644 packages/agent/dist/ai-rootfs-linux-amd64.tar.gz /app/agent/ai/rootfs-linux-amd64.tar.gz
+COPY --chown=app:app --chmod=0644 packages/agent/dist/ai-rootfs-linux-amd64.manifest.json /app/agent/ai/rootfs-linux-amd64.manifest.json
+COPY --chown=app:app --chmod=0644 packages/agent/dist/ai-rootfs-linux-arm64.tar.gz /app/agent/ai/rootfs-linux-arm64.tar.gz
+COPY --chown=app:app --chmod=0644 packages/agent/dist/ai-rootfs-linux-arm64.manifest.json /app/agent/ai/rootfs-linux-arm64.manifest.json
+COPY --chown=app:app packages/agent/profiles/ /app/agent/ai/profiles/
+COPY --chown=app:app --chmod=0755 scripts/install/install-local-agent.sh /app/agent/ai/install-local-agent.sh
 COPY scripts/install/install-host-files.sh /app/scripts/install-host-files.sh
 COPY --chown=app:app --chmod=0755 scripts/install/install-fleet-updater.sh /app/scripts/install/install-fleet-updater.sh
 COPY scripts/install/install-updater.sh /app/scripts/install/install-updater.sh

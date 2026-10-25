@@ -329,6 +329,19 @@ jobs:
         if: needs.changes.outputs.api == 'true' || needs.changes.outputs.web == 'true'
         uses: docker/setup-buildx-action@v3
 
+      - name: Build pinned AI rootfs artifacts
+        # The API image bundles the AI sandbox rootfs tarballs and manifests.
+        # They must be built before `docker build` (the script extracts a
+        # pinned, digest-verified busybox via Docker, so it cannot run inside
+        # the Dockerfile) and are COPYed by the Dockerfile from the build
+        # context under packages/agent/dist. The script fails closed if Docker
+        # is unavailable or the busybox digests do not verify.
+        id: ai-rootfs
+        if: needs.changes.outputs.api == 'true'
+        run: |
+          node scripts/agent/build-rootfs.mjs packages/agent/dist linux-amd64
+          node scripts/agent/build-rootfs.mjs packages/agent/dist linux-arm64
+
       - name: Build API Docker image
         id: api-build
         if: needs.changes.outputs.api == 'true'

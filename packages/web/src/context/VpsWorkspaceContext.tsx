@@ -946,7 +946,7 @@ export function VpsWorkspaceSettingsPage() {
       <h2 className="text-lg font-semibold tracking-tight text-text">
         Settings for {vpsDisplayName(vps)}
       </h2>
-      <SettingsPanel overview={overview}>
+      <SettingsPanel overview={overview} vpsId={vps.id}>
       <SftpSettingsCard vps={vps} />
       <section aria-label="Docker management" className="mb-4 space-y-3 border border-line bg-panel p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">

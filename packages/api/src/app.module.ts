@@ -98,7 +98,7 @@ import {
   LOCAL_FILES_TRANSPORT,
   REMOTE_FILES_TRANSPORT,
 } from "./tokens.js";
-import { AI_REPOSITORY } from "./tokens.js";
+import { AI_REPOSITORY, AI_BUNDLE_TRANSPORT } from "./tokens.js";
 import {
   createJsonAiRepository,
   createPostgresAiRepository,
@@ -116,6 +116,8 @@ import { AiAgentController } from "./ai/ai-agent.controller.js";
 import { AiAgentService } from "./ai/ai-agent.service.js";
 import { AiReadToolsService } from "./ai/ai-read-tools.service.js";
 import { AiRetentionService } from "./ai/ai-retention.service.js";
+import { AiBundleService } from "./ai/ai-bundle.service.js";
+import { AiBundleOrchestrationService, SshAiBundleInstallTransport } from "./ai/ai-bundle-install.service.js";
 import { FLEET_REPOSITORY, FLEET_SERVICE } from "./tokens.js";
 import type { FleetRepository } from "./persistence/repositories/fleet.repository.js";
 import { FleetService } from "./agent-updates/fleet.service.js";
@@ -448,6 +450,13 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       BundledAgentService,
       LocalUpgradeService,
       AgentConvergenceService,
+      // AI bundle install orchestration (execmode plan slice 3b): default
+      // SSH transport over SshService + saved keys, overridable via the
+      // AI_BUNDLE_TRANSPORT token for tests.
+      SshAiBundleInstallTransport,
+      { provide: AI_BUNDLE_TRANSPORT, useExisting: SshAiBundleInstallTransport },
+      AiBundleService,
+      AiBundleOrchestrationService,
       {
         provide: FLEET_REPOSITORY,
         useValue: deps.fleet ?? repositories!.fleet,

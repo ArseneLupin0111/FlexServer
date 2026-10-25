@@ -27,6 +27,11 @@ export type AiPlanStep = {
 
 export type AiPlanStatus = "pending" | "approved" | "denied" | "expired" | "consumed";
 
+/** Shell execution mode (docs/ai-agent-autoupdate-execmode-plan.md Q3):
+ * "sandbox" confines via cgroup v2 + rootfs; "privileged" runs the root
+ * broker op without confinement (plan + per-command approval still apply). */
+export type AiExecMode = "sandbox" | "privileged";
+
 export type AiPlan = {
   planId: string;
   planVersion: number;
@@ -38,6 +43,9 @@ export type AiPlan = {
   providerRevision: number;
   policyRevision: number;
   capabilityRevision: number;
+  /** Stamped from the ACTIVE POLICY at propose time (never the model call);
+   * approve/dispatch re-checks policy.execMode against this → stale_plan. */
+  execMode: AiExecMode;
   steps: AiPlanStep[];
   preconditions: { key: string; expectedValue: unknown }[];
   recoverySteps?: AiPlanStep[];
@@ -165,6 +173,14 @@ export type AiPolicy = {
   dockerActionsEnabled: boolean;
   composeActionsEnabled: boolean;
   shellEnabled: boolean;
+  /** Shell execution mode; defaults to "sandbox". Legacy persisted rows
+   * without the field read as "sandbox" (fail-closed, execmode plan Q3). */
+  execMode: AiExecMode;
+  /** One-time privileged-risk acknowledgment (who/when). Retained forever —
+   * switching back to sandbox never clears it, so re-enabling needs no new
+   * ack. */
+  privilegedAcknowledgedAt: string | null;
+  privilegedAcknowledgedBy: string | null;
   fileReadScopes: string[];
   fileWriteScopes: string[];
   serviceProfileIds: string[];
@@ -184,9 +200,40 @@ export type AiCapability = {
   cgroupV2Available: boolean;
   namespacesAvailable: boolean;
   seccompAvailable: boolean;
+  /** Privileged (root broker, no confinement) availability probed by the
+   * agent helper; fail-closed false for claims from older agents. */
+  privilegedSupported: boolean;
+  privilegedUnsupportedReason?: string;
   profiles: string[];
   rootfsDigest?: string;
   profilesDigest?: string;
+};
+
+// ── AI bundle install jobs (docs/ai-agent-autoupdate-execmode-plan.md) ──
+
+export type AiBundleJobState = "pending" | "running" | "succeeded" | "failed";
+
+/** What asked for the install: an explicit button/toggle action (Q8), or the
+ * convergence tick comparing the bundled bundleId (Q7). */
+export type AiBundleJobTrigger = "manual" | "deliberate" | "convergence";
+
+/** Latest AI bundle install job for one VPS (one record per VPS; the record
+ * survives job replacement so lastInstalledBundleId is durable). */
+export type AiBundleJobRecord = {
+  vpsId: string;
+  jobId: string;
+  state: AiBundleJobState;
+  /** bundleId this job installs (sha256 over sorted {relativePath, sha256}). */
+  bundleId: string;
+  trigger: AiBundleJobTrigger;
+  /** Redacted failure reason; null/undefined while pending/running/succeeded. */
+  error?: string;
+  startedAt: string;
+  finishedAt?: string;
+  /** BundleId of the most recent successful install on the VPS; carried
+   * forward across job replacement. Convergence compares this against the
+   * bundled bundleId (Q7). */
+  lastInstalledBundleId?: string;
 };
 
 export type AiConversation = {
@@ -284,6 +331,10 @@ export type AiHostCapabilitiesReport = {
   cgroupV2: boolean;
   namespaces: boolean;
   seccomp: boolean;
+  /** Optional/additive (execmode plan): absent from older agents → the
+   * persisted capability records privilegedSupported false (fail-closed). */
+  privilegedSupported?: boolean;
+  privilegedUnsupportedReason?: string;
   rootfsDigest: string;
   profilesDigest: string;
   profiles: string[];

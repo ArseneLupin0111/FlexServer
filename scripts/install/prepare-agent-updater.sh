@@ -591,7 +591,11 @@ refresh_helpers_if_idle() {
   INSTALLER_TMP_FILES+=("$tmp_ai_helper")
   local have_ai_helper=false
   if [[ -n "$container" && "$DRY_RUN" != "true" ]]; then
-    if docker cp "${container}:/app/agent/ai-host-helper-linux-${arch}" "$tmp_ai_helper" 2>/dev/null && [[ -s "$tmp_ai_helper" ]]; then
+    if ! docker cp "${container}:/app/agent/ai/ai-host-helper-linux-${arch}" "$tmp_ai_helper" 2>/dev/null; then
+      # Pre-bundle-layout image: artifacts lived directly under /app/agent/.
+      docker cp "${container}:/app/agent/ai-host-helper-linux-${arch}" "$tmp_ai_helper" 2>/dev/null || true
+    fi
+    if [[ -s "$tmp_ai_helper" ]]; then
       have_ai_helper=true
       chmod 0755 "$tmp_ai_helper"
     fi

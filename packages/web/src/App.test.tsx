@@ -1919,6 +1919,342 @@ describe("React dashboard", () => {
       });
     });
 
+    // ── Settings Agent card (AI policy, exec mode, AI bundle) ──────────
+
+    const agentPolicyFixture = {
+      vpsId: "vps-1",
+      aiEnabled: false,
+      readEnabled: true,
+      dockerActionsEnabled: true,
+      composeActionsEnabled: true,
+      shellEnabled: false,
+      execMode: "sandbox",
+      privilegedAcknowledgedAt: null as string | null,
+      privilegedAcknowledgedBy: null as string | null,
+      fileReadScopes: [],
+      fileWriteScopes: [],
+      serviceProfileIds: [],
+      sendLogsToProvider: false,
+      sendFilesToProvider: false,
+      revision: 11,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    const agentUpdateFixture = {
+      installed: {
+        version: "0.9.0",
+        buildId: "aaaa1111bbbb",
+        lastSeenAt: new Date().toISOString(),
+        fresh: true,
+      },
+      available: null,
+      compatibility: { compatible: true, apiContractVersion: 3, reason: "ok" },
+      updater: { installed: true, healthy: true, lastSeenAt: new Date().toISOString() },
+      state: "current",
+      job: null,
+      automation: { state: "current", reason: null, targetBuildId: null, retryAllowed: false },
+    };
+
+    const aiBundleFixture = {
+      available: true,
+      reason: undefined as string | undefined,
+      bundleId: "b1234567890abcdef",
+      installed: true,
+      lastInstalledBundleId: "b1234567890abcdef" as string | null,
+      lastJob: null as {
+        state: string;
+        error: string | null;
+        startedAt: string;
+        finishedAt: string | null;
+      } | null,
+      capability: {
+        supported: false,
+        reason: "sandbox_unavailable: cgroup v2 is not mounted on this host",
+        agentVersion: "0.9.0",
+        privilegedSupported: true,
+      },
+    };
+
+    const aiCapabilityFixture = {
+      vpsId: "vps-1",
+      supported: false,
+      reason: "legacy capability reason",
+      freshness: "2026-01-01T00:00:00.000Z",
+      agentVersion: "0.9.0",
+      protocolVersion: 3,
+      cgroupV2Available: false,
+      namespacesAvailable: true,
+      seccompAvailable: true,
+      profiles: [],
+    };
+
+    function aiOk(data: unknown, status = 200) {
+      return { ok: true, status, json: async () => ({ data }) };
+    }
+
+    // Fetch server for the settings route: emulates the policy PATCH CAS
+    // (server-side revision bump + privileged acknowledgment recording) and
+    // the AI bundle endpoints. `bundle === null` simulates an older API
+    // without the bundle route (404) so the card must degrade gracefully.
+    function mockSettingsAiServer(options: {
+      policy: typeof agentPolicyFixture;
+      bundle?: typeof aiBundleFixture | null;
+    }) {
+      const state = { ...options.policy };
+      const patchBodies: Record<string, unknown>[] = [];
+      fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (url === "/api/auth/me") return authOk();
+        if (url === "/api/vps/vps-1/ai/policy" && init?.method === "PATCH") {
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          patchBodies.push(body);
+          state.revision += 1;
+          if (typeof body.aiEnabled === "boolean") state.aiEnabled = body.aiEnabled;
+          if (typeof body.shellEnabled === "boolean") state.shellEnabled = body.shellEnabled;
+          if (body.execMode === "privileged" && body.acknowledgePrivileged === true) {
+            state.privilegedAcknowledgedAt = "2026-10-25T10:00:00.000Z";
+            state.privilegedAcknowledgedBy = "admin-session";
+          }
+          if (body.execMode === "privileged" || body.execMode === "sandbox") {
+            state.execMode = body.execMode;
+          }
+          return aiOk(state);
+        }
+        if (url === "/api/vps/vps-1/ai/policy") return aiOk(state);
+        if (url === "/api/vps/vps-1/ai/bundle") {
+          if (options.bundle === null) {
+            return {
+              ok: false,
+              status: 404,
+              json: async () => ({
+                error: { code: "NOT_FOUND", message: "AI bundle status is unavailable on this API." },
+              }),
+            };
+          }
+          return aiOk(options.bundle ?? aiBundleFixture);
+        }
+        if (url === "/api/vps/vps-1/ai/bundle/install" && init?.method === "POST") {
+          return aiOk({
+            state: "pending",
+            error: null,
+            startedAt: "2026-10-25T10:00:00.000Z",
+            finishedAt: null,
+          });
+        }
+        if (url === "/api/vps/vps-1/ai/capability") return aiOk(aiCapabilityFixture);
+        if (url === "/api/vps/vps-1/agent-update") return aiOk(agentUpdateFixture);
+        const data =
+          url === "/api/dashboard" ? dashboardData
+          : url === "/api/vps" ? [{ ...twoServers[0], agentStatus: "online" as const }, twoServers[1]]
+          : url === "/api/vps/vps-1/files/capabilities"
+            ? { enabled: false, available: false, transport: "sftp", reason: "disabled" }
+            : [];
+        return aiOk(data);
+      });
+      return { state, patchBodies };
+    }
+
+    it("renders the Agent card with AI and shell toggles, execution mode, and agent version", async () => {
+      mockSettingsAiServer({ policy: agentPolicyFixture });
+
+      renderApp(["/vps/vps-1/settings"]);
+
+      expect(await screen.findByRole("heading", { name: "Settings for web-01" })).toBeInTheDocument();
+      const card = await screen.findByTestId("agent-settings-card");
+      expect(card).toHaveAttribute("data-policy-revision", "11");
+
+      const aiToggle = within(card).getByTestId("agent-ai-toggle");
+      expect(aiToggle).toHaveAttribute("aria-checked", "false");
+      const shellToggle = within(card).getByTestId("agent-shell-toggle");
+      expect(shellToggle).toHaveAttribute("aria-checked", "false");
+
+      const sandbox = within(card).getByTestId("exec-mode-sandbox");
+      const privileged = within(card).getByTestId("exec-mode-privileged");
+      expect(sandbox).toHaveAttribute("aria-pressed", "true");
+      expect(privileged).toHaveAttribute("aria-pressed", "false");
+
+      const versionLine = within(card).getByTestId("agent-version-line");
+      expect(versionLine).toHaveTextContent("v0.9.0");
+      expect(versionLine).toHaveTextContent("aaaa1111bbbb");
+      expect(versionLine).toHaveTextContent(/last seen/);
+      expect(within(card).getByText("Fresh")).toBeInTheDocument();
+
+      // Bundle row: installed + short bundle id + capability diagnosis.
+      const bundleLine = within(card).getByTestId("ai-bundle-line");
+      expect(bundleLine).toHaveTextContent("Installed");
+      expect(bundleLine).toHaveTextContent("b1234567890a");
+      expect(within(card).getByText("Sandbox unavailable")).toBeInTheDocument();
+      expect(
+        within(card).getByTestId("ai-capability-reason"),
+      ).toHaveTextContent("cgroup v2 is not mounted on this host");
+      expect(within(card).getByText("Privileged ready")).toBeInTheDocument();
+    });
+
+    it("PATCHes AI and shell toggles individually and follows the returned policy revision", async () => {
+      const { state, patchBodies } = mockSettingsAiServer({ policy: agentPolicyFixture });
+
+      renderApp(["/vps/vps-1/settings"]);
+
+      const aiToggle = await screen.findByTestId("agent-ai-toggle");
+      await waitFor(() => expect(aiToggle).toBeEnabled());
+      fireEvent.click(aiToggle);
+
+      await waitFor(() => {
+        expect(aiToggle).toHaveAttribute("aria-checked", "true");
+      });
+      expect(patchBodies[0]).toEqual({ aiEnabled: true });
+
+      const shellToggle = screen.getByTestId("agent-shell-toggle");
+      fireEvent.click(shellToggle);
+
+      await waitFor(() => {
+        expect(shellToggle).toHaveAttribute("aria-checked", "true");
+      });
+      expect(patchBodies[1]).toEqual({ shellEnabled: true });
+      expect(state.revision).toBe(13);
+      expect(screen.getByTestId("agent-settings-card")).toHaveAttribute(
+        "data-policy-revision",
+        "13",
+      );
+    });
+
+    it("requires the one-time privileged acknowledgment, then switches directly", async () => {
+      const { state, patchBodies } = mockSettingsAiServer({ policy: agentPolicyFixture });
+
+      renderApp(["/vps/vps-1/settings"]);
+
+      const privileged = await screen.findByTestId("exec-mode-privileged");
+      await waitFor(() => expect(privileged).toBeEnabled());
+      fireEvent.click(privileged);
+
+      // The modal blocks the switch: confirm stays disabled without the
+      // checkbox and no PATCH may fire.
+      const modal = await screen.findByTestId("exec-ack-modal");
+      const confirm = within(modal).getByTestId("exec-ack-confirm");
+      expect(confirm).toBeDisabled();
+      expect(patchBodies).toHaveLength(0);
+
+      fireEvent.click(within(modal).getByTestId("exec-ack-checkbox"));
+      expect(confirm).toBeEnabled();
+      fireEvent.click(confirm);
+
+      await waitFor(() => {
+        expect(screen.queryByTestId("exec-ack-modal")).toBeNull();
+      });
+      expect(patchBodies[0]).toEqual({
+        execMode: "privileged",
+        acknowledgePrivileged: true,
+      });
+      expect(state.privilegedAcknowledgedAt).toBe("2026-10-25T10:00:00.000Z");
+      await waitFor(() => {
+        expect(privileged).toHaveAttribute("aria-pressed", "true");
+      });
+
+      // Back to sandbox PATCHes directly (the ack is never cleared)...
+      const sandbox = screen.getByTestId("exec-mode-sandbox");
+      fireEvent.click(sandbox);
+      await waitFor(() => {
+        expect(sandbox).toHaveAttribute("aria-pressed", "true");
+      });
+      expect(patchBodies[1]).toEqual({ execMode: "sandbox" });
+
+      // ...and switching to privileged again skips the modal.
+      fireEvent.click(screen.getByTestId("exec-mode-privileged"));
+      expect(screen.queryByTestId("exec-ack-modal")).toBeNull();
+      await waitFor(() => {
+        expect(patchBodies[2]).toEqual({ execMode: "privileged" });
+      });
+      expect(patchBodies).toHaveLength(3);
+    });
+
+    it("starts an AI bundle install, disables the button while a job runs, and shows the failed error", async () => {
+      const { patchBodies } = mockSettingsAiServer({
+        policy: agentPolicyFixture,
+        bundle: { ...aiBundleFixture, installed: false, lastInstalledBundleId: null },
+      });
+
+      renderApp(["/vps/vps-1/settings"]);
+
+      const install = await screen.findByTestId("ai-bundle-install");
+      await waitFor(() => expect(install).toBeEnabled());
+      expect(install).toHaveTextContent("Install AI bundle");
+
+      fireEvent.click(install);
+
+      await waitFor(() => {
+        expect(screen.getByTestId("ai-bundle-line")).toHaveTextContent("install queued");
+      });
+      // The install went through the dedicated bundle route, not the policy.
+      expect(
+        fetchMock.mock.calls.some(
+          ([url, init]) =>
+            url === "/api/vps/vps-1/ai/bundle/install" && init?.method === "POST",
+        ),
+      ).toBe(true);
+      expect(patchBodies).toHaveLength(0);
+      // Active job disables the button and explains why.
+      expect(install).toBeDisabled();
+      expect(
+        screen.getByText("An install or update job is already running."),
+      ).toBeInTheDocument();
+    });
+
+    it("shows the failed bundle job error and keeps the install retry available", async () => {
+      mockSettingsAiServer({
+        policy: agentPolicyFixture,
+        bundle: {
+          ...aiBundleFixture,
+          lastJob: {
+            state: "failed",
+            error: "ssh: checksum mismatch for ai-executor",
+            startedAt: "2026-10-25T09:00:00.000Z",
+            finishedAt: "2026-10-25T09:01:00.000Z",
+          },
+        },
+      });
+
+      renderApp(["/vps/vps-1/settings"]);
+
+      expect(
+        await screen.findByTestId("ai-bundle-job-error"),
+      ).toHaveTextContent("ssh: checksum mismatch for ai-executor");
+      expect(screen.getByTestId("ai-bundle-install")).toBeEnabled();
+    });
+
+    it("degrades gracefully when the bundle endpoint is missing and falls back to the capability diagnosis", async () => {
+      mockSettingsAiServer({ policy: agentPolicyFixture, bundle: null });
+
+      renderApp(["/vps/vps-1/settings"]);
+
+      const bundleLine = await screen.findByTestId("ai-bundle-line");
+      expect(bundleLine).toHaveTextContent(
+        "AI bundle status is unavailable on this API.",
+      );
+      expect(screen.getByTestId("ai-bundle-install")).toBeDisabled();
+      expect(
+        screen.getByTestId("ai-capability-reason"),
+      ).toHaveTextContent("legacy capability reason");
+      // The standalone capability endpoint cannot report privileged support.
+      expect(screen.queryByText("Privileged ready")).toBeNull();
+    });
+
+    it("surfaces the server bundle degrade reason when artifacts are unavailable", async () => {
+      mockSettingsAiServer({
+        policy: agentPolicyFixture,
+        bundle: {
+          ...aiBundleFixture,
+          available: false,
+          reason: "AI bundle directory is empty: /app/agent/ai",
+        },
+      });
+
+      renderApp(["/vps/vps-1/settings"]);
+
+      expect(
+        await screen.findByText("AI bundle directory is empty: /app/agent/ai"),
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("ai-bundle-install")).toBeDisabled();
+    });
+
   });
 
   describe("Docker container history targets", () => {

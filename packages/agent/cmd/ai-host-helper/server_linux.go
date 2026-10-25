@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -180,6 +181,10 @@ func handleConn(ctx context.Context, conn net.Conn, profiles *ai.ProfileRegistry
 		handleCgroupKill(conn, req.Params, cfg)
 	case "task_execute":
 		handleTaskExecute(ctx, conn, req.Params, cfg)
+	case "privileged_probe":
+		handlePrivilegedProbe(conn)
+	case "privileged_execute":
+		handlePrivilegedExecute(ctx, conn, req.Params, cfg)
 	default:
 		sendResp(conn, false, fmt.Sprintf("unknown operation %q", req.Op), nil)
 	}
@@ -975,6 +980,155 @@ func handleTaskExecute(ctx context.Context, conn net.Conn, params json.RawMessag
 	go streamLines(stderrPipe, "stderr")
 
 	// Wait for process completion or context cancellation
+	waitErr := cmd.Wait()
+	<-readDone
+	<-readDone
+
+	exitCode := 0
+	terminated := false
+	if waitErr != nil {
+		if exitErr, ok := waitErr.(*exec.ExitError); ok {
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+				exitCode = status.ExitStatus()
+			} else {
+				exitCode = exitErr.ExitCode()
+			}
+		} else {
+			exitCode = 1
+		}
+	}
+	if execCtx.Err() != nil {
+		terminated = true
+		exitCode = 137
+	}
+
+	sendStreamMsg(conn, ai.TaskExecuteStreamMessage{
+		Stream:     "exit",
+		ExitCode:   exitCode,
+		Terminated: terminated,
+	})
+}
+
+// handlePrivilegedProbe answers the privileged execution capability probe. It
+// must stay cheap and side-effect free: the AI worker calls it once at startup
+// and exposes the answer in its claim capabilities. Helpers too old to know the
+// op fall through to the "unknown operation" error branch, which the worker
+// maps to supported=false (fail closed).
+func handlePrivilegedProbe(conn net.Conn) {
+	sendResp(conn, true, "", ai.PrivilegedProbeResult{Supported: true})
+}
+
+// handlePrivilegedExecute runs a script via /bin/sh -c with the helper's own
+// privileges (typically root) and streams stdout/stderr back over the same
+// stream framing as task_execute.
+//
+// SECURITY BOUNDARY (documented, accepted design): this operation performs NO
+// confinement of any kind — no namespaces, no cgroups, no rootfs pivot, no
+// path deny-list. The child runs with full host access as the helper user.
+// The enforcement boundary lives upstream in the API: per-command human
+// approval, protected-target checks, plan/policy revision CAS, digest
+// preconditions, the audit/evidence trail, and output redaction. See
+// docs/security.md before widening this operation in any way.
+func handlePrivilegedExecute(ctx context.Context, conn net.Conn, params json.RawMessage, cfg ServerConfig) {
+	var p ai.PrivilegedExecuteParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		sendStreamMsg(conn, ai.TaskExecuteStreamMessage{Stream: "error", Error: "bad privileged_execute params"})
+		return
+	}
+
+	if err := ai.ValidateTaskID(p.TaskID); err != nil {
+		sendStreamMsg(conn, ai.TaskExecuteStreamMessage{
+			Stream: "error",
+			Error:  fmt.Sprintf("invalid taskId: %v", err),
+		})
+		return
+	}
+
+	// Same script size cap the sandbox path enforces (API shell plan step cap).
+	if len(p.Script) == 0 || len(p.Script) > ai.MaxScriptBytes {
+		sendStreamMsg(conn, ai.TaskExecuteStreamMessage{
+			Stream: "error",
+			Error:  fmt.Sprintf("invalid script length %d (must be 1..%d bytes)", len(p.Script), ai.MaxScriptBytes),
+		})
+		return
+	}
+
+	// Same per-task host lock the sandbox task_execute path takes.
+	if err := applications.AcquireHostScopeAt(cfg.AgentStateDir, "ai:"+p.TaskID, "ai-host-helper", p.TaskID, true, 0); err != nil {
+		sendStreamMsg(conn, ai.TaskExecuteStreamMessage{
+			Stream: "error",
+			Error:  fmt.Sprintf("ai task admission blocked by host lock: %v", err),
+		})
+		return
+	}
+	defer func() {
+		_ = applications.ReleaseHostScopeAt(cfg.AgentStateDir, "ai:"+p.TaskID, "ai-host-helper", p.TaskID)
+	}()
+
+	// Clamp the timeout to the same bounded range the sandbox path uses.
+	timeout := time.Duration(p.TimeoutSeconds) * time.Second
+	if timeout <= 0 || timeout > ai.MaxTimeoutSeconds*time.Second {
+		timeout = ai.DefaultTimeoutSeconds * time.Second
+	}
+
+	// Audit trail: log the op metadata only — the script itself may contain
+	// secrets and is audited upstream via the redacted output + evidence trail.
+	log.Printf("ai-host-helper: privileged_execute task=%s command=%s timeout=%s (unconfined root op, human-approved upstream)", p.TaskID, p.CommandID, timeout)
+
+	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(execCtx, "/bin/sh", "-c", p.Script)
+	// Own process group so the timeout kill reaches the whole script tree,
+	// not just the direct /bin/sh child.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = ai.TermGracePeriod
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		sendStreamMsg(conn, ai.TaskExecuteStreamMessage{
+			Stream: "error",
+			Error:  fmt.Sprintf("creating stdout pipe: %v", err),
+		})
+		return
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		sendStreamMsg(conn, ai.TaskExecuteStreamMessage{
+			Stream: "error",
+			Error:  fmt.Sprintf("creating stderr pipe: %v", err),
+		})
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		sendStreamMsg(conn, ai.TaskExecuteStreamMessage{
+			Stream: "error",
+			Error:  fmt.Sprintf("starting privileged shell: %v", err),
+		})
+		return
+	}
+
+	readDone := make(chan struct{}, 2)
+	streamLines := func(r io.Reader, streamName string) {
+		defer func() { readDone <- struct{}{} }()
+		sc := bufio.NewScanner(r)
+		sBuf := make([]byte, 16*1024)
+		sc.Buffer(sBuf, 64*1024)
+		for sc.Scan() {
+			sendStreamMsg(conn, ai.TaskExecuteStreamMessage{
+				Stream: streamName,
+				Data:   sc.Text() + "\n",
+			})
+		}
+	}
+
+	go streamLines(stdoutPipe, "stdout")
+	go streamLines(stderrPipe, "stderr")
+
 	waitErr := cmd.Wait()
 	<-readDone
 	<-readDone

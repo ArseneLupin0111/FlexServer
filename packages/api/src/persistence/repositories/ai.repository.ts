@@ -11,6 +11,10 @@ import {
   AI_HISTORY_MAX_PAGE,
   AI_TERMINAL_TASK_STATES,
   AiPersistenceConflictError,
+  type AiBundleJobFinishInput,
+  type AiBundleJobRecord,
+  type AiBundleJobStartInput,
+  type AiBundleJobStartResult,
   type AiCapabilityUpsertInput,
   type AiCheckpointAdvanceInput,
   type AiConversationAppendMessageInput,
@@ -24,7 +28,7 @@ import {
   type AiTaskCreateInput,
   type AiTaskTransitionInput,
 } from "./ai.persistence.js";
-import type { AiConversation, AiConversationCheckpoint, AiConversationMessage, AiAuditEvent, AiCapability, AiExecutionBlob, AiExecutionReceipt, AiHostCommand, AiOutboxEntry, AiPlan, AiPolicy, AiProviderProfileInternal, AiProviderSettingsInternal, AiTask, AiTaskState, AiTaskUsage } from "../../ai/ai.models.js";
+import type { AiConversation, AiConversationCheckpoint, AiConversationMessage, AiAuditEvent, AiBundleJobState, AiCapability, AiExecutionBlob, AiExecutionReceipt, AiHostCommand, AiOutboxEntry, AiPlan, AiPolicy, AiProviderProfileInternal, AiProviderSettingsInternal, AiTask, AiTaskState, AiTaskUsage } from "../../ai/ai.models.js";
 import {
   readJsonFile,
   readModifyWriteJsonFile,
@@ -35,11 +39,23 @@ import {
 const bumpRevision = (revision: number): number => revision + 1;
 // Absent-policy default: observation and approval-gated management stay
 // available by default; shell and provider-egress grants remain opt-in.
-const defaultAiPolicy = (vpsId: string): AiPolicy => ({
+// Shell runs sandbox by default (execmode plan Q3).
+export const defaultAiPolicy = (vpsId: string): AiPolicy => ({
   vpsId, aiEnabled: true, readEnabled: true, dockerActionsEnabled: true,
-  composeActionsEnabled: true, shellEnabled: false, fileReadScopes: [],
-  fileWriteScopes: [], serviceProfileIds: [], sendLogsToProvider: false,
-  sendFilesToProvider: false, revision: 0, updatedAt: new Date(0).toISOString(),
+  composeActionsEnabled: true, shellEnabled: false, execMode: "sandbox",
+  privilegedAcknowledgedAt: null, privilegedAcknowledgedBy: null,
+  fileReadScopes: [], fileWriteScopes: [], serviceProfileIds: [],
+  sendLogsToProvider: false, sendFilesToProvider: false, revision: 0,
+  updatedAt: new Date(0).toISOString(),
+});
+/** Read normalization (execmode plan contract): rows persisted before
+ * execMode existed (and any corrupt value) read as "sandbox"; acknowledgment
+ * fields read as null when absent. Ack fields are never cleared by this. */
+const normalizePolicy = (policy: AiPolicy): AiPolicy => ({
+  ...policy,
+  execMode: policy.execMode === "privileged" ? "privileged" : "sandbox",
+  privilegedAcknowledgedAt: policy.privilegedAcknowledgedAt ?? null,
+  privilegedAcknowledgedBy: policy.privilegedAcknowledgedBy ?? null,
 });
 const refreshPolicy = (base: AiPolicy, patch: AiPolicyUpdateInput["patch"], now: string): AiPolicy =>
   ({ ...base, ...patch, vpsId: base.vpsId, revision: bumpRevision(base.revision), updatedAt: now });
@@ -84,6 +100,9 @@ export type StoredAiState = {
   policies: AiPolicy[];
   capabilities: Record<string, AiCapability>;
   auditEvents: AiAuditEventRow[];
+  /** Latest AI bundle install job per VPS (execmode plan); optional for
+   * documents persisted before this field existed (back-compat). */
+  bundleJobs?: Record<string, AiBundleJobRecord>;
   /** Per-conversation compaction checkpoints; optional because documents
    *  persisted before this field existed load without it (back-compat). */
   checkpoints?: StoredAiCheckpoint[];
@@ -113,7 +132,19 @@ const emptyAiState = (): StoredAiState => ({
   auditEvents: [],
   checkpoints: [],
   providers: [],
+  bundleJobs: {},
 });
+
+const AI_BUNDLE_JOB_STATES: readonly AiBundleJobState[] = [
+  "pending",
+  "running",
+  "succeeded",
+  "failed"];
+const bundleJobsOf = (state: StoredAiState): Record<string, AiBundleJobRecord> =>
+  (state.bundleJobs ??= {});
+const bundleJobError = (raw: string): string =>
+  // Redact secrets and bound the persisted failure reason.
+  redactString(raw).slice(0, 500);
 
 const defaultUsage = (): AiTaskUsage => ({
   inputTokens: 0,
@@ -1063,7 +1094,8 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
 
     async getAiPolicy(vpsId) {
       const state = await exec((s) => s);
-      return state.policies.find((p) => p.vpsId === vpsId) ?? defaultAiPolicy(vpsId);
+      const existing = state.policies.find((p) => p.vpsId === vpsId);
+      return existing ? normalizePolicy(existing) : defaultAiPolicy(vpsId);
     },
 
     async updateAiPolicy(input) {
@@ -1076,7 +1108,9 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
             `vps ${input.vpsId} policy revision ${existing.revision} != expected ${input.expectedRevision}`,
           );
         }
-        const base: AiPolicy = existing ?? defaultAiPolicy(input.vpsId);
+        // Normalize the base so a legacy (pre-execMode) row cannot leak a
+        // missing execMode into the merged result.
+        const base: AiPolicy = existing ? normalizePolicy(existing) : defaultAiPolicy(input.vpsId);
         const next = refreshPolicy(base, input.patch, now);
         if (!existing) state.policies.push(next);
         else state.policies[state.policies.indexOf(existing)] = next;
@@ -1095,6 +1129,81 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
       return exec((state) => {
         state.capabilities[capability.vpsId] = capability;
         return capability;
+      });
+    },
+
+    async getAiBundleJob(vpsId) {
+      const state = await exec((s) => s);
+      return bundleJobsOf(state)[vpsId];
+    },
+
+    async startAiBundleJob(input): Promise<AiBundleJobStartResult> {
+      const now = isoNow(input.now);
+      return exec((state) => {
+        const jobs = bundleJobsOf(state);
+        const existing = jobs[input.vpsId];
+        if (
+          existing &&
+          (existing.state === "pending" || existing.state === "running")
+        ) {
+          return { job: existing, created: false };
+        }
+        const job: AiBundleJobRecord = {
+          vpsId: input.vpsId,
+          jobId: input.jobId ?? randomUUID(),
+          state: "pending",
+          bundleId: input.bundleId,
+          trigger: input.trigger ?? "manual",
+          startedAt: now,
+          lastInstalledBundleId: existing?.lastInstalledBundleId,
+        };
+        jobs[input.vpsId] = job;
+        return { job, created: true };
+      });
+    },
+
+    async markAiBundleJobRunning(vpsId, jobId, now) {
+      const at = isoNow(now);
+      return exec((state) => {
+        const job = bundleJobsOf(state)[vpsId];
+        if (!job || job.jobId !== jobId) {
+          throw new AiPersistenceConflictError(
+            "task_conflict",
+            `ai bundle job ${jobId} missing for vps ${vpsId}`,
+          );
+        }
+        if (job.state === "succeeded" || job.state === "failed") return job;
+        // Idempotent: the original pending startedAt is preserved on the
+        // pending->running transition (used as the capability-claim floor).
+        if (job.state === "pending") {
+          job.state = "running";
+          job.startedAt = at;
+        }
+        return job;
+      });
+    },
+
+    async finishAiBundleJob(input): Promise<AiBundleJobRecord> {
+      const at = isoNow(input.now);
+      return exec((state) => {
+        const job = bundleJobsOf(state)[input.vpsId];
+        if (!job || job.jobId !== input.jobId) {
+          throw new AiPersistenceConflictError(
+            "task_conflict",
+            `ai bundle job ${input.jobId} missing for vps ${input.vpsId}`,
+          );
+        }
+        if (input.outcome === "succeeded") {
+          job.state = "succeeded";
+          job.lastInstalledBundleId = job.bundleId;
+          delete job.error;
+        } else {
+          if (job.state === "succeeded") return job;
+          job.state = "failed";
+          job.error = input.error ? bundleJobError(input.error) : "install_failed";
+        }
+        job.finishedAt = at;
+        return job;
       });
     },
 

@@ -248,7 +248,14 @@ func (c *HelperClient) ExecuteTask(ctx context.Context, params TaskExecuteParams
 	if err := ValidateTaskID(params.TaskID); err != nil {
 		return nil, fmt.Errorf("invalid taskId: %w", err)
 	}
+	return c.streamExecute(ctx, "task_execute", params, outputCb)
+}
 
+// streamExecute opens the helper socket, frames a single HelperRequest for op,
+// and consumes the streamed TaskExecuteStreamMessage reply (stdout/stderr/exit/
+// error lines) until EOF, mirroring the wire protocol of the sandbox task
+// execution. Shared by task_execute and privileged_execute.
+func (c *HelperClient) streamExecute(ctx context.Context, op string, params any, outputCb func(chunk string, isStderr bool)) (*ShellExecutionResult, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", c.socketPath)
 	if err != nil {
@@ -261,7 +268,7 @@ func (c *HelperClient) ExecuteTask(ctx context.Context, params TaskExecuteParams
 		return nil, fmt.Errorf("marshal params: %w", err)
 	}
 	req := HelperRequest{
-		Op:     "task_execute",
+		Op:     op,
 		Params: rawParams,
 	}
 	reqBytes, err := json.Marshal(req)
@@ -345,6 +352,53 @@ func (c *HelperClient) ExecuteTask(ctx context.Context, params TaskExecuteParams
 		StderrSnippet: stderrSnippet.String(),
 		Terminated:    wasTerminated,
 	}, nil
+}
+
+// PrivilegedProbeParams is the (empty) param for op "privileged_probe".
+type PrivilegedProbeParams struct{}
+
+// PrivilegedProbeResult is the data returned for "privileged_probe".
+type PrivilegedProbeResult struct {
+	Supported bool `json:"supported"`
+}
+
+// ProbePrivileged asks the helper whether it supports privileged (root,
+// non-confined) script execution. An old helper that does not know the op
+// answers with an error, which maps to supported=false here: callers fail
+// closed when the helper is missing, unreachable, or outdated.
+func (c *HelperClient) ProbePrivileged(ctx context.Context) (bool, error) {
+	var res PrivilegedProbeResult
+	if err := c.call(ctx, "privileged_probe", PrivilegedProbeParams{}, &res); err != nil {
+		return false, err
+	}
+	if !res.Supported {
+		return false, fmt.Errorf("%w: helper reports privileged execution unsupported", ErrHelperFailed)
+	}
+	return true, nil
+}
+
+// PrivilegedExecuteParams is sent to helper for op "privileged_execute". Unlike
+// TaskExecuteParams there is no confinement identity: the script runs with the
+// helper's own (root) privileges under the upstream per-command approval boundary.
+type PrivilegedExecuteParams struct {
+	TaskID         string `json:"taskId"`
+	CommandID      string `json:"commandId"`
+	Script         string `json:"script"`
+	TimeoutSeconds int    `json:"timeoutSeconds"`
+}
+
+// ExecutePrivileged requests the root helper to run the script unconfined with
+// root privileges and streams output back. Transport, framing, and streaming
+// mirror ExecuteTask exactly; the caller owns the human-approval/redaction
+// boundary upstream of this call.
+func (c *HelperClient) ExecutePrivileged(ctx context.Context, params PrivilegedExecuteParams, outputCb func(chunk string, isStderr bool)) (*ShellExecutionResult, error) {
+	if c.socketPath == "" {
+		return nil, ErrHelperUnavailable
+	}
+	if err := ValidateTaskID(params.TaskID); err != nil {
+		return nil, fmt.Errorf("invalid taskId: %w", err)
+	}
+	return c.streamExecute(ctx, "privileged_execute", params, outputCb)
 }
 
 // ConfigApplyParams specifies a privileged CAS mutation routed via helper.

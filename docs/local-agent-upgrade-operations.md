@@ -77,7 +77,7 @@ Host-level lifecycle and lock verification confirmed:
 
 ## Bundled agent source and updater architecture
 
-The API container packages verified Linux amd64/arm64 agent and updater binaries (`/app/agent/vps-agent-linux-amd64` and `/app/agent/vps-updater-linux-amd64`, or repository `packages/agent/dist/`, configurable via `AGENT_BINARY_PATH`).
+The API container packages verified Linux amd64/arm64 agent and updater binaries (`/app/agent/vps-agent-linux-amd64` and `/app/agent/vps-updater-linux-amd64`, or repository `packages/agent/dist/`, configurable via `AGENT_BINARY_PATH`). It additionally packages the complete AI runtime bundle under `/app/agent/ai/` — see [AI bundle layout and convergence](#ai-bundle-layout-and-convergence-appagentai) below.
 
 On startup, `BundledAgentService` inspects the bundled agent binary's ELF64 header:
 - Validates 64-bit little-endian ELF format for Linux (`ELFCLASS64`, `ELFDATA2LSB`, `OSABI_NONE`/`OSABI_LINUX`).
@@ -96,6 +96,23 @@ When an admin confirms an upgrade in the dashboard:
 7. Success is determined **only** when the agent publishes a fresh heartbeat carrying the new build ID to `POST /api/agent/metrics` before the deadline.
 
 No external signing keys (`AGENT_RELEASE_SIGNING_KEY`), public keys (`AGENT_RELEASE_PUBLIC_KEY`), or pointer URLs (`AGENT_RELEASE_MANIFEST_URL`) are required for local updates.
+
+## AI bundle layout and convergence (`/app/agent/ai/`)
+
+Since 2026-10-25 the API image bundles the AI runtime in a dedicated directory `/app/agent/ai/`:
+
+- `ai-executor-linux-amd64`, `ai-executor-linux-arm64`, `ai-host-helper-linux-amd64`, `ai-host-helper-linux-arm64` — built in the Dockerfile `agent-builder` stage (both architectures).
+- `rootfs-linux-amd64.tar.gz`, `rootfs-linux-amd64.manifest.json`, `rootfs-linux-arm64.tar.gz`, `rootfs-linux-arm64.manifest.json` — the pinned sandbox rootfs.
+- `profiles/` — committed service profiles (copied from `packages/agent/profiles`).
+- `install-local-agent.sh` — the AI installer entry point.
+
+The rootfs artifacts are **not** built inside the Dockerfile. The CI `Verify` job runs a dedicated step (id `ai-rootfs`) that executes `node scripts/agent/build-rootfs.mjs packages/agent/dist linux-amd64` and `… linux-arm64` **before** `docker build`. The script extracts BusyBox from one immutable pinned image (`busybox:1.36.1-musl@sha256:3c6ae800…`), verifies the exact per-architecture SHA-256, and fails closed if Docker is unavailable, extraction fails, or any digest mismatches. The tarballs and manifests are written into the build context (`packages/agent/dist`, selectively re-included via `.dockerignore`), and the Dockerfile `COPY`s them into `/app/agent/ai/` — skipping the CI step therefore fails the image build on the missing `COPY` source by design.
+
+### First install and version convergence
+
+- **First install is deliberate (Q8):** the API schedules an SSH installer job — using the VPS's saved SSH credentials, uploading hash-verified artifacts from `/app/agent/ai/` to a host staging directory and running `install-local-agent.sh --install-ai` — only when an administrator takes an explicit action: toggling AI on (off→on), enabling shell execution, changing `execMode`, or pressing the install/update button on the Settings "Agent" card. Ordinary deploys and the default `aiEnabled` state never push the bundle to a host that does not have it. `POST /api/vps/:id/ai/bundle/install` (idempotent per running job) and `GET /api/vps/:id/ai/bundle` expose the installed bundle ID, last job state, and capability report.
+- **Supersedes the "update only if already installed" rule (Q7):** the previous rule that AI components are updated only if already installed and never silently activated is **superseded for this path**. Once the bundle is installed on a host, convergence compares the deployed image's bundle ID with the last installed bundle ID on every convergence tick — **on every deploy, regardless of `aiEnabled`** — and schedules an update job on drift. Turning AI off only disables the AI worker; it never uninstalls the bundle. (Within a signed fleet multi-component release, the updater daemon itself still only updates already-installed AI components; the deliberate first install above is what brings a host into the converged set.)
+- **Legacy layout removed:** the flat pre-bundle paths `/app/agent/ai-executor-linux-*`, `/app/agent/ai-host-helper-linux-*`, `/app/agent/ai-rootfs-*.tar.gz`, `/app/agent/ai-rootfs-*.manifest.json`, and `/app/agent/ai-profiles/` are gone from new images. `scripts/install/prepare-agent-updater.sh` reads the new `/app/agent/ai/` layout and falls back to the old flat paths only when extracting helpers from a pre-bundle image.
 
 ## Bootstrap, installation, and updater migration
 
@@ -227,7 +244,7 @@ CLI verification check for operators:
 1. **Evidence & protocol:** The updater connects to the API via pull protocol version 3 (`X-Updater-Protocol-Version: 3`), advertising host OS, architecture, current versions, CPU load/busy state, and local AI capability & health.
 2. **Updater self-upgrade:** If the release contains a newer `vps-updater` binary, the updater stages and replaces itself first, restarting its service to execute subsequent steps under the newer supervisor logic.
 3. **Agent binary swap:** The agent binary is backed up to a root-owned backup directory and replaced atomically by rename (`renameat2` / POSIX atomic rename).
-4. **AI component upgrades:** AI components (`ai-executor`, `ai-host-helper`, `ai-rootfs`, `ai-profiles`) are updated only if already installed on the host. Uninstalled components are never silently activated. Rootfs archives are unpacked with leading `rootfs/` stripped; profiles archives are unpacked with leading `profiles/` stripped.
+4. **AI component upgrades:** AI components (`ai-executor`, `ai-host-helper`, `ai-rootfs`, `ai-profiles`) are updated only if already installed on the host. Uninstalled components are never silently activated. Rootfs archives are unpacked with leading `rootfs/` stripped; profiles archives are unpacked with leading `profiles/` stripped. (Superseded for the deployed-image bundle path, 2026-10-25: the API now installs the AI bundle over saved SSH on an explicit admin action and then converges it on every deploy regardless of `aiEnabled` — see [AI bundle layout and convergence](#ai-bundle-layout-and-convergence-appagentai). This updater-side rule still governs signed fleet multi-component release jobs.)
 5. **Awaiting heartbeat & observation:** After service restart, the updater monitors agent health and AI helper health. If health checks fail or the grace window elapses, the updater executes automatic rollback from the root-owned backup.
 6. **Safe pruning:** On server-ruled terminal completion, the updater cleans the terminal job's staging and retains current + previous backup generations for crash resilience.
 

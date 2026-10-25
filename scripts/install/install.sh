@@ -817,35 +817,35 @@ else
     else
       AI_EXECUTOR_TMP="$(mktemp)"
       INSTALLER_TMP_FILES+=("$AI_EXECUTOR_TMP")
-      if docker cp "${API_CONTAINER}:/app/agent/ai-executor-linux-amd64" "$AI_EXECUTOR_TMP" &>/dev/null; then
+      if docker cp "${API_CONTAINER}:/app/agent/ai/ai-executor-linux-amd64" "$AI_EXECUTOR_TMP" &>/dev/null; then
         chmod 0755 "$AI_EXECUTOR_TMP"
       else
-        echo "Warning: Failed to extract /app/agent/ai-executor-linux-amd64 from container" >&2
+        echo "Warning: Failed to extract /app/agent/ai/ai-executor-linux-amd64 from container" >&2
       fi
 
       AI_HELPER_TMP="$(mktemp)"
       INSTALLER_TMP_FILES+=("$AI_HELPER_TMP")
-      if docker cp "${API_CONTAINER}:/app/agent/ai-host-helper-linux-amd64" "$AI_HELPER_TMP" &>/dev/null; then
+      if docker cp "${API_CONTAINER}:/app/agent/ai/ai-host-helper-linux-amd64" "$AI_HELPER_TMP" &>/dev/null; then
         chmod 0755 "$AI_HELPER_TMP"
       else
-        echo "Warning: Failed to extract /app/agent/ai-host-helper-linux-amd64 from container" >&2
+        echo "Warning: Failed to extract /app/agent/ai/ai-host-helper-linux-amd64 from container" >&2
       fi
 
       AI_ROOTFS_TAR_TMP="$(mktemp)"
       INSTALLER_TMP_FILES+=("$AI_ROOTFS_TAR_TMP")
-      if ! docker cp "${API_CONTAINER}:/app/agent/ai-rootfs-linux-amd64.tar.gz" "$AI_ROOTFS_TAR_TMP" &>/dev/null; then
-        echo "Warning: Failed to extract /app/agent/ai-rootfs-linux-amd64.tar.gz from container" >&2
+      if ! docker cp "${API_CONTAINER}:/app/agent/ai/rootfs-linux-amd64.tar.gz" "$AI_ROOTFS_TAR_TMP" &>/dev/null; then
+        echo "Warning: Failed to extract /app/agent/ai/rootfs-linux-amd64.tar.gz from container" >&2
       fi
 
       AI_ROOTFS_MANIFEST_TMP="$(mktemp)"
       INSTALLER_TMP_FILES+=("$AI_ROOTFS_MANIFEST_TMP")
-      if ! docker cp "${API_CONTAINER}:/app/agent/ai-rootfs-linux-amd64.manifest.json" "$AI_ROOTFS_MANIFEST_TMP" &>/dev/null; then
-        echo "Warning: Failed to extract /app/agent/ai-rootfs-linux-amd64.manifest.json from container" >&2
+      if ! docker cp "${API_CONTAINER}:/app/agent/ai/rootfs-linux-amd64.manifest.json" "$AI_ROOTFS_MANIFEST_TMP" &>/dev/null; then
+        echo "Warning: Failed to extract /app/agent/ai/rootfs-linux-amd64.manifest.json from container" >&2
       fi
 
       AI_PROFILES_TMP="$(mktemp -d)"
       INSTALLER_TMP_FILES+=("$AI_PROFILES_TMP")
-      docker cp "${API_CONTAINER}:/app/agent/ai-profiles/." "$AI_PROFILES_TMP/" 2>/dev/null || true
+      docker cp "${API_CONTAINER}:/app/agent/ai/profiles/." "$AI_PROFILES_TMP/" 2>/dev/null || true
     fi
   fi
   # Run install-local-agent.sh

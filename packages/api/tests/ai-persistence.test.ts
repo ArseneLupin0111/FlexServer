@@ -60,6 +60,7 @@ function makePlan(overrides: Partial<AiPlan> = {}): AiPlan {
     providerRevision: 1,
     policyRevision: 1,
     capabilityRevision: 1,
+    execMode: "sandbox",
     steps: [makePlanStep()],
     preconditions: [],
     planDigest: "sha256:d41d8cd98f00b204e9800998ecf8427e",

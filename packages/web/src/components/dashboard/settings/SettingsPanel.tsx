@@ -11,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../../ui/card";
 import { Switch } from "../../ui/switch";
 import type { DashboardOverview } from "../../../lib/api";
 import { useDashboard } from "../../../context/DashboardContext";
+import { AgentSettingsCard } from "./AgentSettingsCard";
 
 /**
  * Global terminal settings in the workspace Settings tab.
@@ -79,9 +80,13 @@ function ToggleRow({
 
 export function SettingsPanel({
   overview,
+  vpsId,
   children,
 }: {
   overview: DashboardOverview;
+  /** When set (per-VPS workspace), the host-scoped Agent card renders below
+   * the global Terminal & safety controls. */
+  vpsId?: string;
   children?: ReactNode;
 }) {
   const dashboard = useDashboard();
@@ -245,6 +250,10 @@ export function SettingsPanel({
           </div>
         </CardContent>
       </Card>
+
+      {/* Per-host Agent card (AI policy, execution mode, bundle). Loads its
+          own data lazily so the rest of the page never waits on it. */}
+      {vpsId ? <AgentSettingsCard vpsId={vpsId} /> : null}
 
       {/* Agent updates (host-specific panel directly below the global controls) */}
       {children ? <div className="space-y-4">{children}</div> : null}

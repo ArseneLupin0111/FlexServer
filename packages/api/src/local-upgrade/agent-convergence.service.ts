@@ -36,6 +36,7 @@ import { DemoMutationBlockedError, VpsNotFoundError } from "../common/errors.js"
 import { AuditService } from "../audit/audit.service.js";
 import { AgentLifecycleCoordinator } from "../agents/agent-lifecycle-coordinator.js";
 import type { FleetProvisioningService } from "../agents/fleet-provisioning.service.js";
+import { AiBundleOrchestrationService } from "../ai/ai-bundle-install.service.js";
 
 @Injectable()
 export class AgentConvergenceService
@@ -63,6 +64,11 @@ export class AgentConvergenceService
     @Optional()
     @Inject(AgentLifecycleCoordinator)
     private readonly coordinator?: AgentLifecycleCoordinator,
+    // Optional AI bundle convergence (execmode plan Q7): hand-built test
+    // configs may not wire it; the agent-binary tick then runs unchanged.
+    @Optional()
+    @Inject(AiBundleOrchestrationService)
+    private readonly aiBundles?: AiBundleOrchestrationService,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
@@ -219,6 +225,13 @@ export class AgentConvergenceService
 
   private async runTick(): Promise<void> {
     try {
+      // AI bundle convergence (Q7) runs alongside the agent-binary tick in
+      // its own job state machine; fire-and-forget so it can never delay or
+      // fail the agent update scan.
+      if (this.aiBundles) {
+        this.aiBundles.convergeTick().catch(() => {});
+      }
+
       const nowMs = Date.now();
 
       // 1. Reconcile active jobs and deadlines across all hosts

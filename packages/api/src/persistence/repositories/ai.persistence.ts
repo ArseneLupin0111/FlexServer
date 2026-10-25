@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { AiEnvelopeData } from "../../ai/ai-crypto.js";
 import type {
   AiAuditEvent,
+  AiBundleJobRecord,
+  AiBundleJobState,
+  AiBundleJobTrigger,
   AiCapability,
   AiConversation,
   AiConversationCheckpoint,
@@ -24,7 +27,7 @@ import type {
   AiTaskUsage,
 } from "../../ai/ai.models.js";
 import type { AiTaskError } from "../../ai/ai.models.js";
-export type { AiTaskState };
+export type { AiBundleJobRecord, AiBundleJobState, AiBundleJobTrigger };
 
 /** Error raised when a CAS/admission/identity invariant fails. */
 export type AiPersistenceConflictCode =
@@ -181,6 +184,34 @@ export const AI_HISTORY_MAX_PAGE = 10_000;
 
 export type AiCapabilityUpsertInput = AiCapability & { now?: string };
 
+/** AI bundle install job input types (execmode plan). All transitions are
+ * atomic under the shared AI state lock so at most one pending/running job
+ * exists per VPS in either driver. */
+export type AiBundleJobStartInput = {
+  vpsId: string;
+  bundleId: string;
+  trigger?: AiBundleJobTrigger;
+  /** Explicit job id (tests / resumption); a fresh UUID otherwise. */
+  jobId?: string;
+  now?: string;
+};
+
+export type AiBundleJobFinishInput = {
+  vpsId: string;
+  jobId: string;
+  outcome: AiBundleJobState & ("succeeded" | "failed");
+  /** Raw error; redacted and bounded before storage. */
+  error?: string;
+  now?: string;
+};
+
+export type AiBundleJobStartResult = {
+  job: AiBundleJobRecord;
+  /** True when a fresh pending job was created; false when a pending/running
+   * job already existed and was returned unchanged (idempotent scheduling). */
+  created: boolean;
+};
+
 export type AiPolicyUpdateInput = {
   vpsId: string;
   patch: Partial<Omit<AiPolicy, "vpsId" | "revision" | "updatedAt">>;
@@ -282,6 +313,21 @@ export interface AiRepository {
   updateAiPolicy(input: AiPolicyUpdateInput): Promise<AiPolicy>;
   getAiCapability(vpsId: string): Promise<AiCapability | undefined>;
   recordAiCapability(input: AiCapabilityUpsertInput): Promise<AiCapability>;
+
+  // ─── AI bundle install jobs (execmode plan Q1/Q7/Q8) ────────────
+  /** Latest job record for the VPS (undefined when none ever scheduled). */
+  getAiBundleJob(vpsId: string): Promise<AiBundleJobRecord | undefined>;
+  /** Atomically create a pending job unless a pending/running job already
+   * exists for the VPS (then it is returned with created=false). A terminal
+   * record is replaced, carrying lastInstalledBundleId forward. */
+  startAiBundleJob(input: AiBundleJobStartInput): Promise<AiBundleJobStartResult>;
+  /** pending -> running transition, CAS on jobId. */
+  markAiBundleJobRunning(vpsId: string, jobId: string, now?: string): Promise<AiBundleJobRecord>;
+  /** Terminal transition. On success lastInstalledBundleId is set to the
+   * job's bundleId; on failure the error is redacted and bounded. CAS on
+   * jobId; unknown/mismatched job ids throw AiPersistenceConflictError. */
+  finishAiBundleJob(input: AiBundleJobFinishInput): Promise<AiBundleJobRecord>;
+
   getSettings(): Promise<AiProviderSettingsInternal | undefined>;
   updateSettings(input: AiSettingsUpdateInput): Promise<AiProviderSettingsInternal>;
 

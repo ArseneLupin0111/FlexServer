@@ -26,9 +26,17 @@ const (
 	MaxFileBytes            = 256 * 1024
 	MaxClaimResponseBytes   = 64 * 1024
 	MaxReceiptSizeBytes     = 128 * 1024
+	MaxScriptBytes          = 32 * 1024 // matches the API shell plan step script cap
 	DefaultTimeoutSeconds   = 60
 	MaxTimeoutSeconds       = 120
 	TermGracePeriod         = 5 * time.Second
+)
+
+// Shell execution modes (ShellPayload.ExecMode). Empty means sandbox: old
+// commands without the field keep running confined.
+const (
+	ExecModeSandbox    = "sandbox"
+	ExecModePrivileged = "privileged"
 )
 
 // Command kinds
@@ -118,6 +126,8 @@ var validErrorCodes = map[string]bool{
 }
 
 // HostCapabilities reports the OS confinement and profile state of this agent.
+// PrivilegedSupported is probed at worker start against the root helper: it is
+// independent of Supported (sandbox confinement) and fails closed to false.
 type HostCapabilities struct {
 	Supported         bool     `json:"supported"`
 	UnsupportedReason string   `json:"unsupportedReason,omitempty"`
@@ -128,6 +138,9 @@ type HostCapabilities struct {
 	RootfsDigest      string   `json:"rootfsDigest"`
 	ProfilesDigest    string   `json:"profilesDigest"`
 	Profiles          []string `json:"profiles"`
+
+	PrivilegedSupported         bool   `json:"privilegedSupported"`
+	PrivilegedUnsupportedReason string `json:"privilegedUnsupportedReason,omitempty"`
 }
 
 // ClaimRequest is sent to POST /api/agent/ai/claim
@@ -247,10 +260,14 @@ func (c *Command) Validate(expectedAgentInstanceID, expectedVpsID string) error 
 	return nil
 }
 
-// ShellPayload is the payload for KindShell
+// ShellPayload is the payload for KindShell. ExecMode selects the execution
+// path: "sandbox" (default, empty tolerated) requires sandbox confinement;
+// "privileged" runs unconfined via the root helper and only requires the
+// helper probe to have succeeded at worker start.
 type ShellPayload struct {
 	Script         string   `json:"script"`
 	TimeoutSeconds int      `json:"timeoutSeconds"`
+	ExecMode       string   `json:"execMode,omitempty"`
 	ScratchDirs    []string `json:"scratchDirs,omitempty"`
 }
 

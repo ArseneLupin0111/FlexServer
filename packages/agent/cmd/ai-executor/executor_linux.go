@@ -164,6 +164,10 @@ func run(rootfs, scratch, script string, uid, gid int, cgroup string) (int, erro
 
 // applySeccompFilter installs a classic BPF filter blocking dangerous syscalls.
 func applySeccompFilter() error {
+	// Common blocklist for every architecture. SYS_SYSFS, SYS_IOPL, and
+	// SYS_IOPERM only exist on amd64, so they live in the per-arch extension
+	// list from executor_linux_amd64.go / executor_linux_arm64.go (spliced in
+	// at their original position below); see those files for the constraint.
 	blockedSyscalls := []uint32{
 		unix.SYS_PTRACE,
 		unix.SYS_REBOOT,
@@ -182,11 +186,9 @@ func applySeccompFilter() error {
 		unix.SYS_PIVOT_ROOT,
 		unix.SYS_SWAPON,
 		unix.SYS_SWAPOFF,
-		unix.SYS_SYSFS,
-		unix.SYS_IOPL,
-		unix.SYS_IOPERM,
-		unix.SYS_USERFAULTFD,
 	}
+	blockedSyscalls = append(blockedSyscalls, archSpecificBlockedSyscalls...)
+	blockedSyscalls = append(blockedSyscalls, unix.SYS_USERFAULTFD)
 
 	numBlocked := len(blockedSyscalls)
 	filter := make([]unix.SockFilter, 0, 4+numBlocked+2)

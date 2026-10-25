@@ -764,6 +764,7 @@ export class FleetProvisioningService {
       return process.env.AI_HOST_HELPER_BINARY_PATH;
     }
     const candidates = [
+      `/app/agent/ai/ai-host-helper-linux-${arch}`,
       `/app/agent/ai-host-helper-linux-${arch}`,
       join(process.cwd(), "agent", `ai-host-helper-linux-${arch}`),
       join(process.cwd(), "packages", "agent", "dist", `ai-host-helper-linux-${arch}`),

@@ -2,6 +2,16 @@ node_modules
 **/node_modules
 dist
 **/dist
+# AI sandbox rootfs artifacts are built by CI (scripts/agent/build-rootfs.mjs)
+# into packages/agent/dist before docker build and bundled into the API image.
+# Re-include only those four files; the rest of packages/agent/dist (busybox
+# caches, rootfs staging dirs) stays excluded.
+!packages/agent/dist
+packages/agent/dist/*
+!packages/agent/dist/ai-rootfs-linux-amd64.tar.gz
+!packages/agent/dist/ai-rootfs-linux-amd64.manifest.json
+!packages/agent/dist/ai-rootfs-linux-arm64.tar.gz
+!packages/agent/dist/ai-rootfs-linux-arm64.manifest.json
 public
 .git
 .github

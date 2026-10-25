@@ -4,7 +4,12 @@ import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { AssistantSettingsModal } from "./AssistantSettingsModal";
 import type { AssistantSettingsModalProps } from "./AssistantSettingsModal";
-import type { AiProviderProfile, ProviderProfileWrite } from "../../../lib/ai-api";
+import type {
+  AiPolicy,
+  AiProviderProfile,
+  ProviderProfileWrite,
+  UpdateAiPolicy,
+} from "../../../lib/ai-api";
 
 function makeProfile(overrides: Partial<AiProviderProfile> = {}): AiProviderProfile {
   return {
@@ -664,5 +669,66 @@ describe("AssistantSettingsModal OAuth paste-back flow", () => {
     expect(
       within(section).getByRole("button", { name: /open authorize url for chatgpt/i }),
     ).toBeInTheDocument();
+  });
+});
+
+// ── Policy tab: shell toggle moved to the Settings Agent card (Q6) ───────
+
+const modalPolicy: AiPolicy = {
+  vpsId: "vps-1",
+  aiEnabled: true,
+  readEnabled: true,
+  dockerActionsEnabled: true,
+  composeActionsEnabled: false,
+  shellEnabled: true,
+  execMode: "sandbox",
+  privilegedAcknowledgedAt: null,
+  privilegedAcknowledgedBy: null,
+  fileReadScopes: ["/var/log"],
+  fileWriteScopes: [],
+  serviceProfileIds: [],
+  sendLogsToProvider: false,
+  sendFilesToProvider: false,
+  revision: 4,
+  updatedAt: "2026-01-01T00:00:00.000Z",
+};
+
+describe("AssistantSettingsModal policy tab without the shell toggle", () => {
+  it("no longer renders the shell execution toggle while other policy controls stay", () => {
+    renderModal([makeProfile()], { policy: modalPolicy });
+
+    fireEvent.click(screen.getByRole("button", { name: /permissions/i }));
+
+    expect(
+      screen.queryByRole("switch", { name: /shell execution tools/i }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("switch", { name: /read-only tools/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: /docker mutation tools/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: /compose mutation tools/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("omits shellEnabled from the policy PATCH so saving other fields cannot overwrite the Agent card value", async () => {
+    const { mocks } = renderModal([makeProfile()], { policy: modalPolicy });
+
+    fireEvent.click(screen.getByRole("button", { name: /permissions/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save permissions/i }));
+
+    await waitFor(() => {
+      expect(mocks.onSavePolicy).toHaveBeenCalledTimes(1);
+    });
+    const patch = mocks.onSavePolicy.mock.calls[0][0] as UpdateAiPolicy;
+    expect("shellEnabled" in patch).toBe(false);
+    expect(patch).toMatchObject({
+      aiEnabled: true,
+      readEnabled: true,
+      dockerActionsEnabled: true,
+      composeActionsEnabled: false,
+    });
   });
 });

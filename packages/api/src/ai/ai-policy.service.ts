@@ -190,16 +190,24 @@ export class AiPolicyService {
       cgroupV2Available: false,
       namespacesAvailable: false,
       seccompAvailable: false,
+      privilegedSupported: false,
       profiles: [],
     };
   }
 
-  isCapabilityFresh(capability: AiCapability, now = Date.now()): boolean {
+  /** Age-only freshness of the capability claim (window check, no support
+   * flags). The privileged dispatch path uses this because sandbox
+   * `supported` is deliberately not required there (execmode plan Q3). */
+  isCapabilityReportFresh(capability: AiCapability, now = Date.now()): boolean {
     const age = now - Date.parse(capability.freshness);
     if (!Number.isFinite(age)) return false;
     if (age > AI_CAPABILITY_FRESHNESS_MS) return false;
     if (age < -60_000) return false;
-    return capability.supported === true;
+    return true;
+  }
+
+  isCapabilityFresh(capability: AiCapability, now = Date.now()): boolean {
+    return this.isCapabilityReportFresh(capability, now) && capability.supported === true;
   }
 
   /** Persist an agent-reported capability snapshot after strict validation.
@@ -221,6 +229,8 @@ export class AiPolicyService {
       cgroupV2Available: report.cgroupV2 === true,
       namespacesAvailable: report.namespaces === true,
       seccompAvailable: report.seccomp === true,
+      privilegedSupported: report.privilegedSupported === true,
+      ...(report.privilegedUnsupportedReason ? { privilegedUnsupportedReason: report.privilegedUnsupportedReason } : {}),
       profiles: Array.isArray(report.profiles)
         ? report.profiles.slice(0, 64)
         : [],

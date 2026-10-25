@@ -184,6 +184,14 @@ export type AiProvidersResponse = {
   lastSelection?: AiProviderSelection;
   migrated: boolean;
 };
+/**
+ * Execution isolation for AI shell steps (execmode plan Q3). "sandbox" runs
+ * inside the AI sandbox (cgroup v2 namespaces); "privileged" runs the root
+ * broker directly on the host without confinement — gated server-side by a
+ * one-time risk acknowledgment. Older records read as "sandbox".
+ */
+export type AiExecMode = "sandbox" | "privileged";
+
 export type AiPolicy = {
   vpsId: string;
   aiEnabled: boolean;
@@ -191,6 +199,11 @@ export type AiPolicy = {
   dockerActionsEnabled: boolean;
   composeActionsEnabled: boolean;
   shellEnabled: boolean;
+  execMode: AiExecMode;
+  /** One-time privileged risk acknowledgment; null until acknowledged.
+   * Switching back to sandbox never clears it (plan Q4). */
+  privilegedAcknowledgedAt: string | null;
+  privilegedAcknowledgedBy: string | null;
   fileReadScopes: string[];
   fileWriteScopes: string[];
   serviceProfileIds: string[];
@@ -206,6 +219,10 @@ export type UpdateAiPolicy = {
   dockerActionsEnabled?: boolean;
   composeActionsEnabled?: boolean;
   shellEnabled?: boolean;
+  execMode?: AiExecMode;
+  /** Required by the server when switching to "privileged" without a retained
+   * acknowledgment; re-acking refreshes the stored who/when (plan Q4). */
+  acknowledgePrivileged?: boolean;
   fileReadScopes?: string[];
   fileWriteScopes?: string[];
   serviceProfileIds?: string[];
@@ -471,6 +488,63 @@ export function getVpsAiCapability(
 ): Promise<AiCapability> {
   return request<AiCapability>(`${vpsAiRoot(vpsId)}/capability`, {
     method: "GET",
+    signal,
+  });
+}
+
+// ── AI bundle (install/update orchestration) ─────────────────────────
+
+/** Terminal-ish job states reported by the bundle installer; pending/running
+ * are active and disable the install button (plan Q8). */
+export type AiBundleJobState = "pending" | "running" | "succeeded" | "failed";
+
+export type AiBundleJob = {
+  state: AiBundleJobState;
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+};
+
+/** Sandbox capability projection bundled with the AI bundle status. */
+export type AiBundleCapability = {
+  supported: boolean;
+  reason?: string;
+  agentVersion?: string;
+  privilegedSupported: boolean;
+};
+
+/** GET /api/vps/:id/ai/bundle — install state plus the capability diagnosis
+ * (surfaces the real `sandbox_unavailable` reason on the Agent card). */
+export type AiBundleStatus = {
+  /** False when this deployment ships no AI bundle artifacts. */
+  available: boolean;
+  /** Server-side degrade reason, present only when available=false. */
+  reason?: string;
+  bundleId: string | null;
+  installed: boolean;
+  lastInstalledBundleId: string | null;
+  lastJob: AiBundleJob | null;
+  capability: AiBundleCapability;
+};
+
+export function getAiBundle(
+  vpsId: string,
+  signal?: AbortSignal,
+): Promise<AiBundleStatus> {
+  return request<AiBundleStatus>(`${vpsAiRoot(vpsId)}/bundle`, {
+    method: "GET",
+    signal,
+  });
+}
+
+/** POST /api/vps/:id/ai/bundle/install — idempotent per running job;
+ * resolves with the (fresh) job view. */
+export function installAiBundle(
+  vpsId: string,
+  signal?: AbortSignal,
+): Promise<AiBundleJob> {
+  return request<AiBundleJob>(`${vpsAiRoot(vpsId)}/bundle/install`, {
+    method: "POST",
     signal,
   });
 }

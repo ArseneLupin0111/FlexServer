@@ -16,7 +16,7 @@ import { aiProviderKeyAad } from "../persistence/repositories/ai.repository.js";
 import { AiProvider, type ProviderMessage, type ProviderTool, ProviderProtocolError, ProviderTransportError, ProviderKeyRequiredError, ProviderContextOverflowError, measureProviderRequest, estimateTokens, type ProviderRequestMeasure, PROVIDER_MAX_OUTPUT_TOKENS, PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS } from "./ai-provider.js";
 import { generateCodexRequest, toCodexResponsesBody } from "./ai-codex-provider.js";
 import { AiCodexOauthService } from "./ai-codex-oauth.service.js";
-import type { AiTask, AiPlan, AiHostCommandKind, AiRestrictedEvidenceSource, AiConversation, AiProviderProfileInternal } from "./ai.models.js";
+import type { AiTask, AiPlan, AiExecMode, AiHostCommandKind, AiRestrictedEvidenceSource, AiConversation, AiProviderProfileInternal } from "./ai.models.js";
 import { DashboardSessionService } from "../auth/dashboard-session.service.js";
 import { DockerMonitoringService } from "../docker/docker-monitoring.service.js";
 import { AiHostPlanService, hostTools, sha256 } from "./ai-host-plan.service.js";
@@ -424,6 +424,7 @@ export class AiTaskService implements OnModuleDestroy {
               providerRevision,
               policyRevision,
               capabilityRevision: 0,
+              execMode: activePolicy.execMode,
               steps: [proposal.step],
               preconditions: proposal.preconditions,
               planDigest: "",
@@ -438,12 +439,25 @@ export class AiTaskService implements OnModuleDestroy {
 
           if (hostTools.some(tool => tool.function.name === call.function.name)) {
             if (result.message.toolCalls.length !== 1) throw new AiAssistantError("policy_denied");
+            const kind = call.function.name.slice(5) as AiHostCommandKind;
+            const modelArgs = JSON.parse(call.function.arguments) as Record<string, unknown>;
+            // Plan execMode is stamped from the ACTIVE POLICY, never the model
+            // call (execmode plan): a model request that diverges from the
+            // policy is rejected outright.
+            if (kind === "shell" && modelArgs && typeof modelArgs === "object" && modelArgs.execMode !== undefined && modelArgs.execMode !== activePolicy.execMode) throw new AiAssistantError("policy_denied");
+            const execMode: AiExecMode = activePolicy.execMode;
             const capability = await this.policy.getCapability(task.vpsId);
-            if (!this.policy.isCapabilityFresh(capability)) throw new AiAssistantError("sandbox_unavailable");
+            if (kind === "shell" && execMode === "privileged") {
+              // Privileged branch (execmode plan Q3): claim freshness plus the
+              // helper privileged probe ONLY — sandbox `supported`/cgroup v2 is
+              // deliberately NOT required here.
+              if (!this.policy.isCapabilityReportFresh(capability) || capability.privilegedSupported !== true) throw new AiAssistantError("sandbox_unavailable");
+            } else if (!this.policy.isCapabilityFresh(capability)) {
+              throw new AiAssistantError("sandbox_unavailable");
+            }
             const latest = await this.monitoring.getAuthoritativeLatest(task.vpsId);
             if (!latest?.activeInstanceId) throw new AiAssistantError("sandbox_unavailable");
-            const kind = call.function.name.slice(5) as AiHostCommandKind;
-            const step = await this.hostPlans.propose(task, kind, JSON.parse(call.function.arguments), activePolicy);
+            const step = await this.hostPlans.propose(task, kind, modelArgs, activePolicy);
             const preconditions: { key: string; expectedValue: unknown }[] = [
               { key: "rootfsDigest", expectedValue: capability.rootfsDigest },
             ];
@@ -460,6 +474,7 @@ export class AiTaskService implements OnModuleDestroy {
               providerRevision,
               policyRevision,
               capabilityRevision: Date.parse(capability.freshness),
+              execMode,
               steps: [step],
               preconditions,
               planDigest: "",
@@ -691,7 +706,16 @@ export class AiTaskService implements OnModuleDestroy {
     } else {
       const capability = await this.policy.getCapability(vpsId);
       const latest = await this.monitoring.getAuthoritativeLatest(vpsId);
-      if (!this.policy.isCapabilityFresh(capability) || latest?.activeInstanceId !== plan.agentInstanceId || plan.preconditions.some(condition => condition.key === "rootfsDigest" && condition.expectedValue !== capability.rootfsDigest) || plan.preconditions.some(condition => condition.key === "profilesDigest" && condition.expectedValue !== capability.profilesDigest)) throw new AiAssistantError("stale_plan");
+      // Freshness branches on the plan's stamped execMode (execmode plan):
+      // privileged plans need only claim freshness + the privileged probe,
+      // sandbox plans keep the strict supported check.
+      const capabilityFresh = plan.execMode === "privileged"
+        ? this.policy.isCapabilityReportFresh(capability) && capability.privilegedSupported === true
+        : this.policy.isCapabilityFresh(capability);
+      // Fail-closed mode guard: a plan stamped under one execMode must never
+      // dispatch after the policy switched modes (stale_plan), independent of
+      // the policyRevision CAS.
+      if (!capabilityFresh || activePolicy.execMode !== plan.execMode || latest?.activeInstanceId !== plan.agentInstanceId || plan.preconditions.some(condition => condition.key === "rootfsDigest" && condition.expectedValue !== capability.rootfsDigest) || plan.preconditions.some(condition => condition.key === "profilesDigest" && condition.expectedValue !== capability.profilesDigest)) throw new AiAssistantError("stale_plan");
       for (const step of plan.steps) {
         const blob = step.encryptedBlobId && await this.repository.getExecutionBlob(step.encryptedBlobId);
         if (!blob || blob.taskId !== taskId || blob.stepId !== step.stepId || Date.parse(blob.expiresAt) <= Date.now()) throw new AiAssistantError("stale_plan");

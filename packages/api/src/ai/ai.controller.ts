@@ -49,6 +49,10 @@ export class AiPolicyController {
   policy(@Req() request: Request, @Param("id") id: string) { return this.service.policy(request, id); }
   @Patch("policy")
   update(@Req() request: Request, @Param("id") id: string, @Body() body: unknown) { return this.service.updatePolicy(request, id, body); }
+  @Get("bundle")
+  bundle(@Req() request: Request, @Param("id") id: string) { return this.service.bundle(request, id); }
+  @Post("bundle/install")
+  installBundle(@Req() request: Request, @Param("id") id: string) { return this.service.installBundle(request, id); }
   @Get("tasks")
   list(@Req() req: Request, @Param("id") id: string, @Query("conversationId") conversationId?: string) { return this.tasks.list(req, id, conversationId); }
   @Post("tasks")

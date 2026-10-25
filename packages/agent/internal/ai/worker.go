@@ -73,7 +73,7 @@ func NewWorker(cfg *config.Config, instanceID string, logger *log.Logger) (*Work
 	if caps.Profiles == nil {
 		caps.Profiles = []string{}
 	}
-	return &Worker{
+	worker := &Worker{
 		cfg:          cfg,
 		instanceID:   instanceID,
 		logger:       logger,
@@ -84,7 +84,12 @@ func NewWorker(cfg *config.Config, instanceID string, logger *log.Logger) (*Work
 		helper:       NewHelperClient(cfg.AI.HelperSocketPath),
 		executor:     NewShellExecutor(),
 		capabilities: caps,
-	}, nil
+	}
+	// Probe the root helper once at startup: privileged execution depends only
+	// on the helper being present, reachable, and new enough — not on sandbox
+	// confinement. Any failure leaves PrivilegedSupported=false (fail closed).
+	worker.probePrivilegedSupport()
+	return worker, nil
 }
 
 // Capabilities returns the detected host capabilities.
@@ -109,7 +114,9 @@ func (w *Worker) DispatchCommand(ctx context.Context, cmd *Command) (string, *in
 
 // Run executes the worker loop until ctx is canceled.
 func (w *Worker) Run(ctx context.Context) {
-	w.logger.Printf("ai worker started (supported=%v, reason=%q)", w.capabilities.Supported, w.capabilities.UnsupportedReason)
+	w.logger.Printf("ai worker started (supported=%v, reason=%q, privilegedSupported=%v, privilegedReason=%q)",
+		w.capabilities.Supported, w.capabilities.UnsupportedReason,
+		w.capabilities.PrivilegedSupported, w.capabilities.PrivilegedUnsupportedReason)
 
 	// Startup reconciliation of pending receipts
 	w.reconcilePendingReceipts(ctx)
@@ -391,21 +398,68 @@ func (w *Worker) dispatch(ctx context.Context, cmd *Command) (status string, exi
 	}
 }
 
-func (w *Worker) dispatchShell(ctx context.Context, cmd *Command) (string, *int, string, string, string, any) {
-	if !w.capabilities.Supported || !w.capabilities.CgroupV2 {
-		return StatusFailed, nil, ErrCodeSandboxUnavailable, "sandboxed shell execution is unavailable on this host", "", nil
-	}
+// helperProbeTimeout bounds the one-shot privileged probe at worker startup so
+// a hung helper cannot stall agent boot.
+const helperProbeTimeout = 5 * time.Second
 
+// probePrivilegedSupport asks the root helper whether it supports privileged
+// (root, non-confined) execution and updates the worker capabilities. Every
+// failure mode — helper missing, unreachable, too old, or explicitly reporting
+// no support — maps to PrivilegedSupported=false with a stable reason: the
+// worker fails closed.
+func (w *Worker) probePrivilegedSupport() {
+	const reason = "helper missing, unreachable, or outdated"
+	w.capabilities.PrivilegedSupported = false
+	w.capabilities.PrivilegedUnsupportedReason = reason
+	if w.helper == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), helperProbeTimeout)
+	defer cancel()
+	supported, err := w.helper.ProbePrivileged(ctx)
+	if err != nil {
+		w.logger.Printf("privileged execution probe failed: %v", err)
+		return
+	}
+	if !supported {
+		return
+	}
+	w.capabilities.PrivilegedSupported = true
+	w.capabilities.PrivilegedUnsupportedReason = ""
+}
+
+func (w *Worker) dispatchShell(ctx context.Context, cmd *Command) (string, *int, string, string, string, any) {
 	var p ShellPayload
 	if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+		// Preserve the sandbox gate's precedence for malformed payloads: an
+		// unconfinable host reports sandbox_unavailable exactly as before.
+		if !w.capabilities.Supported || !w.capabilities.CgroupV2 {
+			return StatusFailed, nil, ErrCodeSandboxUnavailable, "sandboxed shell execution is unavailable on this host", "", nil
+		}
 		return StatusFailed, nil, ErrCodeInvalidCommand, fmt.Sprintf("malformed shell payload: %v", err), "", nil
 	}
 
+	if p.ExecMode == ExecModePrivileged {
+		return w.dispatchShellPrivileged(ctx, cmd, &p)
+	}
+	// "sandbox", empty (legacy payloads), or any unrecognized value: the more
+	// restrictive sandbox path is the fail-safe default. The Supported &&
+	// CgroupV2 gate and the confined executor are unchanged.
+	if !w.capabilities.Supported || !w.capabilities.CgroupV2 {
+		return StatusFailed, nil, ErrCodeSandboxUnavailable, "sandboxed shell execution is unavailable on this host", "", nil
+	}
+	return w.runSandboxShell(ctx, cmd, &p)
+}
+
+// shellStreamOutput builds the streaming output callback shared by the sandbox
+// and privileged shell paths: chunks are redacted line-oriented and forwarded
+// as ordered Output chunks under a per-command stream ID.
+func (w *Worker) shellStreamOutput(cmd *Command) func(chunk string, isGap bool, isEnd bool) {
 	streamID := fmt.Sprintf("stream-%s", cmd.CommandID)
 	var seq int64
 	redactor := NewChunkRedactor()
 
-	outputCb := func(chunk string, isGap bool, isEnd bool) {
+	return func(chunk string, isGap bool, isEnd bool) {
 		redacted := redactor.Process(chunk)
 		if isEnd {
 			redacted += redactor.Flush()
@@ -426,22 +480,12 @@ func (w *Worker) dispatchShell(ctx context.Context, cmd *Command) (string, *int,
 			IsEnd:           isEnd,
 		})
 	}
+}
 
-	opts := ShellExecutionOptions{
-		TaskID:         cmd.TaskID,
-		CommandID:      cmd.CommandID,
-		Script:         p.Script,
-		TimeoutSeconds: p.TimeoutSeconds,
-		ScratchRootDir: w.cfg.AI.ScratchRootPath,
-		RootfsDir:      w.cfg.AI.RootfsDirPath,
-		ExecutorBinary: w.cfg.AI.ExecutorPath,
-		ExecutionUID:   w.cfg.AI.ExecutionUID,
-		ExecutionGID:   w.cfg.AI.ExecutionGID,
-		HelperClient:   w.helper,
-		OutputCallback: outputCb,
-	}
-
-	res, err := w.executor.Execute(ctx, opts)
+// shellDispatchResult maps a shell execution outcome to the dispatch result
+// tuple. Shared by the sandbox and privileged paths so status, error codes,
+// previews, and result payloads stay identical between the two modes.
+func shellDispatchResult(res *ShellExecutionResult, err error) (string, *int, string, string, string, any) {
 	if err != nil {
 		preview := ""
 		if res != nil {
@@ -470,6 +514,60 @@ func (w *Worker) dispatchShell(ctx context.Context, cmd *Command) (string, *int,
 	}
 
 	return StatusSucceeded, &code, "", "", preview, res
+}
+
+func (w *Worker) runSandboxShell(ctx context.Context, cmd *Command, p *ShellPayload) (string, *int, string, string, string, any) {
+	opts := ShellExecutionOptions{
+		TaskID:         cmd.TaskID,
+		CommandID:      cmd.CommandID,
+		Script:         p.Script,
+		TimeoutSeconds: p.TimeoutSeconds,
+		ScratchRootDir: w.cfg.AI.ScratchRootPath,
+		RootfsDir:      w.cfg.AI.RootfsDirPath,
+		ExecutorBinary: w.cfg.AI.ExecutorPath,
+		ExecutionUID:   w.cfg.AI.ExecutionUID,
+		ExecutionGID:   w.cfg.AI.ExecutionGID,
+		HelperClient:   w.helper,
+		OutputCallback: w.shellStreamOutput(cmd),
+	}
+
+	res, err := w.executor.Execute(ctx, opts)
+	return shellDispatchResult(res, err)
+}
+
+// dispatchShellPrivileged runs an approved shell command unconfined as root via
+// the helper's privileged_execute op. There is no namespace/cgroup/rootfs
+// confinement on this path by design (docs/security.md): the enforcement
+// boundary is the upstream per-command human approval, protected-target checks,
+// policy revision CAS, audit/evidence trail, and the redaction applied below.
+func (w *Worker) dispatchShellPrivileged(ctx context.Context, cmd *Command, p *ShellPayload) (string, *int, string, string, string, any) {
+	if !w.capabilities.PrivilegedSupported || w.helper == nil {
+		return StatusFailed, nil, ErrCodeSandboxUnavailable, "privileged execution unavailable (helper missing or outdated)", "", nil
+	}
+
+	timeout := p.TimeoutSeconds
+	if timeout <= 0 || timeout > MaxTimeoutSeconds {
+		timeout = DefaultTimeoutSeconds
+	}
+
+	outputCb := w.shellStreamOutput(cmd)
+	res, err := w.helper.ExecutePrivileged(ctx, PrivilegedExecuteParams{
+		TaskID:         cmd.TaskID,
+		CommandID:      cmd.CommandID,
+		Script:         p.Script,
+		TimeoutSeconds: timeout,
+	}, func(chunk string, isStderr bool) {
+		outputCb(chunk, false, false)
+	})
+	if err != nil {
+		// Same deadline/cancellation translation the sandbox executor applies.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+			err = ErrExecutionTimeout
+		} else if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+			err = ErrExecutionCancelled
+		}
+	}
+	return shellDispatchResult(res, err)
 }
 
 func (w *Worker) dispatchFileRead(ctx context.Context, cmd *Command) (string, *int, string, string, string, any) {

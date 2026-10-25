@@ -16,6 +16,13 @@ export const updateAiPolicySchema = z
     dockerActionsEnabled: z.boolean().optional(),
     composeActionsEnabled: z.boolean().optional(),
     shellEnabled: z.boolean().optional(),
+    /** Shell execution mode (execmode plan Q3). Transitioning to
+     * "privileged" additionally requires `acknowledgePrivileged` (or a
+     * retained prior acknowledgment) — enforced in the routes service. */
+    execMode: z.enum(["sandbox", "privileged"]).optional(),
+    /** One-time risk acknowledgment for privileged execution; when true and
+     * the policy moves to privileged, the server records who/when. */
+    acknowledgePrivileged: z.boolean().optional(),
     fileReadScopes: z.array(z.string().min(1).max(1024)).max(64).optional(),
     fileWriteScopes: z.array(z.string().min(1).max(1024)).max(64).optional(),
     serviceProfileIds: z.array(z.string().min(1).max(128)).max(64).optional(),
@@ -78,6 +85,10 @@ export const hostCapabilitiesSchema = z
     cgroupV2: z.boolean(),
     namespaces: z.boolean(),
     seccomp: z.boolean(),
+    /** Additive (execmode plan): absent from older agents → persisted as
+     * privilegedSupported false (fail-closed). */
+    privilegedSupported: z.boolean().optional(),
+    privilegedUnsupportedReason: z.string().max(512).optional(),
     rootfsDigest: z.string().max(128),
     profilesDigest: z.string().max(128),
     profiles: z.array(z.string().min(1).max(64)).max(64),

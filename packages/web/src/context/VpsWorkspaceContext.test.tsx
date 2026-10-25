@@ -2,7 +2,7 @@ import "../test/setup";
 import type * as DashboardPanelsModule from "../components/dashboard/DashboardPanels";
 import { cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   VpsWorkspaceContext,
   VpsWorkspaceTerminalPage,
@@ -10,8 +10,10 @@ import {
   VpsWorkspaceDockerContainerPage,
   VpsWorkspaceSettingsPage,
 } from "./VpsWorkspaceContext";
-import type { DashboardOverview, VpsRecord } from "../lib/api";
+import type { AgentUpdateView, DashboardOverview, VpsRecord } from "../lib/api";
 import * as api from "../lib/api";
+import * as aiApi from "../lib/ai-api";
+import type { AiBundleStatus, AiCapability, AiPolicy } from "../lib/ai-api";
 import { DashboardContext, type DashboardCtx } from "./DashboardContext";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 
@@ -233,7 +235,75 @@ describe("VpsWorkspaceTerminalPage gating", () => {
   });
 });
 
+// The Settings page mounts the Agent card, which lazily fetches the AI
+// policy, AI bundle status, capability, and agent-update view. Stub those
+// transports so the Docker-management assertions below see only their own
+// alerts and no real fetch ever leaves the test.
+const stubAgentPolicy: AiPolicy = {
+  vpsId: "local-host",
+  aiEnabled: false,
+  readEnabled: true,
+  dockerActionsEnabled: true,
+  composeActionsEnabled: true,
+  shellEnabled: false,
+  execMode: "sandbox",
+  privilegedAcknowledgedAt: null,
+  privilegedAcknowledgedBy: null,
+  fileReadScopes: [],
+  fileWriteScopes: [],
+  serviceProfileIds: [],
+  sendLogsToProvider: false,
+  sendFilesToProvider: false,
+  revision: 1,
+  updatedAt: "2026-01-01T00:00:00.000Z",
+};
+
+const stubBundleStatus: AiBundleStatus = {
+  available: true,
+  bundleId: "b1234567890abcdef",
+  installed: false,
+  lastInstalledBundleId: null,
+  lastJob: null,
+  capability: {
+    supported: true,
+    agentVersion: "0.9.0",
+    privilegedSupported: false,
+  },
+};
+
+const stubCapability: AiCapability = {
+  vpsId: "local-host",
+  supported: true,
+  freshness: "2026-01-01T00:00:00.000Z",
+  agentVersion: "0.9.0",
+  protocolVersion: 3,
+  cgroupV2Available: true,
+  namespacesAvailable: true,
+  seccompAvailable: true,
+  profiles: [],
+};
+
+const stubAgentUpdate: AgentUpdateView = {
+  installed: { version: "0.9.0", buildId: "aaaa1111bbbb", lastSeenAt: "2026-01-01T00:00:00.000Z", fresh: true },
+  available: null,
+  compatibility: { compatible: true, apiContractVersion: 3, reason: "ok" },
+  updater: { installed: true, healthy: true, lastSeenAt: "2026-01-01T00:00:00.000Z" },
+  state: "current",
+  job: null,
+  automation: { state: "current", reason: null, targetBuildId: null, retryAllowed: false },
+};
+
+function stubAgentCardTransports(vpsId: string): void {
+  vi.spyOn(aiApi, "getVpsAiPolicy").mockResolvedValue({ ...stubAgentPolicy, vpsId });
+  vi.spyOn(aiApi, "getAiBundle").mockResolvedValue(stubBundleStatus);
+  vi.spyOn(aiApi, "getVpsAiCapability").mockResolvedValue(stubCapability);
+  vi.spyOn(api, "getVpsAgentUpdate").mockResolvedValue(stubAgentUpdate);
+}
+
 describe("Docker management without monitoring", () => {
+  beforeEach(() => {
+    stubAgentCardTransports("local-host");
+  });
   it.each([localVps, remoteVps])("keeps inventory and opt-in available for $id without enabling metrics", async (vps) => {
     const target = { agentInstanceId: "inst_a", containerKey: "container_key", name: "fixture", state: "exited" };
     const inventory = vi.spyOn(api, "listVpsDockerCurrentContainers").mockResolvedValue([target] as api.DockerCurrentContainer[]);

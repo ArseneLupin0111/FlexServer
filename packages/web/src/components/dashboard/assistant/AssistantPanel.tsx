@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
+  AlertTriangle,
   Bot,
   Cable,
   LoaderCircle,
@@ -1217,6 +1218,21 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
 
         <div className={`grid min-h-0 min-w-0 flex-1 gap-3 ${taskDetailsOpen && activeTask ? "grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,24rem)]" : "grid-cols-1"}`}>
           <div className={`flex min-h-0 min-w-0 flex-col ${taskDetailsOpen && activeTask ? "h-[32rem] xl:h-full" : "h-full"}`}>
+            {/* Privileged execution keeps running while the chat is open; the
+                warning must stay visible above the conversation (plan Q4). */}
+            {policy?.execMode === "privileged" ? (
+              <div
+                data-testid="privileged-exec-banner"
+                className="flex shrink-0 items-start gap-2 border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn"
+              >
+                <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span>
+                  Privileged execution is on for this host: AI shell commands
+                  run as root on the host, outside the sandbox. Every command
+                  still requires manual approval.
+                </span>
+              </div>
+            ) : null}
             {selectionWarning && !selectionWarnDismissed ? (
               <div className="flex shrink-0 items-center justify-between gap-3 border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
                 <div className="flex items-center gap-2">

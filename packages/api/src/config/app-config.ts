@@ -70,6 +70,11 @@ export type AppConfig = {
   ai: {
     enabled: boolean;
     keyringFile: string;
+    /** Directory of bundled AI install artifacts (ai-executor/ai-host-helper
+     * binaries, rootfs tar+manifest, profiles/, install-local-agent.sh) that
+     * converge onto managed VPS (execmode plan Q1). Defaults to /app/agent/ai
+     * in the API image; override for tests/dev via APP_AI_BUNDLE_DIR. */
+    bundleDir?: string;
     /** Per-request fallback context window (tokens); model overrides take precedence. */
     contextWindowTokens: number;
     /** Exact model ID to context-window token override. */
@@ -212,6 +217,10 @@ const envSchema = z.object({
   AI_KEYRING_FILE: z.preprocess(
     (value) => (value === "" ? undefined : value),
     z.string().trim().optional(),
+  ),
+  APP_AI_BUNDLE_DIR: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().trim().min(1).optional(),
   ),
   APP_AI_CONTEXT_WINDOW_TOKENS: z.coerce
     .number()
@@ -467,6 +476,7 @@ export function parseAppConfig(
     ai: {
       enabled: parsed.APP_AI_ENABLED,
       keyringFile: aiKeyringFile,
+      bundleDir: parsed.APP_AI_BUNDLE_DIR,
       contextWindowTokens: parsed.APP_AI_CONTEXT_WINDOW_TOKENS,
       contextWindowTokensByModel: modelWindows,
       contextReserveTokens: parsed.APP_AI_CONTEXT_RESERVE_TOKENS,

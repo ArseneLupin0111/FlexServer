@@ -440,6 +440,11 @@ export class AiAgentService {
         cgroupV2Available: input.capabilities.cgroupV2,
         namespacesAvailable: input.capabilities.namespaces,
         seccompAvailable: input.capabilities.seccomp,
+        // Additive execmode field: absent from older agents → false (fail-closed).
+        privilegedSupported: input.capabilities.privilegedSupported === true,
+        ...(input.capabilities.privilegedUnsupportedReason
+          ? { privilegedUnsupportedReason: input.capabilities.privilegedUnsupportedReason }
+          : {}),
         profiles: [],
         rootfsDigest: input.capabilities.rootfsDigest,
       };

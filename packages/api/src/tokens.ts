@@ -21,3 +21,6 @@ export const AI_REPOSITORY = Symbol("AI_REPOSITORY");
 export const FLEET_REPOSITORY = Symbol("FLEET_REPOSITORY");
 export const FLEET_SERVICE = Symbol("FLEET_SERVICE");
 export const FLEET_PROVISIONING_SERVICE = Symbol("FLEET_PROVISIONING_SERVICE");
+/** Injectable SSH boundary for AI bundle installs (execmode plan slice 3b);
+ * default binding is SshAiBundleInstallTransport. */
+export const AI_BUNDLE_TRANSPORT = Symbol("AI_BUNDLE_TRANSPORT");

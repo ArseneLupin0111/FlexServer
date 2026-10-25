@@ -26,6 +26,7 @@ import { Switch } from "../../ui/switch";
 import type {
   AiCapability,
   AiPolicy,
+  AiProviderAuthKind,
   AiProviderProfile,
   ProviderProfileWrite,
   UpdateAiPolicy,
@@ -43,6 +44,14 @@ export type AssistantSettingsModalProps = {
   onDeleteProvider: (id: string) => Promise<void>;
   onCheckProviderProfile: (id: string) => Promise<void>;
   onFetchProviderModels: (id: string) => Promise<void>;
+  /** Builds the authorize URL for a chatgpt_oauth profile (plan Q10 step b). */
+  onAuthorizeProviderOauth: (id: string) => Promise<string>;
+  /** Exchanges the pasted callback URL and refreshes the providers list
+   * (plan Q10 step c); resolves with the new token timestamps. */
+  onExchangeProviderOauth: (
+    id: string,
+    callbackUrl: string,
+  ) => Promise<{ expiresAt: string; lastRefreshedAt: string }>;
   onSavePolicy: (patch: UpdateAiPolicy) => Promise<void>;
   busy?: boolean;
 };
@@ -53,7 +62,15 @@ type ProfileEditor =
   | { mode: "create" }
   | { mode: "edit"; profile: AiProviderProfile };
 
-type RowAction = "check" | "fetch" | "toggle" | "delete";
+type RowAction = "check" | "fetch" | "toggle" | "delete" | "authorize" | "exchange";
+
+/** Codex model set prefilled for chatgpt_oauth profiles (plan Q5). */
+const CHATGPT_OAUTH_DEFAULT_MODELS = ["gpt-5-codex", "gpt-5.1-codex"];
+
+const CHATGPT_OAUTH_TOS_BANNER =
+  "Using ChatGPT Plus/Pro subscription quota through a non-official client " +
+  "violates OpenAI's Terms of Service and can get the account suspended. " +
+  "All credentials belong to your own account.";
 
 function parseModelLines(text: string): string[] {
   return text
@@ -64,18 +81,26 @@ function parseModelLines(text: string): string[] {
 
 // Row actions mutate the saved profile, so the write body is rebuilt from the
 // public projection. Omitting apiKey keeps the stored key (blank keeps it).
+// chatgpt_oauth profiles keep the server-fixed endpoint: the PATCH shape is
+// name/models/defaultModel/enabled/isDefault only (no key fields).
 function profileWriteFromProfile(
   profile: AiProviderProfile,
   enabled: boolean,
 ): ProviderProfileWrite {
-  return {
+  const base = {
     name: profile.name,
-    endpoint: profile.endpoint,
-    allowPrivateEndpoint: profile.allowPrivateEndpoint,
     models: profile.models,
     defaultModel: profile.defaultModel,
     enabled,
     isDefault: profile.isDefault,
+  };
+  if (profile.authKind === "chatgpt_oauth") {
+    return base;
+  }
+  return {
+    ...base,
+    endpoint: profile.endpoint,
+    allowPrivateEndpoint: profile.allowPrivateEndpoint,
   };
 }
 
@@ -91,6 +116,8 @@ export function AssistantSettingsModal({
   onDeleteProvider,
   onCheckProviderProfile,
   onFetchProviderModels,
+  onAuthorizeProviderOauth,
+  onExchangeProviderOauth,
   onSavePolicy,
   busy = false,
 }: AssistantSettingsModalProps) {
@@ -99,6 +126,7 @@ export function AssistantSettingsModal({
   // Profile editor state
   const [editor, setEditor] = useState<ProfileEditor | null>(null);
   const [name, setName] = useState("");
+  const [authKind, setAuthKind] = useState<AiProviderAuthKind>("apiKey");
   const [endpoint, setEndpoint] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
@@ -120,6 +148,17 @@ export function AssistantSettingsModal({
     Record<string, { ok: boolean; message: string }>
   >({});
   const checkRunIdRef = useRef(0);
+
+  // Per-profile OAuth paste-back flow state (plan Q10). The ToS
+  // acknowledgment is per profile and stays for the modal session; the paste
+  // input collapses again once an exchange succeeds.
+  const [tosAcknowledged, setTosAcknowledged] = useState<Record<string, boolean>>({});
+  const [oauthPasteRevealed, setOauthPasteRevealed] = useState<Record<string, boolean>>({});
+  const [oauthPasteUrl, setOauthPasteUrl] = useState<Record<string, string>>({});
+  const [oauthTokenInfo, setOauthTokenInfo] = useState<
+    Record<string, { expiresAt: string; lastRefreshedAt: string }>
+  >({});
+  const [oauthErrors, setOauthErrors] = useState<Record<string, string | null>>({});
 
   // Policy state
   const [aiEnabled, setAiEnabled] = useState(false);
@@ -192,6 +231,7 @@ export function AssistantSettingsModal({
     setApiKey("");
     if (profile) {
       setName(profile.name);
+      setAuthKind(profile.authKind);
       setEndpoint(profile.endpoint);
       setModelsText(profile.models.join("\n"));
       setDefaultModel(profile.defaultModel ?? "");
@@ -200,6 +240,7 @@ export function AssistantSettingsModal({
       setIsDefault(profile.isDefault);
     } else {
       setName("");
+      setAuthKind("apiKey");
       setEndpoint("");
       setModelsText("");
       setDefaultModel("");
@@ -209,13 +250,27 @@ export function AssistantSettingsModal({
     }
   }
 
+  // Switching to the OAuth kind prefills the Codex model set (plan Q5) when
+  // the draft has no models yet; a typed list is kept.
+  function handleAuthKindChange(kind: AiProviderAuthKind) {
+    setAuthKind(kind);
+    if (kind === "chatgpt_oauth" && modelsText.trim().length === 0) {
+      setModelsText(CHATGPT_OAUTH_DEFAULT_MODELS.join("\n"));
+    }
+  }
+
   async function handleSaveProvider() {
     if (savingProvider || busy || !editor) return;
     const trimmedName = name.trim();
     const trimmedEndpoint = endpoint.trim();
     const models = parseModelLines(modelsText);
-    if (!trimmedName || !trimmedEndpoint || models.length === 0) {
-      setProviderError("Name, endpoint, and at least one model are required.");
+    const isOauth = authKind === "chatgpt_oauth";
+    if (!trimmedName || models.length === 0 || (!isOauth && !trimmedEndpoint)) {
+      setProviderError(
+        isOauth
+          ? "Name and at least one model are required."
+          : "Name, endpoint, and at least one model are required.",
+      );
       return;
     }
     setSavingProvider(true);
@@ -223,18 +278,33 @@ export function AssistantSettingsModal({
     setProviderSuccess(null);
     invalidateCheckResults();
     try {
-      const body: ProviderProfileWrite = {
+      const shared = {
         name: trimmedName,
-        endpoint: trimmedEndpoint,
-        allowPrivateEndpoint: allowPrivate,
         models,
         defaultModel: defaultModel.trim() || models[0],
         enabled,
         isDefault,
       };
-      const key = apiKey.trim();
-      if (key.length > 0) {
-        body.apiKey = key;
+      // OAuth create: endpoint/apiKey are omitted — the server fills the
+      // fixed Codex endpoint (plan Q2). OAuth edit: PATCH carries only
+      // name/models/defaultModel/enabled/isDefault (no key fields).
+      const body: ProviderProfileWrite = isOauth
+        ? {
+            ...shared,
+            ...(editor.mode === "create"
+              ? { authKind: "chatgpt_oauth" as const }
+              : {}),
+          }
+        : {
+            ...shared,
+            endpoint: trimmedEndpoint,
+            allowPrivateEndpoint: allowPrivate,
+          };
+      if (!isOauth) {
+        const key = apiKey.trim();
+        if (key.length > 0) {
+          body.apiKey = key;
+        }
       }
       if (editor.mode === "edit") {
         await onUpdateProvider(editor.profile.id, body);
@@ -314,6 +384,74 @@ export function AssistantSettingsModal({
     } finally {
       setRowBusy((prev) =>
         prev && prev.id === profile.id && prev.action === "fetch" ? null : prev,
+      );
+    }
+  }
+
+  // OAuth step b: build the authorize URL server-side and open it in a new
+  // tab; the browser then lands on the (expected to fail) localhost callback.
+  async function handleOauthAuthorize(profile: AiProviderProfile) {
+    if (rowBusy || busy || tosAcknowledged[profile.id] !== true) return;
+    setRowBusy({ id: profile.id, action: "authorize" });
+    setOauthErrors((prev) => ({ ...prev, [profile.id]: null }));
+    try {
+      const authorizeUrl = await onAuthorizeProviderOauth(profile.id);
+      window.open(authorizeUrl, "_blank", "noopener,noreferrer");
+      setOauthPasteRevealed((prev) => ({ ...prev, [profile.id]: true }));
+    } catch (err) {
+      setOauthErrors((prev) => ({
+        ...prev,
+        [profile.id]:
+          err instanceof Error
+            ? err.message
+            : "Failed to start the OAuth authorization.",
+      }));
+    } finally {
+      setRowBusy((prev) =>
+        prev && prev.id === profile.id && prev.action === "authorize" ? null : prev,
+      );
+    }
+  }
+
+  // OAuth step c: paste-back exchange. The callback URL is validated
+  // client-side first so a garbled paste never reaches the endpoint.
+  async function handleOauthExchange(profile: AiProviderProfile) {
+    if (rowBusy || busy) return;
+    const raw = (oauthPasteUrl[profile.id] ?? "").trim();
+    let validCallbackUrl = false;
+    try {
+      const parsed = new URL(raw);
+      validCallbackUrl = parsed.protocol === "http:" || parsed.protocol === "https:";
+    } catch {
+      validCallbackUrl = false;
+    }
+    if (!validCallbackUrl) {
+      setOauthErrors((prev) => ({
+        ...prev,
+        [profile.id]:
+          "Paste the full callback URL from the browser address bar (it starts with http://localhost:1455/auth/callback).",
+      }));
+      return;
+    }
+    setRowBusy({ id: profile.id, action: "exchange" });
+    setOauthErrors((prev) => ({ ...prev, [profile.id]: null }));
+    try {
+      const result = await onExchangeProviderOauth(profile.id, raw);
+      setOauthTokenInfo((prev) => ({ ...prev, [profile.id]: result }));
+      setOauthPasteRevealed((prev) => ({ ...prev, [profile.id]: false }));
+      setOauthPasteUrl((prev) => ({ ...prev, [profile.id]: "" }));
+      setProviderSuccess(`Connected the ChatGPT OAuth login for ${profile.name}.`);
+    } catch (err) {
+      setOauthErrors((prev) => ({
+        ...prev,
+        [profile.id]:
+          err instanceof Error
+            ? err.message
+            : "Failed to exchange the OAuth callback URL.",
+      }));
+    } finally {
+      setRowBusy((prev) =>
+        prev && prev.id === profile.id && prev.action === "exchange" ? null : prev,
       );
     }
   }
@@ -523,6 +661,10 @@ export function AssistantSettingsModal({
                     {providers.map((profile) => {
                       const rowCheck = checkResults[profile.id];
                       const rowAction = rowBusy?.id === profile.id ? rowBusy.action : null;
+                      const isOauthProfile = profile.authKind === "chatgpt_oauth";
+                      const reloginRequired = profile.tokenState === "relogin_required";
+                      const oauthToken = oauthTokenInfo[profile.id];
+                      const oauthError = oauthErrors[profile.id] ?? null;
                       return (
                         <div
                           key={profile.id}
@@ -541,7 +683,7 @@ export function AssistantSettingsModal({
                                 {!profile.enabled ? (
                                   <Badge variant="warning">Disabled</Badge>
                                 ) : null}
-                                {!profile.hasApiKey ? (
+                                {!isOauthProfile && !profile.hasApiKey ? (
                                   <Badge variant="destructive">No key</Badge>
                                 ) : null}
                               </div>
@@ -570,7 +712,9 @@ export function AssistantSettingsModal({
                                 title={
                                   profile.hasApiKey
                                     ? "Check the saved profile endpoint"
-                                    : "Configure an API key first"
+                                    : isOauthProfile
+                                      ? "Managed via the ChatGPT OAuth login"
+                                      : "Configure an API key first"
                                 }
                                 className="text-xs"
                               >
@@ -591,7 +735,9 @@ export function AssistantSettingsModal({
                                 title={
                                   profile.hasApiKey
                                     ? "Fetch the model list from the provider"
-                                    : "Configure an API key first"
+                                    : isOauthProfile
+                                      ? "Managed via the ChatGPT OAuth login"
+                                      : "Configure an API key first"
                                 }
                                 className="text-xs"
                               >
@@ -674,6 +820,158 @@ export function AssistantSettingsModal({
                               <span>{rowCheck.message}</span>
                             </div>
                           ) : null}
+                          {isOauthProfile ? (
+                            <div
+                              data-oauth-section={profile.id}
+                              className={`mt-2 space-y-2 border p-2.5 ${
+                                reloginRequired
+                                  ? "border-warn/40 bg-warn/10"
+                                  : "border-line bg-ink/30"
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[11px] font-semibold uppercase tracking-wider text-dim">
+                                  ChatGPT OAuth
+                                </span>
+                                {reloginRequired ? (
+                                  <Badge variant="warning">Relogin required</Badge>
+                                ) : profile.tokenState === "connected" || oauthToken ? (
+                                  <Badge variant="success">Connected</Badge>
+                                ) : (
+                                  <Badge variant="default">Not connected</Badge>
+                                )}
+                              </div>
+
+                              {reloginRequired ? (
+                                <p className="text-[11px] text-warn">
+                                  The saved login was rejected (expired or
+                                  revoked). Re-run the OAuth flow below.
+                                </p>
+                              ) : null}
+
+                              {oauthToken ? (
+                                <div className="text-[11px] text-dim">
+                                  Token expires{" "}
+                                  <span className="text-text">
+                                    {new Date(oauthToken.expiresAt).toLocaleString()}
+                                  </span>{" "}
+                                  · last refreshed{" "}
+                                  <span className="text-text">
+                                    {new Date(oauthToken.lastRefreshedAt).toLocaleString()}
+                                  </span>
+                                </div>
+                              ) : null}
+
+                              {/* Risk disclosure (plan: non-negotiable). The
+                                  acknowledgment is per profile and gates the
+                                  authorize button. */}
+                              <div className="border border-warn/40 bg-warn/10 p-2 text-[11px] text-warn">
+                                <p>{CHATGPT_OAUTH_TOS_BANNER}</p>
+                                <label className="mt-1.5 flex items-center gap-2 font-medium text-text">
+                                  <input
+                                    type="checkbox"
+                                    checked={tosAcknowledged[profile.id] === true}
+                                    onChange={(e) =>
+                                      setTosAcknowledged((prev) => ({
+                                        ...prev,
+                                        [profile.id]: e.target.checked,
+                                      }))
+                                    }
+                                    aria-label={`I understand the OAuth risk for ${profile.name}`}
+                                    className="h-3.5 w-3.5"
+                                  />
+                                  <span>I understand the risk</span>
+                                </label>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  disabled={
+                                    tosAcknowledged[profile.id] !== true ||
+                                    busy ||
+                                    rowBusy !== null
+                                  }
+                                  onClick={() => void handleOauthAuthorize(profile)}
+                                  aria-label={
+                                    reloginRequired
+                                      ? `Re-login for ${profile.name}`
+                                      : `Open authorize URL for ${profile.name}`
+                                  }
+                                  className="text-xs"
+                                >
+                                  {rowAction === "authorize" ? (
+                                    <LoaderCircle className="mr-1 h-3 w-3 animate-spin" />
+                                  ) : null}
+                                  {reloginRequired ? "Re-login" : "Open authorize URL"}
+                                </Button>
+                                <span className="text-[10px] text-dim">
+                                  Opens auth.openai.com in a new tab.
+                                </span>
+                              </div>
+
+                              {oauthPasteRevealed[profile.id] ? (
+                                <div className="space-y-1.5 border-t border-line pt-2">
+                                  <Label className="text-xs text-text">
+                                    Paste the callback URL
+                                  </Label>
+                                  <p className="text-[11px] text-dim">
+                                    The browser lands on{" "}
+                                    <span className="font-mono">
+                                      localhost:1455/auth/callback?...
+                                    </span>{" "}
+                                    and shows a connection error — that is
+                                    expected. Copy the FULL URL from the address
+                                    bar and paste it here.
+                                  </p>
+                                  <Input
+                                    type="text"
+                                    value={oauthPasteUrl[profile.id] ?? ""}
+                                    onChange={(e) =>
+                                      setOauthPasteUrl((prev) => ({
+                                        ...prev,
+                                        [profile.id]: e.target.value,
+                                      }))
+                                    }
+                                    placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+                                    aria-label="OAuth callback URL"
+                                    className="h-8 font-mono text-xs"
+                                  />
+                                  <Button
+                                    type="button"
+                                    variant="default"
+                                    size="sm"
+                                    disabled={
+                                      busy ||
+                                      rowBusy !== null ||
+                                      (oauthPasteUrl[profile.id] ?? "").trim()
+                                        .length === 0
+                                    }
+                                    onClick={() => void handleOauthExchange(profile)}
+                                    aria-label={`Connect OAuth login for ${profile.name}`}
+                                    className="text-xs font-semibold"
+                                  >
+                                    {rowAction === "exchange" ? (
+                                      <LoaderCircle className="mr-1 h-3 w-3 animate-spin" />
+                                    ) : null}
+                                    Connect
+                                  </Button>
+                                </div>
+                              ) : null}
+
+                              {oauthError ? (
+                                <div
+                                  role="alert"
+                                  className="flex items-center gap-2 border border-crit/40 bg-crit/10 p-2 text-[11px] text-crit"
+                                >
+                                  <XCircle className="h-3.5 w-3.5 shrink-0" />
+                                  <span>{oauthError}</span>
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
                         </div>
                       );
                     })}
@@ -711,54 +1009,85 @@ export function AssistantSettingsModal({
                   </div>
 
                   <div className="space-y-1">
-                    <Label className="text-xs text-text">Endpoint</Label>
-                    <Input
-                      type="url"
-                      value={endpoint}
-                      onChange={(e) => setEndpoint(e.target.value)}
-                      placeholder="https://api.openai.com"
-                      className="h-8 font-mono text-xs"
-                    />
+                    <Label className="text-xs text-text">Auth kind</Label>
+                    <select
+                      value={authKind}
+                      disabled={editor.mode === "edit"}
+                      onChange={(e) =>
+                        handleAuthKindChange(e.target.value as AiProviderAuthKind)
+                      }
+                      aria-label="Auth kind"
+                      className="h-8 w-full border border-line bg-ink px-2 text-xs text-text focus:border-signal focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <option value="apiKey">API key</option>
+                      <option value="chatgpt_oauth">ChatGPT (OAuth)</option>
+                    </select>
                     <p className="text-[11px] text-dim">
-                      OpenAI-compatible. HTTPS for remote hosts.
+                      {editor.mode === "edit"
+                        ? "The auth kind of a saved profile is fixed."
+                        : "ChatGPT (OAuth) uses your ChatGPT subscription instead of an API key."}
                     </p>
                   </div>
 
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs text-text">API key</Label>
-                      {editor.mode === "edit" && editor.profile.hasApiKey ? (
-                        <span className="font-mono text-[11px] text-signal">
-                          Key configured
-                        </span>
-                      ) : null}
-                    </div>
-                    <div className="relative">
-                      <Input
-                        type={showApiKey ? "text" : "password"}
-                        value={apiKey}
-                        onChange={(e) => setApiKey(e.target.value)}
-                        placeholder={
-                          editor.mode === "edit" && editor.profile.hasApiKey
-                            ? "•••••••••••••••••••••••• (Leave blank to keep current)"
-                            : "Enter provider API key"
-                        }
-                        className="h-8 pr-8 font-mono text-xs"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowApiKey(!showApiKey)}
-                        className="absolute right-2 top-2 text-dim hover:text-text"
-                        aria-label={showApiKey ? "Hide API key" : "Show API key"}
-                      >
-                        {showApiKey ? (
-                          <EyeOff className="h-4 w-4" />
-                        ) : (
-                          <Eye className="h-4 w-4" />
-                        )}
-                      </button>
-                    </div>
-                  </div>
+                  {authKind === "chatgpt_oauth" ? (
+                    <p className="border border-line bg-ink/30 p-2 text-[11px] text-dim">
+                      The Codex endpoint is fixed by the server. Save the
+                      profile first, then complete the paste-back OAuth login on
+                      its row below.
+                    </p>
+                  ) : (
+                    <>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-text">Endpoint</Label>
+                        <Input
+                          type="url"
+                          value={endpoint}
+                          onChange={(e) => setEndpoint(e.target.value)}
+                          placeholder="https://api.openai.com"
+                          className="h-8 font-mono text-xs"
+                        />
+                        <p className="text-[11px] text-dim">
+                          OpenAI-compatible. HTTPS for remote hosts.
+                        </p>
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs text-text">API key</Label>
+                          {editor.mode === "edit" && editor.profile.hasApiKey ? (
+                            <span className="font-mono text-[11px] text-signal">
+                              Key configured
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="relative">
+                          <Input
+                            type={showApiKey ? "text" : "password"}
+                            value={apiKey}
+                            onChange={(e) => setApiKey(e.target.value)}
+                            placeholder={
+                              editor.mode === "edit" && editor.profile.hasApiKey
+                                ? "•••••••••••••••••••••••• (Leave blank to keep current)"
+                                : "Enter provider API key"
+                            }
+                            className="h-8 pr-8 font-mono text-xs"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowApiKey(!showApiKey)}
+                            className="absolute right-2 top-2 text-dim hover:text-text"
+                            aria-label={showApiKey ? "Hide API key" : "Show API key"}
+                          >
+                            {showApiKey ? (
+                              <EyeOff className="h-4 w-4" />
+                            ) : (
+                              <Eye className="h-4 w-4" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  )}
 
                   <div className="space-y-1">
                     <Label className="text-xs text-text">Models</Label>
@@ -789,22 +1118,24 @@ export function AssistantSettingsModal({
                     </p>
                   </div>
 
-                  <div className="flex items-center justify-between border border-line bg-panel p-3">
-                    <div className="space-y-0.5 pr-4">
-                      <div className="text-xs font-semibold text-text">
-                        Allow private endpoint
+                  {authKind === "apiKey" ? (
+                    <div className="flex items-center justify-between border border-line bg-panel p-3">
+                      <div className="space-y-0.5 pr-4">
+                        <div className="text-xs font-semibold text-text">
+                          Allow private endpoint
+                        </div>
+                        <div className="text-[11px] text-dim">
+                          Loopback (127.0.0.1) allowed; cloud metadata IPs stay
+                          blocked.
+                        </div>
                       </div>
-                      <div className="text-[11px] text-dim">
-                        Loopback (127.0.0.1) allowed; cloud metadata IPs stay
-                        blocked.
-                      </div>
+                      <Switch
+                        checked={allowPrivate}
+                        onCheckedChange={setAllowPrivate}
+                        aria-label="Allow private endpoint"
+                      />
                     </div>
-                    <Switch
-                      checked={allowPrivate}
-                      onCheckedChange={setAllowPrivate}
-                      aria-label="Allow private endpoint"
-                    />
-                  </div>
+                  ) : null}
 
                   <div className="flex items-center justify-between border border-line bg-panel p-3">
                     <div className="text-xs font-semibold text-text">Enabled</div>

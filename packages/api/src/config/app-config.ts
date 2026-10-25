@@ -81,6 +81,15 @@ export type AppConfig = {
     contextTailTokens: number;
     /** Cumulative per-task token consumption cap (including compact calls). */
     maxCumulativeTaskTokens: number;
+    /** Codex OAuth endpoints/identity (docs/ai-chatgpt-oauth-provider-plan.md).
+     * Public registration data, env-overridable so OpenAI-side changes or
+     * offline test stubs never need a code release. */
+    codexOauth: {
+      clientId: string;
+      authBaseUrl: string;
+      apiBaseUrl: string;
+      cliVersion: string;
+    };
   };
   fleet: {
     publicKeyFile?: string;
@@ -229,6 +238,10 @@ const envSchema = z.object({
     .min(16_000)
     .max(100_000_000)
     .default(1_000_000),
+  APP_AI_CODEX_CLIENT_ID: z.string().trim().min(8).max(256).default("app_EMoamEEZ73f0CkXaXp7hrann"),
+  APP_AI_CODEX_AUTH_BASE_URL: z.string().trim().url().max(1024).default("https://auth.openai.com"),
+  APP_AI_CODEX_API_BASE_URL: z.string().trim().url().max(1024).default("https://chatgpt.com"),
+  APP_AI_CODEX_CLI_VERSION: z.string().trim().min(1).max(64).default("0.55.0"),
   COMPOSE_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(30).max(3_600).default(120),
   COMPOSE_INVENTORY_MAX_BYTES: z.coerce.number().int().min(64 * 1024).max(8 * 1024 * 1024).default(512 * 1024),
   COMPOSE_PREVIEW_TTL_SECONDS: z.coerce.number().int().min(60).max(3_600).default(300),
@@ -459,6 +472,12 @@ export function parseAppConfig(
       contextReserveTokens: parsed.APP_AI_CONTEXT_RESERVE_TOKENS,
       contextTailTokens: parsed.APP_AI_CONTEXT_TAIL_TOKENS,
       maxCumulativeTaskTokens: parsed.APP_AI_MAX_CUMULATIVE_TASK_TOKENS,
+      codexOauth: {
+        clientId: parsed.APP_AI_CODEX_CLIENT_ID,
+        authBaseUrl: parsed.APP_AI_CODEX_AUTH_BASE_URL,
+        apiBaseUrl: parsed.APP_AI_CODEX_API_BASE_URL,
+        cliVersion: parsed.APP_AI_CODEX_CLI_VERSION,
+      },
     },
     localFilesSocketPath: parsed.LOCAL_FILES_SOCKET_PATH,
     terminal: {

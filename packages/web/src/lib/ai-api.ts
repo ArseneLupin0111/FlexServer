@@ -129,6 +129,12 @@ export type UpdateAiSettings = {
   allowPrivateEndpoint?: boolean;
 };
 
+/** How a provider profile authenticates (docs/ai-chatgpt-oauth-provider-plan.md). */
+export type AiProviderAuthKind = "apiKey" | "chatgpt_oauth";
+
+/** OAuth token lifecycle state; `relogin_required` fails closed (plan Q7). */
+export type AiProviderTokenState = "connected" | "relogin_required";
+
 /** One admin-managed provider profile (docs/ai-multi-provider-plan.md). */
 export type AiProviderProfile = {
   id: string;
@@ -140,19 +146,32 @@ export type AiProviderProfile = {
   isDefault: boolean;
   hasApiKey: boolean;
   allowPrivateEndpoint: boolean;
+  authKind: AiProviderAuthKind;
+  tokenState?: AiProviderTokenState;
   revision: number;
   updatedAt: string;
 };
 
 export type ProviderProfileWrite = {
   name: string;
-  endpoint: string;
+  /** Omitted for chatgpt_oauth profiles: the server fills the fixed Codex
+   * endpoint. Required when authKind is "apiKey" (or defaulted). */
+  endpoint?: string;
   apiKey?: string;
   allowPrivateEndpoint?: boolean;
+  /** Only set on create (or left unset); the profile kind is fixed afterwards. */
+  authKind?: AiProviderAuthKind;
   models: string[];
   defaultModel?: string;
   enabled?: boolean;
   isDefault?: boolean;
+};
+
+/** Result of the paste-back OAuth exchange (plan Q10 step c). */
+export type AiProviderOauthExchangeResult = {
+  profile: AiProviderProfile;
+  expiresAt: string;
+  lastRefreshedAt: string;
 };
 
 export type AiProviderSelection = {
@@ -389,6 +408,37 @@ export function fetchAiProviderModels(id: string, signal?: AbortSignal): Promise
     method: "POST",
     signal,
   });
+}
+
+// ── Provider OAuth (ChatGPT/Codex paste-back login) ───────────────────
+
+/** Builds the OpenAI authorize URL for a saved chatgpt_oauth profile; the
+ * PKCE verifier/state stay server-side in memory (plan Q2/Q10). */
+export function authorizeAiProviderOauth(
+  id: string,
+  signal?: AbortSignal,
+): Promise<{ authorizeUrl: string }> {
+  return request<{ authorizeUrl: string }>(
+    `/api/ai/providers/${encodeURIComponent(id)}/oauth/authorize`,
+    { method: "POST", signal },
+  );
+}
+
+/** Exchanges the pasted callback URL (`localhost:1455/auth/callback?...`)
+ * for the stored token envelope (plan Q10 step c). */
+export function exchangeAiProviderOauth(
+  id: string,
+  callbackUrl: string,
+  signal?: AbortSignal,
+): Promise<AiProviderOauthExchangeResult> {
+  return request<AiProviderOauthExchangeResult>(
+    `/api/ai/providers/${encodeURIComponent(id)}/oauth/exchange`,
+    {
+      method: "POST",
+      body: JSON.stringify({ callbackUrl }),
+      signal,
+    },
+  );
 }
 
 // ── Per-VPS Policy & Capability APIs ──────────────────────────────────

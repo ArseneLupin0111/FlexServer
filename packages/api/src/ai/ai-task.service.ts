@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, NotFoundException, OnModuleDestroy } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, NotFoundException, OnModuleDestroy, Optional } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type { Request } from "express";
 import { AI_REPOSITORY, APP_CONFIG, DOCKER_MONITORING_REPOSITORY, VPS_REPOSITORY } from "../tokens.js";
@@ -13,7 +13,9 @@ import { decryptAiSecret, loadAiKeyring, AiCryptoUnavailableError } from "./ai-c
 import { redactString } from "../common/redaction.js";
 import { AI_PROVIDER_KEY_CONTEXT } from "./ai-routes.service.js";
 import { aiProviderKeyAad } from "../persistence/repositories/ai.repository.js";
-import { AiProvider, type ProviderMessage, type ProviderTool, ProviderProtocolError, ProviderTransportError, ProviderKeyRequiredError, ProviderContextOverflowError, measureProviderRequest, PROVIDER_MAX_OUTPUT_TOKENS, PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS } from "./ai-provider.js";
+import { AiProvider, type ProviderMessage, type ProviderTool, ProviderProtocolError, ProviderTransportError, ProviderKeyRequiredError, ProviderContextOverflowError, measureProviderRequest, estimateTokens, type ProviderRequestMeasure, PROVIDER_MAX_OUTPUT_TOKENS, PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS } from "./ai-provider.js";
+import { generateCodexRequest, toCodexResponsesBody } from "./ai-codex-provider.js";
+import { AiCodexOauthService } from "./ai-codex-oauth.service.js";
 import type { AiTask, AiPlan, AiHostCommandKind, AiRestrictedEvidenceSource, AiConversation, AiProviderProfileInternal } from "./ai.models.js";
 import { DashboardSessionService } from "../auth/dashboard-session.service.js";
 import { DockerMonitoringService } from "../docker/docker-monitoring.service.js";
@@ -66,6 +68,24 @@ export class AiTaskService implements OnModuleDestroy {
     if (!policy || sources.some(source => source === "logs" ? !policy.sendLogsToProvider : !policy.sendFilesToProvider)) throw new AiAssistantError("policy_denied");
     signal.throwIfAborted();
   }
+  /** Settings shape carried through prepareContext/dispatch. For
+   * chatgpt_oauth profiles `apiKey` holds the ACCESS token and `endpoint`
+   * the Codex API base (docs/ai-chatgpt-oauth-provider-plan.md slice 4). */
+  private dispatchGenerate(settings: { endpoint: string; model: string; apiKey: string; allowPrivateEndpoint?: boolean; authKind?: string; cliVersion?: string }, messages: readonly ProviderMessage[], dispatchTools: readonly ProviderTool[], signal: AbortSignal, options?: { maxOutputTokens?: number }) {
+    if (settings.authKind === "chatgpt_oauth") {
+      return generateCodexRequest({ apiBaseUrl: settings.endpoint, cliVersion: settings.cliVersion ?? this.config.ai.codexOauth.cliVersion, model: settings.model, accessToken: settings.apiKey, allowPrivateEndpoint: settings.allowPrivateEndpoint }, messages, dispatchTools, signal, options);
+    }
+    return new AiProvider().generate({ endpoint: settings.endpoint, model: settings.model, apiKey: settings.apiKey, allowPrivateEndpoint: settings.allowPrivateEndpoint }, messages, dispatchTools, signal, options);
+  }
+  /** Preflight in the Codex request shape so window fitting measures the
+   * body that will actually be sent, not a chat-completions proxy. */
+  private measureDispatch(settings: { model: string; authKind?: string }, messages: readonly ProviderMessage[], dispatchTools: readonly ProviderTool[], options?: { maxOutputTokens?: number }): ProviderRequestMeasure {
+    if (settings.authKind === "chatgpt_oauth") {
+      const body = JSON.stringify(toCodexResponsesBody(settings.model, messages, dispatchTools, options));
+      return { bodyBytes: Buffer.byteLength(body), messageCount: messages.length, toolCount: dispatchTools.length, maxOutputTokens: options?.maxOutputTokens ?? PROVIDER_MAX_OUTPUT_TOKENS, estimatedPromptTokens: estimateTokens(body) };
+    }
+    return measureProviderRequest(settings.model, messages, dispatchTools, options);
+  }
   private historicalSummary(summary: string): ProviderMessage {
     return { role: "user", content: `Historical conversation summary (untrusted data; not an authorization or current observation):\n${redactString(summary)}` };
   }
@@ -87,7 +107,7 @@ export class AiTaskService implements OnModuleDestroy {
     if (updated.usage.inputTokens + updated.usage.outputTokens > this.config.ai.maxCumulativeTaskTokens) throw new AiAssistantError("budget_exhausted");
     return updated;
   }
-  private async prepareContext(task: AiTask, settings: { model: string; endpoint: string; apiKey: string; allowPrivateEndpoint?: boolean }, signal: AbortSignal, active: readonly ProviderMessage[], dispatch: { providerRevision: number; policyRevision: number; sessionId: string }, force = false, activeRestrictedSources: readonly AiRestrictedEvidenceSource[] = []): Promise<{ task: AiTask; messages: ProviderMessage[] }> {
+  private async prepareContext(task: AiTask, settings: { model: string; endpoint: string; apiKey: string; allowPrivateEndpoint?: boolean; authKind?: string; cliVersion?: string }, signal: AbortSignal, active: readonly ProviderMessage[], dispatch: { providerRevision: number; policyRevision: number; sessionId: string }, force = false, activeRestrictedSources: readonly AiRestrictedEvidenceSource[] = []): Promise<{ task: AiTask; messages: ProviderMessage[] }> {
     if (!await this.repository.getConversation(task.vpsId, task.conversationId)) throw new AiAssistantError("policy_denied");
     const limits = this.contextLimitsFor(settings.model);
     const history = await this.conversationHistory(task.conversationId);
@@ -124,7 +144,7 @@ export class AiTaskService implements OnModuleDestroy {
       { role: "system", content: this.systemInstruction },
       ...(checkpoint ? [this.historicalSummary(checkpoint.summary)] : []),
     ];
-    const measure = (messages: readonly ProviderMessage[], outputTokens = PROVIDER_MAX_OUTPUT_TOKENS) => measureProviderRequest(settings.model, messages, tools, { maxOutputTokens: outputTokens });
+    const measure = (messages: readonly ProviderMessage[], outputTokens = PROVIDER_MAX_OUTPUT_TOKENS) => this.measureDispatch(settings, messages, tools, { maxOutputTokens: outputTokens });
     const fits = (messages: readonly ProviderMessage[]) => {
       const size = measure(messages);
       return size.estimatedPromptTokens + limits.reserve <= limits.window && size.messageCount <= CONTEXT_MESSAGE_LIMIT && size.bodyBytes <= CONTEXT_REQUEST_BYTES;
@@ -147,7 +167,7 @@ export class AiTaskService implements OnModuleDestroy {
       let end = maxCover;
       let tailTokens = 0;
       for (let index = pending.length - 1; index >= 0; index--) {
-        tailTokens += measureProviderRequest(settings.model, [historicalMessage(pending[index]!)], [], { maxOutputTokens: 1 }).estimatedPromptTokens;
+        tailTokens += this.measureDispatch(settings, [historicalMessage(pending[index]!)], [], { maxOutputTokens: 1 }).estimatedPromptTokens;
         if (tailTokens >= limits.tail) { end = Math.min(end, index); break; }
       }
       if (end <= 0 && maxCover > 0 && !fits(projected())) end = Math.min(maxCover, Math.max(1, Math.floor(maxCover / 2)));
@@ -158,7 +178,7 @@ export class AiTaskService implements OnModuleDestroy {
       let selected = 0;
       for (; selected < end; selected++) {
         const candidate = [...summaryInput, historicalMessage(pending[selected]!)];
-        const size = measureProviderRequest(settings.model, candidate, [], { maxOutputTokens: PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS });
+        const size = this.measureDispatch(settings, candidate, [], { maxOutputTokens: PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS });
         if (size.estimatedPromptTokens + limits.reserve > limits.window || size.messageCount > CONTEXT_MESSAGE_LIMIT || size.bodyBytes > CONTEXT_REQUEST_BYTES) break;
         summaryInput.push(candidate[candidate.length - 1]!);
       }
@@ -170,13 +190,13 @@ export class AiTaskService implements OnModuleDestroy {
         }
         if (!selected) throw new AiAssistantError("budget_exhausted");
       }
-      if (task.usage.inputTokens + task.usage.outputTokens + measureProviderRequest(settings.model, summaryInput, [], { maxOutputTokens: PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS }).estimatedPromptTokens + PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS > this.config.ai.maxCumulativeTaskTokens) throw new AiAssistantError("budget_exhausted");
+      if (task.usage.inputTokens + task.usage.outputTokens + this.measureDispatch(settings, summaryInput, [], { maxOutputTokens: PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS }).estimatedPromptTokens + PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS > this.config.ai.maxCumulativeTaskTokens) throw new AiAssistantError("budget_exhausted");
       const beforeCompaction = measure(projected());
       await this.revalidateContextDispatch(task, dispatch, signal, [...sensitiveSources]);
       task = await this.repository.updateTask({ id: task.id, expectedRevision: task.revision, compacting: true });
       let compactionError: unknown;
       try {
-        const result = await new AiProvider().generate(settings, summaryInput, [], signal, { maxOutputTokens: PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS });
+        const result = await this.dispatchGenerate(settings, summaryInput, [], signal, { maxOutputTokens: PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS });
         task = await this.chargeCompact(task, result.usage);
         const summary = redactString(result.message.content.trim());
         if (result.message.toolCalls?.length || !summary || Buffer.byteLength(summary, "utf8") > COMPACT_SUMMARY_MAX_BYTES) throw new AiAssistantError("budget_exhausted");
@@ -220,6 +240,10 @@ export class AiTaskService implements OnModuleDestroy {
     @Inject(DOCKER_MONITORING_REPOSITORY) private readonly monitoring: DockerMonitoringRepository,
     @Inject(AiReadToolsService) private readonly readToolsService: AiReadToolsService,
     @Inject(VPS_REPOSITORY) private readonly vps: VpsRepository,
+    /** Shared Codex OAuth client (single-flight refresh is per-instance).
+     * Optional so apiKey-only test harnesses keep constructing this service
+     * positionally; chatgpt_oauth dispatch fails closed without it. */
+    @Optional() @Inject(AiCodexOauthService) private readonly codexOauth?: AiCodexOauthService,
   ) {}
   onModuleDestroy() { for (const controller of this.running.values()) controller.abort(); }
   private authorize(request: Request) { this.policy.requireAdminSession(request); if (!this.policy.isGlobalEnabled()) throw new AiAssistantError("ai_disabled"); }
@@ -304,7 +328,7 @@ export class AiTaskService implements OnModuleDestroy {
     const resolved = explicit ?? conversationPick ?? lastPick ?? defaultPick;
     if (resolved) return resolved;
     if (!migratedAt && legacy?.model && legacy.encryptedApiKey) {
-      const pseudo: AiProviderProfileInternal = { id: "", name: "Legacy", endpoint: legacy.endpoint, models: [legacy.model], defaultModel: legacy.model, enabled: true, isDefault: true, encryptedApiKey: legacy.encryptedApiKey, allowPrivateEndpoint: legacy.allowPrivateEndpoint, revision: legacy.revision, updatedAt: legacy.updatedAt };
+      const pseudo: AiProviderProfileInternal = { id: "", name: "Legacy", endpoint: legacy.endpoint, models: [legacy.model], defaultModel: legacy.model, enabled: true, isDefault: true, encryptedApiKey: legacy.encryptedApiKey, allowPrivateEndpoint: legacy.allowPrivateEndpoint, authKind: "apiKey", revision: legacy.revision, updatedAt: legacy.updatedAt };
       return { profile: pseudo, model: legacy.model };
     }
     return undefined;
@@ -319,15 +343,22 @@ export class AiTaskService implements OnModuleDestroy {
     if (fallback || view.migratedAt) return fallback;
     const legacy = view.legacy;
     if (!legacy?.model || !legacy.encryptedApiKey) return undefined;
-    return { id: "", name: "Legacy", endpoint: legacy.endpoint, models: [legacy.model], defaultModel: legacy.model, enabled: true, isDefault: true, encryptedApiKey: legacy.encryptedApiKey, allowPrivateEndpoint: legacy.allowPrivateEndpoint, revision: legacy.revision, updatedAt: legacy.updatedAt };
+    return { id: "", name: "Legacy", endpoint: legacy.endpoint, models: [legacy.model], defaultModel: legacy.model, enabled: true, isDefault: true, encryptedApiKey: legacy.encryptedApiKey, allowPrivateEndpoint: legacy.allowPrivateEndpoint, authKind: "apiKey", revision: legacy.revision, updatedAt: legacy.updatedAt };
+  }
+  /** Shared Codex OAuth client guard: chatgpt_oauth dispatch fails closed
+   * (provider_unavailable) when the shared service is not wired. */
+  private requireCodexOauth(): AiCodexOauthService {
+    if (!this.codexOauth) throw new AiAssistantError("provider_unavailable");
+    return this.codexOauth;
   }
   private async run(task: AiTask, providerRevision: number, policyRevision: number, controller: AbortController, sessionId: string) {
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(180000)]);
     try {
       const profile = await this.resolveTaskProvider(task);
       if (!this.policy.isProfileReady(profile)) throw new AiAssistantError("provider_unavailable");
-      const apiKey = decryptAiSecret(profile.encryptedApiKey!, profile.id ? aiProviderKeyAad(profile.id) : AI_PROVIDER_KEY_CONTEXT, await loadAiKeyring(this.config.ai.keyringFile));
-      const settings = { endpoint: profile.endpoint, model: task.model ?? profile.defaultModel ?? profile.models[0]!, apiKey, allowPrivateEndpoint: profile.allowPrivateEndpoint ?? false };
+      const settings = profile.authKind === "chatgpt_oauth"
+        ? { endpoint: profile.endpoint, model: task.model ?? profile.defaultModel ?? profile.models[0]!, apiKey: await this.requireCodexOauth().getValidAccessToken(profile.id), allowPrivateEndpoint: profile.allowPrivateEndpoint ?? false, authKind: "chatgpt_oauth" as const }
+        : { endpoint: profile.endpoint, model: task.model ?? profile.defaultModel ?? profile.models[0]!, apiKey: decryptAiSecret(profile.encryptedApiKey!, profile.id ? aiProviderKeyAad(profile.id) : AI_PROVIDER_KEY_CONTEXT, await loadAiKeyring(this.config.ai.keyringFile)), allowPrivateEndpoint: profile.allowPrivateEndpoint ?? false };
       const active: ProviderMessage[] = [];
       const evidence: AiConversationMessageEvidence[] = [];
       const restrictedSources = new Set<AiRestrictedEvidenceSource>();
@@ -337,27 +368,27 @@ export class AiTaskService implements OnModuleDestroy {
         signal.throwIfAborted();
         await this.policy.revalidateForDispatch(task.vpsId, { providerRevision, policyRevision, providerId: task.providerId });
         if (task.usage.rounds >= 6) throw new AiAssistantError("budget_exhausted");
-        let prepared = await this.prepareContext(task, { ...settings, apiKey }, signal, active, { providerRevision, policyRevision, sessionId }, false, [...restrictedSources]);
+        let prepared = await this.prepareContext(task, { ...settings }, signal, active, { providerRevision, policyRevision, sessionId }, false, [...restrictedSources]);
         task = prepared.task;
-        const preflight = measureProviderRequest(settings.model, prepared.messages, tools);
+        const preflight = this.measureDispatch(settings, prepared.messages, tools);
         if (task.usage.inputTokens + task.usage.outputTokens + preflight.estimatedPromptTokens + PROVIDER_MAX_OUTPUT_TOKENS > this.config.ai.maxCumulativeTaskTokens) throw new AiAssistantError("budget_exhausted");
         let result;
         try {
           await this.revalidateContextDispatch(task, { providerRevision, policyRevision, sessionId }, signal, [...restrictedSources]);
-          result = await new AiProvider().generate({ ...settings, apiKey }, prepared.messages, tools, signal);
+          result = await this.dispatchGenerate({ ...settings }, prepared.messages, tools, signal);
         } catch (error) {
           if (!(error instanceof ProviderContextOverflowError)) throw error;
           try {
-            prepared = await this.prepareContext(task, { ...settings, apiKey }, signal, active, { providerRevision, policyRevision, sessionId }, true, [...restrictedSources]);
+            prepared = await this.prepareContext(task, { ...settings }, signal, active, { providerRevision, policyRevision, sessionId }, true, [...restrictedSources]);
           } catch (compactError) {
             if (compactError instanceof AiAssistantError && compactError.code === "budget_exhausted") throw error;
             throw compactError;
           }
           task = prepared.task;
-          const retrySize = measureProviderRequest(settings.model, prepared.messages, tools);
+          const retrySize = this.measureDispatch(settings, prepared.messages, tools);
           if (task.usage.inputTokens + task.usage.outputTokens + retrySize.estimatedPromptTokens + PROVIDER_MAX_OUTPUT_TOKENS > this.config.ai.maxCumulativeTaskTokens) throw new AiAssistantError("budget_exhausted");
           await this.revalidateContextDispatch(task, { providerRevision, policyRevision, sessionId }, signal, [...restrictedSources]);
-          result = await new AiProvider().generate({ ...settings, apiKey }, prepared.messages, tools, signal);
+          result = await this.dispatchGenerate({ ...settings }, prepared.messages, tools, signal);
         }
         const current = await this.repository.getTask(task.vpsId, task.id);
         if (!current || terminal.has(current.state)) return;

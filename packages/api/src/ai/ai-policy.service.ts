@@ -104,15 +104,14 @@ export class AiPolicyService {
   }
 
   /** Readiness of one provider profile (docs/ai-multi-provider-plan.md):
-   * enabled, with endpoint, key envelope and at least one model. */
+   * enabled, with endpoint, models and usable credentials. API-key profiles
+   * need their key envelope; ChatGPT-OAuth profiles need a connected token
+   * envelope (expiry is enforced at dispatch after refresh). */
   isProfileReady(profile: AiProviderProfileInternal | undefined): profile is AiProviderProfileInternal {
-    return Boolean(
-      this.config.ai.enabled &&
-      profile?.enabled &&
-      profile.endpoint &&
-      profile.models.length > 0 &&
-      profile.encryptedApiKey,
-    );
+    if (!this.config.ai.enabled || !profile?.enabled || !profile.endpoint || profile.models.length === 0) return false;
+    return profile.authKind === "chatgpt_oauth"
+      ? Boolean(profile.encryptedOauth && profile.tokenState !== "relogin_required")
+      : Boolean(profile.encryptedApiKey);
   }
 
   /** AI routes require a live admin session in local mode; in demo mode

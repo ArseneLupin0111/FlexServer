@@ -36,7 +36,7 @@ import {
  */
 export const AI_AAD_NS = "flexserver:ai:v1";
 
-export type AiAadField = "providerApiKey" | "executionPayload";
+export type AiAadField = "providerApiKey" | "executionPayload" | "codexOauthToken";
 
 export type AiAadContext = {
   vpsId: string;

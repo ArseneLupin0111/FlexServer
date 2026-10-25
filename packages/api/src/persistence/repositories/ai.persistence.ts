@@ -13,9 +13,11 @@ import type {
   AiOutboxEntry,
   AiPlan,
   AiPolicy,
+  AiProviderAuthKind,
   AiProviderProfileInternal,
   AiProviderSelection,
   AiProviderSettingsInternal,
+  AiProviderTokenState,
   AiRestrictedEvidenceSource,
   AiTask,
   AiTaskState,
@@ -120,9 +122,19 @@ export type AiProviderProfileWriteInput = {
   enabled: boolean;
   isDefault: boolean;
   allowPrivateEndpoint?: boolean;
+  /** Immutable after creation; defaults to "apiKey". */
+  authKind?: AiProviderAuthKind;
   /** Replaces the stored envelope when set; absent keeps the existing key. */
   apiKeyEnvelope?: AiEnvelopeData;
   expectedRevision?: number;
+  now?: string;
+};
+
+/** OAuth token lifecycle write — deliberately revision-neutral so token
+ * refresh never invalidates plans (docs/ai-chatgpt-oauth-provider-plan.md). */
+export type AiProviderOauthUpdateInput = {
+  envelope?: AiEnvelopeData;
+  tokenState?: AiProviderTokenState;
   now?: string;
 };
 
@@ -290,6 +302,9 @@ export interface AiRepository {
   /** Blocked with provider_conflict while any conversation selection or
    * non-terminal task references the profile (Q10). */
   deleteProviderProfile(id: string): Promise<boolean>;
+  /** OAuth token lifecycle write: updates the token envelope/state WITHOUT
+   * bumping the profile revision (token refresh must not invalidate plans). */
+  updateProviderOauth(id: string, input: AiProviderOauthUpdateInput): Promise<AiProviderProfileInternal | undefined>;
   setLastSelection(selection: AiProviderSelection): Promise<void>;
   /** Pins the conversation's provider/model selection (Q16 tier 1). */
   setConversationProviderSelection(vpsId: string, conversationId: string, selection: AiProviderSelection): Promise<AiConversation>;

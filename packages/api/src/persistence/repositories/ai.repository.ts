@@ -55,6 +55,9 @@ const providerModelsValid = (models: string[]): boolean =>
 /** Per-provider API-key AAD (docs/ai-multi-provider-plan.md invariant "Keys"). */
 export const aiProviderKeyAad = (providerId: string) =>
   ({ vpsId: "global", taskId: providerId, field: "providerApiKey", version: 1 }) as const;
+/** Codex OAuth token AAD — distinct field from API keys (plan Q3). */
+export const aiCodexOauthAad = (providerId: string) =>
+  ({ vpsId: "global", taskId: providerId, field: "codexOauthToken", version: 1 }) as const;
 
 // ── Shared state model (docs/ai-assistant-implementation-plan.md §9) ─────
 // JSON driver: one bounded document, all invariants enforced under the JSON
@@ -1197,6 +1200,9 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
           isDefault: becomesDefault,
           encryptedApiKey: input.apiKeyEnvelope,
           allowPrivateEndpoint: input.allowPrivateEndpoint ?? false,
+          // authKind is immutable after creation; token envelopes are only
+          // written by the dedicated OAuth lifecycle method.
+          authKind: input.authKind ?? "apiKey",
           revision: 1,
           updatedAt: now,
         };
@@ -1218,6 +1224,9 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
             "provider_conflict",
             `provider ${id} revision ${profile.revision} != expected ${input.expectedRevision}`,
           );
+        }
+        if (input.authKind !== undefined && input.authKind !== profile.authKind) {
+          throw new AiPersistenceConflictError("provider_conflict", "provider authKind is immutable");
         }
         if (!providerModelsValid(input.models)) {
           throw new AiPersistenceConflictError("provider_conflict", "models must be 1–100 unique names of 1–256 chars each");
@@ -1276,6 +1285,22 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
       await exec((state) => {
         state.lastSelection = { ...selection };
         return true;
+      });
+    },
+
+    /** OAuth token lifecycle write. Deliberately does NOT bump the profile
+     * revision: a 5-hour token refresh must not invalidate pending plans or
+     * in-flight dispatches bound to this provider (docs/ai-chatgpt-oauth-
+     * provider-plan.md "Dispatch binding"). */
+    async updateProviderOauth(id, input) {
+      const now = isoNow(input.now);
+      return exec((state) => {
+        const profile = (state.providers ?? []).find((candidate) => candidate.id === id);
+        if (!profile) return undefined;
+        if (input.envelope !== undefined) profile.encryptedOauth = input.envelope;
+        if (input.tokenState !== undefined) profile.tokenState = input.tokenState;
+        profile.updatedAt = now;
+        return profile;
       });
     },
 
@@ -1365,19 +1390,20 @@ export async function withAiAdminLock<T>(
 ): Promise<T> {
   const administer = async (state: StoredAiState) => {
     return action({
-      async hasEncryptedFields() { return Boolean(state.settings?.encryptedApiKey || (state.providers ?? []).some((profile) => profile.encryptedApiKey) || state.blobs.length); },
+      async hasEncryptedFields() { return Boolean(state.settings?.encryptedApiKey || (state.providers ?? []).some((profile) => profile.encryptedApiKey || profile.encryptedOauth) || state.blobs.length); },
       async rotateEncryptedFields(options) {
         const refusedTaskIds = state.tasks.filter((task) => ACTIVE_STATES.has(task.state)).map((task) => task.id);
         const envelopeAads = [
           ...(state.settings?.encryptedApiKey
-            ? [{ envelope: state.settings.encryptedApiKey, aad: { vpsId: "global", taskId: "provider", field: "providerApiKey", version: 1 } as const }]
+            ? [{ envelope: state.settings.encryptedApiKey, aad: { vpsId: "global", taskId: "provider", field: "providerApiKey", version: 1 } as const, slot: "settings" as const }]
             : []),
-          ...(state.providers ?? [])
-            .filter((profile) => profile.encryptedApiKey)
-            .map((profile) => ({ envelope: profile.encryptedApiKey!, aad: aiProviderKeyAad(profile.id) })),
+          ...(state.providers ?? []).flatMap((profile) => [
+            ...(profile.encryptedApiKey ? [{ envelope: profile.encryptedApiKey, aad: aiProviderKeyAad(profile.id), slot: { kind: "apiKey" as const, id: profile.id } }] : []),
+            ...(profile.encryptedOauth ? [{ envelope: profile.encryptedOauth, aad: aiCodexOauthAad(profile.id), slot: { kind: "oauth" as const, id: profile.id } }] : []),
+          ]),
           ...state.blobs.map((blob) => {
             const task = state.tasks.find((t) => t.id === blob.taskId);
-            return { envelope: blob.encryptedPayload, aad: { vpsId: task?.vpsId ?? "global", taskId: blob.taskId, field: "executionPayload", version: 1 } as const };
+            return { envelope: blob.encryptedPayload, aad: { vpsId: task?.vpsId ?? "global", taskId: blob.taskId, field: "executionPayload", version: 1 } as const, slot: { kind: "blob" as const, id: blob.id } };
           }),
         ];
         const result = { rewrapped: envelopeAads.length, kekIds: [...new Set(envelopeAads.map((entry) => entry.envelope.kekId))], refusedTaskIds };
@@ -1385,19 +1411,19 @@ export async function withAiAdminLock<T>(
 
         if (envelopeAads.length > 0) {
           const keyring = await loadAiKeyring(config.ai.keyringFile);
-          const rewrappedEnvelopes = envelopeAads.map((entry) => rewrapAiEnvelope(entry.envelope, entry.aad, keyring));
-          if (!options?.dryRun) {
-            if (state.settings?.encryptedApiKey) state.settings.encryptedApiKey = rewrappedEnvelopes[0]!;
-            let providerIndex = state.settings?.encryptedApiKey ? 1 : 0;
-            for (const profile of state.providers ?? []) {
-              if (!profile.encryptedApiKey) continue;
-              profile.encryptedApiKey = rewrappedEnvelopes[providerIndex]!;
-              providerIndex++;
-            }
-            let blobIndex = providerIndex;
-            for (const blob of state.blobs) {
-              blob.encryptedPayload = rewrappedEnvelopes[blobIndex]!;
-              blobIndex++;
+          for (const entry of envelopeAads) {
+            if (options?.dryRun) continue;
+            const rewrapped = rewrapAiEnvelope(entry.envelope, entry.aad, keyring);
+            if (entry.slot === "settings") state.settings!.encryptedApiKey = rewrapped;
+            else if (entry.slot.kind === "apiKey") {
+              const profile = state.providers!.find((candidate) => candidate.id === entry.slot.id)!;
+              profile.encryptedApiKey = rewrapped;
+            } else if (entry.slot.kind === "oauth") {
+              const profile = state.providers!.find((candidate) => candidate.id === entry.slot.id)!;
+              profile.encryptedOauth = rewrapped;
+            } else {
+              const blob = state.blobs.find((candidate) => candidate.id === entry.slot.id);
+              if (blob) blob.encryptedPayload = rewrapped;
             }
           }
         }

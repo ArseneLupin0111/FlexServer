@@ -61,6 +61,7 @@ export class AiProviderMigrationService implements OnModuleInit {
       isDefault: true,
       encryptedApiKey: envelope,
       allowPrivateEndpoint: legacy.allowPrivateEndpoint ?? false,
+      authKind: "apiKey",
       revision: 1,
       updatedAt: new Date().toISOString(),
     });

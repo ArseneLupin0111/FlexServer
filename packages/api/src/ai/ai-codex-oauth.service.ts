@@ -184,25 +184,34 @@ export class AiCodexOauthService {
   private readonly inFlightRefresh = new Map<string, Promise<string>>();
 
   constructor(options: AiCodexOauthOptions, private readonly repository: AiRepository, private readonly keyringFile: string) {
-    if (typeof options.clientId !== "string" || !options.clientId) throw new CodexOauthStateError("clientId is required");
-    if (typeof options.authBaseUrl !== "string" || !options.authBaseUrl) throw new CodexOauthStateError("authBaseUrl is required");
-    const ttl = options.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
-    if (!Number.isFinite(ttl) || ttl <= 0) throw new CodexOauthStateError("pendingTtlMs must be a positive number of milliseconds");
+    // Validation is deferred to first use (requireOptions): the DI factory in
+    // app.module constructs this service eagerly at boot, and hand-built test
+    // configs may legitimately lack the ai section — construction must not
+    // throw (Nest abortOnError would abort the process).
     this.options = { ...options };
-    this.pendingTtlMs = ttl;
+    this.pendingTtlMs = options.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
+  }
+
+  private requireOptions(): AiCodexOauthOptions {
+    if (typeof this.options.clientId !== "string" || !this.options.clientId) throw new CodexOauthStateError("clientId is required");
+    if (typeof this.options.authBaseUrl !== "string" || !this.options.authBaseUrl) throw new CodexOauthStateError("authBaseUrl is required");
+    const ttl = this.options.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
+    if (!Number.isFinite(ttl) || ttl <= 0) throw new CodexOauthStateError("pendingTtlMs must be a positive number of milliseconds");
+    return this.options;
   }
 
   /** Build the S256 authorize URL and hold the verifier + state in memory,
    * keyed by provider, single-use, TTL-bounded. Purely in-memory: profile
    * validation is the routes service' job (slice 4). */
   beginAuthorize(providerId: string): { authorizeUrl: string } {
+    const options = this.requireOptions();
     const verifier = randomBytes(32).toString("base64url");
     const challenge = createHash("sha256").update(verifier, "ascii").digest().toString("base64url");
     const state = randomBytes(32).toString("base64url");
     this.pending.set(providerId, { verifier, state, expiresAt: Date.now() + this.pendingTtlMs });
     const query = new URLSearchParams({
       response_type: "code",
-      client_id: this.options.clientId,
+      client_id: options.clientId,
       redirect_uri: CODEX_OAUTH_REDIRECT_URI,
       scope: CODEX_OAUTH_SCOPE,
       code_challenge: challenge,
@@ -243,7 +252,7 @@ export class AiCodexOauthService {
       grant_type: "authorization_code",
       code,
       code_verifier: pending.verifier,
-      client_id: this.options.clientId,
+      client_id: this.requireOptions().clientId,
       redirect_uri: CODEX_OAUTH_REDIRECT_URI,
     });
     if (response.status === 429) throw new ProviderRateLimitError();
@@ -289,7 +298,7 @@ export class AiCodexOauthService {
     const response = await postForm(this.tokenUrl(), {
       grant_type: "refresh_token",
       refresh_token: previous.refreshToken,
-      client_id: this.options.clientId,
+      client_id: this.requireOptions().clientId,
     });
     // Rejected grant (HTTP 400/401, or any non-200 body naming invalid_grant):
     // persist the closed state BEFORE throwing — nothing is deleted (plan Q7).

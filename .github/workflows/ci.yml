@@ -359,9 +359,12 @@ jobs:
           cache-from: type=gha,scope=api-runtime
           cache-to: type=gha,mode=max,scope=api-runtime
 
-      - name: Smoke test API runtime migration assets and agent binary
+      - name: Smoke test API runtime migration assets, agent binary, and AI bundle
         # `set -eu` makes the shell abort on the first failed assertion so a
-        # missing asset can never be masked by a later passing check.
+        # missing asset can never be masked by a later passing check. The AI
+        # bundle asserts pin the exact file names AiBundleService requires
+        # (packages/api/src/ai/ai-bundle.service.ts): any missing or misnamed
+        # artifact would make the dashboard report "AI bundle incomplete".
         if: needs.changes.outputs.api == 'true'
         run: |
           docker run --rm --entrypoint sh vps-manager-nodejs-api:ci -lc '
@@ -386,6 +389,52 @@ jobs:
             test -f /app/db/migrations/016_docker_alert_resolution.sql
             test -x /app/agent/vps-agent-linux-amd64
             test -x /app/agent/vps-updater-linux-amd64
+
+            # AI sandbox bundle under /app/agent/ai: required file names for
+            # BOTH architectures (rootfs tarball + manifest, executor and
+            # host helper binaries), the installer script, and a non-empty
+            # profiles directory. A missing or misnamed file makes the
+            # runtime report "AI bundle incomplete" (ai-bundle.service.ts).
+            test -f /app/agent/ai/ai-rootfs-linux-amd64.tar.gz
+            test -f /app/agent/ai/ai-rootfs-linux-amd64.manifest.json
+            test -f /app/agent/ai/ai-rootfs-linux-arm64.tar.gz
+            test -f /app/agent/ai/ai-rootfs-linux-arm64.manifest.json
+            test -x /app/agent/ai/ai-executor-linux-amd64
+            test -x /app/agent/ai/ai-executor-linux-arm64
+            test -x /app/agent/ai/ai-host-helper-linux-amd64
+            test -x /app/agent/ai/ai-host-helper-linux-arm64
+            test -x /app/agent/ai/install-local-agent.sh
+            set -- /app/agent/ai/profiles/*
+            test -f "$1"
+          '
+
+          # Bundle integrity: each rootfs manifest must parse, declare a
+          # 64-hex rootfsSha256 with at least one file entry, and its digest
+          # must match the sibling tarball so a stale or mispaired bundle
+          # cannot ship (the same failure class as "AI bundle incomplete").
+          docker run --rm --entrypoint node vps-manager-nodejs-api:ci -e '
+            const fs = require("node:fs");
+            const crypto = require("node:crypto");
+            const dir = "/app/agent/ai";
+            for (const arch of ["amd64", "arm64"]) {
+              const manifest = JSON.parse(fs.readFileSync(`${dir}/ai-rootfs-linux-${arch}.manifest.json`, "utf8"));
+              if (manifest.version !== 1) {
+                throw new Error(`${arch}: unexpected rootfs manifest version ${manifest.version}`);
+              }
+              if (!Array.isArray(manifest.files) || manifest.files.length === 0) {
+                throw new Error(`${arch}: rootfs manifest lists no files`);
+              }
+              if (typeof manifest.rootfsSha256 !== "string" || !/^[0-9a-f]{64}$/.test(manifest.rootfsSha256)) {
+                throw new Error(`${arch}: manifest rootfsSha256 is not a 64-hex digest`);
+              }
+              const tarballSha256 = crypto.createHash("sha256")
+                .update(fs.readFileSync(`${dir}/ai-rootfs-linux-${arch}.tar.gz`))
+                .digest("hex");
+              if (tarballSha256 !== manifest.rootfsSha256) {
+                throw new Error(`${arch}: rootfs tarball sha256 does not match manifest rootfsSha256`);
+              }
+              console.log(`AI rootfs manifest OK: ${arch} (${manifest.files.length} files, sha256=${tarballSha256.slice(0, 12)}...)`);
+            }
           '
 
       - name: Verify embedded agent and updater identity

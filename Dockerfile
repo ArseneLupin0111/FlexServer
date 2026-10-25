@@ -118,10 +118,10 @@ COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-executor-linux-am
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-executor-linux-arm64 /app/agent/ai/ai-executor-linux-arm64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-host-helper-linux-amd64 /app/agent/ai/ai-host-helper-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-host-helper-linux-arm64 /app/agent/ai/ai-host-helper-linux-arm64
-COPY --chown=app:app --chmod=0644 packages/agent/dist/ai-rootfs-linux-amd64.tar.gz /app/agent/ai/rootfs-linux-amd64.tar.gz
-COPY --chown=app:app --chmod=0644 packages/agent/dist/ai-rootfs-linux-amd64.manifest.json /app/agent/ai/rootfs-linux-amd64.manifest.json
-COPY --chown=app:app --chmod=0644 packages/agent/dist/ai-rootfs-linux-arm64.tar.gz /app/agent/ai/rootfs-linux-arm64.tar.gz
-COPY --chown=app:app --chmod=0644 packages/agent/dist/ai-rootfs-linux-arm64.manifest.json /app/agent/ai/rootfs-linux-arm64.manifest.json
+COPY --chown=app:app --chmod=0644 packages/agent/dist/ai-rootfs-linux-amd64.tar.gz /app/agent/ai/ai-rootfs-linux-amd64.tar.gz
+COPY --chown=app:app --chmod=0644 packages/agent/dist/ai-rootfs-linux-amd64.manifest.json /app/agent/ai/ai-rootfs-linux-amd64.manifest.json
+COPY --chown=app:app --chmod=0644 packages/agent/dist/ai-rootfs-linux-arm64.tar.gz /app/agent/ai/ai-rootfs-linux-arm64.tar.gz
+COPY --chown=app:app --chmod=0644 packages/agent/dist/ai-rootfs-linux-arm64.manifest.json /app/agent/ai/ai-rootfs-linux-arm64.manifest.json
 COPY --chown=app:app packages/agent/profiles/ /app/agent/ai/profiles/
 COPY --chown=app:app --chmod=0755 scripts/install/install-local-agent.sh /app/agent/ai/install-local-agent.sh
 COPY scripts/install/install-host-files.sh /app/scripts/install-host-files.sh

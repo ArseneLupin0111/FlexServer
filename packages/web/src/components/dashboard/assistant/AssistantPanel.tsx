@@ -13,30 +13,37 @@ import type { VpsRecord } from "../../../lib/api";
 import {
   approveVpsAiTask,
   cancelVpsAiTask,
-  checkAiProvider,
+  checkAiProviderProfile,
+  createAiProvider,
   createVpsAiTask,
+  deleteAiProvider,
   deleteVpsAiConversation,
   denyVpsAiTask,
+  fetchAiProviderModels,
   getAiSettings,
   getVpsAiCapability,
   getVpsAiConversation,
   getVpsAiPolicy,
   getVpsAiTask,
+  listAiProviders,
   listVpsAiConversations,
   listVpsAiTasks,
-  patchAiSettings,
   patchVpsAiPolicy,
   reconcileVpsAiTask,
   submitVpsAiTaskInput,
+  updateAiProvider,
   type AiCapability,
   type AiConversation,
   type AiConversationMessage,
   type AiPlanStep,
   type AiPolicy,
+  type AiProviderProfile,
+  type AiProviderSelection,
   type AiProviderSettings,
   type AiTask,
+  type CreateAiTaskRequest,
+  type ProviderProfileWrite,
   type UpdateAiPolicy,
-  type UpdateAiSettings,
 } from "../../../lib/ai-api";
 import { useAiTaskStream } from "../../../lib/ai-stream";
 import { AssistantHeader } from "./AssistantHeader";
@@ -50,6 +57,51 @@ import { Button } from "../../ui/button";
 export type AssistantPanelProps = {
   vps: VpsRecord;
 };
+
+// Q16 selection resolution: a selection is usable only when it names an
+// enabled provider that still lists the model. A stale selection resolves to
+// null so the send omits providerId/model and the server applies its own
+// tier order (last selection, then the default profile), failing closed when
+// nothing resolves.
+function resolveUsableSelection(
+  selection: AiProviderSelection | null | undefined,
+  providerList: AiProviderProfile[],
+): AiProviderSelection | null {
+  if (!selection) return null;
+  const profile = providerList.find((p) => p.id === selection.providerId);
+  if (!profile || !profile.enabled || !profile.models.includes(selection.model)) {
+    return null;
+  }
+  return { providerId: profile.id, model: selection.model };
+}
+
+function conversationSelection(
+  conversation: AiConversation | null | undefined,
+  providerList: AiProviderProfile[],
+): AiProviderSelection | null {
+  if (!conversation?.selectedProviderId || !conversation.selectedModel) return null;
+  return resolveUsableSelection(
+    {
+      providerId: conversation.selectedProviderId,
+      model: conversation.selectedModel,
+    },
+    providerList,
+  );
+}
+
+function defaultProfileSelection(
+  providerList: AiProviderProfile[],
+): AiProviderSelection | null {
+  const fallback = providerList.find(
+    (p) => p.isDefault && p.enabled && p.models.length > 0,
+  );
+  if (!fallback) return null;
+  const model =
+    fallback.defaultModel && fallback.models.includes(fallback.defaultModel)
+      ? fallback.defaultModel
+      : fallback.models[0];
+  return { providerId: fallback.id, model };
+}
 
 export function AssistantPanel({ vps }: AssistantPanelProps) {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -73,6 +125,11 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
 
   // Root state
   const [providerSettings, setProviderSettings] = useState<AiProviderSettings | null>(null);
+  const [providers, setProviders] = useState<AiProviderProfile[]>([]);
+  const [lastSelection, setLastSelection] = useState<AiProviderSelection | null>(null);
+  // Composer model pick (Q16 tier 1); null = let the server resolve.
+  const [modelSelection, setModelSelection] = useState<AiProviderSelection | null>(null);
+  const [selectionWarnDismissed, setSelectionWarnDismissed] = useState(false);
   const [policy, setPolicy] = useState<AiPolicy | null>(null);
   const [capability, setCapability] = useState<AiCapability | null>(null);
 
@@ -148,6 +205,18 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     }, []),
   });
 
+  // Keeps the cached conversation list aligned with the loaded detail so the
+  // selection-pin warning reads fresh selectedProviderId/selectedModel data.
+  const mergeConversation = useCallback((conversation: AiConversation) => {
+    setConversations((prev) => {
+      const idx = prev.findIndex((c) => c.id === conversation.id);
+      if (idx === -1) return prev;
+      const next = [...prev];
+      next[idx] = { ...next[idx], ...conversation };
+      return next;
+    });
+  }, []);
+
   // Load all initial data for this host. Re-runs only when the host changes;
   // manual refresh reuses the same seq-guarded path without a full reload.
   const loadInitialData = useCallback(async (mode: "initial" | "refresh" = "refresh") => {
@@ -168,11 +237,16 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       setOlderMessagesAvailable(false);
       setOldestMessageOffset(0);
       setLoadingOlderMessages(false);
+      setProviders([]);
+      setLastSelection(null);
+      setModelSelection(null);
+      setSelectionWarnDismissed(false);
       activeConversationRef.current = undefined;
     }
     try {
-      const [provRes, polRes, capRes, tasksRes, convRes] = await Promise.all([
+      const [provRes, provListRes, polRes, capRes, tasksRes, convRes] = await Promise.all([
         getAiSettings().catch(() => null),
+        listAiProviders().catch(() => null),
         getVpsAiPolicy(vps.id).catch(() => null),
         getVpsAiCapability(vps.id).catch(() => null),
         listVpsAiTasks(vps.id).catch(() => [] as AiTask[]),
@@ -183,6 +257,11 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       if (seq !== loadSeqRef.current) return;
 
       if (provRes) setProviderSettings(provRes);
+      const providerList = provListRes?.providers ?? [];
+      if (provListRes) {
+        setProviders(provListRes.providers);
+        setLastSelection(provListRes.lastSelection ?? null);
+      }
       if (polRes) setPolicy(polRes);
       if (capRes) setCapability(capRes);
       if (tasksRes) {
@@ -233,6 +312,13 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       // (explicit null = New Chat stays empty — never fall through to the
       // latest conversation); initial load prefers the deep-linked/selected
       // task's conversation, then the latest conversation.
+      // Q16 tiers 2/3 for the composer pick: the admin's last used selection,
+      // then the default enabled profile. Only fills in when nothing more
+      // specific set a usable pick (no conversation, or an unresolvable pin).
+      const fallbackSelection =
+        resolveUsableSelection(provListRes?.lastSelection, providerList) ??
+        defaultProfileSelection(providerList);
+
       const preferredConvId =
         mode === "refresh"
           ? (activeConversationRef.current ?? null)
@@ -254,7 +340,21 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
           setMessages(detail.messages || []);
           setOlderMessagesAvailable(start > 0);
           setOldestMessageOffset(start);
+          mergeConversation(detail.conversation);
+          // Conversation pin wins when it still resolves; an unresolvable pin
+          // keeps the current pick so the warning can offer a swap.
+          const convSelection = conversationSelection(detail.conversation, providerList);
+          if (convSelection) {
+            setModelSelection(convSelection);
+          } else {
+            setModelSelection((prev) => prev ?? fallbackSelection);
+          }
+        } else {
+          setModelSelection((prev) => prev ?? fallbackSelection);
         }
+      } else {
+        // New Chat / no conversations yet.
+        setModelSelection((prev) => prev ?? fallbackSelection);
       }
     } catch (err) {
       setRootError(
@@ -266,7 +366,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         setRefreshing(false);
       }
     }
-  }, [vps.id]);
+  }, [vps.id, mergeConversation]);
 
   useEffect(() => {
     setLoading(true);
@@ -294,6 +394,13 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     [tasks, clearOutput, setSearchParams],
   );
 
+  // Composer model pick; also retires the selection-pin warning because
+  // picking another model is exactly what the warning asks for.
+  const handleSelectModel = useCallback((selection: AiProviderSelection) => {
+    setModelSelection(selection);
+    setSelectionWarnDismissed(true);
+  }, []);
+
   // Send new instruction
   async function handleSendMessage(requestText: string) {
     if (actionBusy) return;
@@ -314,11 +421,20 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
 
     try {
       const idempotencyKey = crypto.randomUUID();
-      const newTask = await createVpsAiTask(vps.id, {
+      // Q16 tier 1: bind the picked provider/model only when it still
+      // resolves against an enabled profile; a stale pick is omitted so the
+      // server applies its fallback order and fails closed if unusable.
+      const sendSelection = resolveUsableSelection(modelSelection, providers);
+      const body: CreateAiTaskRequest = {
         request: requestText,
         idempotencyKey,
         conversationId: activeConversationId || undefined,
-      });
+      };
+      if (sendSelection) {
+        body.providerId = sendSelection.providerId;
+        body.model = sendSelection.model;
+      }
+      const newTask = await createVpsAiTask(vps.id, body);
 
       // Reconcile the optimistic turn with server truth: adopt the task's
       // server-side timestamp and task binding. Otherwise client clock skew
@@ -341,6 +457,22 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       // conversation even before it appears in list refreshes.
       setActiveConversationId(newTask.conversationId);
       activeConversationRef.current = newTask.conversationId;
+      if (sendSelection) {
+        // Mirror the server: the sent selection becomes the conversation pin
+        // and the admin's last used selection.
+        setLastSelection(sendSelection);
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === newTask.conversationId
+              ? {
+                  ...c,
+                  selectedProviderId: sendSelection.providerId,
+                  selectedModel: sendSelection.model,
+                }
+              : c,
+          ),
+        );
+      }
       clearOutput();
 
       setSearchParams(
@@ -470,16 +602,93 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     }
   }
 
-  // Save global settings
-  async function handleSaveProviderSettings(patch: UpdateAiSettings) {
+  // Provider profile mutations refresh both the profile list and the legacy
+  // settings projection, which derives the effective default profile.
+  async function refreshProviderData() {
+    const [listRes, settingsRes] = await Promise.all([
+      listAiProviders().catch(() => null),
+      getAiSettings().catch(() => null),
+    ]);
+    if (listRes) {
+      setProviders(listRes.providers);
+      setLastSelection(listRes.lastSelection ?? null);
+    }
+    if (settingsRes) setProviderSettings(settingsRes);
+  }
+
+  async function handleCreateProvider(body: ProviderProfileWrite) {
     setActionBusy(true);
     setRootError(null);
     try {
-      const updated = await patchAiSettings(patch);
-      setProviderSettings(updated);
+      await createAiProvider(body);
+      await refreshProviderData();
     } catch (err) {
       setRootError(
-        err instanceof Error ? err.message : "Failed to save provider settings.",
+        err instanceof Error ? err.message : "Failed to create provider profile.",
+      );
+      // Modal caller surfaces its own error state; never report false success.
+      throw err;
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function handleUpdateProvider(id: string, body: ProviderProfileWrite) {
+    setActionBusy(true);
+    setRootError(null);
+    try {
+      await updateAiProvider(id, body);
+      await refreshProviderData();
+    } catch (err) {
+      setRootError(
+        err instanceof Error ? err.message : "Failed to update provider profile.",
+      );
+      // Modal caller surfaces its own error state; never report false success.
+      throw err;
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function handleDeleteProvider(id: string) {
+    setActionBusy(true);
+    setRootError(null);
+    try {
+      await deleteAiProvider(id);
+      await refreshProviderData();
+    } catch (err) {
+      setRootError(
+        err instanceof Error ? err.message : "Failed to delete provider profile.",
+      );
+      // Modal caller surfaces its own error state; never report false success.
+      throw err;
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  // Check targets the saved profile row; it mutates nothing, so no refresh.
+  async function handleCheckProviderProfile(id: string) {
+    try {
+      await checkAiProviderProfile(id);
+    } catch (err) {
+      setRootError(
+        err instanceof Error ? err.message : "Provider check failed.",
+      );
+      // Modal caller surfaces its own error state; never report false success.
+      throw err;
+    }
+  }
+
+  async function handleFetchProviderModels(id: string) {
+    setActionBusy(true);
+    setRootError(null);
+    try {
+      await fetchAiProviderModels(id);
+      await refreshProviderData();
+    } catch (err) {
+      setRootError(
+        err instanceof Error ? err.message : "Failed to fetch provider models.",
       );
       // Modal caller surfaces its own error state; never report false success.
       throw err;
@@ -511,19 +720,6 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     }
   }
 
-  // Check uses saved global settings; rethrow so the modal never reports false success.
-  async function handleCheckProvider() {
-    try {
-      await checkAiProvider();
-    } catch (err) {
-      setRootError(
-        err instanceof Error ? err.message : "Provider check failed.",
-      );
-      // Modal caller surfaces its own error state; never report false success.
-      throw err;
-    }
-  }
-
   // Select history conversation
   async function handleSelectConversation(conv: AiConversation) {
     const seq = ++convSeqRef.current;
@@ -546,6 +742,13 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       setMessages(detail.messages || []);
       setOlderMessagesAvailable(start > 0);
       setOldestMessageOffset(start);
+      mergeConversation(detail.conversation);
+      // A conversation pin that still resolves takes over the model pick;
+      // one that does not keeps the current pick (warning banner handles it).
+      const convSelection = conversationSelection(detail.conversation, providers);
+      if (convSelection) {
+        setModelSelection(convSelection);
+      }
       const lastMsgWithTask = [...detail.messages].reverse().find((m) => m.taskId);
       if (lastMsgWithTask?.taskId) {
         handleSelectTask(lastMsgWithTask.taskId);
@@ -641,6 +844,34 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   );
   const aiEnabled = policy?.aiEnabled === true;
   const readEnabled = policy?.readEnabled === true;
+
+  const activeConversation = useMemo(
+    () => conversations.find((c) => c.id === activeConversationId) ?? null,
+    [conversations, activeConversationId],
+  );
+
+  // Mirror of the server's fail-closed rule (Q10/Q16): a conversation pinned
+  // to a provider that no longer resolves (disabled, deleted, or model
+  // removed) refuses sends until another model is picked.
+  const selectionWarning = useMemo(() => {
+    const providerId = activeConversation?.selectedProviderId;
+    const model = activeConversation?.selectedModel;
+    if (!providerId || !model) return null;
+    const pinned = providers.find((p) => p.id === providerId);
+    if (!pinned || !pinned.enabled) {
+      return "The provider this conversation was using is disabled or removed. Pick another model before sending.";
+    }
+    if (!pinned.models.includes(model)) {
+      return "The model this conversation was using is no longer available. Pick another model before sending.";
+    }
+    return null;
+  }, [activeConversation, providers]);
+
+  // A different conversation may carry a different pin; the dismissal is
+  // per-conversation and re-arms whenever the selection changes.
+  useEffect(() => {
+    setSelectionWarnDismissed(false);
+  }, [activeConversationId]);
 
   // Chat projection: persisted messages plus synthesized turns for the
   // active conversation only. Final task summaries (from the task list or a
@@ -935,6 +1166,21 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
 
         <div className={`grid min-h-0 min-w-0 flex-1 gap-3 ${taskDetailsOpen && activeTask ? "grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,24rem)]" : "grid-cols-1"}`}>
           <div className={`flex min-h-0 min-w-0 flex-col ${taskDetailsOpen && activeTask ? "h-[32rem] xl:h-full" : "h-full"}`}>
+            {selectionWarning && !selectionWarnDismissed ? (
+              <div className="flex shrink-0 items-center justify-between gap-3 border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>{selectionWarning}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSelectionWarnDismissed(true)}
+                  className="text-xs hover:underline"
+                >
+                  Dismiss
+                </button>
+              </div>
+            ) : null}
             {olderMessagesAvailable ? (
               <Button type="button" variant="ghost" size="sm" disabled={loadingOlderMessages} onClick={() => void handleLoadOlderMessages()} className="shrink-0 self-center text-xs">
                 {loadingOlderMessages ? "Loading…" : "Load older messages"}
@@ -951,6 +1197,9 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
               busy={actionBusy}
               aiEnabled={aiEnabled}
               providerReady={providerReady}
+              providers={providers}
+              modelSelection={modelSelection}
+              onSelectModel={handleSelectModel}
             />
             </div>
           </div>
@@ -990,12 +1239,15 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         open={settingsModalOpen}
         onClose={() => setSettingsModalOpen(false)}
         vpsId={vps.id}
-        providerSettings={providerSettings}
+        providers={providers}
         policy={policy}
         capability={capability}
-        onSaveProviderSettings={handleSaveProviderSettings}
+        onCreateProvider={handleCreateProvider}
+        onUpdateProvider={handleUpdateProvider}
+        onDeleteProvider={handleDeleteProvider}
+        onCheckProviderProfile={handleCheckProviderProfile}
+        onFetchProviderModels={handleFetchProviderModels}
         onSavePolicy={handleSavePolicy}
-        onCheckProvider={handleCheckProvider}
         busy={actionBusy}
       />
     </div>

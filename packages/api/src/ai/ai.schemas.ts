@@ -29,6 +29,23 @@ export const createAiTaskSchema = z
     request: z.string().min(1).max(32768),
     idempotencyKey: z.string().min(1).max(64),
     conversationId: z.string().min(1).max(64).optional(),
+    /** Explicit provider/model selection (Q16 tier 1); must resolve or the
+     * request fails closed instead of falling back. */
+    providerId: z.string().min(1).max(64).optional(),
+    model: z.string().min(1).max(256).optional(),
+  })
+  .strict();
+
+export const providerProfileWriteSchema = z
+  .object({
+    name: z.string().min(1).max(64),
+    endpoint: z.string().url().max(1024),
+    apiKey: z.string().min(1).max(4096).optional(),
+    allowPrivateEndpoint: z.boolean().optional(),
+    models: z.array(z.string().min(1).max(256)).min(1).max(100),
+    defaultModel: z.string().min(1).max(256).optional(),
+    enabled: z.boolean().optional(),
+    isDefault: z.boolean().optional(),
   })
   .strict();
 

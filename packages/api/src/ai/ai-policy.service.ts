@@ -22,6 +22,7 @@ import type {
   AiCapability,
   AiHostCapabilitiesReport,
   AiPolicy,
+  AiProviderProfileInternal,
   AiProviderSettingsInternal,
   AiTaskState,
 } from "./ai.models.js";
@@ -100,6 +101,18 @@ export class AiPolicyService {
       return { configured: false, reason: "provider_unavailable" };
     }
     return { configured: true, settings };
+  }
+
+  /** Readiness of one provider profile (docs/ai-multi-provider-plan.md):
+   * enabled, with endpoint, key envelope and at least one model. */
+  isProfileReady(profile: AiProviderProfileInternal | undefined): profile is AiProviderProfileInternal {
+    return Boolean(
+      this.config.ai.enabled &&
+      profile?.enabled &&
+      profile.endpoint &&
+      profile.models.length > 0 &&
+      profile.encryptedApiKey,
+    );
   }
 
   /** AI routes require a live admin session in local mode; in demo mode
@@ -219,17 +232,30 @@ export class AiPolicyService {
   }
 
   /** Revalidation gate at dispatch: policy revision unchanged, provider
-   * readiness unchanged. Rejects before enqueue when anything moved. */
+   * readiness unchanged. When a providerId is bound (multi-provider), only
+   * THAT profile's revision matters — editing another provider never fails
+   * this task (Q9). Legacy tasks without a bound provider keep the global
+   * settings check. Rejects before enqueue when anything moved. */
   async revalidateForDispatch(
     vpsId: string,
-    expected: { policyRevision: number; providerRevision: number },
+    expected: { policyRevision: number; providerRevision: number; providerId?: string },
   ): Promise<void> {
-    const readiness = await this.resolveProviderReadiness();
-    if (!readiness.configured) {
-      throw new AiPolicyError("provider_unavailable", 502);
+    if (!this.config.ai.enabled) {
+      throw new AiPolicyError("ai_disabled", 403, { scope: "global" });
     }
-    if (readiness.settings.revision !== expected.providerRevision) {
-      throw new AiPolicyError("provider_revision_changed", 409);
+    if (expected.providerId) {
+      const profile = await this.repository.getProviderProfile(expected.providerId);
+      if (!profile || !this.isProfileReady(profile) || profile.revision !== expected.providerRevision) {
+        throw new AiPolicyError("provider_revision_changed", 409);
+      }
+    } else {
+      const readiness = await this.resolveProviderReadiness();
+      if (!readiness.configured) {
+        throw new AiPolicyError("provider_unavailable", 502);
+      }
+      if (readiness.settings.revision !== expected.providerRevision) {
+        throw new AiPolicyError("provider_revision_changed", 409);
+      }
     }
     const policy = await this.repository.getAiPolicy(vpsId);
     if (!policy || !policy.aiEnabled) {

@@ -128,6 +128,43 @@ export type UpdateAiSettings = {
   apiKey?: string;
   allowPrivateEndpoint?: boolean;
 };
+
+/** One admin-managed provider profile (docs/ai-multi-provider-plan.md). */
+export type AiProviderProfile = {
+  id: string;
+  name: string;
+  endpoint: string;
+  models: string[];
+  defaultModel?: string;
+  enabled: boolean;
+  isDefault: boolean;
+  hasApiKey: boolean;
+  allowPrivateEndpoint: boolean;
+  revision: number;
+  updatedAt: string;
+};
+
+export type ProviderProfileWrite = {
+  name: string;
+  endpoint: string;
+  apiKey?: string;
+  allowPrivateEndpoint?: boolean;
+  models: string[];
+  defaultModel?: string;
+  enabled?: boolean;
+  isDefault?: boolean;
+};
+
+export type AiProviderSelection = {
+  providerId: string;
+  model: string;
+};
+
+export type AiProvidersResponse = {
+  providers: AiProviderProfile[];
+  lastSelection?: AiProviderSelection;
+  migrated: boolean;
+};
 export type AiPolicy = {
   vpsId: string;
   aiEnabled: boolean;
@@ -175,6 +212,8 @@ export type AiConversation = {
   id: string;
   vpsId: string;
   title: string;
+  selectedProviderId?: string;
+  selectedModel?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -193,6 +232,9 @@ export type AiConversationMessage = {
   role: "user" | "assistant" | "system";
   content: string;
   evidence?: AiConversationMessageEvidence[];
+  /** Provenance label (`provider · model`) on assistant turns. */
+  providerId?: string;
+  model?: string;
   createdAt: string;
 };
 
@@ -207,6 +249,10 @@ export type CreateAiTaskRequest = {
   request: string;
   idempotencyKey: string;
   conversationId?: string;
+  /** Explicit model selection (Q16 tier 1); fails closed server-side when
+   * the provider/model cannot be honored. */
+  providerId?: string;
+  model?: string;
 };
 
 export type TaskInputRequest = {
@@ -297,6 +343,49 @@ export function patchAiSettings(
 
 export function checkAiProvider(signal?: AbortSignal): Promise<{ ok: true }> {
   return request<{ ok: true }>("/api/ai/provider/check", {
+    method: "POST",
+    signal,
+  });
+}
+
+// ── Provider profiles (multi-provider) ────────────────────────────────
+
+export function listAiProviders(signal?: AbortSignal): Promise<AiProvidersResponse> {
+  return request<AiProvidersResponse>("/api/ai/providers", { method: "GET", signal });
+}
+
+export function createAiProvider(body: ProviderProfileWrite, signal?: AbortSignal): Promise<AiProviderProfile> {
+  return request<AiProviderProfile>("/api/ai/providers", {
+    method: "POST",
+    body: JSON.stringify(body),
+    signal,
+  });
+}
+
+export function updateAiProvider(id: string, body: ProviderProfileWrite, signal?: AbortSignal): Promise<AiProviderProfile> {
+  return request<AiProviderProfile>(`/api/ai/providers/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+    signal,
+  });
+}
+
+export function deleteAiProvider(id: string, signal?: AbortSignal): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/api/ai/providers/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    signal,
+  });
+}
+
+export function checkAiProviderProfile(id: string, signal?: AbortSignal): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/api/ai/providers/${encodeURIComponent(id)}/check`, {
+    method: "POST",
+    signal,
+  });
+}
+
+export function fetchAiProviderModels(id: string, signal?: AbortSignal): Promise<AiProviderProfile> {
+  return request<AiProviderProfile>(`/api/ai/providers/${encodeURIComponent(id)}/models`, {
     method: "POST",
     signal,
   });

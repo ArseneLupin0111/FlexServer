@@ -22,6 +22,18 @@ export class AiSettingsController {
   update(@Req() request: Request, @Body() body: unknown) { return this.service.updateSettings(request, body); }
   @Post("provider/check")
   check(@Req() request: Request) { return this.service.checkProvider(request); }
+  @Get("providers")
+  providers(@Req() request: Request) { return this.service.providers(request); }
+  @Post("providers")
+  createProvider(@Req() request: Request, @Body() body: unknown) { return this.service.createProvider(request, body); }
+  @Patch("providers/:providerId")
+  updateProvider(@Req() request: Request, @Param("providerId") providerId: string, @Body() body: unknown) { return this.service.updateProvider(request, providerId, body); }
+  @Delete("providers/:providerId")
+  deleteProvider(@Req() request: Request, @Param("providerId") providerId: string) { return this.service.deleteProvider(request, providerId); }
+  @Post("providers/:providerId/check")
+  checkProvider(@Req() request: Request, @Param("providerId") providerId: string) { return this.service.checkProviderProfile(request, providerId); }
+  @Post("providers/:providerId/models")
+  fetchProviderModels(@Req() request: Request, @Param("providerId") providerId: string) { return this.service.fetchProviderModels(request, providerId); }
 }
 
 @Controller("api/vps/:id/ai")

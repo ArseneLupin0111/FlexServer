@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
 import { getDefaultAutoSelectFamily, setDefaultAutoSelectFamily } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { AiProvider, ProviderContextOverflowError, ProviderProtocolError, ProviderRateLimitError, ProviderResponseTruncatedError, ProviderTransportError, PROVIDER_MAX_BODY_BYTES, PROVIDER_MAX_MESSAGES, PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS, estimateTokens, measureProviderRequest, serializeProviderRequestBody, type ProviderConfig, type ProviderMessage } from "../src/ai/ai-provider.js";
+import { AiProvider, ProviderContextOverflowError, ProviderProtocolError, ProviderRateLimitError, ProviderResponseTruncatedError, ProviderTransportError, PROVIDER_MAX_BODY_BYTES, PROVIDER_MAX_MESSAGES, PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS, estimateTokens, fetchProviderModels, measureProviderRequest, serializeProviderRequestBody, type ProviderConfig, type ProviderMessage } from "../src/ai/ai-provider.js";
 import { decryptAiSecret, encryptAiSecret, rewrapAiEnvelope, type AiAadContext } from "../src/ai/ai-crypto.js";
 import type { Keyring } from "../src/ssh/key-encryption.js";
 
@@ -87,6 +87,29 @@ async function capturingProvider(responseBody: unknown = valid): Promise<{ confi
   const address=server.address(); if(!address || typeof address==="string") throw new Error("Missing listener");
   return { config:{endpoint:`http://127.0.0.1:${address.port}`,apiKey:"synthetic-test-key",model:"synthetic",allowPrivateEndpoint:true}, bodies: () => received };
 }
+
+describe("AI provider model listing",()=>{
+  it("returns deduplicated redacted model ids from /v1/models",async()=>{
+    const config=await provider({data:[{id:"m1"},{id:"m2"},{id:"m1"},{id:"  "},{object:"model",id:"m3"}]});
+    await expect(fetchProviderModels(config)).resolves.toEqual(["m1","m2","m3"]);
+  });
+  it("caps the fetched list at 100 models",async()=>{
+    const config=await provider({data:Array.from({length:150},(_,index)=>({id:`model-${index}`}))});
+    const models=await fetchProviderModels(config);
+    expect(models).toHaveLength(100);
+    expect(models[0]).toBe("model-0");
+  });
+  it("rejects malformed model listings as protocol failures",async()=>{
+    await expect(fetchProviderModels(await provider({data:"nope"}))).rejects.toBeInstanceOf(ProviderProtocolError);
+    await expect(fetchProviderModels(await provider({unexpected:true}))).rejects.toBeInstanceOf(ProviderProtocolError);
+  });
+  it("applies the same endpoint policy as chat requests",async()=>{
+    const config=await provider({data:[{id:"m1"}]});
+    config.allowPrivateEndpoint=false;
+    await expect(fetchProviderModels(config)).rejects.toBeInstanceOf(ProviderTransportError);
+    await expect(fetchProviderModels({...config,apiKey:""})).rejects.toBeInstanceOf(Error);
+  });
+});
 
 describe("AI provider failure classification",()=>{
   it("classifies HTTP 413 as context overflow, distinct from transport and protocol",async()=>{

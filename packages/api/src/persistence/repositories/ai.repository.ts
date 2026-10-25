@@ -17,12 +17,14 @@ import {
   type AiOutboxCommandExpect,
   type AiPlanApprovalInput,
   type AiPolicyUpdateInput,
+  type AiProviderMigrationView,
+  type AiProviderProfileWriteInput,
   type AiRepository,
   type AiSettingsUpdateInput,
   type AiTaskCreateInput,
   type AiTaskTransitionInput,
 } from "./ai.persistence.js";
-import type { AiConversation, AiConversationCheckpoint, AiConversationMessage, AiAuditEvent, AiCapability, AiExecutionBlob, AiExecutionReceipt, AiHostCommand, AiOutboxEntry, AiPlan, AiPolicy, AiProviderSettingsInternal, AiTask, AiTaskState, AiTaskUsage } from "../../ai/ai.models.js";
+import type { AiConversation, AiConversationCheckpoint, AiConversationMessage, AiAuditEvent, AiCapability, AiExecutionBlob, AiExecutionReceipt, AiHostCommand, AiOutboxEntry, AiPlan, AiPolicy, AiProviderProfileInternal, AiProviderSettingsInternal, AiTask, AiTaskState, AiTaskUsage } from "../../ai/ai.models.js";
 import {
   readJsonFile,
   readModifyWriteJsonFile,
@@ -44,6 +46,16 @@ const refreshPolicy = (base: AiPolicy, patch: AiPolicyUpdateInput["patch"], now:
 const matchesAuditFilter = (event: AiAuditEvent, filter?: { vpsId?: string; taskId?: string }): boolean =>
   (!filter?.vpsId || event.vpsId === filter.vpsId) && (!filter?.taskId || event.taskId === filter.taskId);
 
+const PROVIDER_MODELS_MAX = 100;
+const providerModelsValid = (models: string[]): boolean =>
+  models.length > 0 &&
+  models.length <= PROVIDER_MODELS_MAX &&
+  models.every((model) => model.length >= 1 && model.length <= 256) &&
+  new Set(models).size === models.length;
+/** Per-provider API-key AAD (docs/ai-multi-provider-plan.md invariant "Keys"). */
+export const aiProviderKeyAad = (providerId: string) =>
+  ({ vpsId: "global", taskId: providerId, field: "providerApiKey", version: 1 }) as const;
+
 // ── Shared state model (docs/ai-assistant-implementation-plan.md §9) ─────
 // JSON driver: one bounded document, all invariants enforced under the JSON
 // file lock (plan §9: task/approval/outbox commit together). PG driver: the
@@ -53,6 +65,13 @@ const matchesAuditFilter = (event: AiAuditEvent, filter?: { vpsId?: string; task
 
 export type StoredAiState = {
   settings?: AiProviderSettingsInternal;
+  /** Multi-provider profiles (docs/ai-multi-provider-plan.md); optional for
+   * documents persisted before this field existed. */
+  providers?: AiProviderProfileInternal[];
+  /** Admin's last chat selection (Q16 tier 2). */
+  lastSelection?: { providerId: string; model: string };
+  /** Stamped once the legacy→providers boot migration has run (Q15). */
+  providersMigratedAt?: string;
   conversations: AiConversation[];
   messages: (AiConversationMessage & { vpsId: string })[];
   tasks: StoredTask[];
@@ -90,6 +109,7 @@ const emptyAiState = (): StoredAiState => ({
   capabilities: {},
   auditEvents: [],
   checkpoints: [],
+  providers: [],
 });
 
 const defaultUsage = (): AiTaskUsage => ({
@@ -505,6 +525,8 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
           content: input.content,
           evidence: input.evidence,
           restrictedSources: input.restrictedSources,
+          providerId: input.providerId,
+          model: input.model,
           createdAt,
         };
         state.messages.push({ ...message, vpsId: input.vpsId });
@@ -642,6 +664,8 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
           vpsId: input.vpsId,
           state: input.state,
           revision: 1,
+          providerId: input.providerId,
+          model: input.model,
           requestSummary: input.requestSummary,
           plan: null,
           usage: defaultUsage(),
@@ -1111,6 +1135,160 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
       });
     },
 
+    async getProviderMigrationState(): Promise<AiProviderMigrationView> {
+      const state = await exec((s) => s);
+      return {
+        legacy: state.settings,
+        providers: [...(state.providers ?? [])],
+        migratedAt: state.providersMigratedAt,
+        lastSelection: state.lastSelection,
+      };
+    },
+
+    async completeProviderMigration(profile, now) {
+      const stamp = isoNow(now);
+      return exec((state) => {
+        state.providers ??= [];
+        if (!state.providersMigratedAt) {
+          if (state.providers.length === 0 && profile) {
+            state.providers.push({ ...profile, isDefault: true, revision: 1, updatedAt: stamp });
+          }
+          state.providersMigratedAt = stamp;
+        }
+        return [...state.providers];
+      });
+    },
+
+    async listProviderProfiles() {
+      const state = await exec((s) => s);
+      return [...(state.providers ?? [])];
+    },
+
+    async getProviderProfile(id) {
+      const state = await exec((s) => s);
+      return state.providers?.find((profile) => profile.id === id);
+    },
+
+    async createProviderProfile(input) {
+      const now = isoNow(input.now);
+      return exec((state) => {
+        state.providers ??= [];
+        if (!providerModelsValid(input.models)) {
+          throw new AiPersistenceConflictError("provider_conflict", "models must be 1–100 unique names of 1–256 chars each");
+        }
+        const defaultModel = input.defaultModel ?? input.models[0]!;
+        if (!input.models.includes(defaultModel)) {
+          throw new AiPersistenceConflictError("provider_conflict", "defaultModel must be one of models");
+        }
+        const id = input.id ?? randomUUID();
+        if (state.providers.some((profile) => profile.id === id)) {
+          throw new AiPersistenceConflictError("provider_conflict", `provider ${id} already exists`);
+        }
+        // The first profile is always the default so a default always exists (Q8).
+        const becomesDefault = input.isDefault || state.providers.length === 0;
+        if (becomesDefault) for (const profile of state.providers) profile.isDefault = false;
+        const profile: AiProviderProfileInternal = {
+          id,
+          name: input.name,
+          endpoint: input.endpoint,
+          models: [...input.models],
+          defaultModel,
+          enabled: input.enabled,
+          isDefault: becomesDefault,
+          encryptedApiKey: input.apiKeyEnvelope,
+          allowPrivateEndpoint: input.allowPrivateEndpoint ?? false,
+          revision: 1,
+          updatedAt: now,
+        };
+        state.providers.push(profile);
+        return profile;
+      });
+    },
+
+    async updateProviderProfile(id, input) {
+      const now = isoNow(input.now);
+      return exec((state) => {
+        const providers = (state.providers ??= []);
+        const profile = providers.find((candidate) => candidate.id === id);
+        if (!profile) {
+          throw new AiPersistenceConflictError("provider_conflict", `provider ${id} missing`);
+        }
+        if (input.expectedRevision !== undefined && profile.revision !== input.expectedRevision) {
+          throw new AiPersistenceConflictError(
+            "provider_conflict",
+            `provider ${id} revision ${profile.revision} != expected ${input.expectedRevision}`,
+          );
+        }
+        if (!providerModelsValid(input.models)) {
+          throw new AiPersistenceConflictError("provider_conflict", "models must be 1–100 unique names of 1–256 chars each");
+        }
+        const carriedDefault = profile.defaultModel && input.models.includes(profile.defaultModel) ? profile.defaultModel : undefined;
+        const defaultModel = input.defaultModel ?? carriedDefault ?? input.models[0]!;
+        if (!input.models.includes(defaultModel)) {
+          throw new AiPersistenceConflictError("provider_conflict", "defaultModel must be one of models");
+        }
+        // Exactly-one-default invariant: dropping the default re-promotes the
+        // first enabled peer (or first peer); a sole provider stays default.
+        let defaultId: string | undefined = providers.find((candidate) => candidate.isDefault && candidate.id !== id)?.id;
+        if (input.isDefault) defaultId = id;
+        else if (!defaultId) defaultId = id;
+        if (defaultId === id) for (const candidate of providers) candidate.isDefault = candidate.id === id;
+        const next: AiProviderProfileInternal = {
+          ...profile,
+          name: input.name,
+          endpoint: input.endpoint,
+          models: [...input.models],
+          defaultModel,
+          enabled: input.enabled,
+          isDefault: defaultId === id,
+          encryptedApiKey: input.apiKeyEnvelope ?? profile.encryptedApiKey,
+          allowPrivateEndpoint: input.allowPrivateEndpoint ?? profile.allowPrivateEndpoint ?? false,
+          // Every successful update bumps the revision — scoped invalidation (Q9).
+          revision: bumpRevision(profile.revision),
+          updatedAt: now,
+        };
+        providers[providers.indexOf(profile)] = next;
+        return next;
+      });
+    },
+
+    async deleteProviderProfile(id) {
+      return exec((state) => {
+        const providers = state.providers ?? [];
+        const index = providers.findIndex((profile) => profile.id === id);
+        if (index === -1) return false;
+        if (state.conversations.some((conversation) => conversation.selectedProviderId === id)) {
+          throw new AiPersistenceConflictError("provider_conflict", "provider is still selected by a conversation");
+        }
+        if (state.tasks.some((task) => task.providerId === id && ACTIVE_STATES.has(task.state))) {
+          throw new AiPersistenceConflictError("provider_conflict", "provider is referenced by an active task");
+        }
+        const [removed] = providers.splice(index, 1);
+        if (removed.isDefault && providers.length > 0) {
+          (providers.find((profile) => profile.enabled) ?? providers[0]!).isDefault = true;
+        }
+        if (state.lastSelection?.providerId === id) delete state.lastSelection;
+        return true;
+      });
+    },
+
+    async setLastSelection(selection) {
+      await exec((state) => {
+        state.lastSelection = { ...selection };
+        return true;
+      });
+    },
+
+    async setConversationProviderSelection(vpsId, conversationId, selection) {
+      return exec((state) => {
+        const conversation = assertConversation(state, vpsId, conversationId);
+        conversation.selectedProviderId = selection.providerId;
+        conversation.selectedModel = selection.model;
+        conversation.updatedAt = new Date().toISOString();
+        return conversation;
+      });
+    },
+
     async appendAuditEvent(event) {
       await exec((state) => {
         state.auditEvents.push({ createdAt: isoNow(), event });
@@ -1187,40 +1365,39 @@ export async function withAiAdminLock<T>(
 ): Promise<T> {
   const administer = async (state: StoredAiState) => {
     return action({
-      async hasEncryptedFields() { return Boolean(state.settings?.encryptedApiKey || state.blobs.length); },
+      async hasEncryptedFields() { return Boolean(state.settings?.encryptedApiKey || (state.providers ?? []).some((profile) => profile.encryptedApiKey) || state.blobs.length); },
       async rotateEncryptedFields(options) {
         const refusedTaskIds = state.tasks.filter((task) => ACTIVE_STATES.has(task.state)).map((task) => task.id);
-        const envelopes = [
-          state.settings?.encryptedApiKey,
-          ...state.blobs.map((blob) => blob.encryptedPayload),
-        ].filter((value): value is NonNullable<typeof value> => value !== undefined);
-        const result = { rewrapped: envelopes.length, kekIds: [...new Set(envelopes.map((value) => value.kekId))], refusedTaskIds };
+        const envelopeAads = [
+          ...(state.settings?.encryptedApiKey
+            ? [{ envelope: state.settings.encryptedApiKey, aad: { vpsId: "global", taskId: "provider", field: "providerApiKey", version: 1 } as const }]
+            : []),
+          ...(state.providers ?? [])
+            .filter((profile) => profile.encryptedApiKey)
+            .map((profile) => ({ envelope: profile.encryptedApiKey!, aad: aiProviderKeyAad(profile.id) })),
+          ...state.blobs.map((blob) => {
+            const task = state.tasks.find((t) => t.id === blob.taskId);
+            return { envelope: blob.encryptedPayload, aad: { vpsId: task?.vpsId ?? "global", taskId: blob.taskId, field: "executionPayload", version: 1 } as const };
+          }),
+        ];
+        const result = { rewrapped: envelopeAads.length, kekIds: [...new Set(envelopeAads.map((entry) => entry.envelope.kekId))], refusedTaskIds };
         if (refusedTaskIds.length) return result;
 
-        if (envelopes.length > 0) {
+        if (envelopeAads.length > 0) {
           const keyring = await loadAiKeyring(config.ai.keyringFile);
-
-          if (state.settings?.encryptedApiKey) {
-            const rewrapped = rewrapAiEnvelope(
-              state.settings.encryptedApiKey,
-              { vpsId: "global", taskId: "provider", field: "providerApiKey", version: 1 },
-              keyring,
-            );
-            if (!options?.dryRun) {
-              state.settings.encryptedApiKey = rewrapped;
+          const rewrappedEnvelopes = envelopeAads.map((entry) => rewrapAiEnvelope(entry.envelope, entry.aad, keyring));
+          if (!options?.dryRun) {
+            if (state.settings?.encryptedApiKey) state.settings.encryptedApiKey = rewrappedEnvelopes[0]!;
+            let providerIndex = state.settings?.encryptedApiKey ? 1 : 0;
+            for (const profile of state.providers ?? []) {
+              if (!profile.encryptedApiKey) continue;
+              profile.encryptedApiKey = rewrappedEnvelopes[providerIndex]!;
+              providerIndex++;
             }
-          }
-
-          for (const blob of state.blobs) {
-            const task = state.tasks.find((t) => t.id === blob.taskId);
-            const vpsId = task?.vpsId ?? "global";
-            const rewrapped = rewrapAiEnvelope(
-              blob.encryptedPayload,
-              { vpsId, taskId: blob.taskId, field: "executionPayload", version: 1 },
-              keyring,
-            );
-            if (!options?.dryRun) {
-              blob.encryptedPayload = rewrapped;
+            let blobIndex = providerIndex;
+            for (const blob of state.blobs) {
+              blob.encryptedPayload = rewrappedEnvelopes[blobIndex]!;
+              blobIndex++;
             }
           }
         }

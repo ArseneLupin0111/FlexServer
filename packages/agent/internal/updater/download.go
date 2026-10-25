@@ -21,7 +21,6 @@ type DownloadResult struct {
 	SHA256 string
 }
 
-
 // DownloadBundledArtifact fetches the agent binary directly from the local API endpoint:
 //   - Origin matches the API origin (no cross-origin redirects);
 //   - Uses local-updater bearer authentication;

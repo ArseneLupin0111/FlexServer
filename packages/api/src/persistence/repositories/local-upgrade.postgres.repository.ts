@@ -29,6 +29,7 @@ type LocalUpgradeRow = {
   vps_id: string;
   state: LocalUpgradeState;
   progress: number | null;
+  kind: string | null;
   release_id: string;
   release_version: string;
   release_build_id: string;
@@ -70,7 +71,9 @@ type UpdaterHeartbeatRow = {
   idle: boolean | null;
   busy_reason: string | null;
   installed_ai: string[] | null;
-  ai_health: { status: string; healthy: boolean } | null;
+  ai_health: { status?: string; healthy: boolean } | null;
+  capabilities: string[] | null;
+  capabilities_at: Date | string | null;
 };
 
 function rowToJob(row: LocalUpgradeRow): LocalUpgradeJob {
@@ -79,6 +82,7 @@ function rowToJob(row: LocalUpgradeRow): LocalUpgradeJob {
     vpsId: row.vps_id,
     state: row.state,
     progress: row.progress ?? null,
+    ...(row.kind === "ai-install" ? { kind: "ai-install" as const } : {}),
     releaseId: row.release_id,
     releaseVersion: row.release_version,
     releaseBuildId: row.release_build_id,
@@ -198,18 +202,19 @@ export function createPostgresLocalUpgradeRepository(
         }
         await pool.query(
           `INSERT INTO local_agent_upgrade_jobs (
-             id, vps_id, state, progress, release_id, release_version,
+             id, vps_id, state, progress, kind, release_id, release_version,
              release_build_id, target_sha256, target_url, target_size_bytes,
              manifest_raw, baseline_build_id, actor, idempotency_key,
              fencing_token, reclaim_count, claimed_at, lease_expires_at,
              deadline_at, phase_deadline_at, revision, created_at, updated_at,
              components, manifest_sha256, target_arch, retry_request_key
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)`,
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)`,
           [
             job.id,
             job.vpsId,
             job.state,
             job.progress,
+            job.kind ?? "agent-update",
             job.releaseId,
             job.releaseVersion,
             job.releaseBuildId,
@@ -526,11 +531,14 @@ export function createPostgresLocalUpgradeRepository(
           return undefined;
         }
 
-        // Atomic suppression on terminal failures
+        // Atomic suppression on terminal failures — agent updates only: an
+        // ai-install job suppresses nothing (its release build id never
+        // targets the agent binary and must not pollute convergence state).
         if (
-          patch.state === "failed" ||
-          patch.state === "rolled_back" ||
-          patch.state === "rollback_unverified"
+          current.kind !== "ai-install" &&
+          (patch.state === "failed" ||
+            patch.state === "rolled_back" ||
+            patch.state === "rollback_unverified")
         ) {
           const reason =
             (patch.result as LocalUpgradeResult | undefined)?.reason ??
@@ -581,11 +589,20 @@ export function createPostgresLocalUpgradeRepository(
     },
 
     async recordUpdaterHeartbeat(heartbeat) {
+      // capabilities semantics: undefined = not reported on this write
+      // (progress/result) → preserve stored evidence via COALESCE; an array
+      // (possibly empty, from a CLAIM) → overwrite verbatim, live evidence
+      // only — a claim without capabilities clears the stored list.
+      const reportsCapabilities = heartbeat.capabilities !== undefined;
+      const capabilitiesJson = reportsCapabilities
+        ? JSON.stringify(heartbeat.capabilities)
+        : null;
       await pool.query(
         `INSERT INTO updater_heartbeats (
            vps_id, last_seen_at, credential_id, protocol_version,
-           updater_version, platform, idle, busy_reason, installed_ai, ai_health
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           updater_version, platform, idle, busy_reason, installed_ai, ai_health,
+           capabilities, capabilities_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          ON CONFLICT (vps_id) DO UPDATE SET
            last_seen_at = EXCLUDED.last_seen_at,
            credential_id = EXCLUDED.credential_id,
@@ -595,7 +612,9 @@ export function createPostgresLocalUpgradeRepository(
            idle = COALESCE(EXCLUDED.idle, updater_heartbeats.idle),
            busy_reason = COALESCE(EXCLUDED.busy_reason, updater_heartbeats.busy_reason),
            installed_ai = COALESCE(EXCLUDED.installed_ai, updater_heartbeats.installed_ai),
-           ai_health = COALESCE(EXCLUDED.ai_health, updater_heartbeats.ai_health)`,
+           ai_health = COALESCE(EXCLUDED.ai_health, updater_heartbeats.ai_health),
+           capabilities = CASE WHEN $13 THEN EXCLUDED.capabilities ELSE COALESCE(EXCLUDED.capabilities, updater_heartbeats.capabilities) END,
+           capabilities_at = CASE WHEN $13 THEN EXCLUDED.capabilities_at ELSE COALESCE(EXCLUDED.capabilities_at, updater_heartbeats.capabilities_at) END`,
         [
           heartbeat.vpsId,
           new Date(heartbeat.lastSeenAt),
@@ -607,6 +626,9 @@ export function createPostgresLocalUpgradeRepository(
           heartbeat.busyReason ?? null,
           toJsonOrNull(heartbeat.installedAi),
           toJsonOrNull(heartbeat.aiHealth),
+          capabilitiesJson,
+          heartbeat.capabilitiesAt ? new Date(heartbeat.capabilitiesAt) : null,
+          reportsCapabilities,
         ],
       );
     },
@@ -629,6 +651,10 @@ export function createPostgresLocalUpgradeRepository(
         ...(row.busy_reason == null ? {} : { busyReason: row.busy_reason }),
         ...(row.installed_ai == null ? {} : { installedAi: row.installed_ai }),
         ...(row.ai_health == null ? {} : { aiHealth: row.ai_health }),
+        ...(row.capabilities == null ? {} : { capabilities: row.capabilities }),
+        ...(row.capabilities_at == null
+          ? {}
+          : { capabilitiesAt: requiredIsoString(row.capabilities_at) }),
       };
     },
   };

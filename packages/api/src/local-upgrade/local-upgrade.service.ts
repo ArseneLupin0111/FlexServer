@@ -28,6 +28,8 @@ import type { VpsRecord } from "../vps/vps.models.js";
 import {
   isPostSwapState,
   isTerminalState,
+  jobKind,
+  AI_INSTALL_UPDATER_CAPABILITY,
   LocalUpgradeUniqueViolationError,
   LOCAL_UPGRADE_LEASE_TTL_MS,
   LOCAL_UPGRADE_OVERALL_DEADLINE_MS,
@@ -36,6 +38,7 @@ import {
   EXECUTING_UPGRADE_STATES,
   type AgentAutomationView,
   type AgentConvergenceRecord,
+  type AiInstallConfirmer,
   type LocalUpgradeJob,
   type LocalUpgradeResult,
   type LocalUpgradeState,
@@ -47,6 +50,7 @@ import type {
   LocalUpdaterResultInput,
 } from "./local-upgrade.schemas.js";
 import { AGENT_API_CONTRACT_VERSION } from "./versions.js";
+import { AI_INSTALL_CONFIRMER } from "../tokens.js";
 
 // ── Architecture normalization ───────────────────────────────────────────
 
@@ -358,6 +362,9 @@ export class LocalUpgradeService {
     @Optional()
     @Inject(AgentLifecycleCoordinator)
     private readonly coordinator?: AgentLifecycleCoordinator,
+    @Optional()
+    @Inject(AI_INSTALL_CONFIRMER)
+    private readonly aiInstall?: AiInstallConfirmer,
   ) {}
 
   registerUpdateFenceRelease(vpsId: string, release: () => void): void {
@@ -799,8 +806,25 @@ export class LocalUpgradeService {
 
     const aiHealth =
       typeof evidence?.aiHealth === "object" && evidence.aiHealth !== null
-        ? (evidence.aiHealth as { status: string; healthy: boolean })
+        ? (evidence.aiHealth as {
+            status?: string;
+            healthy: boolean;
+            installed?: boolean;
+            version?: string;
+            detail?: string;
+            components?: string[];
+          })
         : existingHeartbeat?.aiHealth;
+
+    // Feature capabilities are LIVE claim evidence: a claim that carries them
+    // overwrites the stored list; a claim without them clears it (never stale
+    // retention). progress/result reports omit capabilities entirely and
+    // preserve what the last claim stored (repository-level merge).
+    const liveCapabilities = Array.isArray(evidence?.capabilities)
+      ? (evidence.capabilities as unknown[])
+          .filter((c): c is string => typeof c === "string" && c.length > 0 && c.length <= 64)
+          .slice(0, 16)
+      : [];
 
     await this.repository.recordUpdaterHeartbeat({
       vpsId: credential.vpsId,
@@ -813,6 +837,11 @@ export class LocalUpgradeService {
       ...(busyReason ? { busyReason } : {}),
       ...(installedAi ? { installedAi } : {}),
       ...(aiHealth ? { aiHealth } : {}),
+      capabilities: liveCapabilities,
+      // Explicit undefined: a claim without live capabilities also drops the
+      // stored evidence timestamp (JSON merge/PG upsert both clear it).
+      capabilitiesAt:
+        liveCapabilities.length > 0 ? new Date(nowMs).toISOString() : undefined,
     });
     await this.reconcile(credential.vpsId, nowMs);
 
@@ -825,13 +854,31 @@ export class LocalUpgradeService {
       if (!job.manifestRaw && protocolVersion < 3) {
         return null;
       }
+      // AI-install guard: the helper must prove the feature on THIS claim.
+      // Protocol 3 alone is insufficient — an old helper ignores `kind` and
+      // could pick up an ai-install job as an agent upgrade. Without the
+      // live capability the job is never handed out (fail closed; the queued
+      // deadline ruling retires it if the capability never appears).
+      if (
+        jobKind(job) === "ai-install" &&
+        !liveCapabilities.includes(AI_INSTALL_UPDATER_CAPABILITY)
+      ) {
+        return null;
+      }
       const leaseValid =
         job.leaseExpiresAt != null && nowMs <= Date.parse(job.leaseExpiresAt);
       if (leaseValid) {
         return { job, requiresReconcile: isPostSwapState(job.state) };
       }
+      // The lifecycle coordinator fence guards agent binary swaps; AI
+      // installs never swap the agent binary, so they skip it (the helper's
+      // own idle evidence governs host exclusivity).
       let releaseCoordinatorFence: (() => void) | undefined;
-      if (job.state === "queued" && this.coordinator) {
+      if (
+        job.state === "queued" &&
+        jobKind(job) !== "ai-install" &&
+        this.coordinator
+      ) {
         try {
           releaseCoordinatorFence = await this.coordinator.tryAcquire(credential.vpsId, "update");
         } catch {
@@ -1034,6 +1081,76 @@ export class LocalUpgradeService {
 
       this.assertLease(job, input.fencingToken, nowMs);
       const nowIso = new Date(nowMs).toISOString();
+
+      if (jobKind(job) === "ai-install") {
+        // AI-install success is ruled by AI evidence, never by the updater's
+        // own verdict and never by the agent heartbeat (the agent binary did
+        // not change). Without proof the job parks in awaiting_heartbeat so
+        // fresh evidence (or the phase deadline) can settle it — fail closed.
+        if (input.outcome === "succeeded") {
+          const confirmed = this.aiInstall
+            ? await this.aiInstall.confirmAiInstall(job)
+            : false;
+          if (confirmed) {
+            const updated = await this.commitTerminal(
+              job,
+              {
+                state: "succeeded",
+                progress: 100,
+                completedAt: nowIso,
+                result: { outcome: "succeeded", completedAt: nowIso },
+              },
+              {
+                action: "ai.local_install.success",
+                result: "success",
+                metadata: { source: "updater_result" },
+              },
+            );
+            if (updated) return { job: updated };
+            continue;
+          }
+          const moved = await this.repository.compareAndSet(job.id, job.revision, {
+            state: "awaiting_heartbeat",
+            phaseDeadlineAt: new Date(
+              nowMs + LOCAL_UPGRADE_PHASE_TIMEOUT_MS.awaiting_heartbeat,
+            ).toISOString(),
+          });
+          if (moved) return { job: moved, awaitHeartbeat: true };
+          continue;
+        }
+        if (input.outcome === "rolled_back") {
+          // The agent build id is unchanged by an AI install, so the baseline
+          // heartbeat ruling is meaningless here: any rollback report settles
+          // at rollback_unverified for manual verification (fail closed).
+          const updated = await this.commitTerminal(
+            job,
+            {
+              state: "rollback_unverified",
+              completedAt: nowIso,
+              error: {
+                code: "rollback_unverified",
+                message:
+                  input.reason ??
+                  "AI install rollback could not be verified; verify the host manually",
+              },
+              result: {
+                outcome: "rollback_unverified",
+                completedAt: nowIso,
+              },
+            },
+            {
+              action: "ai.local_install.rollback",
+              result: "failure",
+              metadata: { verification: "unconfirmed" },
+            },
+          );
+          if (updated) return { job: updated };
+          continue;
+        }
+        // failed/deferred/superseded/rollback_unverified fall through to the
+        // generic phase-aware handling below (post-swap reports still settle
+        // at rollback_unverified, never success).
+      }
 
       if (input.outcome === "failed") {
         // `failed` is only truthful before the binary swap: the updater is
@@ -1307,17 +1424,17 @@ export class LocalUpgradeService {
       }
 
       // Heartbeat-confirmed success outruns every deadline: the new binary
-      // proved itself by identifying itself in a fresh heartbeat.
+      // proved itself by identifying itself in a fresh heartbeat. AI-install
+      // jobs never swap the agent binary — they confirm through fresh AI
+      // evidence instead (never via the agent build id, which did not change).
       if (job.state === "awaiting_heartbeat" || job.state === "restarting") {
-        const agentState = await this.agents.getState(vpsId);
-        if (
-          agentState?.buildId === job.releaseBuildId &&
-          agentState.lastSeenAt &&
-          isFreshTimestamp(agentState.lastSeenAt) &&
-          (job.baselineHeartbeatAt == null ||
-            Date.parse(agentState.lastSeenAt) >
-              Date.parse(job.baselineHeartbeatAt))
-        ) {
+        const confirmed =
+          jobKind(job) === "ai-install"
+            ? this.aiInstall
+              ? await this.aiInstall.confirmAiInstall(job)
+              : false
+            : await this.agentHeartbeatConfirmsSuccess(vpsId, job);
+        if (confirmed) {
           await this.commitTerminal(
             job,
             {
@@ -1326,14 +1443,23 @@ export class LocalUpgradeService {
               completedAt: nowIso,
               result: {
                 outcome: "succeeded",
-                heartbeatBuildId: agentState.buildId,
+                ...(jobKind(job) === "ai-install"
+                  ? {}
+                  : {
+                      heartbeatBuildId: (
+                        await this.agents.getState(vpsId)
+                      )?.buildId,
+                    }),
                 completedAt: nowIso,
               },
             },
             {
-              action: "local_agent_upgrade.success",
+              action:
+                jobKind(job) === "ai-install"
+                  ? "ai.local_install.success"
+                  : "local_agent_upgrade.success",
               result: "success",
-              metadata: { source: "heartbeat" },
+              metadata: { source: "reconcile" },
             },
           );
           continue;
@@ -1369,6 +1495,23 @@ export class LocalUpgradeService {
         },
       );
     }
+  }
+
+  /** Agent-binary success proof (unchanged semantics): a fresh heartbeat
+   * identifying the target build after the swap point. */
+  private async agentHeartbeatConfirmsSuccess(
+    vpsId: string,
+    job: LocalUpgradeJob,
+  ): Promise<boolean> {
+    const agentState = await this.agents.getState(vpsId);
+    return Boolean(
+      agentState?.buildId === job.releaseBuildId &&
+        agentState.lastSeenAt &&
+        isFreshTimestamp(agentState.lastSeenAt) &&
+        (job.baselineHeartbeatAt == null ||
+          Date.parse(agentState.lastSeenAt) >
+            Date.parse(job.baselineHeartbeatAt)),
+    );
   }
 
   /**
@@ -1538,6 +1681,17 @@ export class LocalUpgradeService {
   ): Promise<{ filePath: string; size: number; sha256: string }> {
     await this.reconcile(credential.vpsId, Date.now());
     const job = await this.requireJob(credential.vpsId, jobId);
+    // AI-install jobs carry no agent binary: the helper pulls the signed
+    // manifest artifacts directly, so no artifact is ever served for them.
+    if (jobKind(job) === "ai-install") {
+      throw new NotFoundException({
+        error: {
+          message:
+            "AI install jobs pull signed manifest artifacts directly; no agent artifact is served",
+          code: "ai_artifact_unavailable",
+        },
+      });
+    }
     if (isTerminalState(job.state) || job.state === "queued") {
       throw this.jobTerminalConflict();
     }

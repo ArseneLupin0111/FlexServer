@@ -34,6 +34,16 @@ const publicProviderProfile = (profile: AiProviderProfileInternal): AiProviderPr
   updatedAt: profile.updatedAt,
 });
 
+/** Idempotency-Key header as a single trimmed string; blank/absent →
+ * undefined (the local updater channel then rejects the request — it never
+ * creates a job without an explicit key). */
+function requestIdempotencyKey(request: Request): string | undefined {
+  const raw = request.headers?.["idempotency-key"];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 @Injectable()
 export class AiRoutesService {
   constructor(
@@ -297,6 +307,10 @@ export class AiRoutesService {
         lastInstalledBundleId: null,
         lastJob: null,
         capability: { supported: false, privilegedSupported: false },
+        installSupported: false,
+        installReason: "AI bundle orchestration is not available in this deployment",
+        localJob: null,
+        localRelease: null,
       };
     }
     return this.bundleOrchestrator.getBundleView(vpsId);
@@ -304,14 +318,20 @@ export class AiRoutesService {
 
   /** POST /api/vps/:id/ai/bundle/install — deliberate "Install/Update AI
    * bundle" action; idempotent while a job is pending/running, 503 when the
-   * bundle is unavailable. */
+   * bundle is unavailable. The Idempotency-Key header is required by (and
+   * replayed on) the local updater channel; the SSH channel is idempotent
+   * per pending/running job and ignores it. */
   async installBundle(request: Request, vpsId: string) {
     this.authorize(request);
     if (!await this.vps.get(vpsId)) throw new NotFoundException("VPS not found");
     if (!this.bundleOrchestrator) {
       throw new ServiceUnavailableException("AI bundle orchestration is not available in this deployment");
     }
-    return this.bundleOrchestrator.installBundle(vpsId, "manual");
+    return this.bundleOrchestrator.installBundle(
+      vpsId,
+      "manual",
+      requestIdempotencyKey(request),
+    );
   }
 
   async updatePolicy(request: Request, vpsId: string, body: unknown) {

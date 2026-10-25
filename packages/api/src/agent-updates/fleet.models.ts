@@ -46,9 +46,14 @@ export interface FleetHost {
   };
   updaterVersion?: string | null;
   installedAi?: string[];
+  /** Mirrors UpdaterHeartbeat.aiHealth (the helper's live AI health report). */
   aiHealth?: {
     status: string;
     healthy: boolean;
+    installed?: boolean;
+    version?: string;
+    detail?: string;
+    components?: string[];
     regression?: boolean;
   };
 }

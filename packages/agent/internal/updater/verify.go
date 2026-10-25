@@ -375,6 +375,15 @@ var (
 		"ai-rootfs":      true,
 		"ai-profiles":    true,
 	}
+	// aiInstallRequiredComponents is the complete signed AI set the explicit
+	// first-install operation requires for the host platform before anything
+	// is downloaded or mutated. A partial set is refused fail-closed.
+	aiInstallRequiredComponents = []string{
+		"ai-executor",
+		"ai-host-helper",
+		"ai-rootfs",
+		"ai-profiles",
+	}
 	semverRe = regexp.MustCompile(`^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
 )
 

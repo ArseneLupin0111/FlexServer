@@ -51,17 +51,25 @@ func (t *FlexTime) UnmarshalJSON(raw []byte) error {
 	return fmt.Errorf("unrecognized time %q", s)
 }
 
+// Job kind wire values for ClaimedJob.Kind are defined next to the claim
+// evidence types (evidence.go): an absent kind or "update" is the historical
+// automatic update (installed AI components only); "ai-install" is the
+// explicit AI first-install operation and is the ONLY kind that may provision
+// AI components that are not yet installed. Any other value is rejected
+// fail-closed before the job is journalled.
+
 // ClaimedJob is the server's view of the one in-flight upgrade job.
 type ClaimedJob struct {
-	JobID               string   `json:"jobId"`
-	Phase               string   `json:"phase"`
-	State               string   `json:"state"`
-	FencingToken        int64    `json:"fencingToken"`
-	ManifestRaw         string   `json:"manifestRaw"`
-	RequiresReconcile   bool     `json:"requiresReconcile"`
-	TargetURL           string   `json:"targetUrl"`
-	TargetSha256        string   `json:"targetSha256"`
-	TargetSizeBytes     int64    `json:"targetSizeBytes"`
+	JobID               string      `json:"jobId"`
+	Phase               string      `json:"phase"`
+	State               string      `json:"state"`
+	Kind                string      `json:"kind,omitempty"`
+	FencingToken        int64       `json:"fencingToken"`
+	ManifestRaw         string      `json:"manifestRaw"`
+	RequiresReconcile   bool        `json:"requiresReconcile"`
+	TargetURL           string      `json:"targetUrl"`
+	TargetSha256        string      `json:"targetSha256"`
+	TargetSizeBytes     int64       `json:"targetSizeBytes"`
 	LeaseExpiresAt      FlexTime    `json:"leaseExpiresAt"`
 	PhaseDeadlineAt     FlexTime    `json:"phaseDeadlineAt"`
 	DeadlineAt          FlexTime    `json:"deadlineAt"`
@@ -133,6 +141,9 @@ func (c *Client) Claim(ctx context.Context) (*ClaimedJob, error) {
 			OS:   runtime.GOOS,
 			Arch: runtime.GOARCH,
 		},
+		// Advertise the explicit AI first-install operation so the API never
+		// hands an ai-install job to an updater predating it.
+		Capabilities: []string{JobKindAIInstall},
 	}
 	if c.cfg != nil {
 		req.Idle, req.BusyReason = DetectHostIdle(c.cfg)

@@ -20,7 +20,6 @@ import (
 	"time"
 )
 
-
 func generateTestEd25519Key(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey, []byte) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)

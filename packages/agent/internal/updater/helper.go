@@ -57,8 +57,12 @@ type HelperJournal struct {
 	NewSha256        string            `json:"newSha256"`
 	BackupPath       string            `json:"backupPath"`
 	ComponentBackups []ComponentBackup `json:"componentBackups,omitempty"`
-	UpdatedAt        time.Time         `json:"updatedAt"`
-	FenceOwner       string            `json:"fenceOwner,omitempty"`
+	// Provision records the fixed AI first-install artifacts (unit file,
+	// agent config backup, created identity) for ai-install jobs so crash
+	// reconciliation and rollback can restore the exact pre-mutation state.
+	Provision  *AIProvisionRecord `json:"provision,omitempty"`
+	UpdatedAt  time.Time          `json:"updatedAt"`
+	FenceOwner string             `json:"fenceOwner,omitempty"`
 }
 
 func agentLockDir(cfg *Config) string {
@@ -80,6 +84,7 @@ func releaseUpgradeFence(cfg *Config, jobID string) error {
 	dir := agentLockDir(cfg)
 	return applications.ReleaseHostScopeAt(dir, applications.LockScopeUpgrade, "updater-helper", jobID)
 }
+
 // HelperResult is what the helper writes back for the daemon to consume.
 type HelperResult struct {
 	JobID         string    `json:"jobId"`
@@ -96,9 +101,15 @@ type HelperResult struct {
 var (
 	execStagedVersion = defaultExecStagedVersion
 	runSystemctl      = defaultRunSystemctl
+	// hostPlatform reports the platform signed artifacts must match exactly.
+	// It is a seam only so the offline harness can exercise the linux/amd64
+	// verification path; production always returns the real runtime platform.
+	hostPlatform      = defaultHostPlatform
 	serviceActiveWait = 10 * time.Second
 	servicePollEvery  = 500 * time.Millisecond
 )
+
+func defaultHostPlatform() (string, string) { return runtime.GOOS, runtime.GOARCH }
 
 func defaultExecStagedVersion(ctx context.Context, path string) (string, error) {
 	cmd := exec.CommandContext(ctx, path, "-version")
@@ -736,6 +747,15 @@ func restoreBackup(cfg *Config, hj *HelperJournal) (string, error) {
 			_ = fsyncDir(cbDir)
 		}
 	}
+
+	// Restore the AI first-install artifacts (unit file, agent config) recorded
+	// in the provision record. Runs before the caller's service restarts so a
+	// restored/removed unit is what gets (re)started.
+	if hj.Provision != nil {
+		if err := rollbackAIProvision(cfg, hj); err != nil {
+			return got, err
+		}
+	}
 	return got, nil
 }
 
@@ -1216,12 +1236,43 @@ func handleApplyFleet(ctx context.Context, cfg *Config, auth JobAuthorizer, apiJ
 	}
 
 	curVer := cfg.UpdaterVersion()
-	if payload.MinUpdaterVersion != "" && curVer != "dev" && CompareSemver(curVer, payload.MinUpdaterVersion) < 0 {
+	aiInstall := apiJob.Kind == JobKindAIInstall
+	if aiInstall {
+		// The AI first-install operation is defined only against the complete
+		// AI component set: refuse any spec that would mutate the agent or
+		// updater binary, or that ships a partial AI set. The daemon selects
+		// the same set; this is the independent root-side attestation.
+		specComps := map[string]bool{}
 		for _, c := range spec.Components {
-			if c.Component == "agent" {
-				res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("current updater version %s is below required minUpdaterVersion %s for agent upgrade", curVer, payload.MinUpdaterVersion)
+			specComps[c.Component] = true
+			if c.Component != "ai-executor" && c.Component != "ai-host-helper" &&
+				c.Component != "ai-rootfs" && c.Component != "ai-profiles" {
+				res.Outcome, res.Detail = "verify_failed",
+					fmt.Sprintf("ai-install apply-spec contains forbidden component %q", c.Component)
 				return res
 			}
+		}
+		for _, want := range aiInstallRequiredComponents {
+			if !specComps[want] {
+				res.Outcome, res.Detail = "verify_failed",
+					fmt.Sprintf("ai-install apply-spec is missing required component %q", want)
+				return res
+			}
+		}
+	}
+	if payload.MinUpdaterVersion != "" && curVer != "dev" && CompareSemver(curVer, payload.MinUpdaterVersion) < 0 {
+		requiresCompatible := aiInstall
+		if !requiresCompatible {
+			for _, c := range spec.Components {
+				if c.Component == "agent" {
+					requiresCompatible = true
+					break
+				}
+			}
+		}
+		if requiresCompatible {
+			res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("current updater version %s is below required minUpdaterVersion %s", curVer, payload.MinUpdaterVersion)
+			return res
 		}
 	}
 
@@ -1240,21 +1291,20 @@ func handleApplyFleet(ctx context.Context, cfg *Config, auth JobAuthorizer, apiJ
 			return res
 		}
 
+		hostOS, hostArch := hostPlatform()
 		var match *FleetArtifact
 		for i := range payload.Artifacts {
 			a := &payload.Artifacts[i]
-			if a.Component == c.Component {
-				if a.OS == runtime.GOOS && a.Arch == runtime.GOARCH {
-					match = a
-					break
-				}
-				if match == nil {
-					match = a
-				}
+			// Exact platform match only: a signed artifact for another
+			// OS/arch must never satisfy this component, however it is
+			// ordered in the manifest.
+			if a.Component == c.Component && a.OS == hostOS && a.Arch == hostArch {
+				match = a
+				break
 			}
 		}
 		if match == nil {
-			res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("component %s not in signed manifest artifacts", c.Component)
+			res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("component %s has no signed manifest artifact for host platform %s/%s", c.Component, hostOS, hostArch)
 			return res
 		}
 
@@ -1357,6 +1407,49 @@ func handleApplyFleet(ctx context.Context, cfg *Config, auth JobAuthorizer, apiJ
 		}
 	}
 
+	// Canonical AI first-install provisioning precedes any component
+	// mutation: identity (fixed group/user), fixed directories, and backups
+	// of the unit file and agent config. Everything is recorded in the
+	// root-owned journal below so crash reconciliation and rollback can
+	// restore the exact pre-mutation state.
+	if aiInstall {
+		rec := &AIProvisionRecord{}
+		aiP := aiPaths(cfg)
+		if err := provisionAIIdentity(ctx, cfg, rec); err != nil {
+			_ = releaseUpgradeFence(cfg, jobID)
+			res.Outcome, res.Detail = "verify_failed", "provision ai identity: "+err.Error()
+			return res
+		}
+		if err := provisionAIDirs(aiP, rec.UID, rec.GID); err != nil {
+			_ = releaseUpgradeFence(cfg, jobID)
+			res.Outcome, res.Detail = "verify_failed", "provision ai dirs: "+err.Error()
+			return res
+		}
+		unitBackup, err := backupFileForRollback(aiP.HelperUnit, bdir, "ai-helper.unit")
+		if err != nil {
+			_ = releaseUpgradeFence(cfg, jobID)
+			res.Outcome, res.Detail = "verify_failed", err.Error()
+			return res
+		}
+		rec.UnitPath, rec.UnitBackupPath = aiP.HelperUnit, unitBackup
+		configBackup := ""
+		if cfg.AgentConfig != "" {
+			configBackup, err = backupFileForRollback(cfg.AgentConfig, bdir, "agent-config.json")
+			if err != nil {
+				_ = releaseUpgradeFence(cfg, jobID)
+				res.Outcome, res.Detail = "verify_failed", err.Error()
+				return res
+			}
+			if fi, statErr := os.Lstat(cfg.AgentConfig); statErr == nil {
+				if uid, gid, ok := fileUIDGID(fi); ok {
+					rec.ConfigUID, rec.ConfigGID = uid, gid
+				}
+			}
+		}
+		rec.ConfigPath, rec.ConfigBackupPath = cfg.AgentConfig, configBackup
+		hj.Provision = rec
+	}
+
 	if err := saveHelperJournal(cfg.StateDir, hj); err != nil {
 		_ = releaseUpgradeFence(cfg, jobID)
 		res.Outcome, res.Detail = "verify_failed", "save helper journal: "+err.Error()
@@ -1369,9 +1462,12 @@ func handleApplyFleet(ctx context.Context, cfg *Config, auth JobAuthorizer, apiJ
 		return res
 	}
 
-	// 2. Perform component mutations
+	// 2. Perform component mutations. From here on a failure is a PARTIAL
+	// mutation: it must roll back, never report the pre-swap "verify_failed"
+	// (which would let cleanup delete the only rollback source).
 	hasAI := false
 	hasAgent := false
+	rootfsManifestCaptured := []byte(nil)
 	for _, c := range spec.Components {
 		if strings.HasPrefix(c.Component, "ai-") {
 			hasAI = true
@@ -1380,21 +1476,28 @@ func handleApplyFleet(ctx context.Context, cfg *Config, auth JobAuthorizer, apiJ
 			hasAgent = true
 		}
 		if c.IsTar {
-			if err := ExtractTarGz(c.SourcePath, c.TargetPath, c.StripPrefix); err != nil {
+			if aiInstall && c.Component == "ai-rootfs" {
+				captured, err := ExtractTarGzCaptureSibling(c.SourcePath, c.TargetPath, c.StripPrefix)
+				if err != nil {
+					res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("extract %s: %v", c.Component, err)
+					return autoRollback(ctx, cfg, hj, res)
+				}
+				rootfsManifestCaptured = captured
+			} else if err := ExtractTarGz(c.SourcePath, c.TargetPath, c.StripPrefix); err != nil {
 				res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("extract %s: %v", c.Component, err)
-				return res
+				return autoRollback(ctx, cfg, hj, res)
 			}
 		} else {
 			targetDir := filepath.Dir(c.TargetPath)
 			if err := os.MkdirAll(targetDir, 0o755); err != nil {
 				res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("mkdir %s: %v", targetDir, err)
-				return res
+				return autoRollback(ctx, cfg, hj, res)
 			}
 			tmp := filepath.Join(targetDir, ".vps-fleet-new-"+c.Component+"-"+jobID)
 			defer os.Remove(tmp)
 			if _, err := copyHashed(c.SourcePath, tmp, c.SHA256, c.Size); err != nil {
 				res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("copy %s: %v", c.Component, err)
-				return res
+				return autoRollback(ctx, cfg, hj, res)
 			}
 			_ = os.Chmod(tmp, 0o755)
 			if os.Geteuid() == 0 {
@@ -1402,9 +1505,46 @@ func handleApplyFleet(ctx context.Context, cfg *Config, auth JobAuthorizer, apiJ
 			}
 			if err := os.Rename(tmp, c.TargetPath); err != nil {
 				res.Outcome, res.Detail = "verify_failed", fmt.Sprintf("rename %s: %v", c.Component, err)
-				return res
+				return autoRollback(ctx, cfg, hj, res)
 			}
 			_ = fsyncDir(targetDir)
+		}
+	}
+
+	// Canonical AI first-install artifacts: rootfs manifest extracted from the
+	// signed tarball sibling, fixed unit file, agent config ai block, then
+	// daemon-reload + enable. All paths and content are compiled-in constants.
+	if aiInstall {
+		aiP := aiPaths(cfg)
+		// The signed ai-rootfs bundle always ships the manifest as a sibling
+		// of rootfs/ (release pipeline). An archive without it is malformed
+		// or tampered: installing anyway would leave a runtime whose sandbox
+		// verification can never pass. Fail closed and roll back.
+		if len(rootfsManifestCaptured) == 0 {
+			res.Outcome, res.Detail = "verify_failed", "ai-rootfs archive carries no sibling rootfs manifest"
+			return autoRollback(ctx, cfg, hj, res)
+		}
+		if err := atomicWriteFile(aiP.RootfsManifest, rootfsManifestCaptured, 0o644); err != nil {
+			res.Outcome, res.Detail = "verify_failed", "write rootfs manifest: "+err.Error()
+			return autoRollback(ctx, cfg, hj, res)
+		}
+		if err := writeAIUnitFile(cfg, aiP, hj.Provision.UID, hj.Provision.GID); err != nil {
+			res.Outcome, res.Detail = "verify_failed", "write ai unit: "+err.Error()
+			return autoRollback(ctx, cfg, hj, res)
+		}
+		if hj.Provision.ConfigPath != "" {
+			if err := mergeAIConfigBlock(cfg, aiP, hj.Provision); err != nil {
+				res.Outcome, res.Detail = "verify_failed", "merge agent config ai block: "+err.Error()
+				return autoRollback(ctx, cfg, hj, res)
+			}
+		}
+		if _, err := runSystemctl(ctx, "daemon-reload"); err != nil {
+			res.Outcome, res.Detail = "verify_failed", "daemon-reload: "+err.Error()
+			return autoRollback(ctx, cfg, hj, res)
+		}
+		if _, err := runSystemctl(ctx, "enable", FixedAIHelperUnitName); err != nil {
+			res.Outcome, res.Detail = "verify_failed", "enable ai unit: "+err.Error()
+			return autoRollback(ctx, cfg, hj, res)
 		}
 	}
 
@@ -1422,8 +1562,8 @@ func handleApplyFleet(ctx context.Context, cfg *Config, auth JobAuthorizer, apiJ
 		}
 	}
 
-	if hasAI && unitExists(ctx, "flexserver-ai-helper.service") {
-		if _, err := runSystemctl(ctx, "restart", "flexserver-ai-helper.service"); err != nil {
+	if hasAI && unitExists(ctx, FixedAIHelperUnitName) {
+		if _, err := runSystemctl(ctx, "restart", FixedAIHelperUnitName); err != nil {
 			res.Outcome, res.Detail = "restart_failed", "restart ai-helper: "+err.Error()
 			return autoRollback(ctx, cfg, hj, res)
 		}
@@ -1441,7 +1581,7 @@ func handleApplyFleet(ctx context.Context, cfg *Config, auth JobAuthorizer, apiJ
 		res.ServiceActive = true
 	}
 
-	if hasAI && unitExists(ctx, "flexserver-ai-helper.service") {
+	if hasAI && unitExists(ctx, FixedAIHelperUnitName) {
 		aiActive, aiDetail := ensureUnitActive(ctx, "flexserver-ai-helper.service")
 		if !aiActive {
 			res.Detail = "ai-helper service not active after restart: " + aiDetail

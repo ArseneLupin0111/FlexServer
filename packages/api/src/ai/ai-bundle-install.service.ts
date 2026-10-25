@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional, ServiceUnavailableException } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException, Optional, ServiceUnavailableException } from "@nestjs/common";
 import { readFileSync } from "node:fs";
 import { AI_REPOSITORY, AGENT_REPOSITORY, AI_BUNDLE_TRANSPORT, APP_CONFIG, KEY_SERVICE, VPS_REPOSITORY } from "../tokens.js";
 import type { AppConfig } from "../config/app-config.js";
@@ -22,6 +22,11 @@ import {
   type AiBundleArchArtifacts,
   type AiBundleFileEntry,
 } from "./ai-bundle.service.js";
+import {
+  AiLocalInstallService,
+  type AiLocalJobWire,
+  type AiLocalReleaseWire,
+} from "./ai-local-install.service.js";
 
 // ── AI bundle install/update orchestration (execmode plan Q1/Q7/Q8) ──────
 //
@@ -97,8 +102,8 @@ export type AiBundleCapabilityView = {
   privilegedSupported: boolean;
 };
 
-/** GET /api/vps/:id/ai/bundle response shape — PINNED, the web slice builds
- * against it. Field order/names must not drift; report any change loudly. */
+/** GET /api/vps/:id/ai/bundle response shape — the web client shares this
+ * contract with the POST install response. */
 export type AiBundleView = {
   available: boolean;
   /** Present only when available=false. */
@@ -115,7 +120,42 @@ export type AiBundleView = {
     finishedAt: string | null;
   } | null;
   capability: AiBundleCapabilityView;
+  /** Install transport for this host: "updater" — local/system hosts whose
+   * first AI install is pulled by their own updater from a signed release;
+   * "ssh" — remote hosts pushed over saved SSH. Absent on degraded paths
+   * (the web then keeps the legacy remote behavior). */
+  installChannel?: "updater" | "ssh";
+  /** Dashboard install (POST /install + deliberate/convergence triggers) is
+   * only possible on remote SSH-managed hosts; false for local/system hosts
+   * and when the host record cannot be resolved. On the updater channel this
+   * reflects the local eligibility gates instead (fresh updater heartbeat
+   * with the ai-install capability, signed release present, host idle). */
+  installSupported?: boolean;
+  /** Present only when installSupported=false: actionable guidance. */
+  installReason?: string;
+  /** Updater-channel job (installChannel "updater"); null on the SSH channel
+   * and when no job has been scheduled. */
+  localJob?: AiLocalJobWire | null;
+  /** Release pinned by the updater-channel job; null when none. Kept strictly
+   * separate from lastInstalledBundleId, which tracks the SSH/API-image
+   * bundle and is never equated with a signed fleet release id. */
+  localRelease?: AiLocalReleaseWire | null;
 };
+
+/** Local/system hosts have no SSH transport; when the updater channel is not
+ * wired in this deployment the install stays fail-closed with this guidance. */
+export const AI_BUNDLE_LOCAL_HOST_INSTALL_REASON =
+  "Local host AI install is unavailable through the dashboard in this deployment; run scripts/install/install.sh --enable-ai on the host. Remote hosts install over saved SSH.";
+
+/** Actionable reason when the VPS record cannot be resolved (not found or
+ * store read failure): install support is unknown, NOT a local-host case. */
+export const AI_BUNDLE_HOST_UNRESOLVED_INSTALL_REASON =
+  "VPS record not found or unreadable — refresh the dashboard and retry; AI install support cannot be determined.";
+
+/** Dashboard installs require a remote user-managed host with saved SSH. */
+function isLocalOrSystemHost(vps: VpsRecord | undefined): boolean {
+  return vps === undefined || vps.kind === "local" || vps.managedBy === "system";
+}
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
@@ -175,6 +215,11 @@ export class AiBundleOrchestrationService {
     @Optional() @Inject(AuditService) private readonly audit?: AuditService,
     @Optional() @Inject(AI_BUNDLE_TRANSPORT) private readonly transport?: AiBundleInstallTransport,
     @Optional() @Inject(AI_BUNDLE_ORCHESTRATION_OPTIONS) options?: OrchestrationOptions,
+    // Updater channel for local/system hosts. Kept LAST: tests construct this
+    // service positionally with an options tail; without the channel wired the
+    // local path stays fail-closed exactly like before.
+    @Optional() @Inject(AiLocalInstallService)
+    private readonly localInstall?: AiLocalInstallService,
   ) {
     this.confirmDeadlineMs = options?.confirmDeadlineMs ?? CONFIRM_DEADLINE_MS;
     this.confirmPollIntervalMs = options?.confirmPollIntervalMs ?? CONFIRM_POLL_INTERVAL_MS;
@@ -186,18 +231,57 @@ export class AiBundleOrchestrationService {
 
   async getBundleView(vpsId: string): Promise<AiBundleView> {
     const bundle = this.bundles.getBundle();
-    const [capability, job] = await Promise.all([
+    const [capability, job, vps] = await Promise.all([
       this.repository.getAiCapability(vpsId).catch(() => undefined),
       this.repository.getAiBundleJob(vpsId).catch(() => undefined),
+      this.vps.get(vpsId).catch(() => undefined),
     ]);
-    return this.buildView(bundle, capability, job);
+    const view = this.buildView(bundle, capability, job, vps);
+    return this.decorateInstallChannel(vps, view);
+  }
+
+  /** Channel decoration: local/system hosts with the updater channel wired
+   * get the updater-channel eligibility/job/release view; remote hosts get
+   * the explicit "ssh" channel with no local job. Absent localInstall keeps
+   * the legacy fail-closed view (no installChannel field, like older APIs). */
+  private async decorateInstallChannel(
+    vps: VpsRecord | undefined,
+    view: AiBundleView,
+  ): Promise<AiBundleView> {
+    if (vps && isLocalOrSystemHost(vps)) {
+      if (!this.localInstall) {
+        return { ...view, localJob: null, localRelease: null };
+      }
+      const local = await this.localInstall.getLocalInstallView(vps.id);
+      // Strip the SSH-view install fields first: buildView marked local hosts
+      // unsupported with SSH guidance, which must never leak into the updater
+      // channel's own eligibility verdict.
+      const { installSupported: _sshSupported, installReason: _sshReason, ...base } = view;
+      return {
+        ...base,
+        installChannel: "updater",
+        installSupported: local.installSupported,
+        ...(local.installReason ? { installReason: local.installReason } : {}),
+        localJob: local.localJob,
+        localRelease: local.localRelease,
+      };
+    }
+    if (vps) {
+      // Remote SSH-managed host: explicit channel, never a local job.
+      return { ...view, installChannel: "ssh", localJob: null, localRelease: null };
+    }
+    // Host record unresolved: channel unknown — leave installChannel absent.
+    return { ...view, localJob: null, localRelease: null };
   }
 
   private buildView(
     bundle: ReturnType<AiBundleService["getBundle"]>,
     capability: Awaited<ReturnType<AiRepository["getAiCapability"]>>,
     job: AiBundleJobRecord | undefined,
+    vps: VpsRecord | undefined,
   ): AiBundleView {
+    const hostMissing = vps === undefined;
+    const localOrSystem = !hostMissing && isLocalOrSystemHost(vps);
     return {
       available: bundle.available,
       ...(bundle.available ? {} : { reason: bundle.reason }),
@@ -218,16 +302,53 @@ export class AiBundleOrchestrationService {
         ...(capability?.agentVersion ? { agentVersion: capability.agentVersion } : {}),
         privilegedSupported: capability?.privilegedSupported === true,
       },
+      installSupported: !hostMissing && !localOrSystem,
+      ...(hostMissing
+        ? { installReason: AI_BUNDLE_HOST_UNRESOLVED_INSTALL_REASON }
+        : localOrSystem
+          ? { installReason: AI_BUNDLE_LOCAL_HOST_INSTALL_REASON }
+          : {}),
     };
   }
 
   // ─── scheduling ─────────────────────────────────────────────────────
 
   /** POST route: schedule (or join) an install; 503 when the bundle is
-   * unavailable or installs are disabled. Returns the fresh view. */
-  async installBundle(vpsId: string, trigger: AiBundleJobTrigger = "manual"): Promise<AiBundleView> {
+   * unavailable or installs are disabled; 404 for an unresolvable VPS record.
+   * Remote hosts take the SSH path (idempotent per pending/running job);
+   * local/system hosts take the updater channel — a durable ai-install job
+   * pinned to a signed release, created only with an Idempotency-Key and
+   * only on an explicit dashboard action. Returns the fresh view. */
+  async installBundle(
+    vpsId: string,
+    trigger: AiBundleJobTrigger = "manual",
+    idempotencyKey?: string,
+  ): Promise<AiBundleView> {
     if (this.config.mode === "demo") {
       throw new ServiceUnavailableException("AI bundle install is disabled in demo mode");
+    }
+    const vps = await this.vps.get(vpsId).catch(() => undefined);
+    if (!vps) throw new NotFoundException("VPS not found");
+    if (isLocalOrSystemHost(vps)) {
+      // Local/system hosts have no SSH transport: their install is pulled by
+      // the host's own updater. Fail closed when the channel is not wired.
+      if (!this.localInstall) {
+        throw new BadRequestException(AI_BUNDLE_LOCAL_HOST_INSTALL_REASON);
+      }
+      if (trigger !== "manual") {
+        // First AI install is a deliberate dashboard action only (Q8): the
+        // deliberate/convergence triggers stay on the SSH channel and skip
+        // local hosts; this guard keeps that contract even if a future call
+        // site forgets.
+        throw new BadRequestException(
+          "Local host AI install is only scheduled by an explicit dashboard action",
+        );
+      }
+      await this.localInstall.scheduleAiInstall(vpsId, {
+        idempotencyKey,
+        actor: "dashboard",
+      });
+      return this.getBundleView(vpsId);
     }
     const scheduled = await this.scheduleInstall(vpsId, trigger);
     if (!scheduled) {
@@ -284,14 +405,14 @@ export class AiBundleOrchestrationService {
 
   // ─── deliberate-action trigger (Q8) ─────────────────────────────────
 
-  /** Called from updatePolicy after an enabling action (AI off→on, shell
-   * off→on, execMode change). Installs the bundle ONLY when it is present
-   * here and the host shows no sign of an install yet (no capability report
-   * and no recorded install); otherwise convergence (Q7) owns updates. */
+  /** Deliberate enabling actions install only on eligible remote hosts without
+   * a capability report or recorded installation. */
   async maybeInstallAfterDeliberateAction(vpsId: string): Promise<void> {
     if (this.config.mode === "demo") return;
     const bundle = this.bundles.getBundle();
     if (!bundle.available) return;
+    const vps = await this.vps.get(vpsId).catch(() => undefined);
+    if (isLocalOrSystemHost(vps)) return;
     const [capability, job] = await Promise.all([
       this.repository.getAiCapability(vpsId).catch(() => undefined),
       this.repository.getAiBundleJob(vpsId).catch(() => undefined),
@@ -318,6 +439,7 @@ export class AiBundleOrchestrationService {
     let createdThisTick = false;
 
     for (const vps of allVps) {
+      if (isLocalOrSystemHost(vps)) continue;
       // Only hosts where an AI worker exists (any capability report) converge.
       const capability = await this.repository.getAiCapability(vps.id).catch(() => undefined);
       if (!capability) continue;

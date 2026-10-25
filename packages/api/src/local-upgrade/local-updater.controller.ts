@@ -29,6 +29,9 @@ import type { LocalUpgradeJob } from "./local-upgrade.models.js";
 function updaterJob(job: LocalUpgradeJob, requiresReconcile = false) {
   return {
     jobId: job.id,
+    // "update" (or absent on very old servers) = agent binary path;
+    // "ai-install" = signed AI runtime install, AI components only.
+    kind: job.kind === "ai-install" ? "ai-install" : "update",
     phase: job.state,
     state: job.state,
     fencingToken: job.fencingToken,

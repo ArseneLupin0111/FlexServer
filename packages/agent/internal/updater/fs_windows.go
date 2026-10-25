@@ -47,3 +47,7 @@ func (l *lockFile) release() {
 // statIsRootOwned: Windows has no uid metadata (test-only build) — the
 // ownership half of requireSecureDir is skipped there.
 func statIsRootOwned(os.FileInfo) (bool, bool) { return false, false }
+
+// fileUIDGID: Windows exposes no POSIX owner in this build (test-only) —
+// ownership preservation is skipped there.
+func fileUIDGID(os.FileInfo) (uid, gid int, ok bool) { return 0, 0, false }

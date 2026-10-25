@@ -71,6 +71,7 @@ describe("AI bundle convergence tick (Q7)", () => {
   let vpsB: string;
   let config: AppConfig;
   let orchestration: AiBundleOrchestrationService;
+  let sshCalls: string[];
 
   beforeEach(async () => {
     fixture = await writeBundleFixture("ai-bundle-conv");
@@ -88,11 +89,22 @@ describe("AI bundle convergence tick (Q7)", () => {
     });
     config = { ...parsed, ai: { ...parsed.ai, enabled: true } };
     // Jobs launched by the tick fail fast (no saved key) and stay contained.
+    sshCalls = [];
     const transport = {
-      resolveAuth: async () => null,
-      makeDirectory: async () => {},
-      uploadFile: async () => {},
-      execCommand: async () => ({ stdout: "", stderr: "" }),
+      resolveAuth: async () => {
+        sshCalls.push("resolveAuth");
+        return null;
+      },
+      makeDirectory: async () => {
+        sshCalls.push("makeDirectory");
+      },
+      uploadFile: async () => {
+        sshCalls.push("uploadFile");
+      },
+      execCommand: async () => {
+        sshCalls.push("execCommand");
+        return { stdout: "", stderr: "" };
+      },
     } as unknown as AiBundleInstallTransport;
     orchestration = new AiBundleOrchestrationService(
       config, aiRepo, vpsRepo, {} as unknown as AgentRepository, new AiBundleService(config),
@@ -177,6 +189,15 @@ describe("AI bundle convergence tick (Q7)", () => {
     await flushAsync();
     expect(await aiRepo.getAiBundleJob(vpsA)).toBeUndefined();
     expect(await aiRepo.getAiBundleJob(vpsB)).toBeUndefined();
+  });
+
+  it("skips local/system hosts even with a capability report (no job, no SSH)", async () => {
+    await vpsRepo.ensureLocalHost({ id: vpsB, name: "Local host", host: "127.0.0.1", port: 22, username: "root", kind: "local", managedBy: "system" });
+    await aiRepo.recordAiCapability(capabilityReport(vpsB));
+    await orchestration.convergeTick();
+    await flushAsync();
+    expect(await aiRepo.getAiBundleJob(vpsB)).toBeUndefined();
+    expect(sshCalls).toEqual([]);
   });
 
   it("creates at most one install job per tick across the fleet", async () => {

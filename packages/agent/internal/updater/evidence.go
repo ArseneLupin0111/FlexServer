@@ -29,6 +29,31 @@ type AIHealthReport struct {
 	Components []string `json:"components,omitempty"`
 }
 
+// Job kind wire values mirrored from client.go: absent or "update" is the
+// historical automatic update; "ai-install" is the explicit AI first-install
+// operation and the only kind that may provision absent AI components.
+const (
+	JobKindUpdate    = "update"
+	JobKindAIInstall = "ai-install"
+)
+
+// SupportedJobKinds lists every kind value this updater accepts. It is the
+// fail-closed allowlist applied at claim time: a server advertising a kind
+// this binary does not implement can never drive it into a partial state.
+func SupportedJobKinds() []string {
+	return []string{"", JobKindUpdate, JobKindAIInstall}
+}
+
+// KindIsSupported reports whether the wire kind is one this updater implements.
+func KindIsSupported(kind string) bool {
+	for _, k := range SupportedJobKinds() {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
+
 // ClaimRequest is sent in Protocol 3 job claim requests.
 type ClaimRequest struct {
 	UpdaterVersion string         `json:"updaterVersion,omitempty"`
@@ -36,6 +61,10 @@ type ClaimRequest struct {
 	Idle           bool           `json:"idle"`
 	BusyReason     string         `json:"busyReason,omitempty"`
 	AIHealth       AIHealthReport `json:"aiHealth"`
+	// Capabilities advertises optional job kinds this updater understands, so
+	// the API can refrain from assigning an ai-install job to an updater that
+	// predates the operation. Older clients never send the field.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // DetectHostIdle inspects active operations on the host (Compose/Docker, terminal sessions, AI tasks).
@@ -81,7 +110,7 @@ func DetectHostIdle(cfg *Config) (idle bool, reason string) {
 		for _, r := range rows {
 			// Idle inspection must ignore own upgrade scope:
 			if r.Scope == applications.LockScopeUpgrade {
-				if (r.Holder.Kind == "updater-helper" || r.Holder.Kind == "") {
+				if r.Holder.Kind == "updater-helper" || r.Holder.Kind == "" {
 					if cfg != nil && cfg.CurrentJobID != "" && r.Holder.ID == cfg.CurrentJobID {
 						continue
 					}

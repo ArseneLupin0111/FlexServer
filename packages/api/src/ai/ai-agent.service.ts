@@ -618,9 +618,18 @@ export class AiAgentService {
       return null;
     }
 
-    // Provider revalidation
-    const settings = await this.repository.getSettings();
-    if (!settings || settings.revision !== plan.providerRevision) {
+    // Provider revalidation — scoped to the plan's own provider (Q9): another
+    // provider's configuration change never blocks this claim.
+    const planProviderId = plan.providerId ?? task.providerId;
+    let providerRevisionOk: boolean;
+    if (planProviderId) {
+      const profile = await this.repository.getProviderProfile(planProviderId);
+      providerRevisionOk = profile?.revision === plan.providerRevision;
+    } else {
+      const settings = await this.repository.getSettings();
+      providerRevisionOk = settings?.revision === plan.providerRevision;
+    }
+    if (!providerRevisionOk) {
       await this.failCommandAndTask(
         task,
         command,

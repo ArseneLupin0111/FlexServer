@@ -13,6 +13,8 @@ import type {
   AiOutboxEntry,
   AiPlan,
   AiPolicy,
+  AiProviderProfileInternal,
+  AiProviderSelection,
   AiProviderSettingsInternal,
   AiRestrictedEvidenceSource,
   AiTask,
@@ -28,6 +30,7 @@ export type AiPersistenceConflictCode =
   | "conversation_conflict"
   | "checkpoint_conflict"
   | "settings_conflict"
+  | "provider_conflict"
   | "policy_conflict"
   | "approval_conflict"
   | "stale_dispatch"
@@ -52,6 +55,9 @@ export type AiTaskCreateInput = {
   requestSummary: string;
   idempotencyKey: string;
   initiatingSessionId: string;
+  /** Provider profile + model bound at admission (Q9/Q16). */
+  providerId?: string;
+  model?: string;
   /** Active-slot lease at admission; JSON adapter uses absolute now derived from createdAt */
   expiresAt?: string;
   createdAt?: string;
@@ -98,7 +104,35 @@ export type AiConversationAppendMessageInput = {
   content: string;
   evidence?: AiConversationMessageEvidence[];
   restrictedSources?: AiRestrictedEvidenceSource[];
+  providerId?: string;
+  model?: string;
   createdAt?: string;
+};
+
+/** Create/update write for one provider profile. Structural invariants
+ * (unique models, defaultModel ∈ models, single default, exactly-one-key
+ * semantics) are enforced by the repository core for both drivers. */
+export type AiProviderProfileWriteInput = {
+  name: string;
+  endpoint: string;
+  models: string[];
+  defaultModel?: string;
+  enabled: boolean;
+  isDefault: boolean;
+  allowPrivateEndpoint?: boolean;
+  /** Replaces the stored envelope when set; absent keeps the existing key. */
+  apiKeyEnvelope?: AiEnvelopeData;
+  expectedRevision?: number;
+  now?: string;
+};
+
+/** Snapshot consumed by the boot migration service and provider routes. */
+export type AiProviderMigrationView = {
+  legacy: AiProviderSettingsInternal | undefined;
+  providers: AiProviderProfileInternal[];
+  /** Set once migration has run; gates legacy PATCH rejection (Q14/Q15). */
+  migratedAt: string | undefined;
+  lastSelection: AiProviderSelection | undefined;
 };
 
 /** Atomic compare-and-advance of a conversation's compaction checkpoint
@@ -238,6 +272,27 @@ export interface AiRepository {
   recordAiCapability(input: AiCapabilityUpsertInput): Promise<AiCapability>;
   getSettings(): Promise<AiProviderSettingsInternal | undefined>;
   updateSettings(input: AiSettingsUpdateInput): Promise<AiProviderSettingsInternal>;
+
+  // ─── provider profiles (docs/ai-multi-provider-plan.md) ─────────
+  getProviderMigrationState(): Promise<AiProviderMigrationView>;
+  /** Idempotent boot migration completion: no-op when already migrated;
+   *  otherwise inserts the converted legacy profile (first profile becomes
+   *  the default) and stamps migratedAt. A profile is only inserted when
+   *  none exist yet; the legacy settings slot is kept so an older build
+   *  still runs after a rollback (Q15). */
+  completeProviderMigration(profile?: AiProviderProfileInternal, now?: string): Promise<AiProviderProfileInternal[]>;
+  listProviderProfiles(): Promise<AiProviderProfileInternal[]>;
+  getProviderProfile(id: string): Promise<AiProviderProfileInternal | undefined>;
+  createProviderProfile(input: AiProviderProfileWriteInput & { id?: string }): Promise<AiProviderProfileInternal>;
+  /** CAS on expectedRevision; every successful update bumps the profile
+   * revision, invalidating only that provider's tasks/plans (Q9). */
+  updateProviderProfile(id: string, input: AiProviderProfileWriteInput): Promise<AiProviderProfileInternal>;
+  /** Blocked with provider_conflict while any conversation selection or
+   * non-terminal task references the profile (Q10). */
+  deleteProviderProfile(id: string): Promise<boolean>;
+  setLastSelection(selection: AiProviderSelection): Promise<void>;
+  /** Pins the conversation's provider/model selection (Q16 tier 1). */
+  setConversationProviderSelection(vpsId: string, conversationId: string, selection: AiProviderSelection): Promise<AiConversation>;
   appendAuditEvent(event: AiAuditEvent): Promise<void>;
   listAuditEvents(filter?: { vpsId?: string; taskId?: string; limit?: number }): Promise<AiAuditEvent[]>;
 }

@@ -33,17 +33,20 @@ import type {
   AiConversationDetail,
   AiConversationMessage,
   AiPolicy,
+  AiProviderProfile,
+  AiProvidersResponse,
   AiProviderSettings,
   AiTask,
   AiTaskUsage,
 } from "../../../lib/ai-api";
 import {
-  checkAiProvider,
+  checkAiProviderProfile,
   createVpsAiTask,
   getAiSettings,
   getVpsAiCapability,
   getVpsAiConversation,
   getVpsAiPolicy,
+  listAiProviders,
   listVpsAiConversations,
   listVpsAiTasks,
 } from "../../../lib/ai-api";
@@ -67,7 +70,9 @@ vi.mock("../../../lib/ai-stream", () => ({
 }));
 
 // Keep the real module (other assistant children import runtime helpers from
-// it) and override only the transport functions the panel drives.
+// it) and override only the transport functions the panel drives. The
+// provider list defaults to empty so generic tests exercise the no-profile
+// paths; multi-provider tests override it after the shared boot helpers.
 vi.mock("../../../lib/ai-api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../lib/ai-api")>();
   return {
@@ -79,7 +84,10 @@ vi.mock("../../../lib/ai-api", async (importOriginal) => {
     listVpsAiConversations: vi.fn(),
     getVpsAiConversation: vi.fn(),
     createVpsAiTask: vi.fn(),
-    checkAiProvider: vi.fn(),
+    listAiProviders: vi.fn(() =>
+      Promise.resolve({ providers: [], lastSelection: undefined, migrated: true }),
+    ),
+    checkAiProviderProfile: vi.fn(),
   };
 });
 
@@ -164,6 +172,30 @@ function makeMessage(overrides: Partial<AiConversationMessage> = {}): AiConversa
   };
 }
 
+function makeProfile(overrides: Partial<AiProviderProfile> = {}): AiProviderProfile {
+  return {
+    id: "prov-1",
+    name: "Primary",
+    endpoint: "https://primary.example/v1",
+    models: ["m-1"],
+    defaultModel: "m-1",
+    enabled: true,
+    isDefault: true,
+    hasApiKey: true,
+    allowPrivateEndpoint: false,
+    revision: 1,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function makeProvidersResponse(
+  providers: AiProviderProfile[],
+  lastSelection?: AiProvidersResponse["lastSelection"],
+): AiProvidersResponse {
+  return { providers, lastSelection, migrated: true };
+}
+
 function renderPanel() {
   return render(
     <MemoryRouter>
@@ -174,6 +206,7 @@ function renderPanel() {
 
 function mockLoadedProvider() {
   vi.mocked(getAiSettings).mockResolvedValue(savedSettings);
+  vi.mocked(listAiProviders).mockResolvedValue(makeProvidersResponse([]));
   // The panel tolerates these being unavailable (catch -> null).
   vi.mocked(getVpsAiPolicy).mockRejectedValue(new Error("policy unavailable"));
   vi.mocked(getVpsAiCapability).mockRejectedValue(new Error("capability unavailable"));
@@ -187,6 +220,7 @@ function mockAssistantLoaded(options: {
   policy?: AiPolicy | null;
 }) {
   vi.mocked(getAiSettings).mockResolvedValue(savedSettings);
+  vi.mocked(listAiProviders).mockResolvedValue(makeProvidersResponse([]));
   if (options.policy === null) {
     vi.mocked(getVpsAiPolicy).mockRejectedValue(new Error("policy unavailable"));
   } else {
@@ -220,42 +254,60 @@ afterEach(() => {
 });
 
 describe("AssistantPanel provider check", () => {
-  it("reports a failed check in the modal instead of a false green result when the check API rejects", async () => {
+  const checkProfile = makeProfile({
+    id: "prov-check",
+    name: "Check target",
+    endpoint: "https://check.example/v1",
+    models: ["check-model"],
+    defaultModel: "check-model",
+  });
+
+  it("reports a failed profile check in the modal instead of a false green result when the check API rejects", async () => {
     mockLoadedProvider();
-    vi.mocked(checkAiProvider).mockRejectedValueOnce(
+    vi.mocked(listAiProviders).mockResolvedValue(
+      makeProvidersResponse([checkProfile]),
+    );
+    vi.mocked(checkAiProviderProfile).mockRejectedValueOnce(
       new Error("Provider check failed: 401 invalid api key"),
     );
 
     renderPanel();
     await openSettingsModal();
 
-    fireEvent.click(screen.getByRole("button", { name: /check endpoint/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /check provider check target/i }),
+    );
 
     await waitFor(() => {
-      expect(checkAiProvider).toHaveBeenCalledTimes(1);
+      expect(checkAiProviderProfile).toHaveBeenCalledWith("prov-check");
     });
 
     // The rejected check must never be presented as an operational endpoint.
-    expect(screen.queryByText(/synthetic tool check succeeded/i)).toBeNull();
+    expect(screen.queryByText(/provider check succeeded/i)).toBeNull();
     expect(screen.queryByText(/endpoint is operational/i)).toBeNull();
 
-    // The failure must be surfaced to the user (modal result and/or root banner).
+    // The failure must be surfaced to the user (modal row result and/or root banner).
     await waitFor(() => {
       expect(screen.getAllByText(/401 invalid api key/i).length).toBeGreaterThan(0);
     });
   });
 
-  it("still shows the operational success message when the check API resolves", async () => {
+  it("still shows the operational success message when the profile check API resolves", async () => {
     mockLoadedProvider();
-    vi.mocked(checkAiProvider).mockResolvedValueOnce({ ok: true });
+    vi.mocked(listAiProviders).mockResolvedValue(
+      makeProvidersResponse([checkProfile]),
+    );
+    vi.mocked(checkAiProviderProfile).mockResolvedValueOnce({ ok: true });
 
     renderPanel();
     await openSettingsModal();
 
-    fireEvent.click(screen.getByRole("button", { name: /check endpoint/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /check provider check target/i }),
+    );
 
     await waitFor(() => {
-      expect(screen.getByText(/synthetic tool check succeeded/i)).toBeInTheDocument();
+      expect(screen.getByText(/provider check succeeded/i)).toBeInTheDocument();
     });
   });
 });
@@ -749,6 +801,7 @@ function setupWindowedConversationHost(total: number) {
   const conversation = makeConversation({ id: "conv-paged", title: "Paged Session" });
   const messages = makeWindowedMessages(conversation.id, total);
   vi.mocked(getAiSettings).mockResolvedValue(savedSettings);
+  vi.mocked(listAiProviders).mockResolvedValue(makeProvidersResponse([]));
   vi.mocked(getVpsAiPolicy).mockResolvedValue(enabledPolicy);
   vi.mocked(getVpsAiCapability).mockRejectedValue(new Error("capability unavailable"));
   vi.mocked(listVpsAiTasks).mockResolvedValue([]);
@@ -767,6 +820,7 @@ function setupTwoConversationHost(titleA: string, titleB: string) {
   const conversationA = makeConversation({ id: "conv-a", title: titleA });
   const conversationB = makeConversation({ id: "conv-b", title: titleB });
   vi.mocked(getAiSettings).mockResolvedValue(savedSettings);
+  vi.mocked(listAiProviders).mockResolvedValue(makeProvidersResponse([]));
   vi.mocked(getVpsAiPolicy).mockResolvedValue(enabledPolicy);
   vi.mocked(getVpsAiCapability).mockRejectedValue(new Error("capability unavailable"));
   vi.mocked(listVpsAiTasks).mockResolvedValue([]);
@@ -1103,7 +1157,264 @@ describe("AssistantPanel chat markdown rendering", () => {
     expect(cells).toEqual(["nginx", "up"]);
 
     const code = chat.querySelector("code");
-    expect(code, "expected a <code> element for `inline code`").not.toBeNull();
+    expect(code, "expected a <code> element for `inline code` text").not.toBeNull();
     expect(code?.textContent).toBe("docker ps --filter name=nginx");
+  });
+});
+
+describe("AssistantPanel multi-provider model selection", () => {
+  const alpha = makeProfile({
+    id: "prov-a",
+    name: "Alpha",
+    models: ["a-1", "a-2"],
+    defaultModel: "a-1",
+  });
+  const beta = makeProfile({
+    id: "prov-b",
+    name: "Beta",
+    models: ["b-1"],
+    defaultModel: "b-1",
+    isDefault: false,
+  });
+  const offline = makeProfile({
+    id: "prov-off",
+    name: "Offline",
+    models: ["off-1"],
+    defaultModel: "off-1",
+    enabled: false,
+    isDefault: false,
+  });
+
+  function mockSend(request: string) {
+    vi.mocked(createVpsAiTask).mockResolvedValue(
+      makeTask({
+        id: "task-new",
+        conversationId: "conv-new",
+        state: "planning",
+        revision: 1,
+        requestSummary: request,
+        summary: undefined,
+      }),
+    );
+  }
+
+  function modelSelect(): HTMLSelectElement {
+    return screen.getByRole("combobox", { name: /model/i }) as HTMLSelectElement;
+  }
+
+  it("initializes the model selector from the admin's last used selection", async () => {
+    mockAssistantLoaded({ tasks: [], conversationDetail: null });
+    vi.mocked(listAiProviders).mockResolvedValue(
+      makeProvidersResponse([alpha, beta], { providerId: "prov-b", model: "b-1" }),
+    );
+
+    renderPanel();
+
+    await screen.findByRole("combobox", { name: /model/i });
+    await waitFor(() => {
+      expect(modelSelect()).toHaveValue("prov-b::b-1");
+    });
+  });
+
+  it("prefers the conversation's provider pin over the last selection when it resolves", async () => {
+    mockAssistantLoaded({
+      tasks: [],
+      conversationDetail: {
+        conversation: makeConversation({
+          selectedProviderId: "prov-a",
+          selectedModel: "a-2",
+        }),
+        messages: [],
+      },
+    });
+    vi.mocked(listAiProviders).mockResolvedValue(
+      makeProvidersResponse([alpha, beta], { providerId: "prov-b", model: "b-1" }),
+    );
+
+    renderPanel();
+
+    await screen.findByRole("combobox", { name: /model/i });
+    await waitFor(() => {
+      expect(modelSelect()).toHaveValue("prov-a::a-2");
+    });
+  });
+
+  it("falls back to the default enabled profile when the last selection is stale", async () => {
+    const request = "Summarize host health";
+    mockAssistantLoaded({ tasks: [], conversationDetail: null });
+    vi.mocked(listAiProviders).mockResolvedValue(
+      makeProvidersResponse([alpha, offline], {
+        providerId: "prov-off",
+        model: "off-1",
+      }),
+    );
+    mockSend(request);
+
+    renderPanel();
+
+    await screen.findByRole("combobox", { name: /model/i });
+    await waitFor(() => {
+      expect(modelSelect()).toHaveValue("prov-a::a-1");
+    });
+
+    fireEvent.change(screen.getByPlaceholderText(/ask the assistant/i), {
+      target: { value: request },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => {
+      expect(createVpsAiTask).toHaveBeenCalledWith("vps-1", {
+        request,
+        idempotencyKey: expect.any(String),
+        conversationId: undefined,
+        providerId: "prov-a",
+        model: "a-1",
+      });
+    });
+  });
+
+  it("omits the provider binding from the send when the selection is stale and no default exists", async () => {
+    const request = "Rotate the tls certificates";
+    mockAssistantLoaded({ tasks: [], conversationDetail: null });
+    vi.mocked(listAiProviders).mockResolvedValue(
+      makeProvidersResponse([offline], {
+        providerId: "prov-off",
+        model: "off-1",
+      }),
+    );
+    mockSend(request);
+
+    renderPanel();
+    await screen.findByText(/how can the assistant help\?/i);
+
+    fireEvent.change(screen.getByPlaceholderText(/ask the assistant/i), {
+      target: { value: request },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => {
+      expect(createVpsAiTask).toHaveBeenCalledTimes(1);
+    });
+    expect(createVpsAiTask).toHaveBeenCalledWith("vps-1", {
+      request,
+      idempotencyKey: expect.any(String),
+      conversationId: undefined,
+    });
+  });
+});
+
+describe("AssistantPanel selection-pin warning", () => {
+  const alpha = makeProfile({
+    id: "prov-a",
+    name: "Alpha",
+    models: ["a-1", "a-2"],
+    defaultModel: "a-1",
+  });
+  const offline = makeProfile({
+    id: "prov-off",
+    name: "Offline",
+    models: ["off-1"],
+    defaultModel: "off-1",
+    enabled: false,
+    isDefault: false,
+  });
+
+  it("warns when the active conversation is pinned to a disabled provider and lets the operator dismiss it", async () => {
+    mockAssistantLoaded({
+      tasks: [],
+      conversationDetail: {
+        conversation: makeConversation({
+          selectedProviderId: "prov-off",
+          selectedModel: "off-1",
+        }),
+        messages: [makeMessage()],
+      },
+    });
+    vi.mocked(listAiProviders).mockResolvedValue(
+      makeProvidersResponse([alpha, offline], {
+        providerId: "prov-a",
+        model: "a-1",
+      }),
+    );
+
+    renderPanel();
+    await screen.findByText("Please prune unused docker images");
+
+    expect(await screen.findByText(/disabled or removed/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /dismiss/i }));
+    expect(screen.queryByText(/disabled or removed/i)).toBeNull();
+  });
+
+  it("retires the pin warning when the operator picks another model", async () => {
+    mockAssistantLoaded({
+      tasks: [],
+      conversationDetail: {
+        conversation: makeConversation({
+          selectedProviderId: "prov-off",
+          selectedModel: "off-1",
+        }),
+        messages: [makeMessage()],
+      },
+    });
+    vi.mocked(listAiProviders).mockResolvedValue(
+      makeProvidersResponse([alpha, offline], {
+        providerId: "prov-a",
+        model: "a-1",
+      }),
+    );
+
+    renderPanel();
+    await screen.findByText("Please prune unused docker images");
+    expect(await screen.findByText(/disabled or removed/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("combobox", { name: /model/i }), {
+      target: { value: "prov-a::a-2" },
+    });
+
+    expect(screen.queryByText(/disabled or removed/i)).toBeNull();
+    expect(screen.getByRole("combobox", { name: /model/i })).toHaveValue("prov-a::a-2");
+  });
+
+  it("warns when the pinned model is no longer available on its provider", async () => {
+    mockAssistantLoaded({
+      tasks: [],
+      conversationDetail: {
+        conversation: makeConversation({
+          selectedProviderId: "prov-a",
+          selectedModel: "ghost-model",
+        }),
+        messages: [makeMessage()],
+      },
+    });
+    vi.mocked(listAiProviders).mockResolvedValue(makeProvidersResponse([alpha]));
+
+    renderPanel();
+    await screen.findByText("Please prune unused docker images");
+
+    expect(await screen.findByText(/no longer available/i)).toBeInTheDocument();
+  });
+
+  it("shows no pin warning for a conversation whose selection still resolves", async () => {
+    mockAssistantLoaded({
+      tasks: [],
+      conversationDetail: {
+        conversation: makeConversation({
+          selectedProviderId: "prov-a",
+          selectedModel: "a-2",
+        }),
+        messages: [makeMessage()],
+      },
+    });
+    vi.mocked(listAiProviders).mockResolvedValue(makeProvidersResponse([alpha]));
+
+    renderPanel();
+    await screen.findByText("Please prune unused docker images");
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: /model/i })).toHaveValue("prov-a::a-2");
+    });
+    expect(screen.queryByText(/disabled or removed/i)).toBeNull();
+    expect(screen.queryByText(/no longer available/i)).toBeNull();
   });
 });

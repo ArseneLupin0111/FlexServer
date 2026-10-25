@@ -1,13 +1,15 @@
 import { useState, useEffect, useRef } from "react";
 import {
-  AlertCircle,
   CheckCircle2,
   ChevronDown,
   Cpu,
+  Download,
   Eye,
   EyeOff,
   Globe,
   LoaderCircle,
+  Pencil,
+  Plus,
   RefreshCw,
   Server,
   Shield,
@@ -24,56 +26,99 @@ import { Switch } from "../../ui/switch";
 import type {
   AiCapability,
   AiPolicy,
-  AiProviderSettings,
+  AiProviderProfile,
+  ProviderProfileWrite,
   UpdateAiPolicy,
-  UpdateAiSettings,
 } from "../../../lib/ai-api";
 
 export type AssistantSettingsModalProps = {
   open: boolean;
   onClose: () => void;
   vpsId: string;
-  providerSettings: AiProviderSettings | null;
+  providers: AiProviderProfile[];
   policy: AiPolicy | null;
   capability: AiCapability | null;
-  onSaveProviderSettings: (patch: UpdateAiSettings) => Promise<void>;
+  onCreateProvider: (body: ProviderProfileWrite) => Promise<void>;
+  onUpdateProvider: (id: string, body: ProviderProfileWrite) => Promise<void>;
+  onDeleteProvider: (id: string) => Promise<void>;
+  onCheckProviderProfile: (id: string) => Promise<void>;
+  onFetchProviderModels: (id: string) => Promise<void>;
   onSavePolicy: (patch: UpdateAiPolicy) => Promise<void>;
-  onCheckProvider: () => Promise<void>;
   busy?: boolean;
 };
 
 type ActiveTab = "provider" | "policy" | "capability";
 
+type ProfileEditor =
+  | { mode: "create" }
+  | { mode: "edit"; profile: AiProviderProfile };
+
+type RowAction = "check" | "fetch" | "toggle" | "delete";
+
+function parseModelLines(text: string): string[] {
+  return text
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+// Row actions mutate the saved profile, so the write body is rebuilt from the
+// public projection. Omitting apiKey keeps the stored key (blank keeps it).
+function profileWriteFromProfile(
+  profile: AiProviderProfile,
+  enabled: boolean,
+): ProviderProfileWrite {
+  return {
+    name: profile.name,
+    endpoint: profile.endpoint,
+    allowPrivateEndpoint: profile.allowPrivateEndpoint,
+    models: profile.models,
+    defaultModel: profile.defaultModel,
+    enabled,
+    isDefault: profile.isDefault,
+  };
+}
+
 export function AssistantSettingsModal({
   open,
   onClose,
   vpsId,
-  providerSettings,
+  providers,
   policy,
   capability,
-  onSaveProviderSettings,
+  onCreateProvider,
+  onUpdateProvider,
+  onDeleteProvider,
+  onCheckProviderProfile,
+  onFetchProviderModels,
   onSavePolicy,
-  onCheckProvider,
   busy = false,
 }: AssistantSettingsModalProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>("provider");
 
-  // Provider state
+  // Profile editor state
+  const [editor, setEditor] = useState<ProfileEditor | null>(null);
+  const [name, setName] = useState("");
   const [endpoint, setEndpoint] = useState("");
-  const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
+  const [modelsText, setModelsText] = useState("");
+  const [defaultModel, setDefaultModel] = useState("");
   const [allowPrivate, setAllowPrivate] = useState(false);
+  const [enabled, setEnabled] = useState(true);
+  const [isDefault, setIsDefault] = useState(false);
   const [savingProvider, setSavingProvider] = useState(false);
   const [providerError, setProviderError] = useState<string | null>(null);
   const [providerSuccess, setProviderSuccess] = useState<string | null>(null);
 
-  // Check state
-  const [checkingProvider, setCheckingProvider] = useState(false);
-  const [checkResult, setCheckResult] = useState<{
-    ok: boolean;
-    message: string;
-  } | null>(null);
+  // Row action state
+  const [rowBusy, setRowBusy] = useState<{ id: string; action: RowAction } | null>(
+    null,
+  );
+  const [armDeleteId, setArmDeleteId] = useState<string | null>(null);
+  const [checkResults, setCheckResults] = useState<
+    Record<string, { ok: boolean; message: string }>
+  >({});
   const checkRunIdRef = useRef(0);
 
   // Policy state
@@ -91,20 +136,19 @@ export function AssistantSettingsModal({
   const [policyError, setPolicyError] = useState<string | null>(null);
   const [policySuccess, setPolicySuccess] = useState<string | null>(null);
 
-  // Sync state on open/load. A pending check belongs to the previous
-  // lifecycle/config snapshot and must not repaint a result afterwards.
+  // A new providers snapshot (or modal open) supersedes any in-flight per-row
+  // check so a late response cannot repaint a stale result. Editor drafts and
+  // success/error banners survive unrelated list refreshes.
   useEffect(() => {
     checkRunIdRef.current += 1;
-    setCheckResult(null);
-    if (providerSettings) {
-      setEndpoint(providerSettings.endpoint || "");
-      setModel(providerSettings.model || "");
-      setAllowPrivate(providerSettings.allowPrivateEndpoint === true);
-      setApiKey("");
+    setCheckResults({});
+    setArmDeleteId(null);
+    if (open) {
+      setEditor(null);
       setProviderError(null);
       setProviderSuccess(null);
     }
-  }, [providerSettings, open]);
+  }, [providers, open]);
   // No late check response may land after unmount.
   useEffect(() => () => { checkRunIdRef.current += 1; }, []);
   useEffect(() => {
@@ -130,86 +174,194 @@ export function AssistantSettingsModal({
       setPolicySuccess(null);
     }
   }, [policy, open]);
-  const hasExistingConnection = Boolean(
-    providerSettings &&
-      (providerSettings.hasApiKey ||
-        (providerSettings.endpoint && providerSettings.endpoint.trim().length > 0)),
-  );
-
-  // Checks use saved settings only — never unsaved drafts or credentials.
-  const savedConfigComplete = Boolean(
-    providerSettings &&
-      providerSettings.endpoint.trim().length > 0 &&
-      providerSettings.model.trim().length > 0 &&
-      providerSettings.hasApiKey === true,
-  );
-  const draftMatchesSaved = Boolean(
-    providerSettings &&
-      endpoint.trim() === providerSettings.endpoint.trim() &&
-      model.trim() === providerSettings.model.trim() &&
-      allowPrivate === (providerSettings.allowPrivateEndpoint === true) &&
-      apiKey.trim().length === 0,
-  );
-  const canCheckProvider = savedConfigComplete && draftMatchesSaved;
 
   if (!open) return null;
 
   // Supersedes any in-flight check so a late response cannot repaint a stale result.
-  function invalidateCheckResult() {
+  function invalidateCheckResults() {
     checkRunIdRef.current += 1;
-    setCheckResult(null);
+    setCheckResults({});
+  }
+
+  function openEditor(profile: AiProviderProfile | null) {
+    setEditor(profile ? { mode: "edit", profile } : { mode: "create" });
+    setArmDeleteId(null);
+    setProviderError(null);
+    setProviderSuccess(null);
+    setShowApiKey(false);
+    setApiKey("");
+    if (profile) {
+      setName(profile.name);
+      setEndpoint(profile.endpoint);
+      setModelsText(profile.models.join("\n"));
+      setDefaultModel(profile.defaultModel ?? "");
+      setAllowPrivate(profile.allowPrivateEndpoint);
+      setEnabled(profile.enabled);
+      setIsDefault(profile.isDefault);
+    } else {
+      setName("");
+      setEndpoint("");
+      setModelsText("");
+      setDefaultModel("");
+      setAllowPrivate(false);
+      setEnabled(true);
+      setIsDefault(false);
+    }
   }
 
   async function handleSaveProvider() {
-    if (savingProvider || busy) return;
+    if (savingProvider || busy || !editor) return;
+    const trimmedName = name.trim();
+    const trimmedEndpoint = endpoint.trim();
+    const models = parseModelLines(modelsText);
+    if (!trimmedName || !trimmedEndpoint || models.length === 0) {
+      setProviderError("Name, endpoint, and at least one model are required.");
+      return;
+    }
     setSavingProvider(true);
     setProviderError(null);
     setProviderSuccess(null);
-    invalidateCheckResult();
+    invalidateCheckResults();
     try {
-      const patch: UpdateAiSettings = {
-        endpoint: endpoint.trim(),
-        model: model.trim(),
+      const body: ProviderProfileWrite = {
+        name: trimmedName,
+        endpoint: trimmedEndpoint,
         allowPrivateEndpoint: allowPrivate,
+        models,
+        defaultModel: defaultModel.trim() || models[0],
+        enabled,
+        isDefault,
       };
-      if (apiKey.trim().length > 0) {
-        patch.apiKey = apiKey.trim();
+      const key = apiKey.trim();
+      if (key.length > 0) {
+        body.apiKey = key;
       }
-      await onSaveProviderSettings(patch);
+      if (editor.mode === "edit") {
+        await onUpdateProvider(editor.profile.id, body);
+      } else {
+        await onCreateProvider(body);
+      }
       setApiKey("");
-      setProviderSuccess("Global provider settings updated successfully.");
+      setProviderSuccess(
+        editor.mode === "edit"
+          ? "Provider profile updated."
+          : "Provider profile created.",
+      );
+      setEditor(null);
     } catch (err) {
       setProviderError(
-        err instanceof Error ? err.message : "Failed to update provider settings.",
+        err instanceof Error ? err.message : "Failed to save provider profile.",
       );
     } finally {
       setSavingProvider(false);
     }
   }
 
-  async function handleCheckProvider() {
-    if (checkingProvider || busy || !canCheckProvider) return;
+  // Checks always run against the saved profile row, never the editor draft.
+  async function handleCheckProfile(profile: AiProviderProfile) {
+    if (rowBusy || busy || !profile.hasApiKey) return;
     const runId = ++checkRunIdRef.current;
-    setCheckingProvider(true);
-    setCheckResult(null);
+    setRowBusy({ id: profile.id, action: "check" });
+    setProviderError(null);
+    setProviderSuccess(null);
+    setCheckResults((prev) => {
+      if (!(profile.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[profile.id];
+      return next;
+    });
     try {
-      await onCheckProvider();
+      await onCheckProviderProfile(profile.id);
       if (checkRunIdRef.current !== runId) return;
-      setCheckResult({
-        ok: true,
-        message: "Synthetic tool check succeeded. Endpoint is operational.",
-      });
+      setCheckResults((prev) => ({
+        ...prev,
+        [profile.id]: {
+          ok: true,
+          message: "Provider check succeeded. Endpoint is operational.",
+        },
+      }));
     } catch (err) {
       if (checkRunIdRef.current !== runId) return;
-      setCheckResult({
-        ok: false,
-        message:
-          err instanceof Error
-            ? err.message
-            : "Synthetic tool check failed. Check endpoint and credentials.",
-      });
+      setCheckResults((prev) => ({
+        ...prev,
+        [profile.id]: {
+          ok: false,
+          message:
+            err instanceof Error
+              ? err.message
+              : "Provider check failed. Check endpoint and credentials.",
+        },
+      }));
     } finally {
-      setCheckingProvider(false);
+      setRowBusy((prev) =>
+        prev && prev.id === profile.id && prev.action === "check" ? null : prev,
+      );
+    }
+  }
+
+  async function handleFetchModels(profile: AiProviderProfile) {
+    if (rowBusy || busy || !profile.hasApiKey) return;
+    setRowBusy({ id: profile.id, action: "fetch" });
+    setProviderError(null);
+    setProviderSuccess(null);
+    try {
+      await onFetchProviderModels(profile.id);
+      setProviderSuccess(`Fetched the model list for ${profile.name}.`);
+    } catch (err) {
+      setProviderError(
+        err instanceof Error ? err.message : "Failed to fetch provider models.",
+      );
+    } finally {
+      setRowBusy((prev) =>
+        prev && prev.id === profile.id && prev.action === "fetch" ? null : prev,
+      );
+    }
+  }
+
+  async function handleToggleEnabled(profile: AiProviderProfile) {
+    if (rowBusy || busy) return;
+    setRowBusy({ id: profile.id, action: "toggle" });
+    setProviderError(null);
+    setProviderSuccess(null);
+    try {
+      await onUpdateProvider(
+        profile.id,
+        profileWriteFromProfile(profile, !profile.enabled),
+      );
+    } catch (err) {
+      setProviderError(
+        err instanceof Error ? err.message : "Failed to update provider profile.",
+      );
+    } finally {
+      setRowBusy((prev) =>
+        prev && prev.id === profile.id && prev.action === "toggle" ? null : prev,
+      );
+    }
+  }
+
+  // Two-click arm-then-confirm; a profile referenced by conversations or
+  // non-terminal tasks is rejected server-side and the reason is surfaced.
+  async function handleDeleteProfile(profile: AiProviderProfile) {
+    if (rowBusy || busy) return;
+    if (armDeleteId !== profile.id) {
+      setArmDeleteId(profile.id);
+      return;
+    }
+    setRowBusy({ id: profile.id, action: "delete" });
+    setProviderError(null);
+    setProviderSuccess(null);
+    try {
+      await onDeleteProvider(profile.id);
+      setArmDeleteId(null);
+    } catch (err) {
+      setArmDeleteId(null);
+      setProviderError(
+        err instanceof Error ? err.message : "Failed to delete provider profile.",
+      );
+    } finally {
+      setRowBusy((prev) =>
+        prev && prev.id === profile.id && prev.action === "delete" ? null : prev,
+      );
     }
   }
 
@@ -254,6 +406,8 @@ export function AssistantSettingsModal({
       setSavingPolicy(false);
     }
   }
+
+  const editorModels = parseModelLines(modelsText);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/80 p-4">
@@ -321,13 +475,28 @@ export function AssistantSettingsModal({
 
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto p-5 text-xs [scrollbar-width:thin]">
-          {/* TAB 1: GLOBAL PROVIDER SETTINGS */}
+          {/* TAB 1: PROVIDER PROFILES */}
           {activeTab === "provider" ? (
             <div className="space-y-4">
-              <p className="text-[11px] text-dim">
-                Applies to every host. Keys are encrypted at rest and never
-                displayed again.
-              </p>
+              <div className="flex items-start justify-between gap-3">
+                <p className="text-[11px] text-dim">
+                  Applies to every host. Keys are encrypted at rest and never
+                  displayed again.
+                </p>
+                {editor === null ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={busy || rowBusy !== null}
+                    onClick={() => openEditor(null)}
+                    className="shrink-0 text-xs"
+                  >
+                    <Plus className="mr-1.5 h-3.5 w-3.5" />
+                    Add provider
+                  </Button>
+                ) : null}
+              </div>
 
               {providerSuccess ? (
                 <div className="flex items-center gap-2 border border-signal/40 bg-signal/10 p-3 text-xs text-signal">
@@ -343,160 +512,343 @@ export function AssistantSettingsModal({
                 </div>
               ) : null}
 
-              <div className="space-y-3">
-                <div className="space-y-1">
-                  <Label className="text-xs text-text">Endpoint</Label>
-                  <Input
-                    type="url"
-                    value={endpoint}
-                    onChange={(e) => {
-                      setEndpoint(e.target.value);
-                      invalidateCheckResult();
-                    }}
-                    placeholder="https://api.openai.com"
-                    className="h-8 font-mono text-xs"
-                  />
-                  <p className="text-[11px] text-dim">
-                    OpenAI-compatible. HTTPS for remote hosts.
-                  </p>
-                </div>
-
-                <div className="space-y-1">
-                  <Label className="text-xs text-text">Model</Label>
-                  <Input
-                    type="text"
-                    value={model}
-                    onChange={(e) => {
-                      setModel(e.target.value);
-                      invalidateCheckResult();
-                    }}
-                    placeholder="gpt-4o"
-                    className="h-8 font-mono text-xs"
-                  />
-                </div>
-
-                <div className="space-y-1">
+              {editor === null ? (
+                providers.length === 0 ? (
+                  <div className="border border-line bg-ink/30 p-6 text-center text-xs text-dim">
+                    No provider profiles yet. Add a provider to enable the
+                    Assistant.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {providers.map((profile) => {
+                      const rowCheck = checkResults[profile.id];
+                      const rowAction = rowBusy?.id === profile.id ? rowBusy.action : null;
+                      return (
+                        <div
+                          key={profile.id}
+                          data-provider-id={profile.id}
+                          className="border border-line bg-panel p-3"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0 space-y-0.5">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="text-xs font-semibold text-text">
+                                  {profile.name}
+                                </span>
+                                {profile.isDefault ? (
+                                  <Badge variant="ready">Default</Badge>
+                                ) : null}
+                                {!profile.enabled ? (
+                                  <Badge variant="warning">Disabled</Badge>
+                                ) : null}
+                                {!profile.hasApiKey ? (
+                                  <Badge variant="destructive">No key</Badge>
+                                ) : null}
+                              </div>
+                              <div
+                                className="truncate font-mono text-[11px] text-dim"
+                                title={profile.endpoint}
+                              >
+                                {profile.endpoint}
+                              </div>
+                              <div className="text-[11px] text-dim">
+                                {profile.models.length}{" "}
+                                {profile.models.length === 1 ? "model" : "models"}
+                                {profile.defaultModel
+                                  ? ` · default ${profile.defaultModel}`
+                                  : ""}
+                              </div>
+                            </div>
+                            <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                disabled={!profile.hasApiKey || busy || rowBusy !== null}
+                                onClick={() => void handleCheckProfile(profile)}
+                                aria-label={`Check provider ${profile.name}`}
+                                title={
+                                  profile.hasApiKey
+                                    ? "Check the saved profile endpoint"
+                                    : "Configure an API key first"
+                                }
+                                className="text-xs"
+                              >
+                                {rowAction === "check" ? (
+                                  <LoaderCircle className="mr-1 h-3 w-3 animate-spin" />
+                                ) : (
+                                  <RefreshCw className="mr-1 h-3 w-3" />
+                                )}
+                                Check
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                disabled={!profile.hasApiKey || busy || rowBusy !== null}
+                                onClick={() => void handleFetchModels(profile)}
+                                aria-label={`Fetch models for ${profile.name}`}
+                                title={
+                                  profile.hasApiKey
+                                    ? "Fetch the model list from the provider"
+                                    : "Configure an API key first"
+                                }
+                                className="text-xs"
+                              >
+                                {rowAction === "fetch" ? (
+                                  <LoaderCircle className="mr-1 h-3 w-3 animate-spin" />
+                                ) : (
+                                  <Download className="mr-1 h-3 w-3" />
+                                )}
+                                Fetch
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                disabled={busy || rowBusy !== null}
+                                onClick={() => openEditor(profile)}
+                                aria-label={`Edit ${profile.name}`}
+                                className="text-xs"
+                              >
+                                <Pencil className="mr-1 h-3 w-3" />
+                                Edit
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                disabled={busy || rowBusy !== null}
+                                onClick={() => void handleToggleEnabled(profile)}
+                                aria-label={`${profile.enabled ? "Disable" : "Enable"} provider ${profile.name}`}
+                                className="text-xs"
+                              >
+                                {rowAction === "toggle" ? (
+                                  <LoaderCircle className="mr-1 h-3 w-3 animate-spin" />
+                                ) : null}
+                                {profile.enabled ? "Disable" : "Enable"}
+                              </Button>
+                              {armDeleteId === profile.id ? (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  disabled={busy || rowBusy !== null}
+                                  onClick={() => void handleDeleteProfile(profile)}
+                                  aria-label={`Confirm delete ${profile.name}`}
+                                  className="border-crit/40 text-xs text-crit hover:bg-crit/10"
+                                >
+                                  {rowAction === "delete" ? (
+                                    <LoaderCircle className="mr-1 h-3 w-3 animate-spin" />
+                                  ) : null}
+                                  Confirm delete
+                                </Button>
+                              ) : (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  disabled={busy || rowBusy !== null}
+                                  onClick={() => void handleDeleteProfile(profile)}
+                                  aria-label={`Delete provider ${profile.name}`}
+                                  className="text-xs text-crit hover:bg-crit/10"
+                                >
+                                  Delete
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                          {rowCheck ? (
+                            <div
+                              className={`mt-2 flex items-center gap-2 border p-2 text-[11px] ${
+                                rowCheck.ok
+                                  ? "border-signal/40 bg-signal/10 text-signal"
+                                  : "border-crit/40 bg-crit/10 text-crit"
+                              }`}
+                            >
+                              {rowCheck.ok ? (
+                                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                              ) : (
+                                <XCircle className="h-3.5 w-3.5 shrink-0" />
+                              )}
+                              <span>{rowCheck.message}</span>
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )
+              ) : (
+                <div className="space-y-3 border border-line bg-ink/30 p-3">
                   <div className="flex items-center justify-between">
-                    <Label className="text-xs text-text">API key</Label>
-                    {providerSettings?.hasApiKey ? (
-                      <span className="text-[11px] text-signal font-mono">
-                        Key configured
-                      </span>
-                    ) : (
-                      <span className="text-[11px] text-dim font-mono">
-                        No key set
-                      </span>
-                    )}
-                  </div>
-                  <div className="relative">
-                    <Input
-                      type={showApiKey ? "text" : "password"}
-                      value={apiKey}
-                      onChange={(e) => {
-                        setApiKey(e.target.value);
-                        invalidateCheckResult();
-                      }}
-                      placeholder={
-                        providerSettings?.hasApiKey
-                          ? "•••••••••••••••••••••••• (Leave blank to keep current)"
-                          : "Enter provider API key"
-                      }
-                      className="h-8 pr-8 font-mono text-xs"
-                    />
-                    <button
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-dim">
+                      {editor.mode === "edit"
+                        ? `Edit profile: ${editor.profile.name}`
+                        : "New provider profile"}
+                    </h3>
+                    <Button
                       type="button"
-                      onClick={() => setShowApiKey(!showApiKey)}
-                      className="absolute right-2 top-2 text-dim hover:text-text"
-                      aria-label={showApiKey ? "Hide API key" : "Show API key"}
+                      variant="ghost"
+                      size="sm"
+                      disabled={savingProvider}
+                      onClick={() => setEditor(null)}
+                      className="text-xs"
                     >
-                      {showApiKey ? (
-                        <EyeOff className="h-4 w-4" />
-                      ) : (
-                        <Eye className="h-4 w-4" />
-                      )}
-                    </button>
+                      Cancel
+                    </Button>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-xs text-text">Name</Label>
+                    <Input
+                      type="text"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="Primary provider"
+                      className="h-8 text-xs"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-xs text-text">Endpoint</Label>
+                    <Input
+                      type="url"
+                      value={endpoint}
+                      onChange={(e) => setEndpoint(e.target.value)}
+                      placeholder="https://api.openai.com"
+                      className="h-8 font-mono text-xs"
+                    />
+                    <p className="text-[11px] text-dim">
+                      OpenAI-compatible. HTTPS for remote hosts.
+                    </p>
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs text-text">API key</Label>
+                      {editor.mode === "edit" && editor.profile.hasApiKey ? (
+                        <span className="font-mono text-[11px] text-signal">
+                          Key configured
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="relative">
+                      <Input
+                        type={showApiKey ? "text" : "password"}
+                        value={apiKey}
+                        onChange={(e) => setApiKey(e.target.value)}
+                        placeholder={
+                          editor.mode === "edit" && editor.profile.hasApiKey
+                            ? "•••••••••••••••••••••••• (Leave blank to keep current)"
+                            : "Enter provider API key"
+                        }
+                        className="h-8 pr-8 font-mono text-xs"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowApiKey(!showApiKey)}
+                        className="absolute right-2 top-2 text-dim hover:text-text"
+                        aria-label={showApiKey ? "Hide API key" : "Show API key"}
+                      >
+                        {showApiKey ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-xs text-text">Models</Label>
+                    <textarea
+                      value={modelsText}
+                      onChange={(e) => setModelsText(e.target.value)}
+                      placeholder={"gpt-4o\no4-mini"}
+                      rows={4}
+                      className="w-full resize-none border border-line bg-ink p-2 font-mono text-xs text-text focus:border-signal focus:outline-none"
+                    />
+                    <p className="text-[10px] text-dim">
+                      One model name per line. Saved profiles can also fetch the
+                      list from the provider.
+                    </p>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-xs text-text">Default model</Label>
+                    <Input
+                      type="text"
+                      value={defaultModel}
+                      onChange={(e) => setDefaultModel(e.target.value)}
+                      placeholder={editorModels[0] || "gpt-4o"}
+                      className="h-8 font-mono text-xs"
+                    />
+                    <p className="text-[11px] text-dim">
+                      Blank uses the first model.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-between border border-line bg-panel p-3">
+                    <div className="space-y-0.5 pr-4">
+                      <div className="text-xs font-semibold text-text">
+                        Allow private endpoint
+                      </div>
+                      <div className="text-[11px] text-dim">
+                        Loopback (127.0.0.1) allowed; cloud metadata IPs stay
+                        blocked.
+                      </div>
+                    </div>
+                    <Switch
+                      checked={allowPrivate}
+                      onCheckedChange={setAllowPrivate}
+                      aria-label="Allow private endpoint"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between border border-line bg-panel p-3">
+                    <div className="text-xs font-semibold text-text">Enabled</div>
+                    <Switch
+                      checked={enabled}
+                      onCheckedChange={setEnabled}
+                      aria-label="Provider enabled"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between border border-line bg-panel p-3">
+                    <div className="space-y-0.5 pr-4">
+                      <div className="text-xs font-semibold text-text">
+                        Set as default
+                      </div>
+                      <div className="text-[11px] text-dim">
+                        The default profile serves chats without an explicit
+                        model pick.
+                      </div>
+                    </div>
+                    <Switch
+                      checked={isDefault}
+                      onCheckedChange={setIsDefault}
+                      aria-label="Set as default provider"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2 pt-1">
+                    <Button
+                      type="button"
+                      variant="default"
+                      size="sm"
+                      disabled={savingProvider || busy}
+                      onClick={() => void handleSaveProvider()}
+                      className="text-xs font-semibold"
+                    >
+                      {savingProvider ? (
+                        <LoaderCircle className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      ) : null}
+                      {editor.mode === "edit" ? "Save changes" : "Create provider"}
+                    </Button>
                   </div>
                 </div>
-
-                <div className="flex items-center justify-between border border-line bg-ink/30 p-3">
-                  <div className="space-y-0.5 pr-4">
-                    <div className="text-xs font-semibold text-text">
-                      Allow private endpoint
-                    </div>
-                    <div className="text-[11px] text-dim">
-                      Loopback (127.0.0.1) allowed; cloud metadata IPs stay
-                      blocked.
-                    </div>
-                  </div>
-                  <Switch
-                    checked={allowPrivate}
-                    onCheckedChange={(next) => {
-                      setAllowPrivate(next);
-                      invalidateCheckResult();
-                    }}
-                    aria-label="Allow private endpoint"
-                  />
-                </div>
-              </div>
-
-              {!canCheckProvider ? (
-                <div className="flex items-start gap-1.5 text-[11px] text-warn">
-                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  <span>
-                    {savedConfigComplete
-                      ? "The check runs against the saved configuration — save your changes first."
-                      : "A complete saved configuration (endpoint, model, and key) is required."}
-                  </span>
-                </div>
-              ) : null}
-
-              {checkResult ? (
-                <div
-                  className={`flex items-center gap-2 border p-2 text-[11px] ${
-                    checkResult.ok
-                      ? "border-signal/40 bg-signal/10 text-signal"
-                      : "border-crit/40 bg-crit/10 text-crit"
-                  }`}
-                >
-                  {checkResult.ok ? (
-                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                  ) : (
-                    <XCircle className="h-3.5 w-3.5 shrink-0" />
-                  )}
-                  <span>{checkResult.message}</span>
-                </div>
-              ) : null}
-
-              <div className="flex items-center justify-end gap-2 pt-1">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={checkingProvider || busy || !canCheckProvider}
-                  onClick={() => void handleCheckProvider()}
-                  className="text-xs"
-                >
-                  {checkingProvider ? (
-                    <LoaderCircle className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-                  )}
-                  Check Endpoint
-                </Button>
-                <Button
-                  type="button"
-                  variant="default"
-                  size="sm"
-                  disabled={savingProvider || busy}
-                  onClick={() => void handleSaveProvider()}
-                  className="text-xs font-semibold"
-                >
-                  {savingProvider ? (
-                    <LoaderCircle className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                  ) : null}
-                  {hasExistingConnection ? "Update connection" : "Connect provider"}
-                </Button>
-              </div>
+              )}
             </div>
           ) : null}
 

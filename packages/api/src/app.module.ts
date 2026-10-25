@@ -107,6 +107,7 @@ import type { AiRepository } from "./persistence/repositories/ai.persistence.js"
 import { AiRoutesService } from "./ai/ai-routes.service.js";
 import { AiSettingsController, AiPolicyController } from "./ai/ai.controller.js";
 import { AiPolicyService } from "./ai/ai-policy.service.js";
+import { AiProviderMigrationService } from "./ai/ai-provider-migration.service.js";
 import { AiTaskService } from "./ai/ai-task.service.js";
 import { AiHostPlanService } from "./ai/ai-host-plan.service.js";
 import { AiDockerBridgeService } from "./ai/ai-docker-bridge.service.js";
@@ -245,6 +246,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       },
       AiRoutesService,
       AiPolicyService,
+      AiProviderMigrationService,
       AiHostPlanService,
       AiDockerBridgeService,
       AiTaskService,

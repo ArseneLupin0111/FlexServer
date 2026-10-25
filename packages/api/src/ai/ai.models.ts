@@ -33,6 +33,8 @@ export type AiPlan = {
   taskId: string;
   vpsId: string;
   agentInstanceId?: string;
+  /** Provider whose revision approved this plan; covered by planDigest. */
+  providerId?: string;
   providerRevision: number;
   policyRevision: number;
   capabilityRevision: number;
@@ -67,6 +69,10 @@ export type AiTask = {
   vpsId: string;
   state: AiTaskState;
   revision: number;
+  /** Provider profile + model bound at admission; revision changes to this
+   * profile (only) invalidate the task (docs/ai-multi-provider-plan.md Q9). */
+  providerId?: string;
+  model?: string;
   requestSummary: string;
   summary?: string;
   clarificationPrompt?: string;
@@ -106,6 +112,40 @@ export type AiProviderSettingsInternal = {
   updatedAt: string;
 };
 
+/** Public projection of one provider profile: envelope material never leaves
+ * the persistence layer (docs/ai-multi-provider-plan.md invariants). */
+export type AiProviderProfile = {
+  id: string;
+  name: string;
+  endpoint: string;
+  models: string[];
+  defaultModel?: string;
+  enabled: boolean;
+  isDefault: boolean;
+  hasApiKey: boolean;
+  allowPrivateEndpoint: boolean;
+  revision: number;
+  updatedAt: string;
+};
+
+export type AiProviderProfileInternal = {
+  id: string;
+  name: string;
+  endpoint: string;
+  models: string[];
+  defaultModel?: string;
+  enabled: boolean;
+  isDefault: boolean;
+  /** AAD { vpsId: "global", taskId: id, field: "providerApiKey", version: 1 }. */
+  encryptedApiKey?: AiEnvelopeData;
+  allowPrivateEndpoint?: boolean;
+  revision: number;
+  updatedAt: string;
+};
+
+/** Admin's most recent chat selection (Q16 resolution tier 2). */
+export type AiProviderSelection = { providerId: string; model: string };
+
 export type AiPolicy = {
   vpsId: string;
   aiEnabled: boolean;
@@ -141,6 +181,9 @@ export type AiConversation = {
   id: string;
   vpsId: string;
   title: string;
+  /** Provider/model pinned for this conversation (Q16 tier 1). */
+  selectedProviderId?: string;
+  selectedModel?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -168,6 +211,9 @@ export type AiConversationMessage = {
   content: string;
   evidence?: AiConversationMessageEvidence[];
   restrictedSources?: AiRestrictedEvidenceSource[];
+  /** Provenance for the `provider · model` label (assistant messages). */
+  providerId?: string;
+  model?: string;
   createdAt: string;
 };
 

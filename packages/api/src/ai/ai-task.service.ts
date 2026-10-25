@@ -12,8 +12,9 @@ import { createAiTaskSchema, taskInputSchema, approvePlanSchema } from "./ai.sch
 import { decryptAiSecret, loadAiKeyring, AiCryptoUnavailableError } from "./ai-crypto.js";
 import { redactString } from "../common/redaction.js";
 import { AI_PROVIDER_KEY_CONTEXT } from "./ai-routes.service.js";
+import { aiProviderKeyAad } from "../persistence/repositories/ai.repository.js";
 import { AiProvider, type ProviderMessage, type ProviderTool, ProviderProtocolError, ProviderTransportError, ProviderKeyRequiredError, ProviderContextOverflowError, measureProviderRequest, PROVIDER_MAX_OUTPUT_TOKENS, PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS } from "./ai-provider.js";
-import type { AiTask, AiPlan, AiHostCommandKind, AiRestrictedEvidenceSource } from "./ai.models.js";
+import type { AiTask, AiPlan, AiHostCommandKind, AiRestrictedEvidenceSource, AiConversation, AiProviderProfileInternal } from "./ai.models.js";
 import { DashboardSessionService } from "../auth/dashboard-session.service.js";
 import { DockerMonitoringService } from "../docker/docker-monitoring.service.js";
 import { AiHostPlanService, hostTools, sha256 } from "./ai-host-plan.service.js";
@@ -44,7 +45,7 @@ function snapshotFailureCode(error: unknown): string {
   if (error instanceof ProviderProtocolError || error instanceof ProviderTransportError || error instanceof ProviderKeyRequiredError || error instanceof AiCryptoUnavailableError) return error.code;
   return "provider_unavailable";
 }
-const publicTask = (task: AiTask): AiTask => ({ id: task.id, conversationId: task.conversationId, vpsId: task.vpsId, state: task.state, revision: task.revision, requestSummary: task.requestSummary, summary: task.summary, clarificationPrompt: task.clarificationPrompt, plan: task.plan, usage: task.usage, error: task.error, capabilityMetadata: task.capabilityMetadata, compacting: task.compacting, createdAt: task.createdAt, updatedAt: task.updatedAt, expiresAt: task.expiresAt });
+const publicTask = (task: AiTask): AiTask => ({ id: task.id, conversationId: task.conversationId, vpsId: task.vpsId, state: task.state, revision: task.revision, providerId: task.providerId, model: task.model, requestSummary: task.requestSummary, summary: task.summary, clarificationPrompt: task.clarificationPrompt, plan: task.plan, usage: task.usage, error: task.error, capabilityMetadata: task.capabilityMetadata, compacting: task.compacting, createdAt: task.createdAt, updatedAt: task.updatedAt, expiresAt: task.expiresAt });
 
 @Injectable()
 export class AiTaskService implements OnModuleDestroy {
@@ -60,7 +61,7 @@ export class AiTaskService implements OnModuleDestroy {
   private async revalidateContextDispatch(task: AiTask, dispatch: { providerRevision: number; policyRevision: number; sessionId: string }, signal: AbortSignal, sources: readonly AiRestrictedEvidenceSource[]) {
     if (!await this.sessions.authenticateById(dispatch.sessionId)) throw new AiAssistantError("policy_denied");
     signal.throwIfAborted();
-    await this.policy.revalidateForDispatch(task.vpsId, { providerRevision: dispatch.providerRevision, policyRevision: dispatch.policyRevision });
+    await this.policy.revalidateForDispatch(task.vpsId, { providerRevision: dispatch.providerRevision, policyRevision: dispatch.policyRevision, providerId: task.providerId });
     const policy = await this.repository.getAiPolicy(task.vpsId);
     if (!policy || sources.some(source => source === "logs" ? !policy.sendLogsToProvider : !policy.sendFilesToProvider)) throw new AiAssistantError("policy_denied");
     signal.throwIfAborted();
@@ -243,35 +244,90 @@ export class AiTaskService implements OnModuleDestroy {
     if (!await this.vps.get(vpsId)) throw new NotFoundException("VPS not found");
     const policy = await this.policy.authorizeTaskAdmission(vpsId, true);
     this.policy.authorizeToolCall(policy, "readEnabled");
-    const readiness = await this.policy.resolveProviderReadiness();
-    if (!readiness.configured) throw new AiAssistantError("provider_unavailable");
     let conversationId = input.data.conversationId;
-    if (conversationId && !await this.repository.getConversation(vpsId, conversationId)) throw new NotFoundException("Conversation not found");
+    let existingConversation: AiConversation | undefined;
+    if (conversationId) {
+      existingConversation = await this.repository.getConversation(vpsId, conversationId);
+      if (!existingConversation) throw new NotFoundException("Conversation not found");
+    }
     if (!conversationId) conversationId = (await this.repository.createConversation(vpsId, input.data.request.slice(0, 80))).id;
+    // Q16 resolution: explicit > conversation > last used > default. An
+    // explicit selection that cannot be honored fails closed (no fallback).
+    const selection = await this.resolveSelection(input.data.providerId, input.data.model, existingConversation);
+    if (!selection) throw new AiAssistantError("provider_unavailable");
+    if (!this.policy.isProfileReady(selection.profile)) throw new AiAssistantError("provider_unavailable");
     const sanitizedRequest = redactString(input.data.request);
     let admitted;
     try {
-      admitted = await this.repository.createTask({ id: randomUUID(), vpsId, conversationId, state: "planning", requestSummary: sanitizedRequest, idempotencyKey: input.data.idempotencyKey, initiatingSessionId: request.dashboardSessionId!, expiresAt: new Date(Date.now() + 180000).toISOString() });
+      admitted = await this.repository.createTask({ id: randomUUID(), vpsId, conversationId, state: "planning", requestSummary: sanitizedRequest, idempotencyKey: input.data.idempotencyKey, initiatingSessionId: request.dashboardSessionId!, providerId: selection.profile.id, model: selection.model, expiresAt: new Date(Date.now() + 180000).toISOString() });
     } catch (error) {
       if (error instanceof AiPersistenceConflictError) throw new AiAssistantError("task_busy");
       throw error;
     }
     if (!admitted.replay) {
+      // The legacy pseudo-profile has no durable id; nothing to pin yet.
+      if (selection.profile.id) {
+        await this.repository.setConversationProviderSelection(vpsId, conversationId, { providerId: selection.profile.id, model: selection.model });
+        await this.repository.setLastSelection({ providerId: selection.profile.id, model: selection.model });
+      }
       await this.repository.appendMessage({ id: randomUUID(), vpsId, conversationId, taskId: admitted.task.id, role: "user", content: sanitizedRequest });
       const controller = new AbortController();
       this.running.set(admitted.task.id, controller);
-      void this.run(admitted.task, readiness.settings.revision, policy.revision, controller, request.dashboardSessionId!).catch((error: unknown) => {
+      void this.run(admitted.task, selection.profile.revision, policy.revision, controller, request.dashboardSessionId!).catch((error: unknown) => {
         if (!(error instanceof AiPersistenceConflictError)) console.error("AI task persistence failure", { taskId: admitted.task.id });
       }).finally(() => this.running.delete(admitted.task.id));
     }
     return publicTask(admitted.task);
   }
+  /** Q16 selection tiers; returns undefined only when no ready provider
+   * exists at all (caller fails closed with provider_unavailable). A
+   * conversation pinned to a provider that no longer resolves fails closed
+   * (Q10) instead of silently switching. Pre-migration, the legacy settings
+   * slot serves as an ephemeral default profile (id ""). */
+  private async resolveSelection(explicitProviderId: string | undefined, explicitModel: string | undefined, conversation: AiConversation | undefined): Promise<{ profile: AiProviderProfileInternal; model: string } | undefined> {
+    const { providers, lastSelection, migratedAt, legacy } = await this.repository.getProviderMigrationState();
+    const pick = (providerId: string | undefined, model: string | undefined): { profile: AiProviderProfileInternal; model: string } | undefined => {
+      const profile = providers.find((candidate) => candidate.id === providerId && candidate.enabled);
+      if (!profile || !model || !profile.models.includes(model)) return undefined;
+      return { profile, model };
+    };
+    const explicit = pick(explicitProviderId, explicitModel);
+    if (explicitProviderId !== undefined && !explicit) throw new AiAssistantError("provider_unavailable");
+    const conversationPick = conversation?.selectedProviderId !== undefined ? pick(conversation.selectedProviderId, conversation?.selectedModel) : undefined;
+    if (conversation?.selectedProviderId !== undefined && !conversationPick) throw new AiAssistantError("provider_unavailable");
+    const lastPick = pick(lastSelection?.providerId, lastSelection?.model);
+    const defaultPick = (() => {
+      const fallbackProfile = providers.find((candidate) => candidate.isDefault && candidate.enabled);
+      if (!fallbackProfile) return undefined;
+      return { profile: fallbackProfile, model: fallbackProfile.defaultModel ?? fallbackProfile.models[0]! };
+    })();
+    const resolved = explicit ?? conversationPick ?? lastPick ?? defaultPick;
+    if (resolved) return resolved;
+    if (!migratedAt && legacy?.model && legacy.encryptedApiKey) {
+      const pseudo: AiProviderProfileInternal = { id: "", name: "Legacy", endpoint: legacy.endpoint, models: [legacy.model], defaultModel: legacy.model, enabled: true, isDefault: true, encryptedApiKey: legacy.encryptedApiKey, allowPrivateEndpoint: legacy.allowPrivateEndpoint, revision: legacy.revision, updatedAt: legacy.updatedAt };
+      return { profile: pseudo, model: legacy.model };
+    }
+    return undefined;
+  }
+  /** Provider profile bound to a task; pre-migration legacy tasks resolve
+   * the legacy settings slot as an ephemeral profile (id ""), keeping the
+   * legacy revision semantics for dispatch revalidation. */
+  private async resolveTaskProvider(task: AiTask): Promise<AiProviderProfileInternal | undefined> {
+    const view = await this.repository.getProviderMigrationState();
+    if (task.providerId) return view.providers.find((profile) => profile.id === task.providerId);
+    const fallback = view.providers.find((profile) => profile.isDefault);
+    if (fallback || view.migratedAt) return fallback;
+    const legacy = view.legacy;
+    if (!legacy?.model || !legacy.encryptedApiKey) return undefined;
+    return { id: "", name: "Legacy", endpoint: legacy.endpoint, models: [legacy.model], defaultModel: legacy.model, enabled: true, isDefault: true, encryptedApiKey: legacy.encryptedApiKey, allowPrivateEndpoint: legacy.allowPrivateEndpoint, revision: legacy.revision, updatedAt: legacy.updatedAt };
+  }
   private async run(task: AiTask, providerRevision: number, policyRevision: number, controller: AbortController, sessionId: string) {
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(180000)]);
     try {
-      const settings = await this.repository.getSettings();
-      if (!settings?.encryptedApiKey) throw new AiAssistantError("provider_unavailable");
-      const apiKey = decryptAiSecret(settings.encryptedApiKey, AI_PROVIDER_KEY_CONTEXT, await loadAiKeyring(this.config.ai.keyringFile));
+      const profile = await this.resolveTaskProvider(task);
+      if (!this.policy.isProfileReady(profile)) throw new AiAssistantError("provider_unavailable");
+      const apiKey = decryptAiSecret(profile.encryptedApiKey!, profile.id ? aiProviderKeyAad(profile.id) : AI_PROVIDER_KEY_CONTEXT, await loadAiKeyring(this.config.ai.keyringFile));
+      const settings = { endpoint: profile.endpoint, model: task.model ?? profile.defaultModel ?? profile.models[0]!, apiKey, allowPrivateEndpoint: profile.allowPrivateEndpoint ?? false };
       const active: ProviderMessage[] = [];
       const evidence: AiConversationMessageEvidence[] = [];
       const restrictedSources = new Set<AiRestrictedEvidenceSource>();
@@ -279,7 +335,7 @@ export class AiTaskService implements OnModuleDestroy {
       for (let round = 0; round < 6; round++) {
         if (!await this.sessions.authenticateById(sessionId)) throw new AiAssistantError("policy_denied");
         signal.throwIfAborted();
-        await this.policy.revalidateForDispatch(task.vpsId, { providerRevision, policyRevision });
+        await this.policy.revalidateForDispatch(task.vpsId, { providerRevision, policyRevision, providerId: task.providerId });
         if (task.usage.rounds >= 6) throw new AiAssistantError("budget_exhausted");
         let prepared = await this.prepareContext(task, { ...settings, apiKey }, signal, active, { providerRevision, policyRevision, sessionId }, false, [...restrictedSources]);
         task = prepared.task;
@@ -311,13 +367,13 @@ export class AiTaskService implements OnModuleDestroy {
         if (!result.message.toolCalls?.length) {
           if (!result.message.content.trim()) throw new AiAssistantError("provider_unavailable");
           const sanitizedContent = redactString(result.message.content);
-          await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: sanitizedContent, ...(evidence.length ? { evidence: evidence.slice(0, 12) } : {}), ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
+          await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: sanitizedContent, providerId: task.providerId, model: task.model, ...(evidence.length ? { evidence: evidence.slice(0, 12) } : {}), ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
           await this.repository.updateTask({ id: task.id, expectedRevision: task.revision, state: "succeeded", summary: sanitizedContent });
           return;
         }
         for (const call of result.message.toolCalls) {
           signal.throwIfAborted();
-          await this.policy.revalidateForDispatch(task.vpsId, { providerRevision, policyRevision });
+          await this.policy.revalidateForDispatch(task.vpsId, { providerRevision, policyRevision, providerId: task.providerId });
           const activePolicy = await this.repository.getAiPolicy(task.vpsId);
           if (!activePolicy) throw new AiAssistantError("policy_denied");
 
@@ -333,6 +389,7 @@ export class AiTaskService implements OnModuleDestroy {
               taskId: task.id,
               vpsId: task.vpsId,
               agentInstanceId: targetAgentInstanceId,
+              providerId: task.providerId,
               providerRevision,
               policyRevision,
               capabilityRevision: 0,
@@ -343,7 +400,7 @@ export class AiTaskService implements OnModuleDestroy {
               status: "pending",
             };
             plan.planDigest = sha256(JSON.stringify(plan));
-            if (evidence.length) await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: "Historical observations used while preparing this plan; execution still requires explicit approval.", evidence: evidence.slice(0, 12), ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
+            if (evidence.length) await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: "Historical observations used while preparing this plan; execution still requires explicit approval.", evidence: evidence.slice(0, 12), providerId: task.providerId, model: task.model, ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
             await this.repository.updateTask({ id: task.id, expectedRevision: task.revision, state: "awaiting_approval", plan });
             return;
           }
@@ -368,6 +425,7 @@ export class AiTaskService implements OnModuleDestroy {
               taskId: task.id,
               vpsId: task.vpsId,
               agentInstanceId: latest.activeInstanceId,
+              providerId: task.providerId,
               providerRevision,
               policyRevision,
               capabilityRevision: Date.parse(capability.freshness),
@@ -378,7 +436,7 @@ export class AiTaskService implements OnModuleDestroy {
               status: "pending",
             };
             plan.planDigest = sha256(JSON.stringify(plan));
-            if (evidence.length) await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: "Historical observations used while preparing this plan; execution still requires explicit approval.", evidence: evidence.slice(0, 12), ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
+            if (evidence.length) await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: "Historical observations used while preparing this plan; execution still requires explicit approval.", evidence: evidence.slice(0, 12), providerId: task.providerId, model: task.model, ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
             await this.repository.updateTask({ id: task.id, expectedRevision: task.revision, state: "awaiting_approval", plan });
             return;
           }
@@ -410,7 +468,7 @@ export class AiTaskService implements OnModuleDestroy {
             const args = JSON.parse(call.function.arguments);
             if (!args || typeof args.question !== "string" || !args.question.trim() || args.question.length > 2048 || Object.keys(args).length !== 1 || result.message.toolCalls.length !== 1) throw new AiAssistantError("policy_denied");
             const sanitizedQuestion = redactString(args.question);
-            await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: sanitizedQuestion, ...(evidence.length ? { evidence: evidence.slice(0, 12) } : {}), ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
+            await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: sanitizedQuestion, providerId: task.providerId, model: task.model, ...(evidence.length ? { evidence: evidence.slice(0, 12) } : {}), ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
             await this.repository.updateTask({ id: task.id, expectedRevision: task.revision, state: "awaiting_input", clarificationPrompt: sanitizedQuestion });
             return;
           }

@@ -12,6 +12,8 @@ import {
 import { Button } from "../../ui/button";
 import type {
   AiConversationMessage,
+  AiProviderProfile,
+  AiProviderSelection,
   AiTask,
 } from "../../../lib/ai-api";
 import { AssistantMarkdown } from "./AssistantMarkdown";
@@ -26,6 +28,10 @@ export type AssistantChatProps = {
   busy?: boolean;
   aiEnabled: boolean;
   providerReady: boolean;
+  /** Enabled provider profiles for the model selector (grouped by provider). */
+  providers?: AiProviderProfile[];
+  modelSelection?: AiProviderSelection | null;
+  onSelectModel?: (selection: AiProviderSelection) => void;
 };
 
 function prefersReducedMotion(): boolean {
@@ -90,6 +96,9 @@ export function AssistantChat({
   busy = false,
   aiEnabled,
   providerReady,
+  providers = [],
+  modelSelection,
+  onSelectModel,
 }: AssistantChatProps) {
   const [inputText, setInputText] = useState("");
   const [clarificationText, setClarificationText] = useState("");
@@ -126,6 +135,15 @@ export function AssistantChat({
     if (!el) return;
     pinnedToBottomRef.current =
       el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  }
+
+  const enabledProviders = providers.filter((profile) => profile.enabled && profile.models.length > 0);
+  const selectionValue = modelSelection ? `${modelSelection.providerId}::${modelSelection.model}` : "";
+  const providerNameById = new Map(providers.map((profile) => [profile.id, profile.name]));
+  function handleSelectModel(value: string) {
+    const separator = value.indexOf("::");
+    if (separator <= 0 || !onSelectModel) return;
+    onSelectModel({ providerId: value.slice(0, separator), model: value.slice(separator + 2) });
   }
 
   async function handleSend() {
@@ -261,6 +279,11 @@ export function AssistantChat({
                     <span className="font-semibold uppercase tracking-[0.06em]">
                       {ROLE_LABELS[msg.role]}
                     </span>
+                    {msg.model ? (
+                      <span className="truncate font-mono text-[10px]">
+                        {msg.providerId ? (providerNameById.get(msg.providerId) ?? msg.providerId) : "provider"} · {msg.model}
+                      </span>
+                    ) : null}
                     <time className="tnum" dateTime={msg.createdAt}>
                       {new Date(msg.createdAt).toLocaleTimeString()}
                     </time>
@@ -413,13 +436,37 @@ export function AssistantChat({
           />
 
           <div className="flex items-center justify-end gap-2 pt-1.5 sm:justify-between">
-            <span
-              className="tnum hidden text-[10px] text-dim sm:inline"
-              aria-hidden="true"
-            >
-              {inputText.length > 0
-                ? `${inputText.length.toLocaleString()}/32,768`
-                : "Shift+Enter for newline"}
+            <span className="flex min-w-0 items-center gap-2">
+              <span
+                className="tnum hidden text-[10px] text-dim sm:inline"
+                aria-hidden="true"
+              >
+                {inputText.length > 0
+                  ? `${inputText.length.toLocaleString()}/32,768`
+                  : "Shift+Enter for newline"}
+              </span>
+              {enabledProviders.length > 0 && onSelectModel ? (
+                <select
+                  value={selectionValue}
+                  onChange={(e) => handleSelectModel(e.target.value)}
+                  // Boolean(): isTaskRunning is `boolean | null` and the DOM
+                  // disabled attribute rejects null.
+                  disabled={Boolean(sending || busy || isTaskRunning)}
+                  aria-label="Model"
+                  className="max-w-[11rem] truncate rounded-lg border border-line bg-ink px-2 py-1 font-mono text-[11px] text-text focus:outline-none disabled:opacity-50"
+                >
+                  {selectionValue === "" ? <option value="">Default model</option> : null}
+                  {enabledProviders.map((profile) => (
+                    <optgroup key={profile.id} label={profile.name}>
+                      {profile.models.map((model) => (
+                        <option key={`${profile.id}::${model}`} value={`${profile.id}::${model}`}>
+                          {model}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              ) : null}
             </span>
             <button
               type="button"

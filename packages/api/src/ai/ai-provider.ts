@@ -103,6 +103,63 @@ function rejectClassifiedStatus(response: IncomingMessage, reject: (error: Error
   finish(new ProviderTransportError());
 }
 
+type ProviderTarget = { url: URL; addresses: { address: string; family: number }[] };
+
+/** Shared endpoint policy + DNS pinning for every provider HTTP call (chat,
+ * check, model listing): URL shape, forbidden/private ranges and the
+ * loopback-HTTP opt-in are identical on all paths. */
+async function resolveProviderTarget(config: ProviderConfig, combined: AbortSignal, pathSuffix: string): Promise<ProviderTarget> {
+  const url = new URL(config.endpoint);
+  if (url.username || url.password || url.hash || url.search || !["https:","http:"].includes(url.protocol)) throw new ProviderTransportError();
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  combined.throwIfAborted();
+  let addresses: { address: string; family: number }[];
+  if (isIP(hostname)) {
+    addresses = [{ address: hostname, family: isIP(hostname) }];
+  } else {
+    let onAbort: () => void = () => {};
+    try {
+      addresses = await Promise.race([
+        lookup(hostname, { all: true, verbatim: true }),
+        new Promise<never>((_, reject) => {
+          onAbort = () => reject(new ProviderTransportError());
+          combined.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]);
+    } finally {
+      combined.removeEventListener("abort", onAbort);
+    }
+  }
+  if (combined.aborted || !addresses.length || addresses.some(a=>!allowed(a.address,config.allowPrivateEndpoint === true))) throw new ProviderTransportError();
+  if (url.protocol === "http:" && !(config.allowPrivateEndpoint && addresses.every(a=>a.address === "::1" || a.address.startsWith("127.")))) throw new ProviderTransportError();
+  url.pathname = `${url.pathname.replace(/\/$/, "").replace(/\/v1$/, "")}${pathSuffix}`;
+  return { url, addresses };
+}
+
+/** One authenticated provider JSON exchange (POST when a body is given, GET
+ * otherwise) with pinned DNS, bounded response and classified failures. */
+function providerJsonExchange(target: ProviderTarget, config: ProviderConfig, combined: AbortSignal, body?: string): Promise<string> {
+  return new Promise<string>((resolve,reject)=>{
+    const request = (target.url.protocol === "https:" ? httpsRequest : httpRequest)(target.url,{method: body === undefined ? "GET" : "POST",agent:false,signal:combined,lookup:(_host,options,callback)=>{
+      // Resolve only to addresses already validated by the endpoint policy.
+      const familyFiltered=options.family===4||options.family===6?target.addresses.filter(a=>a.family===options.family):[];
+      const pinned=familyFiltered.length?familyFiltered:target.addresses;
+      if(options.all) callback(null,pinned.map(a=>({address:a.address,family:a.family})));
+      else { const first=pinned[0]!; callback(null,first.address,first.family); }
+    },headers:{Authorization:`Bearer ${config.apiKey}`,...(body === undefined ? {} : {"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)}),Accept:"application/json"}},response=>{
+      if (response.statusCode !== 200) { rejectClassifiedStatus(response, reject); return; }
+      if (!response.headers["content-type"]?.toLowerCase().includes("application/json")) { response.destroy(); reject(new ProviderTransportError()); return; }
+      const chunks: Buffer[] = []; let bytes = 0;
+      response.on("data",(chunk:Buffer)=>{bytes += chunk.length;if(bytes > PROVIDER_MAX_BODY_BYTES){reject(new ProviderProtocolError());response.destroy();}else chunks.push(chunk);});
+      response.on("end",()=>resolve(Buffer.concat(chunks).toString("utf8")));
+      response.on("error",()=>reject(new ProviderTransportError()));
+      response.on("aborted",()=>reject(new ProviderTransportError()));
+    });
+    request.on("error",()=>reject(new ProviderTransportError()));
+    if (body === undefined) request.end(); else request.end(body);
+  });
+}
+
 export async function generateProviderRequest(config: ProviderConfig, messages: readonly ProviderMessage[], tools: readonly ProviderTool[], signal?: AbortSignal, options?: ProviderRequestOptions): Promise<ProviderResult> {
   if (!config.apiKey) throw new ProviderKeyRequiredError();
   if (tools.length > PROVIDER_MAX_TOOLS || messages.length > PROVIDER_MAX_MESSAGES || !config.model || config.model.length > 256) throw new ProviderProtocolError();
@@ -110,50 +167,10 @@ export async function generateProviderRequest(config: ProviderConfig, messages: 
   const deadline = AbortSignal.timeout(60000);
   const combined = signal ? AbortSignal.any([signal,deadline]) : deadline;
   try {
-    const url = new URL(config.endpoint);
-    if (url.username || url.password || url.hash || url.search || !["https:","http:"].includes(url.protocol)) throw new ProviderTransportError();
-    const hostname = url.hostname.replace(/^\[|\]$/g, "");
-    combined.throwIfAborted();
-    let addresses: { address: string; family: number }[];
-    if (isIP(hostname)) {
-      addresses = [{ address: hostname, family: isIP(hostname) }];
-    } else {
-      let onAbort: () => void = () => {};
-      try {
-        addresses = await Promise.race([
-          lookup(hostname, { all: true, verbatim: true }),
-          new Promise<never>((_, reject) => {
-            onAbort = () => reject(new ProviderTransportError());
-            combined.addEventListener("abort", onAbort, { once: true });
-          }),
-        ]);
-      } finally {
-        combined.removeEventListener("abort", onAbort);
-      }
-    }
-    if (combined.aborted || !addresses.length || addresses.some(a=>!allowed(a.address,config.allowPrivateEndpoint === true))) throw new ProviderTransportError();
-    if (url.protocol === "http:" && !(config.allowPrivateEndpoint && addresses.every(a=>a.address === "::1" || a.address.startsWith("127.")))) throw new ProviderTransportError();
-    url.pathname = `${url.pathname.replace(/\/$/, "").replace(/\/v1$/, "")}/v1/chat/completions`;
+    const target = await resolveProviderTarget(config, combined, "/v1/chat/completions");
     const body = serializeProviderRequestBody(config.model, messages, tools, options);
     if (Buffer.byteLength(body) > PROVIDER_MAX_BODY_BYTES) throw new ProviderProtocolError();
-    const raw = await new Promise<string>((resolve,reject)=>{
-      const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url,{method:"POST",agent:false,signal:combined,lookup:(_host,options,callback)=>{
-            // Resolve only to addresses already validated by the endpoint policy.
-            const familyFiltered=options.family===4||options.family===6?addresses.filter(a=>a.family===options.family):[];
-            const pinned=familyFiltered.length?familyFiltered:addresses;
-            if(options.all) callback(null,pinned.map(a=>({address:a.address,family:a.family})));
-            else { const first=pinned[0]!; callback(null,first.address,first.family); }
-          },headers:{Authorization:`Bearer ${config.apiKey}`,"Content-Type":"application/json","Content-Length":Buffer.byteLength(body),Accept:"application/json"}},response=>{
-        if (response.statusCode !== 200) { rejectClassifiedStatus(response, reject); return; }
-        if (!response.headers["content-type"]?.toLowerCase().includes("application/json")) { response.destroy(); reject(new ProviderTransportError()); return; }
-        const chunks: Buffer[] = []; let bytes = 0;
-        response.on("data",(chunk:Buffer)=>{bytes += chunk.length;if(bytes > PROVIDER_MAX_BODY_BYTES){reject(new ProviderProtocolError());response.destroy();}else chunks.push(chunk);});
-        response.on("end",()=>resolve(Buffer.concat(chunks).toString("utf8")));
-        response.on("error",()=>reject(new ProviderTransportError()));
-        response.on("aborted",()=>reject(new ProviderTransportError()));
-      });
-      request.on("error",()=>reject(new ProviderTransportError())); request.end(body);
-    });
+    const raw = await providerJsonExchange(target, config, combined, body);
     let decoded: unknown; try { decoded=JSON.parse(raw); } catch { throw new ProviderProtocolError(); }
     const parsed=responseSchema.safeParse(decoded); if(!parsed.success) throw new ProviderProtocolError();
     const choice=parsed.data.choices[0]!; const message=choice.message;
@@ -165,6 +182,31 @@ export async function generateProviderRequest(config: ProviderConfig, messages: 
     const assistant = {role:"assistant" as const,content:redactString(message.content ?? ""),...(message.tool_calls ? {toolCalls:message.tool_calls}:{})};
     const output = JSON.stringify(assistant);
     return {message:assistant,usage:usage?{inputTokens:usage.prompt_tokens,outputTokens:usage.completion_tokens,estimated:false}:{inputTokens:estimateTokens(body),outputTokens:estimateTokens(output),estimated:true}};
+  } catch(error) { if(error instanceof ProviderProtocolError || error instanceof ProviderTransportError) throw error; throw new ProviderTransportError(); }
+}
+
+const modelsResponseSchema = z.object({ data: z.array(z.object({ id: z.string().min(1).max(256) }).passthrough()) }).passthrough();
+
+/** Bounded GET /v1/models through the same endpoint policy as chat (docs/
+ * ai-multi-provider-plan.md egress invariant). Returns at most 100 unique,
+ * redacted model ids; never contacts anything but the pinned addresses. */
+export async function fetchProviderModels(config: ProviderConfig, signal?: AbortSignal): Promise<string[]> {
+  if (!config.apiKey) throw new ProviderKeyRequiredError();
+  const deadline = AbortSignal.timeout(60000);
+  const combined = signal ? AbortSignal.any([signal,deadline]) : deadline;
+  try {
+    const target = await resolveProviderTarget(config, combined, "/v1/models");
+    const raw = await providerJsonExchange(target, config, combined);
+    let decoded: unknown; try { decoded=JSON.parse(raw); } catch { throw new ProviderProtocolError(); }
+    const parsed=modelsResponseSchema.safeParse(decoded); if(!parsed.success) throw new ProviderProtocolError();
+    const seen=new Set<string>(); const models: string[]=[];
+    for(const entry of parsed.data.data) {
+      const id=redactString(entry.id).trim();
+      if(!id || seen.has(id) || models.length >= 100) continue;
+      seen.add(id); models.push(id);
+    }
+    if(!models.length) throw new ProviderProtocolError();
+    return models;
   } catch(error) { if(error instanceof ProviderProtocolError || error instanceof ProviderTransportError) throw error; throw new ProviderTransportError(); }
 }
 export class AiProvider {

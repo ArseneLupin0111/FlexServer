@@ -505,6 +505,28 @@ export type AiBundleJob = {
   finishedAt: string | null;
 };
 
+/** Install transport for this host (server-reported only): "updater" runs a
+ * job through the local/system host's own updater; "ssh" pushes over saved
+ * SSH to a remote host. Absent on older APIs — treated as "ssh" (legacy
+ * remote behavior). */
+export type AiBundleInstallChannel = "updater" | "ssh";
+
+/** Local updater install job (installChannel "updater" only). GET /bundle
+ * and POST /bundle/install both return the persisted job state. `progress`
+ * is the updater's real 0-100 percent or null while unknown — never
+ * estimated client-side. Absent on older APIs; the UI fails closed (no
+ * fabricated progress) when it is missing. */
+export type AiBundleLocalJob = {
+  id: string;
+  state: AiBundleJobState;
+  /** Real percent complete (0-100) when the updater reports it; null while
+   * unknown. */
+  progress: number | null;
+  /** Current updater phase label (e.g. "downloading"), when reported. */
+  phase?: string;
+  error?: string | null;
+};
+
 /** Sandbox capability projection bundled with the AI bundle status. */
 export type AiBundleCapability = {
   supported: boolean;
@@ -513,8 +535,10 @@ export type AiBundleCapability = {
   privilegedSupported: boolean;
 };
 
-/** GET /api/vps/:id/ai/bundle — install state plus the capability diagnosis
- * (surfaces the real `sandbox_unavailable` reason on the Agent card). */
+/** GET /api/vps/:id/ai/bundle and POST …/bundle/install response — install
+ * state plus the capability diagnosis (surfaces the real
+ * `sandbox_unavailable` reason on the Agent card). Mirrors the pinned API
+ * `AiBundleView`. */
 export type AiBundleStatus = {
   /** False when this deployment ships no AI bundle artifacts. */
   available: boolean;
@@ -525,6 +549,21 @@ export type AiBundleStatus = {
   lastInstalledBundleId: string | null;
   lastJob: AiBundleJob | null;
   capability: AiBundleCapability;
+  /** Host eligibility for a manual install from the dashboard. The UI gates
+   * the button on server readiness only: on the "updater" channel install is
+   * enabled only when this is explicitly true (no optimistic inference);
+   * on "ssh" (or when absent on older APIs) the legacy rule applies
+   * (false disables, absent stays enabled). */
+  installSupported?: boolean;
+  /** Why the manual install is unsupported; present when installSupported
+   * is false. */
+  installReason?: string;
+  /** Install transport for this host; absent on older APIs (treated as
+   * "ssh"). */
+  installChannel?: AiBundleInstallChannel;
+  /** Local updater job (installChannel "updater"); null or absent when no
+   * job has been scheduled or the API predates local install tracking. */
+  localJob?: AiBundleLocalJob | null;
 };
 
 export function getAiBundle(
@@ -538,12 +577,14 @@ export function getAiBundle(
 }
 
 /** POST /api/vps/:id/ai/bundle/install — idempotent per running job;
- * resolves with the (fresh) job view. */
+ * resolves with the fresh FULL bundle view (same shape as GET /bundle):
+ * `lastJob` carries the scheduled/running remote SSH job, `localJob` the
+ * updater job on local hosts ("updater" channel). */
 export function installAiBundle(
   vpsId: string,
   signal?: AbortSignal,
-): Promise<AiBundleJob> {
-  return request<AiBundleJob>(`${vpsAiRoot(vpsId)}/bundle/install`, {
+): Promise<AiBundleStatus> {
+  return request<AiBundleStatus>(`${vpsAiRoot(vpsId)}/bundle/install`, {
     method: "POST",
     signal,
   });

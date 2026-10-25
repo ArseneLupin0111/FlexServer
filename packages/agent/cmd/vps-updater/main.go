@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/vps-manager/agent/internal/updater"
@@ -182,6 +183,11 @@ func runStatus(cfg *updater.Config) error {
 	} else {
 		fmt.Println("job:")
 		fmt.Println(updater.MarshalJob(j))
+		kind := j.Kind
+		if kind == "" {
+			kind = updater.JobKindUpdate
+		}
+		fmt.Printf("job kind: %s\n", kind)
 	}
 	hj, err := updater.LoadHelperJournal(cfg.StateDir)
 	if err != nil {
@@ -192,6 +198,12 @@ func runStatus(cfg *updater.Config) error {
 	} else {
 		fmt.Printf("helper: job=%s phase=%s old=%s new=%s backup=%s\n",
 			hj.JobID, hj.Phase, shortHash(hj.OldSha256), shortHash(hj.NewSha256), hj.BackupPath)
+		if hj.Provision != nil {
+			rec := hj.Provision
+			fmt.Printf("helper ai-provision: unit=%s (backup=%s) config=%s (backup=%s) groupCreated=%v userCreated=%v uid=%d gid=%d\n",
+				rec.UnitPath, orNone(rec.UnitBackupPath), rec.ConfigPath, orNone(rec.ConfigBackupPath),
+				rec.GroupCreated, rec.UserCreated, rec.UID, rec.GID)
+		}
 	}
 	pending, err := updater.PendingActions(cfg.StateDir)
 	if err != nil {
@@ -202,7 +214,31 @@ func runStatus(cfg *updater.Config) error {
 	} else {
 		fmt.Printf("pending: %s\n", pending)
 	}
+	// AI subsystem diagnostics: which fixed components exist, helper binary
+	// version and unit activity. Read-only; bounded timeouts inside.
+	ai := updater.DetectAIHealth(cfg)
+	if !ai.Installed {
+		fmt.Println("ai: not installed (no AI components found)")
+	} else {
+		version := ai.Version
+		if version == "" {
+			version = "unknown"
+		}
+		state := "healthy"
+		if !ai.Healthy {
+			state = "unhealthy: " + ai.Detail
+		}
+		fmt.Printf("ai: installed version=%s state=%s components=%s\n",
+			version, state, strings.Join(ai.Components, ","))
+	}
 	return nil
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "(absent)"
+	}
+	return s
 }
 
 // runAck clears the hold flag after an operator has inspected a held job

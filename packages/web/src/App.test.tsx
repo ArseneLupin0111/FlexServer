@@ -2002,6 +2002,13 @@ describe("React dashboard", () => {
     }) {
       const state = { ...options.policy };
       const patchBodies: Record<string, unknown>[] = [];
+      // The POST returns the fresh FULL bundle view (same shape as GET
+      // /bundle) with a fresh pending job — mirrors the pinned AiBundleView
+      // contract of POST /ai/bundle/install.
+      const bundleView = (): typeof aiBundleFixture =>
+        options.bundle === null || options.bundle === undefined
+          ? aiBundleFixture
+          : options.bundle;
       fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
         if (url === "/api/auth/me") return authOk();
         if (url === "/api/vps/vps-1/ai/policy" && init?.method === "PATCH") {
@@ -2034,10 +2041,13 @@ describe("React dashboard", () => {
         }
         if (url === "/api/vps/vps-1/ai/bundle/install" && init?.method === "POST") {
           return aiOk({
-            state: "pending",
-            error: null,
-            startedAt: "2026-10-25T10:00:00.000Z",
-            finishedAt: null,
+            ...bundleView(),
+            lastJob: {
+              state: "pending",
+              error: null,
+              startedAt: "2026-10-25T10:00:00.000Z",
+              finishedAt: null,
+            },
           });
         }
         if (url === "/api/vps/vps-1/ai/capability") return aiOk(aiCapabilityFixture);
@@ -2180,9 +2190,26 @@ describe("React dashboard", () => {
 
       fireEvent.click(install);
 
+      // The POST resolves with the full bundle view whose lastJob is pending;
+      // the live progress block appears immediately with the queued state.
       await waitFor(() => {
-        expect(screen.getByTestId("ai-bundle-line")).toHaveTextContent("install queued");
+        expect(screen.getByTestId("ai-bundle-install-progress")).toBeInTheDocument();
       });
+      expect(screen.getByTestId("ai-bundle-install-state")).toHaveTextContent(
+        "Install queued…",
+      );
+      const progress = screen.getByRole("progressbar", {
+        name: "AI bundle install progress",
+      });
+      // Indeterminate: no aria-valuenow, since the job carries no numeric progress.
+      expect(progress).not.toHaveAttribute("aria-valuenow");
+      expect(progress).toHaveAttribute("aria-valuemin", "0");
+      expect(progress).toHaveAttribute("aria-valuemax", "100");
+      // The live region announces queued → running transitions.
+      expect(screen.getByTestId("ai-bundle-install-progress")).toHaveAttribute(
+        "aria-live",
+        "polite",
+      );
       // The install went through the dedicated bundle route, not the policy.
       expect(
         fetchMock.mock.calls.some(

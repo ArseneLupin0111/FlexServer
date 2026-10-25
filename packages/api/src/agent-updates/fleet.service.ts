@@ -213,7 +213,14 @@ export class FleetService {
         platform: heartbeat?.platform,
         updaterVersion: heartbeat?.updaterVersion ?? null,
         installedAi: heartbeat?.installedAi,
-        aiHealth: heartbeat?.aiHealth,
+        aiHealth: heartbeat?.aiHealth
+          ? {
+              ...heartbeat.aiHealth,
+              status:
+                heartbeat.aiHealth.status ??
+                (heartbeat.aiHealth.healthy ? "healthy" : "unhealthy"),
+            }
+          : undefined,
       };
     });
 

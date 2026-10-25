@@ -26,9 +26,13 @@ const (
 // job may exist at a time; a global filesystem lock enforces that even across
 // manual runs.
 type Journal struct {
-	JobID            string    `json:"jobId"`
-	FencingToken     int64     `json:"fencingToken"`
-	RequiresReconcile bool     `json:"requiresReconcile,omitempty"`
+	JobID             string `json:"jobId"`
+	FencingToken      int64  `json:"fencingToken"`
+	RequiresReconcile bool   `json:"requiresReconcile,omitempty"`
+	// Kind is the server-declared job kind ("update" default or "ai-install").
+	// It decides whether first-install of AI components is permitted; it is
+	// validated against the fail-closed allowlist on save.
+	Kind             string    `json:"kind,omitempty"`
 	ReleaseID        string    `json:"releaseId"`
 	Version          string    `json:"version"`
 	BuildID          string    `json:"buildId"`
@@ -82,6 +86,11 @@ func (s *JournalStore) Load() (*Journal, error) {
 	if err := json.Unmarshal(raw, &j); err != nil {
 		return nil, fmt.Errorf("corrupt journal %s: %w", s.path, err)
 	}
+	// Fail closed on a kind this binary does not implement: a resumed job of
+	// unknown provenance must halt the daemon, never run as something else.
+	if !KindIsSupported(j.Kind) {
+		return nil, fmt.Errorf("journal %s carries unsupported job kind %q", s.path, j.Kind)
+	}
 	return &j, nil
 }
 
@@ -125,6 +134,9 @@ func (j *Journal) Validate() error {
 	}
 	if !jobIDRe.MatchString(j.JobID) {
 		return fmt.Errorf("journal jobId %q has invalid charset", j.JobID)
+	}
+	if !KindIsSupported(j.Kind) {
+		return fmt.Errorf("journal job kind %q is not supported by this updater", j.Kind)
 	}
 	if j.Phase == "" {
 		return fmt.Errorf("journal has no phase")

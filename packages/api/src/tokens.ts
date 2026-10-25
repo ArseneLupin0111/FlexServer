@@ -24,3 +24,7 @@ export const FLEET_PROVISIONING_SERVICE = Symbol("FLEET_PROVISIONING_SERVICE");
 /** Injectable SSH boundary for AI bundle installs (execmode plan slice 3b);
  * default binding is SshAiBundleInstallTransport. */
 export const AI_BUNDLE_TRANSPORT = Symbol("AI_BUNDLE_TRANSPORT");
+/** AI-install evidence confirmer (AiInstallConfirmer): proves fresh AI
+ * capability/health for an ai-install job. Injected into LocalUpgradeService
+ * via this token so the local-upgrade module never imports the ai module. */
+export const AI_INSTALL_CONFIRMER = Symbol("AI_INSTALL_CONFIRMER");

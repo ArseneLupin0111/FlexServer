@@ -78,6 +78,7 @@ export type LocalUpgradeWritePatch = Partial<
     | "releaseId"
     | "manifestRaw"
     | "targetArch"
+    | "kind"
   >
 >;
 
@@ -249,11 +250,14 @@ export function createJsonLocalUpgradeRepository(
         };
         data.jobs[index] = updated;
 
-        // Atomic suppression on terminal failures
+        // Atomic suppression on terminal failures — agent updates only: an
+        // ai-install job suppresses nothing (its release build id never
+        // targets the agent binary and must not pollute convergence state).
         if (
-          patch.state === "failed" ||
-          patch.state === "rolled_back" ||
-          patch.state === "rollback_unverified"
+          current.kind !== "ai-install" &&
+          (patch.state === "failed" ||
+            patch.state === "rolled_back" ||
+            patch.state === "rollback_unverified")
         ) {
           data.convergence ??= {};
           const currentConv = data.convergence[current.vpsId] ?? {
@@ -311,7 +315,16 @@ export function createJsonLocalUpgradeRepository(
         fallback,
         (data) => {
           data.updaterHeartbeats ??= {};
-          data.updaterHeartbeats[heartbeat.vpsId] = heartbeat;
+          // Merge (mirrors the Postgres COALESCE upsert): progress/result
+          // reports carry only freshness fields and must never wipe stored
+          // evidence (updaterVersion, platform, aiHealth, capabilities...).
+          // Claims that explicitly report empty capabilities overwrite the
+          // stored list (live-evidence semantics, never stale retention).
+          const existing = data.updaterHeartbeats[heartbeat.vpsId];
+          data.updaterHeartbeats[heartbeat.vpsId] = {
+            ...(existing ?? {}),
+            ...heartbeat,
+          };
           return data;
         },
       );

@@ -1044,7 +1044,7 @@ func TestDaemonRollbackOnHeartbeatTimeout(t *testing.T) {
 		JobID: faultJobID, FencingToken: 7, PostSwap: true, SwapRequested: true,
 		ReleaseID: rel.releaseID, BuildID: rel.buildID, Version: "9.9.9",
 		TargetSha256: newSha, ManifestRaw: string(rel.manifestRaw),
-		Phase:    PhaseAwaitingHB,
+		Phase:     PhaseAwaitingHB,
 		OldSha256: oldSha, NewSha256: newSha,
 		// Baseline far in the past: grace already expired on entry.
 		BaselineHBAt: time.Now().Add(-30 * time.Minute).UTC(),
@@ -1463,11 +1463,11 @@ func TestHelperBundledUpdate(t *testing.T) {
 	}
 
 	cfg := &Config{
-		APIBase:      "https://api.test.invalid",
-		Credential:   "vma_test_credential",
-		AgentBinary:  agentBin,
-		AgentUnit:    "vps-manager-agent.service",
-		StateDir:     stateDir,
+		APIBase:     "https://api.test.invalid",
+		Credential:  "vma_test_credential",
+		AgentBinary: agentBin,
+		AgentUnit:   "vps-manager-agent.service",
+		StateDir:    stateDir,
 	}
 	jobID := "bundled-job-test-1"
 	job := &ClaimedJob{

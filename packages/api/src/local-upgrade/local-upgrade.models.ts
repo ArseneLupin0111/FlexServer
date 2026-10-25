@@ -73,6 +73,47 @@ export type LocalUpgradeOutcome =
   | "deferred"
   | "superseded";
 
+// ── Job kinds ─────────────────────────────────────────────────────────────
+//
+// The durable job state machine is shared by the agent-binary updater and the
+// local/system host AI first-install (pull updater channel). Legacy rows have
+// no kind and always mean the agent update path; `ai-install` jobs carry a
+// verbatim signed fleet manifest, only ever list AI components (never the
+// agent binary), and are handed to updaters that proved the feature on the
+// live claim (see AI_INSTALL_UPDATER_CAPABILITY).
+
+export type LocalUpgradeJobKind = "agent-update" | "ai-install";
+
+export const AI_INSTALL_JOB_KIND: LocalUpgradeJobKind = "ai-install";
+
+/** ClaimRequest capability a helper must send (live, every claim) before the
+ * API hands it an `ai-install` job. Protocol 3 alone is NOT sufficient: an
+ * old helper ignores `kind` and would run the wrong job. */
+export const AI_INSTALL_UPDATER_CAPABILITY = "ai-install";
+
+/** The four AI components a complete signed AI release must carry for the
+ * pinned host architecture; an ai-install job never pins anything else. */
+export const AI_INSTALL_COMPONENTS = [
+  "ai-executor",
+  "ai-host-helper",
+  "ai-rootfs",
+  "ai-profiles",
+] as const;
+
+export function jobKind(job: Pick<LocalUpgradeJob, "kind">): LocalUpgradeJobKind {
+  return job.kind ?? "agent-update";
+}
+
+/** Narrow AI-install confirmation boundary (implemented by
+ * AiLocalInstallService, injected via the AI_INSTALL_CONFIRMER token to keep
+ * local-upgrade free of ai module imports). Failure to confirm is the only
+ * outcome when the confirmer is absent: never fake success. */
+export type AiInstallConfirmer = {
+  /** True only when fresh AI evidence (capability claim + healthy updater AI
+   * health covering every component pinned on the job) proves the install. */
+  confirmAiInstall(job: LocalUpgradeJob): Promise<boolean>;
+};
+
 export type LocalUpgradeError = {
   code: string;
   message: string;
@@ -94,6 +135,8 @@ export type LocalUpgradeJob = {
   state: LocalUpgradeState;
   /** Real percentage only; null until a phase reports one. */
   progress: number | null;
+  /** Job kind; undefined on legacy rows = agent binary update. */
+  kind?: LocalUpgradeJobKind;
   /** Immutable target architecture pinned at creation time. */
   targetArch?: "amd64" | "arm64";
   /** Pinned at confirm time — later channel-pointer moves never retarget a job. */
@@ -141,7 +184,20 @@ export type UpdaterHeartbeat = {
   idle?: boolean;
   busyReason?: string;
   installedAi?: string[];
-  aiHealth?: { status: string; healthy: boolean };
+  aiHealth?: {
+    status?: string;
+    healthy: boolean;
+    installed?: boolean;
+    version?: string;
+    detail?: string;
+    components?: string[];
+  };
+  /** Feature capabilities proved by the helper on its most recent CLAIM.
+   * Live evidence only: a claim without capabilities clears the list (and the
+   * timestamp) instead of retaining stale support. progress/result reports
+   * never carry capabilities and preserve the stored value. */
+  capabilities?: string[];
+  capabilitiesAt?: string;
 };
 
 // ── Timing policy ────────────────────────────────────────────────────────

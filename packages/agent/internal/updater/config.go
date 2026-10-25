@@ -95,7 +95,12 @@ type Config struct {
 	testCanonicalTargets  map[string]string
 	testFleetPublicKeyPEM []byte
 	testUpdaterVersion    string
+	// testAIProvisionRoot re-roots every fixed AI provisioning path under a
+	// temp dir for the offline fault-injection harness. Production code can
+	// never set it; only an in-process test harness may.
+	testAIProvisionRoot string
 }
+
 const (
 	FixedAgentBinary           = "/usr/local/bin/vps-manager-agent"
 	FixedAgentUnit             = "vps-manager-agent.service"
@@ -107,6 +112,7 @@ const (
 	FixedAIProfilesDir         = "/etc/flexserver-ai/profiles"
 	FixedFleetReleasePublicKey = "/etc/vps-updater/fleet-release.pub"
 )
+
 // EnableTestOverrides allows this in-process Config to deviate from the
 // fixed production invariants (https-only apiBase, fixed agent binary/unit,
 // pinned allowlist) so the fault-injection harness can redirect them at
@@ -117,6 +123,7 @@ func (c *Config) EnableTestOverrides() { c.testMode = true }
 func (c *Config) SetTestAuthorizer(auth JobAuthorizer) { c.testAuthorizer = auth }
 func (c *Config) SetTestLockDir(dir string)            { c.testLockDir = dir }
 func (c *Config) SetTestTmpfilesDir(dir string)        { c.testTmpfilesDir = dir }
+func (c *Config) SetTestAIProvisionRoot(dir string)    { c.testAIProvisionRoot = dir }
 func (c *Config) SetTestCanonicalTargets(targets map[string]string) {
 	c.testCanonicalTargets = targets
 }

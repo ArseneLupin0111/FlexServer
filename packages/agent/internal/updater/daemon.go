@@ -26,11 +26,11 @@ type API interface {
 // lock and a durable journal; every post-swap step is reconciled from disk
 // after a crash instead of re-executed.
 type Daemon struct {
-	cfg    *Config
-	api    API
+	cfg     *Config
+	api     API
 	journal *JournalStore
-	dl     *http.Client
-	logf   func(format string, args ...any)
+	dl      *http.Client
+	logf    func(format string, args ...any)
 
 	// lastPhase tracks what the server already knows, so progress POSTs fire
 	// only on phase changes (rate-limit contract).
@@ -118,6 +118,13 @@ func (d *Daemon) stepClaim(ctx context.Context) {
 		d.logf("claim returned job with invalid id, ignoring")
 		return
 	}
+	// Fail closed on an operation this binary does not implement: claim it
+	// never happened (no journal, no mutation) and let the server deadline
+	// reap it. Never run an unknown kind as the default update path.
+	if !KindIsSupported(job.Kind) {
+		d.logf("claim returned job %s with unsupported kind %q — ignoring (fail closed)", job.JobID, job.Kind)
+		return
+	}
 	targetSha := job.TargetSha256
 	if targetSha == "" {
 		targetSha = job.Release.TargetSha256
@@ -130,6 +137,7 @@ func (d *Daemon) stepClaim(ctx context.Context) {
 		JobID:             job.JobID,
 		FencingToken:      job.FencingToken,
 		RequiresReconcile: job.RequiresReconcile,
+		Kind:              job.Kind,
 		ReleaseID:         job.Release.ReleaseID,
 		Version:           job.Release.Version,
 		BuildID:           job.Release.BuildID,
@@ -831,7 +839,6 @@ func (d *Daemon) ensureAction(ctx context.Context, action, jobID string) (*Helpe
 	return nil, fmt.Errorf("helper %s for %s timed out after %s", action, jobID, d.cfg.HelperTimeout)
 }
 
-
 func sleepCtx(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -873,6 +880,7 @@ func restartUpdaterService() {
 	defer cancel()
 	_, _ = runSystemctl(ctx, "restart", "vps-updater.service")
 }
+
 // MarshalJob pretty-prints the journal for the status command.
 func MarshalJob(j *Journal) string {
 	raw, err := json.MarshalIndent(j, "", "  ")
@@ -921,16 +929,35 @@ func (d *Daemon) runFleetPreSwap(ctx context.Context, j *Journal) error {
 	hostArch := runtime.GOARCH
 
 	curVer := d.cfg.UpdaterVersion()
+	aiInstall := j.Kind == JobKindAIInstall
+	// minUpdaterVersion guard: an agent upgrade AND the explicit AI
+	// first-install both require a compatible updater, regardless of which
+	// components the release carries. Plain AI-only updates keep the
+	// historical agent-scoped rule.
 	if payload.MinUpdaterVersion != "" && curVer != "dev" && CompareSemver(curVer, payload.MinUpdaterVersion) < 0 {
-		hasAgentArtifact := false
-		for _, a := range payload.Artifacts {
-			if a.Component == "agent" && a.OS == hostOS && a.Arch == hostArch {
-				hasAgentArtifact = true
-				break
+		requiresCompatible := aiInstall
+		if !requiresCompatible {
+			for _, a := range payload.Artifacts {
+				if a.Component == "agent" && a.OS == hostOS && a.Arch == hostArch {
+					requiresCompatible = true
+					break
+				}
 			}
 		}
-		if hasAgentArtifact {
-			return d.failPreSwap(ctx, j, fmt.Sprintf("updater version %s is below required minUpdaterVersion %s for agent upgrade", curVer, payload.MinUpdaterVersion))
+		if requiresCompatible {
+			return d.failPreSwap(ctx, j, fmt.Sprintf("updater version %s is below required minUpdaterVersion %s", curVer, payload.MinUpdaterVersion))
+		}
+	}
+
+	if aiInstall {
+		// The explicit first-install operation is only ever defined against
+		// the complete signed AI set: a partial set would leave the helper
+		// service, executor and rootfs inconsistent. Fail closed.
+		for _, comp := range aiInstallRequiredComponents {
+			if payload.FindArtifact(comp, hostOS, hostArch) == nil {
+				return d.failPreSwap(ctx, j, fmt.Sprintf(
+					"ai-install manifest lacks %s artifact for %s/%s", comp, hostOS, hostArch))
+			}
 		}
 	}
 
@@ -948,12 +975,20 @@ func (d *Daemon) runFleetPreSwap(ctx context.Context, j *Journal) error {
 		}
 		switch a.Component {
 		case "agent":
+			if aiInstall {
+				// ai-install mutates AI components only; an agent artifact in
+				// the same release is never applied by this operation.
+				continue
+			}
 			targetPath, _ := d.cfg.CanonicalTarget("agent")
 			selected = append(selected, selectedComp{
 				artifact:   a,
 				targetPath: targetPath,
 			})
 		case "updater":
+			if aiInstall {
+				continue
+			}
 			if !strings.HasPrefix(curVer, a.Version) {
 				targetPath, _ := d.cfg.CanonicalTarget("updater")
 				selected = append(selected, selectedComp{
@@ -964,7 +999,9 @@ func (d *Daemon) runFleetPreSwap(ctx context.Context, j *Journal) error {
 			}
 		case "ai-executor":
 			targetPath, _ := d.cfg.CanonicalTarget("ai-executor")
-			if fileExists(targetPath) {
+			// First-install is permitted only for the explicit ai-install
+			// operation; the automatic update path stays installed-only.
+			if aiInstall || fileExists(targetPath) {
 				selected = append(selected, selectedComp{
 					artifact:   a,
 					targetPath: targetPath,
@@ -972,7 +1009,7 @@ func (d *Daemon) runFleetPreSwap(ctx context.Context, j *Journal) error {
 			}
 		case "ai-host-helper":
 			targetPath, _ := d.cfg.CanonicalTarget("ai-host-helper")
-			if fileExists(targetPath) {
+			if aiInstall || fileExists(targetPath) {
 				selected = append(selected, selectedComp{
 					artifact:   a,
 					targetPath: targetPath,
@@ -980,7 +1017,7 @@ func (d *Daemon) runFleetPreSwap(ctx context.Context, j *Journal) error {
 			}
 		case "ai-rootfs":
 			targetPath, _ := d.cfg.CanonicalTarget("ai-rootfs")
-			if fileExists(targetPath) {
+			if aiInstall || fileExists(targetPath) {
 				selected = append(selected, selectedComp{
 					artifact:    a,
 					targetPath:  targetPath,
@@ -990,7 +1027,7 @@ func (d *Daemon) runFleetPreSwap(ctx context.Context, j *Journal) error {
 			}
 		case "ai-profiles":
 			targetPath, _ := d.cfg.CanonicalTarget("ai-profiles")
-			if fileExists(targetPath) {
+			if aiInstall || fileExists(targetPath) {
 				selected = append(selected, selectedComp{
 					artifact:    a,
 					targetPath:  targetPath,

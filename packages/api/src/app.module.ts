@@ -118,7 +118,8 @@ import { AiReadToolsService } from "./ai/ai-read-tools.service.js";
 import { AiRetentionService } from "./ai/ai-retention.service.js";
 import { AiBundleService } from "./ai/ai-bundle.service.js";
 import { AiBundleOrchestrationService, SshAiBundleInstallTransport } from "./ai/ai-bundle-install.service.js";
-import { FLEET_REPOSITORY, FLEET_SERVICE } from "./tokens.js";
+import { AiLocalInstallService } from "./ai/ai-local-install.service.js";
+import { FLEET_REPOSITORY, FLEET_SERVICE, AI_INSTALL_CONFIRMER } from "./tokens.js";
 import type { FleetRepository } from "./persistence/repositories/fleet.repository.js";
 import { FleetService } from "./agent-updates/fleet.service.js";
 import { AgentUpdatesController } from "./agent-updates/agent-updates.controller.js";
@@ -457,6 +458,11 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       { provide: AI_BUNDLE_TRANSPORT, useExisting: SshAiBundleInstallTransport },
       AiBundleService,
       AiBundleOrchestrationService,
+      // Local/system host AI first-install (pull updater channel): the
+      // service doubles as the AI_INSTALL_CONFIRMER evidence confirmer for
+      // LocalUpgradeService (which it depends on via forwardRef).
+      AiLocalInstallService,
+      { provide: AI_INSTALL_CONFIRMER, useExisting: AiLocalInstallService },
       {
         provide: FLEET_REPOSITORY,
         useValue: deps.fleet ?? repositories!.fleet,

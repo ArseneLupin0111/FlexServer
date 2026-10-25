@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Request } from "express";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ServiceUnavailableException } from "@nestjs/common";
+import { BadRequestException, ServiceUnavailableException } from "@nestjs/common";
 import { parseAppConfig, type AppConfig } from "../src/config/app-config.js";
 import { createJsonAiRepository } from "../src/persistence/repositories/ai.repository.js";
 import { createVpsStore } from "../src/persistence/store/vpsStore.js";
@@ -12,6 +12,7 @@ import type { VpsRepository } from "../src/persistence/repositories/vps.reposito
 import type { AiCodexOauthService } from "../src/ai/ai-codex-oauth.service.js";
 import { AiBundleService } from "../src/ai/ai-bundle.service.js";
 import {
+  AI_BUNDLE_LOCAL_HOST_INSTALL_REASON,
   AiBundleOrchestrationService,
   type AiBundleInstallTransport,
   type AiBundleSshAuth,
@@ -26,7 +27,10 @@ import type { AgentRepository } from "../src/persistence/repositories/agent.repo
 // reader + bundle routes + deliberate-action triggers. Fully offline — the
 // SSH transport is a fake and bundle artifacts are temp-file fixtures.
 
-const request = { dashboardSessionId: "admin-session" } as unknown as Request;
+const request = {
+  dashboardSessionId: "admin-session",
+  headers: {},
+} as unknown as Request;
 
 type BundleFixture = {
   dir: string;
@@ -176,7 +180,23 @@ describe("GET /api/vps/:id/ai/bundle", () => {
       lastInstalledBundleId: null,
       lastJob: null,
       capability: { supported: false, privilegedSupported: false },
+      installChannel: "ssh",
+      installSupported: true,
+      localJob: null,
+      localRelease: null,
     });
+  });
+
+  it("flags local/system hosts as not install-supported with actionable guidance", async () => {
+    await vpsRepo.ensureLocalHost({ id: vpsId, name: "Local host", host: "127.0.0.1", port: 22, username: "root", kind: "local", managedBy: "system" });
+    const view = (await routes.bundle(request, vpsId)) as AiBundleView;
+    expect(view.available).toBe(true);
+    expect(view.installSupported).toBe(false);
+    expect(view.installReason).toBe(AI_BUNDLE_LOCAL_HOST_INSTALL_REASON);
+    // No updater channel wired in this fixture: no channel field, no job.
+    expect(view.installChannel).toBeUndefined();
+    expect(view.localJob).toBeNull();
+    expect(view.localRelease).toBeNull();
   });
 
   it("reflects installed state, lastInstalledBundleId and the last job record", async () => {
@@ -296,6 +316,15 @@ describe("POST /api/vps/:id/ai/bundle/install idempotency", () => {
     const degradedRoutes = new AiRoutesService(degradedConfig, aiRepo, vpsRepo, {} as unknown as AiCodexOauthService, orchestration);
     await expect(degradedRoutes.installBundle(request, vpsId)).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
+
+  it("rejects local/system hosts with 400 before creating a job or touching SSH", async () => {
+    await vpsRepo.ensureLocalHost({ id: vpsId, name: "Local host", host: "127.0.0.1", port: 22, username: "root", kind: "local", managedBy: "system" });
+    const error = await routes.installBundle(request, vpsId).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as Error).message).toContain("scripts/install/install.sh --enable-ai");
+    expect(await aiRepo.getAiBundleJob(vpsId)).toBeUndefined();
+    expect(hangAuthCalls).toHaveLength(0);
+  });
 });
 
 describe("updatePolicy deliberate-action triggers (Q8)", () => {
@@ -387,6 +416,14 @@ describe("updatePolicy deliberate-action triggers (Q8)", () => {
       privilegedSupported: false, profiles: [],
     });
     await routes.updatePolicy(request, vpsId, { aiEnabled: true, shellEnabled: true });
+    expect(await aiRepo.getAiBundleJob(vpsId)).toBeUndefined();
+  });
+
+  it("does not schedule for local/system hosts on enabling actions", async () => {
+    await vpsRepo.ensureLocalHost({ id: vpsId, name: "Local host", host: "127.0.0.1", port: 22, username: "root", kind: "local", managedBy: "system" });
+    await routes.updatePolicy(request, vpsId, { aiEnabled: true, shellEnabled: true });
+    // Fire-and-forget trigger: give it a moment, then confirm nothing ran.
+    await new Promise((resolve) => setTimeout(resolve, 100));
     expect(await aiRepo.getAiBundleJob(vpsId)).toBeUndefined();
   });
 });

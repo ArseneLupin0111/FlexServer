@@ -107,8 +107,9 @@ type ProviderTarget = { url: URL; addresses: { address: string; family: number }
 
 /** Shared endpoint policy + DNS pinning for every provider HTTP call (chat,
  * check, model listing): URL shape, forbidden/private ranges and the
- * loopback-HTTP opt-in are identical on all paths. */
-async function resolveProviderTarget(config: ProviderConfig, combined: AbortSignal, pathSuffix: string): Promise<ProviderTarget> {
+ * loopback-HTTP opt-in are identical on all paths. Exported for the Codex
+ * OAuth transport. */
+export async function resolveProviderTarget(config: ProviderConfig, combined: AbortSignal, pathSuffix: string): Promise<ProviderTarget> {
   const url = new URL(config.endpoint);
   if (url.username || url.password || url.hash || url.search || !["https:","http:"].includes(url.protocol)) throw new ProviderTransportError();
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
@@ -137,8 +138,9 @@ async function resolveProviderTarget(config: ProviderConfig, combined: AbortSign
 }
 
 /** One authenticated provider JSON exchange (POST when a body is given, GET
- * otherwise) with pinned DNS, bounded response and classified failures. */
-function providerJsonExchange(target: ProviderTarget, config: ProviderConfig, combined: AbortSignal, body?: string): Promise<string> {
+ * otherwise) with pinned DNS, bounded response and classified failures.
+ * Exported for the Codex OAuth transport, which shares this guarded path. */
+export function providerJsonExchange(target: ProviderTarget, config: ProviderConfig, combined: AbortSignal, body?: string, extraHeaders?: Record<string, string>): Promise<string> {
   return new Promise<string>((resolve,reject)=>{
     const request = (target.url.protocol === "https:" ? httpsRequest : httpRequest)(target.url,{method: body === undefined ? "GET" : "POST",agent:false,signal:combined,lookup:(_host,options,callback)=>{
       // Resolve only to addresses already validated by the endpoint policy.
@@ -146,7 +148,7 @@ function providerJsonExchange(target: ProviderTarget, config: ProviderConfig, co
       const pinned=familyFiltered.length?familyFiltered:target.addresses;
       if(options.all) callback(null,pinned.map(a=>({address:a.address,family:a.family})));
       else { const first=pinned[0]!; callback(null,first.address,first.family); }
-    },headers:{Authorization:`Bearer ${config.apiKey}`,...(body === undefined ? {} : {"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)}),Accept:"application/json"}},response=>{
+    },headers:{Authorization:`Bearer ${config.apiKey}`,...(body === undefined ? {} : {"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)}),Accept:"application/json",...extraHeaders}},response=>{
       if (response.statusCode !== 200) { rejectClassifiedStatus(response, reject); return; }
       if (!response.headers["content-type"]?.toLowerCase().includes("application/json")) { response.destroy(); reject(new ProviderTransportError()); return; }
       const chunks: Buffer[] = []; let bytes = 0;

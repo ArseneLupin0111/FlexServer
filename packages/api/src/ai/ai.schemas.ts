@@ -39,13 +39,22 @@ export const createAiTaskSchema = z
 export const providerProfileWriteSchema = z
   .object({
     name: z.string().min(1).max(64),
-    endpoint: z.string().url().max(1024),
+    /** Optional for chatgpt_oauth profiles (server pins the Codex API base);
+     * required for apiKey profiles — enforced in the routes service. */
+    endpoint: z.string().url().max(1024).optional(),
     apiKey: z.string().min(1).max(4096).optional(),
     allowPrivateEndpoint: z.boolean().optional(),
     models: z.array(z.string().min(1).max(256)).min(1).max(100),
     defaultModel: z.string().min(1).max(256).optional(),
     enabled: z.boolean().optional(),
     isDefault: z.boolean().optional(),
+    authKind: z.enum(["apiKey", "chatgpt_oauth"]).optional(),
+  })
+  .strict();
+
+export const codexOauthExchangeSchema = z
+  .object({
+    callbackUrl: z.string().min(16).max(2048),
   })
   .strict();
 

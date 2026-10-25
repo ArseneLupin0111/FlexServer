@@ -114,6 +114,11 @@ export type AiProviderSettingsInternal = {
 
 /** Public projection of one provider profile: envelope material never leaves
  * the persistence layer (docs/ai-multi-provider-plan.md invariants). */
+export type AiProviderAuthKind = "apiKey" | "chatgpt_oauth";
+
+/** OAuth token lifecycle state; `relogin_required` fails closed (plan Q7). */
+export type AiProviderTokenState = "connected" | "relogin_required";
+
 export type AiProviderProfile = {
   id: string;
   name: string;
@@ -124,6 +129,8 @@ export type AiProviderProfile = {
   isDefault: boolean;
   hasApiKey: boolean;
   allowPrivateEndpoint: boolean;
+  authKind: AiProviderAuthKind;
+  tokenState?: AiProviderTokenState;
   revision: number;
   updatedAt: string;
 };
@@ -139,6 +146,11 @@ export type AiProviderProfileInternal = {
   /** AAD { vpsId: "global", taskId: id, field: "providerApiKey", version: 1 }. */
   encryptedApiKey?: AiEnvelopeData;
   allowPrivateEndpoint?: boolean;
+  authKind: AiProviderAuthKind;
+  /** Codex OAuth tokens { accessToken, refreshToken, accountId, expiresAt,
+   * lastRefreshedAt } under AAD field "codexOauthToken" (plan Q3). */
+  encryptedOauth?: AiEnvelopeData;
+  tokenState?: AiProviderTokenState;
   revision: number;
   updatedAt: string;
 };

@@ -1,6 +1,6 @@
 # AI Assistant: ChatGPT/OpenAI OAuth provider (Codex subscription quota)
 
-Status: approved design (grilled 2026-10-25, Q1–Q10), implementation not started. Stacks on the multi-provider branch `feat/ai-multi-provider` ([plan](ai-multi-provider-plan.md)).
+Status: implemented and verified offline (2026-10-25) on branch `feat/ai-chatgpt-oauth` (stacked on `feat/ai-multi-provider`). Stacks on the multi-provider branch `feat/ai-multi-provider` ([plan](ai-multi-provider-plan.md)).
 
 ## Risk disclosure (non-negotiable)
 
@@ -76,5 +76,10 @@ Routes: `POST /api/ai/providers/:id/oauth/authorize` (creates the authorize URL 
 ## Progress
 
 - [x] Grilled design (Q1–Q10) and shared understanding confirmed.
-- [ ] Slices 1–6.
-- [ ] Offline verification green (limitations reported honestly; no real provider/VPS/OpenAI endpoint contacted).
+- [x] Slice 1: `authKind` + OAuth envelope shapes, revision-neutral `updateProviderOauth` (token refresh cannot invalidate plans), `codexOauthToken` AAD field, keyring rotation coverage, `isProfileReady` for OAuth profiles, env-overridable Codex constants (`APP_AI_CODEX_*`). Typecheck + 61 related tests green.
+- [x] Slice 2 (task agent): `AiCodexOauthService` — PKCE S256 paste-back flow, single-use state with TTL, single-flight rotating refresh with persist-before-use, `invalid_grant` → `relogin_required` fail-closed, self-contained guarded form POST. 12/12 offline tests.
+- [x] Slice 3 (task agent): pure Chat-Completions ↔ Responses translators + guarded `generateCodexRequest` (originator/version/session headers, 429→rate-limit, 413→overflow, reasoning items skipped). 34/34 offline tests. Deviations reviewed and accepted: `model` included in the wire body; optional result context for tool-name validation and input estimation.
+- [x] Slice 4: routes `POST /api/ai/providers/:id/oauth/{authorize,exchange}`; OAuth profile creation pins the Codex endpoint and takes no API key; per-profile check reroutes through a Codex `flexserver_check` probe; fetch-models refuses OAuth profiles; dispatch acquires the access token via the shared single-flight client, preflights in the Codex request shape and translates through the shared guarded funnel. 4/4 end-to-end offline flow tests (stub auth + stub Codex).
+- [x] Slice 5 (task agent): web — auth-kind selector in the provider editor, four-step OAuth flow (ToS acknowledgment, authorize link, paste-back with helper text, token status + re-login), 13 new component tests. 283/283 web suite.
+- [x] Slice 6: integrated offline verification — both typechecks, 177 AI API tests (10 files), 283 web tests (13 files), both production builds, docs link check, diff whitespace; `public/` build artifacts removed. ToS risk documented in `docs/security.md`, `.env.example` and README. No real OpenAI endpoint contacted at any point; the live OAuth flow runs only when an operator triggers it deliberately.
+- Known limitation: token expiry is surfaced in the UI only right after exchange/refresh; between refreshes the badge reflects the persisted `tokenState` (connected / relogin_required), not a live countdown.

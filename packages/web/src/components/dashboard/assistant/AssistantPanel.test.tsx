@@ -40,8 +40,10 @@ import type {
   AiTaskUsage,
 } from "../../../lib/ai-api";
 import {
+  authorizeAiProviderOauth,
   checkAiProviderProfile,
   createVpsAiTask,
+  exchangeAiProviderOauth,
   getAiSettings,
   getVpsAiCapability,
   getVpsAiConversation,
@@ -88,6 +90,8 @@ vi.mock("../../../lib/ai-api", async (importOriginal) => {
       Promise.resolve({ providers: [], lastSelection: undefined, migrated: true }),
     ),
     checkAiProviderProfile: vi.fn(),
+    authorizeAiProviderOauth: vi.fn(),
+    exchangeAiProviderOauth: vi.fn(),
   };
 });
 
@@ -183,6 +187,7 @@ function makeProfile(overrides: Partial<AiProviderProfile> = {}): AiProviderProf
     isDefault: true,
     hasApiKey: true,
     allowPrivateEndpoint: false,
+    authKind: "apiKey",
     revision: 1,
     updatedAt: "2026-01-01T00:00:00.000Z",
     ...overrides,
@@ -309,6 +314,109 @@ describe("AssistantPanel provider check", () => {
     await waitFor(() => {
       expect(screen.getByText(/provider check succeeded/i)).toBeInTheDocument();
     });
+  });
+});
+
+describe("AssistantPanel ChatGPT OAuth paste-back", () => {
+  const oauthProfile = makeProfile({
+    id: "prov-oauth",
+    name: "ChatGPT",
+    endpoint: "https://chatgpt.com/backend-api/codex/responses",
+    models: ["gpt-5-codex", "gpt-5.1-codex"],
+    defaultModel: "gpt-5-codex",
+    hasApiKey: false,
+    authKind: "chatgpt_oauth",
+    isDefault: false,
+  });
+  const authorizeUrl = "https://auth.openai.com/authorize?client_id=app_x&state=s1";
+
+  it("runs authorize, paste-back, and exchange, then refreshes the providers list", async () => {
+    mockLoadedProvider();
+    vi.mocked(listAiProviders)
+      .mockResolvedValueOnce(makeProvidersResponse([oauthProfile]))
+      .mockResolvedValue(
+        makeProvidersResponse([{ ...oauthProfile, tokenState: "connected" }]),
+      );
+    vi.mocked(authorizeAiProviderOauth).mockResolvedValue({ authorizeUrl });
+    vi.mocked(exchangeAiProviderOauth).mockResolvedValue({
+      profile: { ...oauthProfile, tokenState: "connected" },
+      expiresAt: "2026-01-01T05:00:00.000Z",
+      lastRefreshedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
+
+    renderPanel();
+    await openSettingsModal();
+
+    // ToS acknowledgment gates the authorize button.
+    expect(
+      screen.getByRole("button", { name: /open authorize url for chatgpt/i }),
+    ).toBeDisabled();
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /i understand the oauth risk/i }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /open authorize url for chatgpt/i }),
+    );
+
+    await waitFor(() => {
+      expect(authorizeAiProviderOauth).toHaveBeenCalledWith("prov-oauth");
+    });
+    await waitFor(() => {
+      expect(openSpy).toHaveBeenCalledWith(authorizeUrl, "_blank", "noopener,noreferrer");
+    });
+
+    const paste = await screen.findByLabelText("OAuth callback URL");
+    fireEvent.change(paste, {
+      target: { value: "http://localhost:1455/auth/callback?code=abc&state=s1" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /connect oauth login for chatgpt/i }),
+    );
+
+    await waitFor(() => {
+      expect(exchangeAiProviderOauth).toHaveBeenCalledWith(
+        "prov-oauth",
+        "http://localhost:1455/auth/callback?code=abc&state=s1",
+      );
+    });
+    // The panel owns the refresh: initial load plus the post-exchange reload.
+    await waitFor(() => {
+      expect(vi.mocked(listAiProviders).mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+    expect(await screen.findByText(/token expires/i)).toBeInTheDocument();
+    expect(await screen.findByText("Connected")).toBeInTheDocument();
+  });
+
+  it("surfaces a rejected exchange as an error without a false connected state", async () => {
+    mockLoadedProvider();
+    vi.mocked(listAiProviders).mockResolvedValue(
+      makeProvidersResponse([oauthProfile]),
+    );
+    vi.mocked(authorizeAiProviderOauth).mockResolvedValue({ authorizeUrl });
+    vi.mocked(exchangeAiProviderOauth).mockRejectedValue(new Error("state mismatch"));
+    vi.spyOn(window, "open").mockReturnValue(null);
+
+    renderPanel();
+    await openSettingsModal();
+
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /i understand the oauth risk/i }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /open authorize url for chatgpt/i }),
+    );
+    const paste = await screen.findByLabelText("OAuth callback URL");
+    fireEvent.change(paste, {
+      target: { value: "http://localhost:1455/auth/callback?code=abc&state=bad" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /connect oauth login for chatgpt/i }),
+    );
+
+    // Surfaced by the modal's OAuth section and/or the panel root banner.
+    expect((await screen.findAllByText(/state mismatch/i)).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Connected")).toBeNull();
   });
 });
 

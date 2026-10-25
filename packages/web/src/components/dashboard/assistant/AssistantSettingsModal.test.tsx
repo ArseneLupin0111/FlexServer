@@ -1,7 +1,7 @@
 import "../../../test/setup";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { AssistantSettingsModal } from "./AssistantSettingsModal";
 import type { AssistantSettingsModalProps } from "./AssistantSettingsModal";
 import type { AiProviderProfile, ProviderProfileWrite } from "../../../lib/ai-api";
@@ -17,10 +17,27 @@ function makeProfile(overrides: Partial<AiProviderProfile> = {}): AiProviderProf
     isDefault: true,
     hasApiKey: true,
     allowPrivateEndpoint: false,
+    authKind: "apiKey",
     revision: 1,
     updatedAt: "2026-01-01T00:00:00.000Z",
     ...overrides,
   };
+}
+
+function makeOauthProfile(
+  overrides: Partial<AiProviderProfile> = {},
+): AiProviderProfile {
+  return makeProfile({
+    id: "prov-oauth",
+    name: "ChatGPT",
+    endpoint: "https://chatgpt.com/backend-api/codex/responses",
+    models: ["gpt-5-codex", "gpt-5.1-codex"],
+    defaultModel: "gpt-5-codex",
+    hasApiKey: false,
+    authKind: "chatgpt_oauth",
+    isDefault: false,
+    ...overrides,
+  });
 }
 
 type ModalOverrides = Partial<AssistantSettingsModalProps>;
@@ -33,6 +50,11 @@ function renderModal(providers: AiProviderProfile[] = [makeProfile()], overrides
     onDeleteProvider: vi.fn().mockResolvedValue(undefined),
     onCheckProviderProfile: vi.fn().mockResolvedValue(undefined),
     onFetchProviderModels: vi.fn().mockResolvedValue(undefined),
+    onAuthorizeProviderOauth: vi.fn().mockResolvedValue("https://auth.openai.com/authorize?state=s1"),
+    onExchangeProviderOauth: vi.fn().mockResolvedValue({
+      expiresAt: "2026-01-01T05:00:00.000Z",
+      lastRefreshedAt: "2026-01-01T00:00:00.000Z",
+    }),
     onSavePolicy: vi.fn().mockResolvedValue(undefined),
   };
   const props: AssistantSettingsModalProps = {
@@ -367,5 +389,280 @@ describe("AssistantSettingsModal enable/disable toggle", () => {
     } satisfies ProviderProfileWrite);
     const body = mocks.onUpdateProvider.mock.calls[0][1] as ProviderProfileWrite;
     expect(body.apiKey).toBeUndefined();
+  });
+});
+
+// ── ChatGPT OAuth (docs/ai-chatgpt-oauth-provider-plan.md, Q10) ──────────
+
+function oauthSection(id: string): HTMLElement {
+  const section = document.querySelector(`[data-oauth-section="${id}"]`);
+  expect(section, `expected an OAuth section for ${id}`).not.toBeNull();
+  return section as HTMLElement;
+}
+
+async function revealPasteInput(
+  props: AssistantSettingsModalProps,
+  authorizeUrl = "https://auth.openai.com/authorize?client_id=app_x&state=s1",
+): Promise<{ paste: HTMLElement; openSpy: MockInstance }> {
+  const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
+  fireEvent.click(
+    screen.getByRole("checkbox", { name: /i understand the oauth risk/i }),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: /open authorize url for chatgpt/i }),
+  );
+  await waitFor(() => {
+    expect(props.onAuthorizeProviderOauth).toHaveBeenCalledWith("prov-oauth");
+  });
+  const paste = await screen.findByLabelText("OAuth callback URL");
+  return { paste, openSpy };
+}
+
+describe("AssistantSettingsModal OAuth editor auth kind", () => {
+  it("hides endpoint/key fields and prefills the Codex models when ChatGPT OAuth is chosen", async () => {
+    const onCreateProvider = vi.fn().mockResolvedValue(undefined);
+    renderModal([makeProfile()], { onCreateProvider });
+
+    fireEvent.click(screen.getByRole("button", { name: /add provider/i }));
+    expect(screen.getByPlaceholderText("https://api.openai.com")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/enter provider api key/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Primary provider"), {
+      target: { value: "Codex" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: /auth kind/i }), {
+      target: { value: "chatgpt_oauth" },
+    });
+
+    expect(screen.queryByPlaceholderText("https://api.openai.com")).toBeNull();
+    expect(screen.queryByPlaceholderText(/enter provider api key/i)).toBeNull();
+    expect(screen.getByPlaceholderText(/gpt-4o\s+o4-mini/)).toHaveValue(
+      "gpt-5-codex\ngpt-5.1-codex",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /create provider/i }));
+    await waitFor(() => {
+      expect(onCreateProvider).toHaveBeenCalledTimes(1);
+    });
+    // OAuth create omits endpoint/apiKey/allowPrivateEndpoint; the server
+    // fills the fixed Codex endpoint.
+    expect(onCreateProvider).toHaveBeenCalledWith({
+      name: "Codex",
+      models: ["gpt-5-codex", "gpt-5.1-codex"],
+      defaultModel: "gpt-5-codex",
+      enabled: true,
+      isDefault: false,
+      authKind: "chatgpt_oauth",
+    } satisfies ProviderProfileWrite);
+    const body = onCreateProvider.mock.calls[0][0] as ProviderProfileWrite;
+    expect(body.endpoint).toBeUndefined();
+    expect(body.apiKey).toBeUndefined();
+    expect(body.allowPrivateEndpoint).toBeUndefined();
+  });
+
+  it("rejects an incomplete OAuth draft with the OAuth message and no endpoint requirement", async () => {
+    const { props } = renderModal();
+
+    fireEvent.click(screen.getByRole("button", { name: /add provider/i }));
+    fireEvent.change(screen.getByRole("combobox", { name: /auth kind/i }), {
+      target: { value: "chatgpt_oauth" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /create provider/i }));
+
+    expect(
+      screen.getByText(/name and at least one model are required/i),
+    ).toBeInTheDocument();
+    expect(props.onCreateProvider).not.toHaveBeenCalled();
+  });
+
+  it("keeps the auth kind fixed in edit mode and PATCHes an OAuth profile without key fields", async () => {
+    const onUpdateProvider = vi.fn().mockResolvedValue(undefined);
+    const { props } = renderModal([makeOauthProfile()], { onUpdateProvider });
+
+    fireEvent.click(rowButton(profileRow(props.providers[0]), /edit chatgpt/i));
+    const kindSelect = screen.getByRole("combobox", { name: /auth kind/i });
+    expect(kindSelect).toBeDisabled();
+    expect(kindSelect).toHaveValue("chatgpt_oauth");
+    expect(screen.queryByPlaceholderText("https://api.openai.com")).toBeNull();
+    expect(screen.queryByPlaceholderText(/enter provider api key/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => {
+      expect(onUpdateProvider).toHaveBeenCalledTimes(1);
+    });
+    expect(onUpdateProvider).toHaveBeenCalledWith("prov-oauth", {
+      name: "ChatGPT",
+      models: ["gpt-5-codex", "gpt-5.1-codex"],
+      defaultModel: "gpt-5-codex",
+      enabled: true,
+      isDefault: false,
+    } satisfies ProviderProfileWrite);
+    const body = onUpdateProvider.mock.calls[0][1] as ProviderProfileWrite;
+    expect(body.endpoint).toBeUndefined();
+    expect(body.apiKey).toBeUndefined();
+  });
+
+  it("toggles an OAuth profile without endpoint/key fields", async () => {
+    const { props } = renderModal([makeOauthProfile()]);
+
+    fireEvent.click(
+      rowButton(profileRow(props.providers[0]), /disable provider chatgpt/i),
+    );
+
+    await waitFor(() => {
+      expect(props.onUpdateProvider).toHaveBeenCalledTimes(1);
+    });
+    expect(props.onUpdateProvider).toHaveBeenCalledWith("prov-oauth", {
+      name: "ChatGPT",
+      models: ["gpt-5-codex", "gpt-5.1-codex"],
+      defaultModel: "gpt-5-codex",
+      enabled: false,
+      isDefault: false,
+    } satisfies ProviderProfileWrite);
+  });
+});
+
+describe("AssistantSettingsModal OAuth paste-back flow", () => {
+  it("shows no OAuth section for apiKey-kind profiles", () => {
+    renderModal([makeProfile()]);
+
+    expect(document.querySelector('[data-oauth-section="prov-1"]')).toBeNull();
+    expect(screen.queryByText(/violates openai's terms of service/i)).toBeNull();
+    expect(
+      screen.queryByRole("checkbox", { name: /i understand/i }),
+    ).toBeNull();
+  });
+
+  it("gates the authorize button behind the per-profile ToS acknowledgment", () => {
+    renderModal([makeOauthProfile()]);
+
+    expect(
+      screen.getByText(/violates openai's terms of service/i),
+    ).toBeInTheDocument();
+    const authorize = screen.getByRole("button", {
+      name: /open authorize url for chatgpt/i,
+    });
+    expect(authorize).toBeDisabled();
+
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /i understand the oauth risk/i }),
+    );
+    expect(
+      screen.getByRole("button", { name: /open authorize url for chatgpt/i }),
+    ).toBeEnabled();
+  });
+
+  it("opens the authorize URL in a new tab and reveals the paste-back field", async () => {
+    const authorizeUrl = "https://auth.openai.com/authorize?client_id=app_x&state=s1";
+    const { props } = renderModal([makeOauthProfile()], {
+      onAuthorizeProviderOauth: vi.fn().mockResolvedValue(authorizeUrl),
+    });
+
+    const { paste, openSpy } = await revealPasteInput(props, authorizeUrl);
+
+    expect(openSpy).toHaveBeenCalledWith(authorizeUrl, "_blank", "noopener,noreferrer");
+    expect(paste).toBeInTheDocument();
+    expect(screen.getByText(/localhost:1455\/auth\/callback/i)).toBeInTheDocument();
+    expect(screen.getByText(/connection error/i)).toBeInTheDocument();
+  });
+
+  it("exchanges the pasted callback URL and shows the connected token status", async () => {
+    const expiresAt = "2026-01-01T05:00:00.000Z";
+    const lastRefreshedAt = "2026-01-01T00:00:00.000Z";
+    const { props } = renderModal([makeOauthProfile()], {
+      onExchangeProviderOauth: vi.fn().mockResolvedValue({ expiresAt, lastRefreshedAt }),
+    });
+
+    const { paste } = await revealPasteInput(props);
+    fireEvent.change(paste, {
+      target: { value: "http://localhost:1455/auth/callback?code=abc&state=s1" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /connect oauth login for chatgpt/i }),
+    );
+
+    await waitFor(() => {
+      expect(props.onExchangeProviderOauth).toHaveBeenCalledWith(
+        "prov-oauth",
+        "http://localhost:1455/auth/callback?code=abc&state=s1",
+      );
+    });
+
+    const section = oauthSection("prov-oauth");
+    expect(await within(section).findByText("Connected")).toBeInTheDocument();
+    expect(within(section).getByText(/token expires/i)).toBeInTheDocument();
+    expect(within(section).getByText(new Date(expiresAt).toLocaleString())).toBeInTheDocument();
+    expect(within(section).getByText(new Date(lastRefreshedAt).toLocaleString())).toBeInTheDocument();
+    // The paste-back step collapses once the exchange succeeded.
+    expect(screen.queryByLabelText("OAuth callback URL")).toBeNull();
+  });
+
+  it("shows a client-side error for an invalid paste URL without calling exchange", async () => {
+    const { props } = renderModal([makeOauthProfile()]);
+
+    const { paste } = await revealPasteInput(props);
+    fireEvent.change(paste, { target: { value: "not a callback url" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: /connect oauth login for chatgpt/i }),
+    );
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByText(/paste the full callback url/i)).toBeInTheDocument();
+    expect(props.onExchangeProviderOauth).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a rejected exchange instead of reporting success", async () => {
+    const { props } = renderModal([makeOauthProfile()], {
+      onExchangeProviderOauth: vi.fn().mockRejectedValue(new Error("state mismatch")),
+    });
+
+    const { paste } = await revealPasteInput(props);
+    fireEvent.change(paste, {
+      target: { value: "http://localhost:1455/auth/callback?code=abc&state=bad" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /connect oauth login for chatgpt/i }),
+    );
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByText(/state mismatch/i)).toBeInTheDocument();
+    expect(within(oauthSection("prov-oauth")).queryByText("Connected")).toBeNull();
+  });
+
+  it("marks a relogin_required profile and reruns the flow as Re-login", async () => {
+    const { props } = renderModal([
+      makeOauthProfile({ tokenState: "relogin_required" }),
+    ]);
+
+    const section = oauthSection("prov-oauth");
+    expect(within(section).getByText("Relogin required")).toBeInTheDocument();
+    // The relogin state highlights the OAuth section for a redo.
+    expect(section.className).toContain("border-warn");
+    expect(within(section).getByText(/re-run the oauth flow/i)).toBeInTheDocument();
+
+    const relogin = within(section).getByRole("button", {
+      name: /re-login for chatgpt/i,
+    });
+    expect(relogin).toHaveTextContent("Re-login");
+
+    // Re-login reruns the same paste-back flow (steps b-c).
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /i understand the oauth risk/i }),
+    );
+    fireEvent.click(relogin);
+    expect(await screen.findByLabelText("OAuth callback URL")).toBeInTheDocument();
+    expect(props.onAuthorizeProviderOauth).toHaveBeenCalledWith("prov-oauth");
+  });
+
+  it("shows the connected badge for a connected token state without re-login highlighting", () => {
+    renderModal([makeOauthProfile({ tokenState: "connected" })]);
+
+    const section = oauthSection("prov-oauth");
+    expect(within(section).getByText("Connected")).toBeInTheDocument();
+    expect(within(section).queryByText("Relogin required")).toBeNull();
+    expect(section.className).not.toContain("border-warn");
+    expect(
+      within(section).getByRole("button", { name: /open authorize url for chatgpt/i }),
+    ).toBeInTheDocument();
   });
 });

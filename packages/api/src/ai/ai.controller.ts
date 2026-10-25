@@ -34,6 +34,10 @@ export class AiSettingsController {
   checkProvider(@Req() request: Request, @Param("providerId") providerId: string) { return this.service.checkProviderProfile(request, providerId); }
   @Post("providers/:providerId/models")
   fetchProviderModels(@Req() request: Request, @Param("providerId") providerId: string) { return this.service.fetchProviderModels(request, providerId); }
+  @Post("providers/:providerId/oauth/authorize")
+  authorizeProviderOauth(@Req() request: Request, @Param("providerId") providerId: string) { return this.service.authorizeProviderOauth(request, providerId); }
+  @Post("providers/:providerId/oauth/exchange")
+  exchangeProviderOauth(@Req() request: Request, @Param("providerId") providerId: string, @Body() body: unknown) { return this.service.exchangeProviderOauth(request, providerId, body); }
 }
 
 @Controller("api/vps/:id/ai")

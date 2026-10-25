@@ -9,8 +9,10 @@ import { aiProviderKeyAad } from "../persistence/repositories/ai.repository.js";
 import { redactString } from "../common/redaction.js";
 import { decryptAiSecret, encryptAiSecret, loadAiKeyring } from "./ai-crypto.js";
 import { AiProvider, fetchProviderModels } from "./ai-provider.js";
+import { generateCodexRequest } from "./ai-codex-provider.js";
 import type { AiProviderProfile, AiProviderProfileInternal } from "./ai.models.js";
-import { updateAiPolicySchema, updateAiSettingsSchema, providerProfileWriteSchema } from "./ai.schemas.js";
+import { updateAiPolicySchema, updateAiSettingsSchema, providerProfileWriteSchema, codexOauthExchangeSchema } from "./ai.schemas.js";
+import { AiCodexOauthService, CodexOauthReloginRequiredError, CodexOauthStateError } from "./ai-codex-oauth.service.js";
 
 // Global provider credentials have a reserved, non-task AAD identity.
 export const AI_PROVIDER_KEY_CONTEXT = { vpsId: "global", taskId: "provider", field: "providerApiKey", version: 1 } as const;
@@ -25,6 +27,8 @@ const publicProviderProfile = (profile: AiProviderProfileInternal): AiProviderPr
   isDefault: profile.isDefault,
   hasApiKey: Boolean(profile.encryptedApiKey),
   allowPrivateEndpoint: profile.allowPrivateEndpoint ?? false,
+  authKind: profile.authKind,
+  tokenState: profile.tokenState,
   revision: profile.revision,
   updatedAt: profile.updatedAt,
 });
@@ -35,6 +39,7 @@ export class AiRoutesService {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(AI_REPOSITORY) private readonly repository: AiRepository,
     @Inject(VPS_REPOSITORY) private readonly vps: VpsRepository,
+    @Inject(AiCodexOauthService) private readonly codexOauth: AiCodexOauthService,
   ) {}
 
   private authorize(request: Request): void {
@@ -93,6 +98,19 @@ export class AiRoutesService {
   }
 
   private async checkProfileInternal(profile: AiProviderProfileInternal) {
+    if (profile.authKind === "chatgpt_oauth") {
+      const accessToken = await this.codexOauth.getValidAccessToken(profile.id);
+      const result = await generateCodexRequest(
+        { apiBaseUrl: profile.endpoint, cliVersion: this.config.ai.codexOauth.cliVersion, model: profile.defaultModel ?? profile.models[0]!, accessToken, allowPrivateEndpoint: profile.allowPrivateEndpoint },
+        [{ role: "user", content: "Call flexserver_check with {ok:true}. No infrastructure data is provided." }],
+        [{ type: "function", function: { name: "flexserver_check", description: "Synthetic protocol check only", parameters: { type: "object", properties: { ok: { type: "boolean", const: true } }, required: ["ok"], additionalProperties: false } } }],
+      );
+      const calls = result.message.toolCalls;
+      if (calls?.length !== 1 || calls[0]!.function.name !== "flexserver_check") throw new BadRequestException("Codex protocol check failed");
+      const args = JSON.parse(calls[0]!.function.arguments) as Record<string, unknown>;
+      if (args.ok !== true || Object.keys(args).length !== 1) throw new BadRequestException("Codex protocol check failed");
+      return { ok: true } as const;
+    }
     if (!profile.encryptedApiKey) throw new BadRequestException("Provider API key required");
     const apiKey = decryptAiSecret(profile.encryptedApiKey, aiProviderKeyAad(profile.id), await this.providerKeyring());
     return new AiProvider().check({ endpoint: profile.endpoint, model: profile.defaultModel ?? profile.models[0]!, apiKey, allowPrivateEndpoint: profile.allowPrivateEndpoint });
@@ -122,18 +140,24 @@ export class AiRoutesService {
   async createProvider(request: Request, body: unknown) {
     this.authorize(request);
     const { input, models, defaultModel } = this.profileWriteInput(body);
+    const authKind = input.authKind ?? "apiKey";
+    if (authKind === "apiKey" && !input.endpoint) throw new BadRequestException("Provider endpoint required");
+    // chatgpt_oauth profiles are pinned to the configured Codex API base;
+    // API keys are meaningless for them (auth comes from OAuth tokens).
+    const endpoint = authKind === "chatgpt_oauth" ? this.config.ai.codexOauth.apiBaseUrl : input.endpoint!;
     const id = randomUUID();
-    const apiKeyEnvelope = await this.createProfileEnvelope(input.apiKey, id);
+    const apiKeyEnvelope = authKind === "apiKey" ? await this.createProfileEnvelope(input.apiKey, id) : undefined;
     try {
       const profile = await this.repository.createProviderProfile({
         id,
         name: redactString(input.name),
-        endpoint: input.endpoint,
+        endpoint,
         models,
         defaultModel,
         enabled: input.enabled ?? true,
         isDefault: input.isDefault ?? false,
-        allowPrivateEndpoint: input.allowPrivateEndpoint ?? false,
+        allowPrivateEndpoint: authKind === "chatgpt_oauth" ? false : input.allowPrivateEndpoint ?? false,
+        authKind,
         apiKeyEnvelope,
       });
       return publicProviderProfile(profile);
@@ -143,21 +167,55 @@ export class AiRoutesService {
     }
   }
 
+  /** Slice 4 (docs/ai-chatgpt-oauth-provider-plan.md): start the paste-back
+   * OAuth flow for one saved chatgpt_oauth profile. */
+  async authorizeProviderOauth(request: Request, id: string) {
+    this.authorize(request);
+    const profile = await this.repository.getProviderProfile(id);
+    if (!profile) throw new NotFoundException("Provider not found");
+    if (profile.authKind !== "chatgpt_oauth") throw new BadRequestException("Provider is not a ChatGPT OAuth profile");
+    return this.codexOauth.beginAuthorize(id);
+  }
+
+  async exchangeProviderOauth(request: Request, id: string, body: unknown) {
+    this.authorize(request);
+    const profile = await this.repository.getProviderProfile(id);
+    if (!profile) throw new NotFoundException("Provider not found");
+    if (profile.authKind !== "chatgpt_oauth") throw new BadRequestException("Provider is not a ChatGPT OAuth profile");
+    const parsed = codexOauthExchangeSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException("Invalid OAuth callback URL");
+    let tokens;
+    try {
+      tokens = await this.codexOauth.exchangeCallback(id, parsed.data.callbackUrl);
+    } catch (error) {
+      if (error instanceof CodexOauthReloginRequiredError || error instanceof CodexOauthStateError) {
+        throw new BadRequestException(error instanceof CodexOauthStateError ? "OAuth login session expired or unknown — start again" : "OpenAI rejected the login — start again");
+      }
+      throw error;
+    }
+    const updated = await this.repository.getProviderProfile(id);
+    if (!updated) throw new NotFoundException("Provider not found");
+    return { profile: publicProviderProfile(updated), expiresAt: tokens.expiresAt, lastRefreshedAt: tokens.lastRefreshedAt };
+  }
+
   async updateProvider(request: Request, id: string, body: unknown) {
     this.authorize(request);
     const existing = await this.repository.getProviderProfile(id);
     if (!existing) throw new NotFoundException("Provider not found");
     const { input, models, defaultModel } = this.profileWriteInput(body);
-    const apiKeyEnvelope = await this.createProfileEnvelope(input.apiKey, id);
+    if (existing.authKind === "apiKey" && !input.endpoint) throw new BadRequestException("Provider endpoint required");
+    // OAuth profiles keep their pinned Codex endpoint and take no API key.
+    const endpoint = existing.authKind === "chatgpt_oauth" ? existing.endpoint : input.endpoint!;
+    const apiKeyEnvelope = existing.authKind === "apiKey" ? await this.createProfileEnvelope(input.apiKey, id) : undefined;
     try {
       const profile = await this.repository.updateProviderProfile(id, {
         name: redactString(input.name),
-        endpoint: input.endpoint,
+        endpoint,
         models,
         defaultModel,
         enabled: input.enabled ?? existing.enabled,
         isDefault: input.isDefault ?? existing.isDefault,
-        allowPrivateEndpoint: input.allowPrivateEndpoint ?? existing.allowPrivateEndpoint ?? false,
+        allowPrivateEndpoint: existing.authKind === "chatgpt_oauth" ? false : input.allowPrivateEndpoint ?? existing.allowPrivateEndpoint ?? false,
         apiKeyEnvelope,
         expectedRevision: existing.revision,
       });
@@ -190,6 +248,7 @@ export class AiRoutesService {
     this.authorize(request);
     const profile = await this.repository.getProviderProfile(id);
     if (!profile) throw new NotFoundException("Provider not found");
+    if (profile.authKind === "chatgpt_oauth") throw new BadRequestException("ChatGPT OAuth profiles use a fixed model list; edit it manually");
     if (!profile.encryptedApiKey) throw new BadRequestException("Provider API key required");
     const apiKey = decryptAiSecret(profile.encryptedApiKey, aiProviderKeyAad(profile.id), await this.providerKeyring());
     const models = await fetchProviderModels({ endpoint: profile.endpoint, model: profile.defaultModel ?? profile.models[0]!, apiKey, allowPrivateEndpoint: profile.allowPrivateEndpoint });

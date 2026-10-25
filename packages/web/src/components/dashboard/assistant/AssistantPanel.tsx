@@ -12,6 +12,7 @@ import {
 import type { VpsRecord } from "../../../lib/api";
 import {
   approveVpsAiTask,
+  authorizeAiProviderOauth,
   cancelVpsAiTask,
   checkAiProviderProfile,
   createAiProvider,
@@ -19,6 +20,7 @@ import {
   deleteAiProvider,
   deleteVpsAiConversation,
   denyVpsAiTask,
+  exchangeAiProviderOauth,
   fetchAiProviderModels,
   getAiSettings,
   getVpsAiCapability,
@@ -697,6 +699,55 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     }
   }
 
+  // OAuth paste-back flow (plan Q10): authorize builds the URL server-side
+  // (PKCE state stays in-memory there; no profile mutation, so no refresh).
+  async function handleAuthorizeProviderOauth(id: string): Promise<string> {
+    setActionBusy(true);
+    setRootError(null);
+    try {
+      const { authorizeUrl } = await authorizeAiProviderOauth(id);
+      return authorizeUrl;
+    } catch (err) {
+      setRootError(
+        err instanceof Error
+          ? err.message
+          : "Failed to start the OAuth authorization.",
+      );
+      // Modal caller surfaces its own error state; never report false success.
+      throw err;
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  // Exchange stores the token envelope server-side; the refreshed provider
+  // list carries the new tokenState and the timestamps flow back to the modal.
+  async function handleExchangeProviderOauth(
+    id: string,
+    callbackUrl: string,
+  ): Promise<{ expiresAt: string; lastRefreshedAt: string }> {
+    setActionBusy(true);
+    setRootError(null);
+    try {
+      const result = await exchangeAiProviderOauth(id, callbackUrl);
+      await refreshProviderData();
+      return {
+        expiresAt: result.expiresAt,
+        lastRefreshedAt: result.lastRefreshedAt,
+      };
+    } catch (err) {
+      setRootError(
+        err instanceof Error
+          ? err.message
+          : "Failed to connect the ChatGPT OAuth login.",
+      );
+      // Modal caller surfaces its own error state; never report false success.
+      throw err;
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   // Save host policy
   async function handleSavePolicy(patch: UpdateAiPolicy) {
     setActionBusy(true);
@@ -1247,6 +1298,8 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         onDeleteProvider={handleDeleteProvider}
         onCheckProviderProfile={handleCheckProviderProfile}
         onFetchProviderModels={handleFetchProviderModels}
+        onAuthorizeProviderOauth={handleAuthorizeProviderOauth}
+        onExchangeProviderOauth={handleExchangeProviderOauth}
         onSavePolicy={handleSavePolicy}
         busy={actionBusy}
       />

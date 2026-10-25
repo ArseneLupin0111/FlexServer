@@ -250,8 +250,17 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       AiProviderMigrationService,
       {
         provide: AiCodexOauthService,
+        // Null-safe reads with protocol defaults: hand-built test configs may
+        // omit the ai section entirely, and Nest instantiates this provider
+        // eagerly at boot — an undefined deref here aborts the process
+        // (abortOnError). Real values come from parseAppConfig's env schema.
         useFactory: (cfg: AppConfig, repo: AiRepository) =>
-          new AiCodexOauthService({ clientId: cfg.ai.codexOauth.clientId, authBaseUrl: cfg.ai.codexOauth.authBaseUrl, apiBaseUrl: cfg.ai.codexOauth.apiBaseUrl, cliVersion: cfg.ai.codexOauth.cliVersion }, repo, cfg.ai.keyringFile),
+          new AiCodexOauthService({
+            clientId: cfg.ai?.codexOauth?.clientId ?? "app_EMoamEEZ73f0CkXaXp7hrann",
+            authBaseUrl: cfg.ai?.codexOauth?.authBaseUrl ?? "https://auth.openai.com",
+            apiBaseUrl: cfg.ai?.codexOauth?.apiBaseUrl ?? "https://chatgpt.com",
+            cliVersion: cfg.ai?.codexOauth?.cliVersion ?? "0.55.0",
+          }, repo, cfg.ai?.keyringFile ?? ""),
         inject: [APP_CONFIG, AI_REPOSITORY],
       },
       AiHostPlanService,

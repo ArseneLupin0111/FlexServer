@@ -141,6 +141,12 @@ type OrchestrationOptions = {
   installerTimeoutMs?: number;
 };
 
+/** Injection token for the optional OrchestrationOptions overrides. Without
+ * an explicit token Nest treats the bare `options` constructor param as a
+ * class dependency and AppModule instantiation fails (the E2E fixture boots
+ * the real app: a DI abort there kills every journey silently). */
+export const AI_BUNDLE_ORCHESTRATION_OPTIONS = Symbol.for("AI_BUNDLE_ORCHESTRATION_OPTIONS");
+
 const INSTALLER_COMMAND_TIMEOUT_MS = 300_000;
 const CONFIRM_DEADLINE_MS = 120_000;
 const CONFIRM_POLL_INTERVAL_MS = 2_000;
@@ -168,7 +174,7 @@ export class AiBundleOrchestrationService {
     @Inject(AiBundleService) private readonly bundles: AiBundleService,
     @Optional() @Inject(AuditService) private readonly audit?: AuditService,
     @Optional() @Inject(AI_BUNDLE_TRANSPORT) private readonly transport?: AiBundleInstallTransport,
-    options?: OrchestrationOptions,
+    @Optional() @Inject(AI_BUNDLE_ORCHESTRATION_OPTIONS) options?: OrchestrationOptions,
   ) {
     this.confirmDeadlineMs = options?.confirmDeadlineMs ?? CONFIRM_DEADLINE_MS;
     this.confirmPollIntervalMs = options?.confirmPollIntervalMs ?? CONFIRM_POLL_INTERVAL_MS;

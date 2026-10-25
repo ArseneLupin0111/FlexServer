@@ -121,6 +121,23 @@ function resolveStaticBusybox(targetArch, cacheDir) {
 
   // 3. Extract from immutable pinned Docker image with explicit platform
   console.log(`[Rootfs] Extracting static busybox from ${PINNED_DOCKER_IMAGE} for platform ${target.platform}...`);
+  // Building several architectures in a row on one host (CI verify job) pulls
+  // the same manifest-list digest for different platforms; Docker refuses with
+  // "cannot overwrite digest" if a previously pulled platform variant is still
+  // present. Drop the local image reference first (best-effort, no-op when
+  // absent) so each platform pulls its own variant.
+  try {
+    execSync(`docker image rm ${PINNED_DOCKER_IMAGE}`, { stdio: "ignore" });
+  } catch {
+    // Some Docker versions only match the digest-only reference (busybox@sha256:…);
+    // try that too before giving up.
+    const digestOnly = PINNED_DOCKER_IMAGE.replace(/:[^:@]+@/, "@");
+    try {
+      execSync(`docker image rm ${digestOnly}`, { stdio: "ignore" });
+    } catch {
+      // Image not present locally — nothing to remove.
+    }
+  }
   const containerName = `extract-busybox-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
   try {
     execSync(`docker create --platform ${target.platform} --name ${containerName} ${PINNED_DOCKER_IMAGE}`, { stdio: "pipe" });

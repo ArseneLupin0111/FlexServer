@@ -336,12 +336,56 @@ describe("updatePolicy deliberate-action triggers (Q8)", () => {
   let vpsId: string;
   let config: AppConfig;
   let routes: AiRoutesService;
+  let pendingRepoWrites: Promise<unknown>[];
+  const drainRepoWrites = async (): Promise<void> => {
+    // Drain all in-flight JSON repository promises (including ones scheduled
+    // by continuation microtasks during job execution) so afterEach's rm()
+    // never races atomic rename/write on ai.json or vps.json.
+    for (;;) {
+      while (pendingRepoWrites.length > 0) {
+        const batch = pendingRepoWrites.splice(0);
+        await Promise.allSettled(batch);
+      }
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      if (pendingRepoWrites.length === 0) break;
+    }
+  };
 
   beforeEach(async () => {
     fixture = await writeBundleFixture("ai-bundle-trig");
     dir = await mkdtemp(join(tmpdir(), "ai-bundle-trig-state-"));
-    aiRepo = createJsonAiRepository(join(dir, "ai.json"));
-    vpsRepo = createVpsStore(join(dir, "vps.json"));
+    pendingRepoWrites = [];
+    const realAiRepo = createJsonAiRepository(join(dir, "ai.json"));
+    // Wrap repository in a recording proxy so any fire-and-forget background
+    // persistence (startAiBundleJob, finishAiBundleJob, etc.) is observable
+    // and drainable deterministically before the state directory is removed.
+    aiRepo = new Proxy(realAiRepo, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          const result = (value as (...a: unknown[]) => unknown).apply(target, args);
+          if (result instanceof Promise) {
+            pendingRepoWrites.push(result);
+          }
+          return result;
+        };
+      },
+    });
+    const realVpsRepo = createVpsStore(join(dir, "vps.json"));
+    vpsRepo = new Proxy(realVpsRepo, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          const result = (value as (...a: unknown[]) => unknown).apply(target, args);
+          if (result instanceof Promise) {
+            pendingRepoWrites.push(result);
+          }
+          return result;
+        };
+      },
+    });
     agentRepo = {} as unknown as AgentRepository;
     const created = await vpsRepo.create({ name: "VPS", host: "127.0.0.1", port: 22, username: "root" });
     vpsId = created.id;
@@ -360,20 +404,14 @@ describe("updatePolicy deliberate-action triggers (Q8)", () => {
   });
 
   afterEach(async () => {
+    await drainRepoWrites();
     await rm(fixture.dir, { recursive: true, force: true });
     await rm(dir, { recursive: true, force: true });
   });
 
   const scheduledJob = async () => {
-    // Fire-and-forget scheduling (microtasks + file lock I/O): poll briefly
-    // so parallel test-runner load cannot cause a false negative.
-    const deadline = Date.now() + 2_000;
-    for (;;) {
-      const job = await aiRepo.getAiBundleJob(vpsId);
-      if (job) return job;
-      if (Date.now() > deadline) return undefined;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    await drainRepoWrites();
+    return aiRepo.getAiBundleJob(vpsId);
   };
 
   const bundledId = (): string => {
@@ -384,6 +422,7 @@ describe("updatePolicy deliberate-action triggers (Q8)", () => {
 
   it("schedules an install when AI is enabled off->on", async () => {
     await routes.updatePolicy(request, vpsId, { aiEnabled: false });
+    await drainRepoWrites();
     expect((await aiRepo.getAiBundleJob(vpsId)) ?? undefined).toBeUndefined();
     await routes.updatePolicy(request, vpsId, { aiEnabled: true });
     const job = await scheduledJob();
@@ -406,6 +445,7 @@ describe("updatePolicy deliberate-action triggers (Q8)", () => {
   it("does not schedule on unrelated policy edits", async () => {
     await routes.updatePolicy(request, vpsId, { readEnabled: false });
     await routes.updatePolicy(request, vpsId, { sendLogsToProvider: true });
+    await drainRepoWrites();
     expect(await aiRepo.getAiBundleJob(vpsId)).toBeUndefined();
   });
 
@@ -416,14 +456,15 @@ describe("updatePolicy deliberate-action triggers (Q8)", () => {
       privilegedSupported: false, profiles: [],
     });
     await routes.updatePolicy(request, vpsId, { aiEnabled: true, shellEnabled: true });
+    await drainRepoWrites();
     expect(await aiRepo.getAiBundleJob(vpsId)).toBeUndefined();
   });
 
   it("does not schedule for local/system hosts on enabling actions", async () => {
     await vpsRepo.ensureLocalHost({ id: vpsId, name: "Local host", host: "127.0.0.1", port: 22, username: "root", kind: "local", managedBy: "system" });
     await routes.updatePolicy(request, vpsId, { aiEnabled: true, shellEnabled: true });
-    // Fire-and-forget trigger: give it a moment, then confirm nothing ran.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Fire-and-forget trigger: drain background activity deterministically.
+    await drainRepoWrites();
     expect(await aiRepo.getAiBundleJob(vpsId)).toBeUndefined();
   });
 });

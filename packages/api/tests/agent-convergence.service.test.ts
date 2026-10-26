@@ -1200,6 +1200,7 @@ describe.skipIf(!databaseUrl)("AgentConvergenceService (Postgres Repository)", (
     if (m033) await pool.query(m033.sql);
     const m034 = migrations.find((m) => m.id === "034_agent_convergence_indexes.sql");
     if (m034) await pool.query(m034.sql);
+    await pool.query(migrations.find((m) => m.id === "035_updater_ai_install.sql")!.sql);
 
     upgradeRepo = createPostgresLocalUpgradeRepository(pool);
   });

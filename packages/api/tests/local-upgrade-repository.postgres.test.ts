@@ -140,10 +140,15 @@ describe("local-upgrade postgres terminal outcome (live PostgreSQL)", () => {
     });
     try {
       await pool.query("CREATE TABLE vps (id text PRIMARY KEY)");
+      await pool.query("CREATE TABLE agent_credentials (id text PRIMARY KEY, vps_id text)");
+      await pool.query("CREATE TABLE agent_states (vps_id text PRIMARY KEY)");
       const migrations = await loadMigrations();
       await pool.query(migrations.find((m) => m.id === "021_local_agent_upgrades.sql")!.sql);
+      await pool.query(migrations.find((m) => m.id === "032_fleet_agent_updates.sql")!.sql);
       const m033 = migrations.find((m) => m.id === "033_agent_deploy_convergence.sql");
       if (m033) await pool.query(m033.sql);
+      await pool.query(migrations.find((m) => m.id === "034_agent_convergence_indexes.sql")!.sql);
+      await pool.query(migrations.find((m) => m.id === "035_updater_ai_install.sql")!.sql);
       await pool.query("INSERT INTO vps (id) VALUES ('vps-live-1')");
 
       const repo = createPostgresLocalUpgradeRepository(pool);
@@ -179,14 +184,19 @@ describe("local-upgrade postgres terminal outcome (live PostgreSQL)", () => {
     const pool = new pg.Pool({ connectionString: databaseUrl!, options: `-c search_path="${schema}"` });
     try {
       await pool.query("CREATE TABLE vps (id text PRIMARY KEY)");
+      await pool.query("CREATE TABLE agent_credentials (id text PRIMARY KEY, vps_id text)");
+      await pool.query("CREATE TABLE agent_states (vps_id text PRIMARY KEY)");
       const migrations = await loadMigrations();
       await pool.query(migrations.find((m) => m.id === "021_local_agent_upgrades.sql")!.sql);
+      await pool.query(migrations.find((m) => m.id === "032_fleet_agent_updates.sql")!.sql);
       const m033 = migrations.find((m) => m.id === "033_agent_deploy_convergence.sql");
       if (m033) await pool.query(m033.sql);
+      await pool.query(migrations.find((m) => m.id === "034_agent_convergence_indexes.sql")!.sql);
+      await pool.query(migrations.find((m) => m.id === "035_updater_ai_install.sql")!.sql);
 
       await pool.query("INSERT INTO vps (id) VALUES ('vps-1')");
       const repo = createPostgresLocalUpgradeRepository(pool);
-      await repo.create({ ...baseJob(), targetArch: "amd64" });
+      await repo.create({ ...baseJob(), vpsId: "vps-1", targetArch: "amd64" });
 
       const deferredUpdated = await repo.compareAndSet("lug_live_1", 0, {
         state: "deferred",
@@ -212,12 +222,16 @@ describe("local-upgrade postgres terminal outcome (live PostgreSQL)", () => {
     const pool = new pg.Pool({ connectionString: databaseUrl!, options: `-c search_path="${schema}"` });
     try {
       await pool.query("CREATE TABLE vps (id text PRIMARY KEY)");
+      await pool.query("CREATE TABLE agent_credentials (id text PRIMARY KEY, vps_id text)");
+      await pool.query("CREATE TABLE agent_states (vps_id text PRIMARY KEY)");
       const migrations = await loadMigrations();
       await pool.query(migrations.find((m) => m.id === "021_local_agent_upgrades.sql")!.sql);
+      await pool.query(migrations.find((m) => m.id === "032_fleet_agent_updates.sql")!.sql);
       const m033 = migrations.find((m) => m.id === "033_agent_deploy_convergence.sql");
       if (m033) await pool.query(m033.sql);
       const m034 = migrations.find((m) => m.id === "034_agent_convergence_indexes.sql");
       if (m034) await pool.query(m034.sql);
+      await pool.query(migrations.find((m) => m.id === "035_updater_ai_install.sql")!.sql);
 
       await pool.query("INSERT INTO vps (id) VALUES ('vps-1'), ('vps-2')");
       const repo = createPostgresLocalUpgradeRepository(pool);
@@ -249,7 +263,7 @@ describe("local-upgrade postgres terminal outcome (live PostgreSQL)", () => {
       // Claim second job while first is executing -> throws global_active error
       await expect(
         repo.compareAndSet("lug_2", 0, { state: "claimed" }),
-      ).rejects.toThrowError(/Another agent upgrade job is currently executing/);
+      ).rejects.toMatchObject({ kind: "global_active", existingId: "lug_1" });
 
       // listActive returns only active non-terminal jobs
       const activeList = await repo.listActive();

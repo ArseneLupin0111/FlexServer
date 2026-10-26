@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 
 /**
- * Cross-platform build script for the Go agent and updater.
+ * Cross-platform build script for the Go agent binaries.
  * Sets GOOS=linux GOARCH=amd64 to produce Linux binaries on any host.
  *
  * Build identity (parity with the Dockerfile agent-builder stage):
  *   -X ...version.Value=<semver>          display version (AGENT_VERSION, defaults to dev)
  *   -X ...version.Build=<40-hex content ID>  deterministic content identity via agent-build-id CLI
  * `-version` prints "<Value>+<Build>" ("<Value>" alone when Build is unknown).
- * Both binaries share one identity.
+ * The agent binary and AI runtime helpers share one identity.
  */
 
 import { execSync } from "child_process";
@@ -22,12 +22,20 @@ const root = join(__dirname, "..", "..");
 const agentDir = join(root, "packages", "agent");
 const outputDir = join(agentDir, "dist");
 const agentOutputPath = join(outputDir, "vps-agent-linux-amd64");
-const updaterOutputPath = join(outputDir, "vps-updater-linux-amd64");
 const hostPtyOutputPath = join(outputDir, "host-pty-linux-amd64");
 const hostFilesOutputPath = join(outputDir, "host-files-linux-amd64");
 const rotatorOutputPath = join(outputDir, "local-agent-rotator-linux-amd64");
 const aiExecutorOutputPath = join(outputDir, "ai-executor-linux-amd64");
 const aiHostHelperOutputPath = join(outputDir, "ai-host-helper-linux-amd64");
+// Arm64 parity: the host installer extracts arch-specific binaries from the
+// API image, and these dist artifacts must package the same set, so build
+// every component for both architectures.
+const agentOutputPathArm64 = join(outputDir, "vps-agent-linux-arm64");
+const hostPtyOutputPathArm64 = join(outputDir, "host-pty-linux-arm64");
+const hostFilesOutputPathArm64 = join(outputDir, "host-files-linux-arm64");
+const rotatorOutputPathArm64 = join(outputDir, "local-agent-rotator-linux-arm64");
+const aiExecutorOutputPathArm64 = join(outputDir, "ai-executor-linux-arm64");
+const aiHostHelperOutputPathArm64 = join(outputDir, "ai-host-helper-linux-arm64");
 const nativeExt = process.platform === "win32" ? ".exe" : "";
 const hostPtyNativePath = join(outputDir, `host-pty${nativeExt}`);
 const hostFilesNativePath = join(outputDir, `host-files${nativeExt}`);
@@ -45,7 +53,7 @@ if (!existsSync(agentDir)) {
   process.exit(1);
 }
 
-console.log("Building vps-agent and vps-updater for linux/amd64...");
+console.log("Building vps-agent for linux/amd64...");
 mkdirSync(outputDir, { recursive: true });
 
 const agentVersion = process.env.AGENT_VERSION || "dev";
@@ -93,7 +101,6 @@ const ldflags = [
 try {
   for (const [pkg, out] of [
     ["./cmd/vps-agent", agentOutputPath],
-    ["./cmd/vps-updater", updaterOutputPath],
     ["./cmd/host-pty", hostPtyOutputPath],
     ["./cmd/host-files", hostFilesOutputPath],
     ["./cmd/local-agent-rotator", rotatorOutputPath],
@@ -106,11 +113,24 @@ try {
       env: { ...process.env, GOOS: "linux", GOARCH: "amd64", CGO_ENABLED: "0" },
     });
   }
+  for (const [pkg, out] of [
+    ["./cmd/vps-agent", agentOutputPathArm64],
+    ["./cmd/host-pty", hostPtyOutputPathArm64],
+    ["./cmd/host-files", hostFilesOutputPathArm64],
+    ["./cmd/local-agent-rotator", rotatorOutputPathArm64],
+    ["./cmd/ai-executor", aiExecutorOutputPathArm64],
+    ["./cmd/ai-host-helper", aiHostHelperOutputPathArm64],
+  ]) {
+    execSync('go build -trimpath -buildvcs=false -ldflags "' + ldflags + '" -o "' + out + '" ' + pkg, {
+      cwd: agentDir,
+      stdio: "inherit",
+      env: { ...process.env, GOOS: "linux", GOARCH: "arm64", CGO_ENABLED: "0" },
+    });
+  }
 } catch (err) {
   console.error("Build failed.");
   process.exit(1);
 }
-
 if (process.platform !== "linux" || process.arch !== "amd64") {
   try {
     execSync('go build -trimpath -buildvcs=false -ldflags "' + ldflags + '" -o "' + hostPtyNativePath + '" ./cmd/host-pty', {
@@ -186,9 +206,13 @@ if (process.platform !== "linux" || process.arch !== "amd64") {
     console.warn("Native ai-host-helper build skipped:", err.message);
   }
 }
-
-
-for (const out of [agentOutputPath, updaterOutputPath, hostPtyOutputPath, hostPtyNativePath, hostFilesOutputPath, hostFilesNativePath, rotatorOutputPath, rotatorNativePath, aiExecutorOutputPath, aiExecutorNativePath, aiHostHelperOutputPath, aiHostHelperNativePath]) {
+for (const out of [
+  agentOutputPath, hostPtyOutputPath, hostFilesOutputPath, rotatorOutputPath,
+  aiExecutorOutputPath, aiHostHelperOutputPath,
+  agentOutputPathArm64, hostPtyOutputPathArm64, hostFilesOutputPathArm64, rotatorOutputPathArm64,
+  aiExecutorOutputPathArm64, aiHostHelperOutputPathArm64,
+  hostPtyNativePath, hostFilesNativePath, rotatorNativePath, aiExecutorNativePath, aiHostHelperNativePath,
+]) {
   if (existsSync(out)) {
     const stats = statSync(out);
     const sizeKB = (stats.size / 1024).toFixed(1);
@@ -210,10 +234,25 @@ if (existsSync(agentOutputPath)) {
   };
   writeFileSync(`${agentOutputPath}.json`, JSON.stringify(agentMeta, null, 2));
 }
+if (existsSync(agentOutputPathArm64)) {
+  const agentBuf = readFileSync(agentOutputPathArm64);
+  const agentSha = createHash("sha256").update(agentBuf).digest("hex");
+  const agentMeta = {
+    os: "linux",
+    arch: "arm64",
+    version: agentVersion,
+    buildId: buildId,
+    sha256: agentSha,
+    size: agentBuf.length,
+    publishedAt: new Date().toISOString(),
+  };
+  writeFileSync(`${agentOutputPathArm64}.json`, JSON.stringify(agentMeta, null, 2));
+}
 for (const [binPath, componentName] of [
-  [updaterOutputPath, "updater"],
   [aiExecutorOutputPath, "ai-executor"],
   [aiHostHelperOutputPath, "ai-host-helper"],
+  [aiExecutorOutputPathArm64, "ai-executor"],
+  [aiHostHelperOutputPathArm64, "ai-host-helper"],
 ]) {
   if (existsSync(binPath)) {
     const buf = readFileSync(binPath);
@@ -221,7 +260,6 @@ for (const [binPath, componentName] of [
     const meta = {
       component: componentName,
       os: "linux",
-      arch: "amd64",
       version: agentVersion,
       buildId: buildId,
       sha256: sha,

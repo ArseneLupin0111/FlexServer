@@ -2,8 +2,7 @@
 #
 # deploy.sh — One-command deployment entry point for VPS Manager.
 #
-# Runs Docker Compose deployment (build or pull), waits for API health,
-# and executes host updater preparation with current privileges or `sudo -n`.
+# Runs Docker Compose deployment (build or pull) and waits for API health.
 #
 # Usage:
 #   bash scripts/deploy.sh [options]
@@ -15,7 +14,6 @@
 #   --env-file <path>         Environment file to pass to docker compose
 #   --health-timeout <sec>    Maximum seconds to wait for API health (default: 90)
 #   --health-url <url>        Explicit API health check URL
-#   --skip-updater            Skip host updater preparation step
 #   --dry-run                 Echo deployment actions without running docker or changing host
 #   --help|-h                 Show this help
 
@@ -26,7 +24,6 @@ COMPOSE_FILE=""
 ENV_FILE=""
 HEALTH_TIMEOUT=90
 HEALTH_URL=""
-SKIP_UPDATER=false
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -41,8 +38,6 @@ while [[ $# -gt 0 ]]; do
       HEALTH_TIMEOUT="$2"; shift 2 ;;
     --health-url)
       HEALTH_URL="$2"; shift 2 ;;
-    --skip-updater)
-      SKIP_UPDATER=true; shift ;;
     --dry-run)
       DRY_RUN=true; shift ;;
     --help|-h)
@@ -145,63 +140,6 @@ else
   echo "[Deploy] Dashboard is healthy."
 fi
 
-# ── 4. Host Updater Preparation ─────────────────────────────────────────────
-if [[ "$SKIP_UPDATER" == "true" ]]; then
-  echo "[Deploy] Skipping host updater preparation (--skip-updater specified)."
-  exit 0
-fi
-
-# Locate prepare-agent-updater.sh
-PREPARE_SCRIPT=""
-if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
-  cand="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install/prepare-agent-updater.sh"
-  if [[ -f "$cand" ]]; then PREPARE_SCRIPT="$cand"; fi
-fi
-if [[ -z "$PREPARE_SCRIPT" && -f "./scripts/install/prepare-agent-updater.sh" ]]; then
-  PREPARE_SCRIPT="$(pwd)/scripts/install/prepare-agent-updater.sh"
-fi
-if [[ -z "$PREPARE_SCRIPT" && -f "./prepare-agent-updater.sh" ]]; then
-  PREPARE_SCRIPT="$(pwd)/prepare-agent-updater.sh"
-fi
-if [[ -z "$PREPARE_SCRIPT" && -f "/tmp/prepare-agent-updater.sh" ]]; then
-  PREPARE_SCRIPT="/tmp/prepare-agent-updater.sh"
-fi
-
-if [[ -z "$PREPARE_SCRIPT" || ! -f "$PREPARE_SCRIPT" ]]; then
-  echo "Warning: scripts/install/prepare-agent-updater.sh not found; skipping host updater preparation." >&2
-  echo "[Deploy] Deployment complete: dashboard is healthy."
-  exit 0
-fi
-
-# Privilege resolution for host preparation:
-# Must use current privileges or sudo -n; lack of host privileges prints explicit warning and exits 0.
-SUDO_CMD=()
-if [[ "$DRY_RUN" != "true" && "$(id -u)" -ne 0 ]]; then
-  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    SUDO_CMD=(sudo -n)
-  else
-    echo "Warning: Host updater preparation requires root privileges or passwordless sudo." >&2
-    echo "  Dashboard deployment is healthy, but the local agent updater was not refreshed." >&2
-    echo "  To prepare the local updater manually, run: sudo bash ${PREPARE_SCRIPT}" >&2
-    echo "[Deploy] Deployment complete: dashboard is healthy."
-    exit 0
-  fi
-fi
-
-echo "[Deploy] Preparing host agent updater..."
-PREPARE_ARGS=()
-if [[ -n "$COMPOSE_FILE" ]]; then
-  PREPARE_ARGS+=(--compose-file "$COMPOSE_FILE")
-fi
-if [[ "$DRY_RUN" == "true" ]]; then
-  PREPARE_ARGS+=(--dry-run)
-fi
-
-if ! "${SUDO_CMD[@]}" bash "$PREPARE_SCRIPT" "${PREPARE_ARGS[@]}"; then
-  echo "Warning: Host updater preparation failed. Local updater was not refreshed, but dashboard deployment is healthy." >&2
-else
-  echo "[Deploy] Host updater preparation completed successfully."
-fi
-
-echo "[Deploy] Deployment complete: dashboard is healthy."
+# Container deployment does not change the local host agent or AI runtime.
+echo "[Deploy] Dashboard is healthy. Host agent and AI installation is separate: sudo bash scripts/install/install.sh"
 exit 0

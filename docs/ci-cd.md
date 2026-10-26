@@ -1,6 +1,6 @@
 # CI/CD
 
-This repository uses GitHub Actions for verification, Docker image publishing, and optional SSH deployment.
+This repository uses GitHub Actions for verification, Docker image publishing, and optional SSH deployment. Hosts run agent+AI bundles installed over SSH; there is no host updater to build, test, or deploy.
 
 ## Workflow
 
@@ -8,10 +8,10 @@ Workflow file: `.github/workflows/ci.yml`
 
 ### Pull requests
 
-Pull requests run Chromium E2E unconditionally and conditional verification behind a lightweight `changes` job (path filters, no toolchains installed): Node, Go, installer, updater, database, and image steps run only when their paths change. Pushes to `main` force the full check matrix and both image builds. Pull requests do not publish images to GHCR and do not run the production deploy job.
+Pull requests run Chromium E2E unconditionally and conditional verification behind a lightweight `changes` job (path filters, no toolchains installed): Node, Go, installer, database, and image steps run only when their paths change. Pushes to `main` force the full check matrix and both image builds. Pull requests do not publish images to GHCR and do not run the production deploy job.
 
-API and Web use independent Docker build stages and GitHub Actions cache scopes (`api-runtime`, `web-runtime`). Current path filters still rebuild both images for changes in either Node workspace; database integrations skip web-only changes. Docs-only PRs skip Node, Go, image, installer/updater, and database checks. Workflow and hardening-fixture changes re-run the affected safety checks.
-After change detection, `verify-checks` (Node tests/typecheck/CLI smoke), `verify-go` (Go, installer/updater and Compose checks), `verify` (image builds, identity checks, scans and publishing), and the two database jobs run independently. Existing status names remain. The Go job pins Node 24 for updater validation without installing npm dependencies. Go race tests use the runner's GCC, installing it only when absent.
+API and Web use independent Docker build stages and GitHub Actions cache scopes (`api-runtime`, `web-runtime`). Current path filters still rebuild both images for changes in either Node workspace; database integrations skip web-only changes. Docs-only PRs skip Node, Go, image, installer, and database checks. Workflow and hardening-fixture changes re-run the affected safety checks.
+After change detection, `verify-checks` (Node tests/typecheck/CLI smoke), `verify-go` (Go agent, installer and Compose checks), `verify` (image builds, identity checks, scans and publishing), and the two database jobs run independently. Existing status names remain. The Go job pins Node 24 without installing npm dependencies. Go race tests use the runner's GCC, installing it only when absent.
 
 The independent `e2e` job (`E2E Chromium`) always runs on pull requests, pushes to `main`, and manual dispatch, without path filters or production secrets. It uses Node.js 22, `npm ci`, `npx playwright install --with-deps chromium`, and `npm run test:e2e` with a 15-minute job timeout. It builds the real React/NestJS application and checks authentication against isolated temporary JSON storage, not `.env` or a deployed server.
 
@@ -22,14 +22,12 @@ In addition to unconditional Chromium E2E, every pull request runs change detect
 
 1. When Node paths change: `npm ci`, `npm test`, `npm run typecheck`, and the `--help` script smoke tests. `npm run build` runs only as a fallback when no Docker target builds; each Docker target compiles its own workspace.
 2. When installer paths change: `bash scripts/tests/test-installer-docker-access.sh`.
-3. When updater (or agent) paths change: pinned `Setup Go`, then `bash scripts/tests/test-updater.sh`.
-4. `docker compose config --quiet` (always, cheap sanity gate).
-5. When agent paths change: Go agent tested with the race detector plus `go vet`; the API image compiles agent/updater binaries, whose embedded identities are checked directly against package version and commit SHA without another standalone build in the image job.
-6. When API/web paths change (or a workflow-dispatch force input selects them): Docker build checks for the affected runtime targets (`api-runtime`, `web-runtime`) with OCI labels.
-7. When an API or web image is built: fail-fast smoke tests, the Docker-socket metadata guard, independent report-only Trivy scans, and the fail-closed CRITICAL gate. SBOM generation is main-only (SBOMs are release attestations; PRs are still scanned and gated).
+3. When agent paths change: Go agent tested with the race detector plus `go vet`; the API image compiles agent binaries plus the AI runtime bundle, whose embedded identities are checked directly against package version and commit SHA without another standalone build in the image job. The deployed image is scoped to the agent+AI bundle: updater-era artifacts in a rebuilt image fail the image checks.
+4. When API/web paths change (or a workflow-dispatch force input selects them): Docker build checks for the affected runtime targets (`api-runtime`, `web-runtime`) with OCI labels.
+5. When an API or web image is built: fail-fast smoke tests, the Docker-socket metadata guard, independent report-only Trivy scans, and the fail-closed CRITICAL gate. SBOM generation is main-only (SBOMs are release attestations; PRs are still scanned and gated).
    API/web Trivy scans run concurrently using pinned Trivy 0.70.0 after a single vulnerability database download. Each process uses an in-memory analysis cache and skips database updates, avoiding shared-cache writer contention. Both exit statuses are awaited; scanner errors or missing reports block release. Docker app builds copy only required source/config/assets, and Go compilation uses BuildKit module/compiler cache mounts (runner-local mount contents are not guaranteed to persist through the GitHub Actions layer cache).
-8. When database paths change: TimescaleDB PostgreSQL migration integration (`postgres-integration`, `timescale/timescaledb:2.17.2-pg16`) runs concurrently with `verify` (no longer gated on it).
-9. When database paths change: mandatory plain PostgreSQL 16 job (`docker-monitoring-postgres16`, `postgres:16`, `pg_isready` healthcheck, and `VPS_MANAGER_TEST_POSTGRES_URL`), separate from TimescaleDB; it runs the concrete migration, repository, and maintenance suites (`docker-migration-009/013/014.postgres.test.ts`, `docker-monitoring-repository.postgres.test.ts`, and `docker-monitoring-maintenance.postgres.test.ts`). Publishing requires both database jobs.
+6. When database paths change: TimescaleDB PostgreSQL migration integration (`postgres-integration`, `timescale/timescaledb:2.17.2-pg16`) runs concurrently with `verify` (no longer gated on it).
+7. When database paths change: mandatory plain PostgreSQL 16 job (`docker-monitoring-postgres16`, `postgres:16`, `pg_isready` healthcheck, and `VPS_MANAGER_TEST_POSTGRES_URL`), separate from TimescaleDB; it runs the concrete migration, repository, and maintenance suites (`docker-migration-009/013/014.postgres.test.ts`, `docker-monitoring-repository.postgres.test.ts`, and `docker-monitoring-maintenance.postgres.test.ts`). Publishing requires both database jobs.
 
 The PostgreSQL jobs run the same live-test contract against different server capabilities. Core migrations and Docker-monitoring tables must work on ordinary PostgreSQL; TimescaleDB is exercised separately for optional extension-aware deployments. Tests that require a live database are skipped when `VPS_MANAGER_TEST_POSTGRES_URL` is unset, but CI supplies it and therefore treats those cases as mandatory.
 
@@ -50,7 +48,7 @@ Deploy pulls by immutable digest (`name@sha256:...` references recorded from `Re
 
 After publishing, the workflow can deploy over SSH if deployment secrets are configured.
 
-Local and remote host agent updates use the bundled agent and updater binaries packaged directly in the deployed API container (`/app/agent/vps-agent-linux-amd64` and `/app/agent/vps-agent-linux-arm64`). Deployment via `scripts/deploy.sh` prepares the host updater using `scripts/install/prepare-agent-updater.sh`, and `AgentConvergenceService` starts convergence at API startup without waiting for agent idle or requiring manual release selection or enrollment. Active terminal sessions, AI tasks, and Compose operations do not defer bundled updates and may be interrupted by agent/helper restarts. Offline hosts wait for connectivity, missing host access is reported as `needs_access`, and failed targets are suppressed per host until manually retried. Integrity checks, update serialization, heartbeat confirmation, and rollback remain enforced.
+Local and remote host agents are updated with the bundled binaries packaged directly in the deployed API container (`/app/agent/vps-agent-linux-amd64` and `/app/agent/vps-agent-linux-arm64`, plus the AI runtime bundle under `/app/agent/ai/`). Remote hosts install/update over their saved SSH credentials through explicit dashboard actions; `scripts/deploy.sh` deploys containers only and finishes with an explicit `sudo bash scripts/install/install.sh` pointer for the local host agent+AI install, so a container-only deploy does NOT install or replace the local host's agent or AI runtime on disk — deploying the API image alone changes no host binaries. Missing host privileges on the deploy host mean the agent/AI installer is skipped-or-warned rather than attempted silently, and a healthy dashboard endpoint alone is never treated as a completed host install. There is no automatic convergence pass: updating a host is always an explicit action, unchanged agent build identities do not trigger restarts, and active terminal sessions, AI tasks, and Compose operations do not defer an action once started and may be interrupted by the agent restart. Missing host access is reported as `needs_access`, and failed targets are suppressed per host until manually retried. There is no host updater daemon, no updater scoped credentials, and no automatic host-side rollback; a failed agent restart is recovered manually from a pre-change backup.
 
 ## Runtime topology
 
@@ -104,9 +102,9 @@ Optional repository variables can override generated server `.env` values:
 | `DASHBOARD_COOKIE_SAME_SITE`    | `lax`     | SameSite cookie attribute.                                                                  |
 | `TRUST_PROXY_HOPS`              | `0`       | Number of reverse proxy hops to trust for client IP. Set to `1` when behind an HTTPS proxy. |
 
-### Local agent updates and optional release catalog
+### Agent and AI bundle updates
 
-Host agent upgrades do not require external catalog variables or manual signing keys. The API container bundles architecture-specific agent and updater binaries directly. Deployment automatically prepares the host updater via `scripts/install/prepare-agent-updater.sh`, preserving credentials, configuration, and state. The convergence service updates connected managed agents to the deployed build identity without an idle wait; unchanged agent identities do not trigger restarts. Optional Ed25519-signed release manifests are reserved exclusively for AI runtime components (`ai-executor`, `ai-host-helper`, `ai-rootfs`, `ai-profiles`); signed rollouts for `agent` and `updater` components are rejected in favor of deployment-bundled convergence.
+Host agent upgrades do not require external catalog variables or manual signing keys and use no updater daemon. The API container bundles architecture-specific agent binaries directly (and the AI runtime bundle). Remote hosts are updated over saved SSH from those bundled artifacts; the local/system host is updated by re-running `sudo bash scripts/install/install.sh` on the host after deploying the new API image. There is no automatic convergence pass: changes reach hosts only through these explicit actions, and a fresh agent heartbeat carrying the bundled build ID remains the success condition.
 
 ## Server requirements
 

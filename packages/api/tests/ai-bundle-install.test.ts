@@ -224,6 +224,8 @@ describe("AI bundle install runner", () => {
     expect(installerCmd).toContain(`--ai-rootfs-tar '${tmp}/rootfs.tar.gz'`);
     expect(installerCmd).toContain(`--ai-rootfs-manifest '${tmp}/rootfs.manifest.json'`);
     expect(installerCmd).toContain(`--ai-profiles-dir '${tmp}/profiles'`);
+    const invocation = installerCmd.split("\n").find((line) => line.includes("bash '") && line.includes("install-local-agent.sh"));
+    expect(invocation).toContain(`--ai-profiles-dir '${tmp}/profiles' && echo AI_BUNDLE_INSTALL_OK`);
 
     // Staging directory cleaned up best-effort
     expect(transport.commands.some((c) => c.includes(`rm -rf '${tmp}'`))).toBe(true);
@@ -375,20 +377,11 @@ describe("AI bundle install runner", () => {
     const remote = await orchestration.getBundleView(vpsId);
     expect(remote.installSupported).toBe(true);
     expect(remote.installReason).toBeUndefined();
-    // Remote hosts install over saved SSH: explicit channel, never a local job.
-    expect(remote.installChannel).toBe("ssh");
-    expect(remote.localJob).toBeNull();
-    expect(remote.localRelease).toBeNull();
 
     await toLocalHost();
     const local = await orchestration.getBundleView(vpsId);
     expect(local.installSupported).toBe(false);
     expect(local.installReason).toBe(AI_BUNDLE_LOCAL_HOST_INSTALL_REASON);
-    // Without the updater channel wired (this runner has no local install
-    // service) the local view stays fail-closed with no updater channel.
-    expect(local.installChannel).toBeUndefined();
-    expect(local.localJob).toBeNull();
-    expect(local.localRelease).toBeNull();
   });
 
   it("reports an actionable unresolved-host reason (not local guidance) when the VPS record is missing or unreadable", async () => {
@@ -417,7 +410,7 @@ describe("AI bundle install runner", () => {
     );
     const error = await runner.installBundle(vpsId, "manual").catch((e: unknown) => e);
     expect(error).toBeInstanceOf(BadRequestException);
-    expect((error as Error).message).toContain("scripts/install/install.sh --enable-ai");
+    expect((error as Error).message).toContain("sudo bash scripts/install/install.sh");
     expect(await aiRepo.getAiBundleJob(vpsId)).toBeUndefined();
     expect(authCalls).toBe(0);
     expect(transport.mkdirs).toHaveLength(0);

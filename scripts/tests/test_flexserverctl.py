@@ -6,22 +6,19 @@ POSIX seams (/proc symlinks, chown, chmod) rather than faking them. A few
 paths still need care and are skipped explicitly: permission bits do not
 constrain root, and a real subprocess needs the real /proc to be inspected.
 
-Each reviewer-flagged defect has at least one
-dedicated test here:
+Each reviewer-flagged defect has at least one dedicated test here:
 
   1.  a relative `-config` resolves against that process's own /proc cwd
   2.  `stop_exact_process` reports non-ownership instead of signalling
   3.  a spawn whose identity cannot be verified is killed and never published
   4.  systemd orders `stop` before the delivery preflight and `restart` after
   5.  a systemd restart failure rolls the config back byte-for-byte
-  6.  an inactive/failed updater rolls the cutover back
-  7.  a user preflight failure restarts the original loop with its own argv
-  8.  a user post-health failure stops the new loop and restarts the original
-  9.  rollback restores bytes AND owner/mode, and never deletes the backup
+  6.  a user preflight failure restarts the original loop with its own argv
+  7.  a user post-health failure stops the new loop and restarts the original
+  8.  rollback restores bytes AND owner/mode, and never deletes the backup
       when the restore itself failed
-  10. an updater with ANY job evidence refuses before any config mutation
-  11. systemd serialises concurrent invocations via the lock
-  12. https-only migration, no host allow/deny list, no token leakage
+  9.  systemd serialises concurrent invocations via the lock
+  10. loopback-only http, no host allow/deny list, no token leakage
 """
 from __future__ import annotations
 
@@ -56,12 +53,7 @@ AGENT_CFG = {
     "requestTimeoutSeconds": 5,
     "keepCustomField": "important_value",
 }
-UPDATER_CFG = {
-    "apiBase": "https://initial.flexserver.tech",
-    "credential": "vma_updater_cred_abcdef",
-    "pinnedPublicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-    "keepUpdaterField": 42,
-}
+
 BAK = ".flexserverctl.bak"
 
 
@@ -169,15 +161,6 @@ class TestUrlValidation(LinuxGuard):
             with self.assertRaises(ValueError):
                 flexserverctl.validate_backend_url(bad)
 
-    def test_updater_requires_https(self):
-        self.assertEqual(
-            flexserverctl.validate_updater_apibase("https://flexserver.tech"),
-            "https://flexserver.tech",
-        )
-        with self.assertRaises(ValueError) as ctx:
-            flexserverctl.validate_updater_apibase("http://127.0.0.1:3000")
-        self.assertIn("apiBase must stay https", str(ctx.exception))
-
 
 class TestConfigValidation(LinuxGuard):
     def test_agent_config_ok(self):
@@ -194,25 +177,6 @@ class TestConfigValidation(LinuxGuard):
         cfg["intervalSeconds"] = 0
         with self.assertRaises(ValueError):
             flexserverctl.validate_agent_config(cfg)
-
-    def test_updater_config_ok(self):
-        flexserverctl.validate_updater_config(dict(UPDATER_CFG))
-
-    def test_updater_config_without_pinned_key_ok(self):
-        cfg = dict(UPDATER_CFG)
-        del cfg["pinnedPublicKey"]
-        flexserverctl.validate_updater_config(cfg)
-    def test_updater_config_rejects_bad_key_length(self):
-        cfg = dict(UPDATER_CFG)
-        cfg["pinnedPublicKey"] = "AAA="
-        with self.assertRaises(ValueError):
-            flexserverctl.validate_updater_config(cfg)
-
-    def test_updater_config_rejects_unscoped_credential(self):
-        cfg = dict(UPDATER_CFG)
-        cfg["credential"] = "not_a_token"
-        with self.assertRaises(ValueError):
-            flexserverctl.validate_updater_config(cfg)
 
 
 class TestTokenHygiene(LinuxGuard):
@@ -418,7 +382,6 @@ class TestProcessIdentity(LinuxGuard):
                 "FLEXSERVERCTL_PROC_ROOT": self.proc_root,
                 "FLEXSERVERCTL_HOME": self.home,
                 "FLEXSERVERCTL_AGENT_CONFIG": self.cfg,
-                "FLEXSERVERCTL_JOURNALCTL_BIN": "false",
             },
         )
         patcher.start()
@@ -650,188 +613,8 @@ class TestGoFlagArgv(LinuxGuard):
         )
 
 
-class TestUpdaterGuard(LinuxGuard):
-    """Defect 6/10: any job evidence refuses; busy never stops the daemon."""
-
-    def setUp(self):
-        super().setUp()  # keep the Linux-only gate neutralised
-        self.tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.state = os.path.join(self.tmp, "state")
-        os.makedirs(self.state)
-        self.bin = os.path.join(self.tmp, "vps-updater")
-        # A portable stub: Python, exit code configurable per test.
-        with open(self.bin, "w") as fh:
-            fh.write("import sys\nsys.exit(%d)\n" % 0)
-        os.chmod(self.bin, 0o755)
-        # The CLI shells out to `vps-updater status -config <cfg>`; make that
-        # resolve to the Python interpreter so the test is host-independent.
-        self.bin = sys.executable
-        self.cfg = os.path.join(self.tmp, "updater.json")
-        with open(self.cfg, "w") as fh:
-            json.dump(dict(UPDATER_CFG), fh)
-
-    def _journal(self, obj):
-        with open(os.path.join(self.state, "journal.json"), "w") as fh:
-            json.dump(obj, fh)
-
-    def test_idle_state_dir_is_not_busy(self):
-        """An absent journal is idle, not busy: absence is not evidence."""
-        busy, _ = flexserverctl.updater_busy(self.state)
-        self.assertFalse(busy)
-
-    def test_missing_state_dir_is_not_busy(self):
-        busy, _ = flexserverctl.updater_busy(os.path.join(self.tmp, "absent"))
-        self.assertFalse(busy)
-
-    def test_active_job_refuses(self):
-        self._journal({"phase": "downloading", "jobId": "job-1"})
-        busy, _ = flexserverctl.updater_busy(self.state)
-        self.assertTrue(busy)
-
-    def test_unparseable_journal_fails_closed(self):
-        with open(os.path.join(self.state, "journal.json"), "w") as fh:
-            fh.write("{not json")
-        busy, _ = flexserverctl.updater_busy(self.state)
-        self.assertTrue(busy)
-
-    def test_non_object_journal_fails_closed(self):
-        with open(os.path.join(self.state, "journal.json"), "w") as fh:
-            fh.write('["a", "b"]')
-        self.assertTrue(flexserverctl.updater_busy(self.state)[0])
-
-    def test_any_present_daemon_journal_is_busy(self):
-        """A present daemon journal is in-flight by construction.
-
-        `Daemon.Run` removes it only after the server's terminal ruling, and the
-        "terminal" phase coexists with outcome=hold / rollback_unverified and
-        retained backups, so no phase lets a present daemon journal through.
-        """
-        for phase in (
-            "terminal",
-            "rollback_unverified",
-            "hold",
-            "done",
-            "complete",
-            "completed",
-            "awaiting_heartbeat",
-            "restarting",
-            "rolling_back",
-        ):
-            self._journal({"phase": phase, "jobId": "j"})
-            busy, _ = flexserverctl.updater_busy(self.state)
-            self.assertTrue(busy, phase)
-
-    def test_pending_entry_refuses(self):
-        os.makedirs(os.path.join(self.state, "pending"))
-        with open(os.path.join(self.state, "pending", "job-1.json"), "w") as fh:
-            fh.write("{}")
-        busy, _ = flexserverctl.updater_busy(self.state)
-        self.assertTrue(busy)
-
-    def test_unreadable_pending_fails_closed(self):
-        if not hasattr(os, "geteuid") or os.geteuid() == 0:
-            self.skipTest("root bypasses mode 000 directory permissions")
-        os.makedirs(os.path.join(self.state, "pending"))
-        os.chmod(os.path.join(self.state, "pending"), 0o000)
-        self.addCleanup(os.chmod, os.path.join(self.state, "pending"), 0o755)
-        present, names = flexserverctl.pending_entries(self.state)
-        self.assertTrue(present)
-        self.assertEqual(names, ["<unreadable>"])
-
-    def _helper(self, obj):
-        os.makedirs(os.path.join(self.state, "helper"), exist_ok=True)
-        with open(os.path.join(self.state, "helper", "journal.json"), "w") as fh:
-            json.dump(obj, fh)
-
-    def test_settled_helper_journal_is_quiescent(self):
-        """`handleCleanup` only removes the helper journal best-effort.
-
-        A completed job therefore routinely leaves a settled "restarted" (or
-        "rolled_back") record behind with no daemon journal and no pending
-        entries. That is a historical record, not live work, so it must not
-        block a backend-URL cutover.
-        """
-        for phase in ("restarted", "rolled_back", "rolled-back", "rolledback"):
-            self._helper(
-                {
-                    "jobId": "lug_j-lEw9PGEEj-",
-                    "phase": phase,
-                    "oldSha256": "a",
-                    "newSha256": "b",
-                    "backupPath": "/b",
-                }
-            )
-            busy, _ = flexserverctl.updater_busy(self.state)
-            self.assertFalse(busy, phase)
-            os.remove(os.path.join(self.state, "helper", "journal.json"))
-
-    def test_mid_swap_helper_journal_refuses(self):
-        """Only intent/renamed describe an unfinished privileged mutation."""
-        for phase in ("intent", "renamed"):
-            self._helper({"jobId": "j", "phase": phase})
-            busy, _ = flexserverctl.updater_busy(self.state)
-            self.assertTrue(busy, phase)
-
-    def test_unrecognised_helper_phase_fails_closed(self):
-        for phase in ("done", "complete", "cleaned", "unknown", ""):
-            self._helper({"jobId": "j", "phase": phase})
-            busy, _ = flexserverctl.updater_busy(self.state)
-            self.assertTrue(busy, phase)
-
-    def test_daemon_journal_overrides_settled_helper(self):
-        """A live job is never cleared by a settled helper record."""
-        self._helper({"jobId": "j", "phase": "restarted"})
-        self._journal({"phase": "awaiting_heartbeat", "jobId": "j"})
-        busy, _ = flexserverctl.updater_busy(self.state)
-        self.assertTrue(busy)
-
-    def test_pending_overrides_settled_helper(self):
-        self._helper({"jobId": "j", "phase": "restarted"})
-        os.makedirs(os.path.join(self.state, "pending"))
-        with open(os.path.join(self.state, "pending", "apply-j.json"), "w") as fh:
-            fh.write("{}")
-        busy, _ = flexserverctl.updater_busy(self.state)
-        self.assertTrue(busy)
-
-    def test_helper_journal_unparseable_fails_closed(self):
-        os.makedirs(os.path.join(self.state, "helper"))
-        with open(os.path.join(self.state, "helper", "journal.json"), "w") as fh:
-            fh.write("{nope")
-        busy, _ = flexserverctl.updater_busy(self.state)
-        self.assertTrue(busy)
-
-    def test_empty_helper_journal_fails_closed(self):
-        self._helper({})
-        self.assertTrue(flexserverctl.updater_busy(self.state)[0])
-
-    def test_helper_journal_without_phase_fails_closed(self):
-        self._helper({"jobId": "j"})
-        busy, _ = flexserverctl.updater_busy(self.state)
-        self.assertTrue(busy)
-
-    def test_local_proof_status_failed(self):
-        """A non-zero `status -config` is reported as failed, not proof.
-
-        `run_updater_status` is stubbed here rather than executed so the result
-        does not depend on a real updater binary or on the host shell.
-        """
-        with unittest.mock.patch.object(
-            flexserverctl, "run_updater_status", lambda bin_, cfg, timeout=30: (3, "denied")
-        ):
-            state, detail = flexserverctl.updater_local_proof(self.state, self.bin, self.cfg)
-        self.assertEqual(state, "updater-status-failed")
-
-    def test_local_proof_never_claims_delivery(self):
-        """Idle journal silence is never reported as authenticated delivery."""
-        for phase in ("domain-claim", "observing", "pending"):
-            self._journal({"phase": phase, "jobId": "j"})
-            state, detail = flexserverctl.updater_local_proof(self.state, self.bin, self.cfg)
-            self.assertNotIn("authenticated delivery", detail)
-
-
 class TestSystemdCutover(LinuxGuard):
-    """Defects 4, 5, 11: ordering, rollback target, and serialisation."""
+    """Defects 4, 5, and 11: ordering, rollback target, and serialisation."""
 
     def setUp(self):
         super().setUp()  # keep the Linux-only gate neutralised
@@ -840,26 +623,16 @@ class TestSystemdCutover(LinuxGuard):
         self.etc = os.path.join(self.tmp, "etc")
         os.makedirs(self.etc)
         self.agent_cfg = os.path.join(self.etc, "agent.json")
-        self.updater_cfg = os.path.join(self.etc, "updater.json")
         with open(self.agent_cfg, "w") as fh:
             json.dump(dict(AGENT_CFG), fh)
-        with open(self.updater_cfg, "w") as fh:
-            json.dump(dict(UPDATER_CFG), fh)
         self.lock_path = os.path.join(self.etc, "flexserverctl.lock")
-        self.state = os.path.join(self.tmp, "state")
-        os.makedirs(self.state)
-        state_patch = unittest.mock.patch.object(flexserverctl, "UPDATER_STATE_DIR", self.state)
-        state_patch.start()
-        self.addCleanup(state_patch.stop)
         self.env = unittest.mock.patch.dict(
             os.environ,
             {
                 "FLEXSERVERCTL_AGENT_CONFIG": self.agent_cfg,
-                "FLEXSERVERCTL_UPDATER_CONFIG": self.updater_cfg,
                 "FLEXSERVERCTL_SYSTEMD_LOCK": self.lock_path,
                 "FLEXSERVERCTL_SYSTEMCTL_BIN": "systemctl-stub",
                 "FLEXSERVERCTL_AGENT_BIN": os.path.join(self.tmp, "agent-binary"),
-                "FLEXSERVERCTL_UPDATER_BIN": os.path.join(self.tmp, "updater-binary"),
             },
         )
         self.env.start()
@@ -872,40 +645,17 @@ class TestSystemdCutover(LinuxGuard):
         health.start()
         self.addCleanup(health.stop)
         self.calls = []
-        self._install_stubs()
-
-    def _install_stubs(self):
-        self.calls = []
-        unit_states = {}
-
-        def fake_systemctl(unit, action, rc=0, out="active"):
-            self.calls.append(f"systemctl {action} {unit}")
-            if action == "stop":
-                unit_states[unit] = "inactive"
-                return (0, "")
-            elif action in ("start", "restart"):
-                unit_states[unit] = "active"
-                return (0, "")
-            elif action == "is-active":
-                state = unit_states.get(unit, "active")
-                return (0, "active\n") if state == "active" else (3, "inactive\n")
-            return rc, out
-
-        def fake_status(bin_, cfg, timeout=30):
-            self.calls.append("updater status")
-            return 0, "Up to date"
-
-        self.sys_patcher = unittest.mock.patch.object(
-            flexserverctl, "run_systemctl",
-            lambda args, timeout=30: (
-                fake_systemctl(args[-1], args[0]) if len(args) > 1 else (0, "")
-            ),
-        )
-        self.sys_patcher.start()
-        self.addCleanup(self.sys_patcher.stop)
+        # Stub systemctl before anything can invoke it; _do_systemd_cutover_locked
+        # only reaches the unit manager through run_systemctl.
+        def _no_systemctl(args, timeout=30):
+            self.calls.append(f"systemctl {args[0]} {args[-1] if len(args) > 1 else ''}")
+            return (0, "")
+        p = unittest.mock.patch.object(flexserverctl, "run_systemctl", _no_systemctl)
+        p.start()
+        self.addCleanup(p.stop)
 
     def _patch_ctl(self, actions=None):
-        """actions: {('vps-updater.service','restart'): (rc,out), ...}"""
+        """actions: {('vps-manager-agent.service','restart'): (rc,out), ...}"""
         actions = actions or {}
         unit_states = {}
 
@@ -931,7 +681,6 @@ class TestSystemdCutover(LinuxGuard):
         p.start()
         self.addCleanup(p.stop)
 
-
     def test_ordering_stop_before_preflight_restart_after(self):
         self._patch_ctl({})
         p = unittest.mock.patch.object(
@@ -940,29 +689,16 @@ class TestSystemdCutover(LinuxGuard):
         )
         p.start()
         self.addCleanup(p.stop)
-        p2 = unittest.mock.patch.object(
-            flexserverctl, "updater_local_proof",
-            lambda *a, **k: ("updater-process-observed", "job=1 phase=done"),
-        )
-        p2.start()
-        self.addCleanup(p2.stop)
         rc = flexserverctl.do_systemd_cutover("https://new.flexserver.tech")
         self.assertEqual(rc, 0)
         stop_idx = self.calls.index("systemctl stop vps-manager-agent.service")
         restart_idx = self.calls.index("systemctl restart vps-manager-agent.service")
         self.assertLess(stop_idx, restart_idx)
-        # The updater must be stopped before the guard re-check, and restarted
-        # afterwards; the agent's restart is the last unit action.
-        self.assertLess(
-            self.calls.index("systemctl stop vps-updater.service"), stop_idx
-        )
         with open(self.agent_cfg) as fh:
             self.assertEqual(json.load(fh)["backendUrl"], "https://new.flexserver.tech")
-        with open(self.updater_cfg) as fh:
-            self.assertEqual(json.load(fh)["apiBase"], "https://new.flexserver.tech")
         self.assertFalse(os.path.exists(self.agent_cfg + BAK))
 
-    def test_restart_failure_rolls_both_units_back(self):
+    def test_restart_failure_rolls_config_back(self):
         self._patch_ctl({("vps-manager-agent.service", "restart"): (1, "Job failed")})
         p = unittest.mock.patch.object(flexserverctl, "_preflight", lambda b, c: (True, "ok"))
         p.start()
@@ -971,57 +707,13 @@ class TestSystemdCutover(LinuxGuard):
         self.assertEqual(rc, 1)
         with open(self.agent_cfg) as fh:
             self.assertEqual(json.load(fh)["backendUrl"], "https://initial.flexserver.tech")
-        # Both units were restarted (not merely started) onto the restored bytes.
+        # The unit was restarted (not merely started) onto the restored bytes.
         self.assertIn("systemctl stop vps-manager-agent.service", self.calls)
-        self.assertIn("systemctl stop vps-updater.service", self.calls)
         self.assertIn("systemctl restart vps-manager-agent.service", self.calls)
-        self.assertIn("systemctl restart vps-updater.service", self.calls)
-
-    def test_updater_status_failure_rolls_back(self):
-        self._patch_ctl({})
-        with unittest.mock.patch.object(flexserverctl, "run_updater_status",
-                                        lambda *a, **k: (3, "auth denied")):
-            p = unittest.mock.patch.object(flexserverctl, "_preflight", lambda b, c: (True, "ok"))
-            p.start()
-            self.addCleanup(p.stop)
-            rc = flexserverctl.do_systemd_cutover("https://new.flexserver.tech")
-        self.assertEqual(rc, 1)
-        with open(self.agent_cfg) as fh:
-            self.assertEqual(json.load(fh)["backendUrl"], "https://initial.flexserver.tech")
-
-    def test_busy_updater_refuses_before_any_write(self):
-        journal = os.path.join(self.state, "journal.json")
-        with open(journal, "w") as fh:
-            json.dump({"phase": "downloading", "jobId": "j"}, fh)
-        before = open(self.agent_cfg, "rb").read()
-        p = unittest.mock.patch.object(
-            flexserverctl, "_preflight", lambda b, c: (_ for _ in ()).throw(RuntimeError("should not run"))
-        )
-        p.start()
-        self.addCleanup(p.stop)
-        with self.assertRaises(SystemExit) as ctx:
-            flexserverctl.do_systemd_cutover("https://new.flexserver.tech")
-        self.assertEqual(ctx.exception.code, 1)
-        self.assertEqual(open(self.agent_cfg, "rb").read(), before)
-        self.assertFalse(os.path.exists(self.agent_cfg + BAK))
-        self.assertNotIn("preflight", " ".join(self.calls))
-
-    def test_busy_updater_does_not_leave_it_down(self):
-        self._patch_ctl({})
-        busy_calls = [False, True]
-        with unittest.mock.patch.object(
-            flexserverctl,
-            "updater_busy",
-            side_effect=lambda d: (busy_calls.pop(0), "active") if busy_calls else (True, "active"),
-        ):
-            with self.assertRaises(SystemExit):
-                flexserverctl.do_systemd_cutover("https://new.flexserver.tech")
-        self.assertIn("systemctl restart vps-updater.service", self.calls)
 
     def test_health_reject_does_not_write_or_touch_units(self):
         self._patch_ctl({})
         before_agent = open(self.agent_cfg, "rb").read()
-        before_updater = open(self.updater_cfg, "rb").read()
         with unittest.mock.patch.object(
             flexserverctl, "_health_gate", lambda u, timeout=10: (False, "unreachable")
         ):
@@ -1029,17 +721,8 @@ class TestSystemdCutover(LinuxGuard):
                 flexserverctl.do_systemd_cutover("https://bad.flexserver.tech")
             self.assertEqual(ctx.exception.code, 1)
         self.assertEqual(open(self.agent_cfg, "rb").read(), before_agent)
-        self.assertEqual(open(self.updater_cfg, "rb").read(), before_updater)
         self.assertFalse(os.path.exists(self.agent_cfg + BAK))
-        self.assertFalse(os.path.exists(self.updater_cfg + BAK))
         self.assertEqual(self.calls, [])
-
-    def test_corrupt_journal_refuses(self):
-        with open(os.path.join(self.state, "journal.json"), "w") as fh:
-            fh.write("{corrupt")
-        self._patch_ctl({})
-        with self.assertRaises(SystemExit):
-            flexserverctl.do_systemd_cutover("https://new.flexserver.tech")
 
     def test_lock_contention_refuses(self):
         os.makedirs(self.lock_path)
@@ -1085,7 +768,6 @@ class TestUserCutover(LinuxGuard):
                 "FLEXSERVERCTL_HOME": self.home,
                 "FLEXSERVERCTL_AGENT_BIN": self.agent_bin,
                 "FLEXSERVERCTL_PROC_ROOT": os.path.join(self.tmp, "proc"),
-                "FLEXSERVERCTL_JOURNALCTL_BIN": "false",
             },
         )
         self.env.start()
@@ -1105,10 +787,6 @@ class TestUserCutover(LinuxGuard):
     def test_explicit_override_wins_over_user_default(self):
         with unittest.mock.patch.dict(os.environ, {"FLEXSERVERCTL_AGENT_BIN": "/opt/x"}):
             self.assertEqual(flexserverctl.user_agent_bin_path(), "/opt/x")
-
-    def test_systemd_binary_default_unchanged(self):
-        os.environ.pop("FLEXSERVERCTL_AGENT_BIN", None)
-        self.assertEqual(flexserverctl.agent_bin_path(), flexserverctl.AGENT_BINARY)
 
     def test_user_cutover_uses_user_binary(self):
         with unittest.mock.patch.object(flexserverctl, "_health_gate", lambda u, timeout=10: (True, "ok")), \
@@ -1328,16 +1006,9 @@ class TestCliSurface(LinuxGuard):
         args = parser.parse_args(["set-backend", "--url=https://flexserver.tech"])
         self.assertEqual(args.url_opt, "https://flexserver.tech")
 
-    def test_validate_url_updater_flag(self):
-        parser = flexserverctl.build_parser()
-        args = parser.parse_args(["validate-url", "--updater", "https://flexserver.tech"])
-        self.assertTrue(args.updater)
-
     def test_validate_url_command(self):
         self.assertEqual(flexserverctl.main(["validate-url", "https://flexserver.tech"]), 0)
-        self.assertEqual(
-            flexserverctl.main(["validate-url", "--updater", "https://flexserver.tech"]), 0
-        )
+        self.assertEqual(flexserverctl.main(["validate-url", "http://127.0.0.1:3000"]), 0)
 
     def test_validate_url_rejects_bad(self):
         self.assertEqual(flexserverctl.main(["validate-url", "http://nonloop.invalid"]), 1)

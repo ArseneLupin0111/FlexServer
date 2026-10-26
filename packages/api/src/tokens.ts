@@ -13,18 +13,12 @@ export const ADMIN_CREDENTIAL_REPOSITORY = Symbol(
 export const HOST_KEY_PIN_REPOSITORY = Symbol("HOST_KEY_PIN_REPOSITORY");
 export const DOCKER_MONITORING_REPOSITORY = Symbol("DOCKER_MONITORING_REPOSITORY");
 export const DOCKER_MANAGEMENT_REPOSITORY = Symbol("DOCKER_MANAGEMENT_REPOSITORY");
-export const LOCAL_UPGRADE_REPOSITORY = Symbol("LOCAL_UPGRADE_REPOSITORY");
 export const SETTINGS_REPOSITORY = Symbol("SETTINGS_REPOSITORY");
 export const LOCAL_FILES_TRANSPORT = Symbol("LOCAL_FILES_TRANSPORT");
 export const REMOTE_FILES_TRANSPORT = Symbol("REMOTE_FILES_TRANSPORT");
 export const AI_REPOSITORY = Symbol("AI_REPOSITORY");
 export const FLEET_REPOSITORY = Symbol("FLEET_REPOSITORY");
 export const FLEET_SERVICE = Symbol("FLEET_SERVICE");
-export const FLEET_PROVISIONING_SERVICE = Symbol("FLEET_PROVISIONING_SERVICE");
 /** Injectable SSH boundary for AI bundle installs (execmode plan slice 3b);
  * default binding is SshAiBundleInstallTransport. */
 export const AI_BUNDLE_TRANSPORT = Symbol("AI_BUNDLE_TRANSPORT");
-/** AI-install evidence confirmer (AiInstallConfirmer): proves fresh AI
- * capability/health for an ai-install job. Injected into LocalUpgradeService
- * via this token so the local-upgrade module never imports the ai module. */
-export const AI_INSTALL_CONFIRMER = Symbol("AI_INSTALL_CONFIRMER");

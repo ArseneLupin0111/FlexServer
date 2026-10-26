@@ -88,9 +88,8 @@ export function AgentLifecycleStatus({ vps, jobs, compact = false }: {
   if (vps.kind === "local" || vps.managedBy === "system") {
     // Local host: the persisted lifecycle row can be missing while the local
     // process keeps reporting (the supervisor marks the record seen on every
-    // collect), and the shared LocalAgentUpdate control next to this label
-    // shows the observed version/heartbeat. Never assert "not installed" over
-    // that observation — mirror it instead with the shared observed label.
+    // collect). Never assert "not installed" over a fresh observation -
+    // mirror it with the shared observed label.
     const observed = localAgentLabel(vps.lastSeenAt);
     if (observed === "Online") return <span className="inline-flex items-center gap-1.5 text-xs text-signal" role="status"><CheckCircle2 size={13} aria-hidden="true" />Agent online</span>;
     if (observed === "Offline") return <span className="inline-flex items-center gap-1.5 text-xs text-warn" role="status"><Radio size={13} aria-hidden="true" />Agent offline</span>;

@@ -18,8 +18,8 @@ import { AgentSettingsCard } from "./AgentSettingsCard";
  *
  * Two global toggles (web terminal, command guard) carry the actions; the
  * always-visible root-session warning keeps the safety boundary explicit and
- * the technical caveats stay in a native disclosure. Host-specific agent
- * update controls arrive as children and render directly below.
+ * the technical caveats stay in a native disclosure. The host-scoped Agent
+ * card renders below when a vpsId is provided.
  */
 function ToggleRow({
   icon,
@@ -81,13 +81,11 @@ function ToggleRow({
 export function SettingsPanel({
   overview,
   vpsId,
-  children,
 }: {
   overview: DashboardOverview;
   /** When set (per-VPS workspace), the host-scoped Agent card renders below
    * the global Terminal & safety controls. */
   vpsId?: string;
-  children?: ReactNode;
 }) {
   const dashboard = useDashboard();
   const [pending, setPending] = useState(false);
@@ -254,9 +252,6 @@ export function SettingsPanel({
       {/* Per-host Agent card (AI policy, execution mode, bundle). Loads its
           own data lazily so the rest of the page never waits on it. */}
       {vpsId ? <AgentSettingsCard vpsId={vpsId} /> : null}
-
-      {/* Agent updates (host-specific panel directly below the global controls) */}
-      {children ? <div className="space-y-4">{children}</div> : null}
     </div>
   );
 }

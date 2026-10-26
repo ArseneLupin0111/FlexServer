@@ -1,6 +1,11 @@
 import { expect, it } from "vitest";
 import { AgentInstallerService } from "../src/agents/agent-installer.service.js";
 import { AgentLifecycleCoordinator } from "../src/agents/agent-lifecycle-coordinator.js";
+import { BundledAgentService } from "../src/local-upgrade/bundled-agent.service.js";
+import type { AppConfig } from "../src/config/app-config.js";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentState, AgentCredential } from "../src/agents/agent.models.js";
 
 async function installScenario(mode: "new" | "none" | "old") {
@@ -9,6 +14,9 @@ async function installScenario(mode: "new" | "none" | "old") {
   let task!: (ctx: unknown) => Promise<void>;
   let succeeded = false;
   let rolledBack = false;
+  const binDir = mkdtempSync(join(tmpdir(), "readiness-installer-"));
+  const amd64Path = join(binDir, "vps-agent-linux-amd64");
+  writeFileSync(amd64Path, buildElf("a".repeat(40), "1.2.3", "amd64"));
   const ssh = {
     makeDirectory: async () => {}, uploadFile: async () => {},
     execCommand: async (_v: unknown, command: string) => {
@@ -20,8 +28,9 @@ async function installScenario(mode: "new" | "none" | "old") {
     },
   };
   const service = new AgentInstallerService(...([
-    { agentPublicBaseUrl: "https://unreachable.invalid", agentBinaryPath: "package.json", agentInstallIntervalSeconds: 15 },
+    { agentPublicBaseUrl: "https://unreachable.invalid", agentInstallIntervalSeconds: 15 },
     ssh,
+    new BundledAgentService({ agentBinaryPath: amd64Path } as unknown as AppConfig),
     { createCredential: async () => ({ credential, token: "probe" }) },
     { getState: async () => state, upsertState: async (s: AgentState) => (state = s),
       getCredential: async () => credential, revokeCredential: async () => { credential.status = "revoked"; } },
@@ -58,4 +67,70 @@ it("preserves real ingest identity on successful installation", async () => {
   expect(result.succeeded).toBe(true);
   expect(result.state).toMatchObject({ status: "online", version: "1.2.3", buildId: "a".repeat(40) });
   expect(result.state?.lastSeenAt).toBe(result.credential.lastUsedAt);
+});
+
+function buildElf(buildId: string, version: string, arch: "amd64" | "arm64"): Buffer {
+  const buf = Buffer.alloc(128);
+  buf[0] = 0x7f; buf[1] = 0x45; buf[2] = 0x4c; buf[3] = 0x46; // ELF magic
+  buf[4] = 2; // ELFCLASS64
+  buf[5] = 1; // little-endian
+  buf[7] = 0; // System V OS ABI
+  buf.writeUInt16LE(arch === "arm64" ? 0xb7 : 0x3e, 18);
+  buf.write(`version.Build=${buildId}\0`, 64);
+  buf.write(`version.Value=${version}\0`, 96);
+  return buf;
+}
+
+it("uploads the arm64 binary bytes for an arm64 host, not the amd64 artifact", async () => {
+  const uploads: { path: string; content: unknown }[] = [];
+  const buildId = "b".repeat(40);
+  const arm64Bytes = buildElf(buildId, "1.2.3", "arm64");
+  const amd64Bytes = buildElf(buildId, "1.2.3", "amd64");
+  const binDir = mkdtempSync(join(tmpdir(), "arm64-installer-"));
+  writeFileSync(join(binDir, "vps-agent-linux-amd64"), amd64Bytes);
+  writeFileSync(join(binDir, "vps-agent-linux-arm64"), arm64Bytes);
+  let state: AgentState | undefined;
+  const credential = { id: "new", status: "pending" } as AgentCredential;
+  let task!: (ctx: unknown) => Promise<void>;
+  const ssh = {
+    makeDirectory: async () => {},
+    uploadFile: async (_v: unknown, path: string, content: unknown) => {
+      uploads.push({ path, content });
+    },
+    execCommand: async (_v: unknown, command: string) => {
+      return { stdout: command === "echo $HOME" ? "/home/audit" :
+        command.includes("uname -m") ? "aarch64" :
+        command.startsWith("if mkdir") ? "acquired" :
+        command.includes("owned:") ? "none" : "" };
+    },
+  };
+  const bundled = new BundledAgentService({ agentBinaryPath: join(binDir, "vps-agent-linux-amd64") } as AppConfig);
+  const service = new AgentInstallerService(...([
+    { agentPublicBaseUrl: "https://unreachable.invalid", agentInstallIntervalSeconds: 15 },
+    ssh,
+    bundled,
+    { createCredential: async () => ({ credential, token: "probe" }) },
+    { getState: async () => state, upsertState: async (s: AgentState) => (state = s),
+      getCredential: async () => credential, revokeCredential: async () => { credential.status = "revoked"; } },
+    { get: async () => ({ id: "audit", host: "203.0.113.1", port: 22, username: "audit", keyProvisionedAt: "now" }) },
+    { readPrivateKey: async () => "key" }, { record: async () => {} },
+    { start: (_job: unknown, fn: typeof task) => { task = fn; } },
+    { create: async () => ({ id: "job" }) }, new AgentLifecycleCoordinator(),
+    { intervalMs: 1, timeoutMs: 3, sleep: async () => {
+      credential.status = "active"; credential.lastUsedAt = new Date().toISOString();
+      state = { vpsId: "audit", status: "online", version: "1.2.3", buildId, lastSeenAt: new Date().toISOString() };
+    } },
+  ] as unknown as ConstructorParameters<typeof AgentInstallerService>));
+  try {
+    await service.install("audit", undefined, undefined);
+    await task({ update: async () => {}, succeed: async () => {} });
+  } finally {
+    rmSync(binDir, { recursive: true, force: true });
+  }
+  const uploaded = uploads.find((u) => u.path.includes("vps-agent.stage-"));
+  expect(uploaded).toBeDefined();
+  expect(uploaded!.content).toEqual(arm64Bytes);
+  // amd64 bytes were on disk in the same fixture dir and would have been
+  // uploaded had the installer blindly reused the configured amd64 path.
+  expect(Buffer.compare(amd64Bytes, arm64Bytes)).not.toBe(0);
 });

@@ -12,7 +12,6 @@ import {
 import { DashboardSessionGuard } from "../auth/dashboard-session.guard.js";
 import { OriginGuard } from "../auth/origin-guard.js";
 import { FleetService } from "./fleet.service.js";
-import { AgentConvergenceService } from "../local-upgrade/agent-convergence.service.js";
 import type { FleetManifestEnvelope } from "./fleet.models.js";
 import {
   controlRolloutSchema,
@@ -23,16 +22,13 @@ import {
 @Controller("api/agent-updates")
 export class AgentUpdatesController {
   constructor(
-    @Inject(AgentConvergenceService)
-    private readonly convergence: AgentConvergenceService,
     @Inject(FleetService)
     private readonly service: FleetService,
   ) {}
 
   @Get()
   async getOverview() {
-    const hosts = await this.convergence.listAgentUpdates();
-    return { data: { hosts } };
+    return { data: await this.service.getOverview() };
   }
   @Post("rollouts")
   async createRollout(@Body() rawBody: unknown) {

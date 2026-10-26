@@ -252,6 +252,7 @@ Mỗi step gồm `stepId`, tool/version, exact normalized args, resource keys, i
 ### 5.2 Bảo vệ Flexserver
 
 Danh mục protected resources do deployment/admin cấu hình ngoài AI, kết hợp identity thực: API/DB/agent/executor/helper/updater units, container IDs/opaque identity mapping, compose projects, credential/keyring/state paths, sockets, shared volumes và runtime dependencies. Tên container đơn thuần không đủ.
+(2026-10-26 cập nhật: unit updater legacy đã bị gỡ khỏi kiến trúc cutover — danh mục bảo vệ hiện thời chỉ còn API/DB/agent/executor/helper units.)
 
 Từ chối mutation cả thao tác gián tiếp (Compose apply/removal, config reload liên quan, parent path writes) vào tài nguyên được bảo vệ. Target chưa phân loại được → deny mutation. Người dùng vẫn có thể quản trị ngoài AI; không cho nút approval vượt quy tắc này.
 
@@ -399,7 +400,7 @@ Lỗi ổn định: `ai_disabled`, `provider_unavailable`, `provider_revision_ch
 
 Routes tách Docker: `/api/agent/ai/claim`, `/heartbeat`, `/result`, `/output`, `/cancel-status` (định dạng REST cuối cùng theo convention implementation). Versioned envelope có strict schema ở TypeScript và Go; `protocolVersion`, `taskId`, `stepId`, `commandId`, `agentInstanceId`, `payloadDigest`, `policyRevision`, `expiresAt`, `limits`, typed operation.
 
-- Dùng bearer credential được xác minh và bind VPS server-side; không tin vpsId trong body. Nếu thêm scope `ai-execution`, migrate token issuance và verifier rõ ràng; không dùng updater credential.
+- Dùng bearer credential được xác minh và bind VPS server-side; không tin vpsId trong body. Nếu thêm scope `ai-execution`, migrate token issuance và verifier rõ ràng; không dùng updater credential (2026-10-26 cutover: scope updater legacy bị xóa cùng updater daemon — token issuer mới riêng, không kế thừa updater credential).
 - Command envelope phải gắn chính xác approval đã consumed và identity. Host broker kiểm tra fixed schema/profile, không chỉ tin model input qua transport.
 - Heartbeat thể hiện liveness, không chứng minh side effect thành công. Deadline bằng wall-clock có skew guard, elapsed execution bằng monotonic timer.
 - Lease expiry không tái thực thi command với marker. Result report duplicate có cùng digest trả ack cũ; conflict bị từ chối.

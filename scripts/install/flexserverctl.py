@@ -2,22 +2,21 @@
 """flexserverctl - safe backend URL cutover for the vps-manager stack.
 
 Standalone, stdlib-only Python 3 CLI for Linux. Switches the backend URL for
-the local agent (and the local updater when installed) without rotating
-credentials, validates both configs, probes health without sending secrets,
-performs one ordered transaction, verifies actual delivery rather than mere
-service liveness, and rolls back byte-for-byte with an explicit outcome.
+the local agent without rotating credentials, validates the config, probes
+health without sending secrets, performs one ordered transaction, verifies
+actual delivery rather than mere service liveness, and rolls back byte-for-byte
+with an explicit outcome.
 
 Usage:
   flexserverctl help
   flexserverctl set-backend <URL> [--mode auto|systemd|user] [--dry-run]
   flexserverctl set-backend --url <URL> [--mode auto|systemd|user] [--dry-run]
-  flexserverctl validate-url <URL> [--updater]
+  flexserverctl validate-url <URL>
 
 Modes:
   auto     (default) pick systemd when running as root with a systemd agent
            install present, else user mode when ~/.vps-manager-agent exists.
-  systemd  rewrite /etc/vps-manager-agent/config.json (backendUrl) and, when
-           installed, /etc/vps-updater/config.json (apiBase) to the same URL.
+  systemd  rewrite /etc/vps-manager-agent/config.json (backendUrl) only.
   user     rewrite ~/.vps-manager-agent/config.json (backendUrl) only.
 
 Transaction (both modes), in this exact order:
@@ -29,25 +28,19 @@ Transaction (both modes), in this exact order:
 
 Guarantees:
   * A loop and a -once preflight never run concurrently.
-  * No cutover runs while an updater job shows ANY evidence of activity. Such
-    evidence makes the cutover refuse before any mutation, and the updater is
-    never stopped or coordinated by this tool.
   * Tokens (vma_...) are never printed; config contents are never logged.
   * Health is probed with a credential-free GET <url>/api/health: system TLS
     verification, no redirect followed, bounded timeout and body size, and a
     required {"ok": true} body shape.
-  * http is accepted only for loopback hosts (agent config); the updater
-    apiBase must stay https.
+  * http is accepted only for loopback hosts (agent config).
   * No host is allow- or deny-listed by name. Any syntactically valid https URL
     is accepted here; DNS/TLS/auth failures surface in the health probe and
     never bypass it.
   * Process identity uses /proc exe + cwd + full argv + starttime; there is no
     pkill/killall anywhere, and a kill is only ever issued against a process
     whose full identity was verified first.
-  * The updater is verified from local state only (status -config, journal.json,
-    helper/journal.json, pending/). No claim endpoint is ever called, and idle
-    journal silence is never reported as authenticated delivery.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -69,20 +62,17 @@ import urllib.parse
 import urllib.request
 
 AGENT_CONFIG_PATH = "/etc/vps-manager-agent/config.json"
-UPDATER_CONFIG_PATH = "/etc/vps-updater/config.json"
 AGENT_BINARY = "/usr/local/bin/vps-manager-agent"
-UPDATER_BINARY = "/usr/local/lib/vps-manager-agent/vps-updater"
 AGENT_UNIT = "vps-manager-agent.service"
-UPDATER_UNIT = "vps-updater.service"
 USER_AGENT_DIR = ".vps-manager-agent"
 USER_CONFIG_NAME = "config.json"
 USER_PID_NAME = "vps-agent.pid"
 LIFECYCLE_LOCK_NAME = "lifecycle.lock"
 SYSTEMD_LOCK_NAME = "flexserverctl.lock"
-UPDATER_STATE_DIR = "/var/lib/vps-updater"
 RUN_LOCK_DIR = "/run/vps-manager-agent"
+
+
 SYSTEMCTL_BIN = "systemctl"
-JOURNALCTL_BIN = "journalctl"
 TOKEN_RE = re.compile(r"vma_[A-Za-z0-9_\-]+")
 HEALTH_TIMEOUT = 10
 HEALTH_MAX_BYTES = 64 * 1024
@@ -113,14 +103,13 @@ Usage:
   flexserverctl help
   flexserverctl set-backend <URL> [--mode auto|systemd|user] [--dry-run]
   flexserverctl set-backend --url <URL> [--mode auto|systemd|user] [--dry-run]
-  flexserverctl validate-url <URL> [--updater]
+  flexserverctl validate-url <URL>
 
 Commands:
   set-backend <URL>   Cut the local backend URL over atomically. When --dry-run
                       is given, nothing is written and no service is touched.
   validate-url <URL>  Validate a URL with zero side effects. Exit 0 when the
-                      URL is acceptable, exit 1 otherwise. --updater applies
-                      the stricter https-only updater apiBase rule.
+                      URL is acceptable, exit 1 otherwise.
   help                Print this text.
 
 Options:
@@ -129,7 +118,6 @@ Options:
                              the user install; it fails when neither exists.
   --dry-run                  Validate and probe health only. No write, no stop,
                              no start, no backup file.
-  --updater                  (validate-url only) require https.
 
 Outcomes:
   applied-with-heartbeat-confirmation-required
@@ -239,18 +227,6 @@ def agent_config_path() -> str:
     return _env_path("FLEXSERVERCTL_AGENT_CONFIG", AGENT_CONFIG_PATH)
 
 
-def updater_config_path() -> str:
-    return _env_path("FLEXSERVERCTL_UPDATER_CONFIG", UPDATER_CONFIG_PATH)
-
-
-def agent_bin_path() -> str:
-    return _env_path("FLEXSERVERCTL_AGENT_BIN", AGENT_BINARY)
-
-
-def updater_bin_path() -> str:
-    return _env_path("FLEXSERVERCTL_UPDATER_BIN", UPDATER_BINARY)
-
-
 def user_agent_bin_path() -> str:
     """Default user-mode agent binary.
 
@@ -268,9 +244,6 @@ def user_agent_bin_path() -> str:
 def systemctl_bin() -> str:
     return _env_path("FLEXSERVERCTL_SYSTEMCTL_BIN", SYSTEMCTL_BIN)
 
-
-def journalctl_bin() -> str:
-    return _env_path("FLEXSERVERCTL_JOURNALCTL_BIN", JOURNALCTL_BIN)
 
 
 def systemd_present() -> bool:
@@ -336,13 +309,6 @@ def validate_backend_url(raw: str) -> str:
     return normalized
 
 
-def validate_updater_apibase(raw: str) -> str:
-    normalized = validate_backend_url(raw)
-    if urllib.parse.urlsplit(normalized).scheme.lower() != "https":
-        raise ValueError("updater apiBase must stay https")
-    return normalized
-
-
 # --- config schema validation ---------------------------------------------
 
 AGENT_REQUIRED_KEYS = (
@@ -352,7 +318,6 @@ AGENT_REQUIRED_KEYS = (
     "intervalSeconds",
     "requestTimeoutSeconds",
 )
-UPDATER_REQUIRED_KEYS = ("apiBase", "credential")
 
 
 def validate_agent_config(cfg) -> dict:
@@ -376,32 +341,6 @@ def validate_agent_config(cfg) -> dict:
     validate_backend_url(str(cfg["backendUrl"]))
     return cfg
 
-
-def validate_updater_config(cfg) -> dict:
-    """Mirror packages/agent/internal/updater/config.go NormalizeAndValidate()."""
-    if not isinstance(cfg, dict):
-        raise ValueError("updater config must be a JSON object")
-    for key in UPDATER_REQUIRED_KEYS:
-        if cfg.get(key) in (None, ""):
-            raise ValueError(f"updater config is missing required key {key!r}")
-    validate_updater_apibase(str(cfg["apiBase"]))
-    if not str(cfg["credential"]).startswith("vma_"):
-        raise ValueError("updater config credential must be a scoped vma_ bearer")
-    pinned_key = cfg.get("pinnedPublicKey")
-    if pinned_key:
-        try:
-            decoded = base64.b64decode(str(pinned_key), validate=True)
-        except Exception as exc:
-            raise ValueError(f"updater config pinnedPublicKey is not valid base64: {exc}") from exc
-        if len(decoded) != 32:
-            raise ValueError(
-                "updater config pinnedPublicKey must decode to a 32-byte Ed25519 key, "
-                f"got {len(decoded)} bytes"
-            )
-    state_dir = cfg.get("stateDir")
-    if state_dir is not None and (not isinstance(state_dir, str) or not os.path.isabs(state_dir)):
-        raise ValueError("updater config stateDir must be an absolute path")
-    return cfg
 
 
 # --- config writing: snapshot, atomic replace, verified restore ------------
@@ -930,16 +869,6 @@ def run_agent_once(agent_bin: str, config: str, state_path: str, timeout=PREFLIG
     argv = [agent_bin, CONFIG_FLAG, config, "-state", state_path, "-once", "-host-only"]
     return run_cmd(argv, timeout=timeout)
 
-def run_updater_status(updater_bin: str, config_path: str, timeout=30):
-    return run_cmd([updater_bin, "status", CONFIG_FLAG, config_path], timeout=timeout)
-
-
-def journalctl_since(unit: str, since: str, timeout=30):
-    return run_cmd(
-        [journalctl_bin(), "-u", unit, "--since", since, "--no-pager", "-o", "cat"],
-        timeout=timeout,
-    )
-
 
 # --- process ownership, stop, transactional start -------------------------
 
@@ -1171,211 +1100,6 @@ def start_transactional_loop(exe: str, config: str, pid_file: str, cwd: str = ""
     return spawn_verified_loop(exe, config, pid_file, cwd, argv=argv)
 
 
-# --- updater: local-state proof + in-flight guard (never orchestrate it) ----
-
-
-def _read_json_state(path: str):
-    """Read a JSON state file. Returns (present, object).
-
-    `present` is True whenever the file exists, even if unparseable: an
-    unparseable state file is evidence of an in-flight or interrupted
-    transaction and must never be mistaken for absence (fail closed).
-    """
-    if not os.path.exists(path):
-        return False, None
-    try:
-        with open(path, "rb") as fh:
-            return True, json.loads(fh.read().decode("utf-8"))
-    except Exception:
-        return True, None
-
-
-def updater_journal(state_dir: str):
-    return _read_json_state(os.path.join(state_dir, "journal.json"))
-
-
-def helper_journal(state_dir: str):
-    return _read_json_state(os.path.join(state_dir, "helper", "journal.json"))
-
-
-def pending_entries(state_dir: str):
-    """Names of entries under <stateDir>/pending. Returns (present, names).
-
-    An unreadable pending directory is an error, not an empty queue: a
-    permission or I/O failure must fail closed so a cutover is never allowed
-    to proceed while its state cannot be inspected.
-    """
-    pending = os.path.join(state_dir, "pending")
-    if not os.path.exists(pending):
-        return False, []
-    try:
-        return True, sorted(os.listdir(pending))
-    except OSError:
-        return True, ["<unreadable>"]
-
-
-# Daemon journal phases (packages/agent/internal/updater/journal.go). A present
-# daemon journal is in-flight BY CONSTRUCTION: Daemon.Run consumes it only after
-# the server's terminal ruling, and the "terminal" phase coexists with
-# outcome=hold / rollback_unverified plus retained backups, so a terminal record
-# may still await a ruling. A present daemon journal therefore always refuses.
-#
-# Helper journal phases (packages/agent/internal/updater/helper.go) are
-# different in kind: handleCleanup deletes that journal only best-effort, so a
-# job the server already ruled on routinely leaves a settled record behind. Only
-# "intent" and "renamed" describe a bounded privileged mutation that has not
-# finished; "restarted" and "rolled_back" mean the swap is over and reconciled.
-HJ_IN_FLIGHT_PHASES = {"intent", "renamed"}
-HJ_SETTLED_PHASES = {"restarted", "rolled-back", "rolledback"}
-
-
-def _phase_present(journal) -> bool:
-    """A non-empty journal is present; a present-but-unparseable one is too."""
-    return isinstance(journal, dict) and bool(journal)
-
-
-def _normalise_phase(value) -> str:
-    return str(value or "").strip().lower().replace("_", "-")
-
-def _journal_phase(journal) -> str:
-    """Phase of either journal shape; both use a phase/state/stage key."""
-    if not isinstance(journal, dict):
-        return ""
-    for key in ("phase", "state", "stage"):
-        if journal.get(key):
-            return _normalise_phase(journal[key])
-    return ""
-
-def _journal_job(journal) -> str:
-    if not isinstance(journal, dict):
-        return ""
-    return str(journal.get("jobId") or journal.get("job") or "")
-
-
-
-def updater_busy(state_dir: str):
-    """Return (busy, detail) for local updater evidence of active work.
-
-    The daemon journal and the helper journal have different lifetimes, so they
-    are judged differently:
-
-    * A present daemon journal is always in-flight: `Daemon.Run` removes it only
-      after the server's terminal ruling, and the "terminal" phase coexists with
-      `outcome=hold` / `rollback_unverified` and retained backups.
-    * The helper journal is durable after a settled job. `handleCleanup` deletes
-      it only best-effort, so a job the server already ruled on routinely leaves
-      a settled "restarted" or "rolled_back" record behind; with no daemon
-      journal and no pending entries that is quiescent, not busy. Only the
-      bounded mutation phases "intent" and "renamed" are in-flight.
-
-    Anything unreadable, unrecognised, or otherwise unjudgeable fails closed.
-    The caller refuses before any config mutation and never stops or coordinates
-    the updater's own transaction.
-    """
-    if not state_dir or not os.path.isdir(state_dir):
-        return False, ""
-
-    journal_present, journal = updater_journal(state_dir)
-    if journal_present:
-        if journal is None:
-            return True, "updater journal exists but cannot be parsed (fail closed)"
-        if not _phase_present(journal):
-            return True, "updater journal is present but not an object (fail closed)"
-        return True, (
-            f"updater journal has phase {_journal_phase(journal) or 'unknown'!r} "
-            f"(job {_journal_job(journal) or 'unknown'}); a present daemon "
-            "journal means a job is still being driven and may await a ruling"
-        )
-
-    pending_present, pending = pending_entries(state_dir)
-    if pending:
-        return True, (
-            f"updater pending queue holds {len(pending)} "
-            f"entr{'y' if len(pending) == 1 else 'ies'}"
-        )
-
-    helper_present, helper = helper_journal(state_dir)
-    if helper_present:
-        if helper is None:
-            return True, "updater helper journal exists but cannot be parsed (fail closed)"
-        if not isinstance(helper, dict) or not helper:
-            return True, "updater helper journal is present but empty (fail closed)"
-        phase = _journal_phase(helper)
-        job = _journal_job(helper) or "unknown"
-        if phase in HJ_IN_FLIGHT_PHASES:
-            return True, (
-                f"updater helper journal is mid-swap with phase {phase!r} "
-                f"(job {job}); the privileged swap has not finished, so its "
-                "transaction is not reconciled"
-            )
-        if phase not in HJ_SETTLED_PHASES:
-            return True, (
-                f"updater helper journal has unrecognised phase {phase!r} "
-                f"(job {job}); fail closed"
-            )
-        # `handleCleanup` removes the helper journal best-effort, so a job the
-        # server already ruled on routinely leaves a settled record behind.
-        return False, (
-            f"updater helper journal records settled phase {phase!r} (job {job}); "
-            "no daemon journal and no pending entries, so it is quiescent"
-        )
-
-    return False, ""
-
-
-def updater_local_proof(state_dir: str, updater_bin: str, updater_cfg: str):
-    """Verify the updater from local state only.
-
-    Returns (state, detail). States:
-      updater-process-observed  the journal/pending/helper trace exists (the
-                                strongest local proof available to us).
-      updater-status-failed     `status -config` exited non-zero.
-      updater-proof-unavailable nothing observable locally (idle, absent).
-
-    `status -config` is liveness only. Idle journal silence is NEVER reported
-    as authenticated delivery, and no claim endpoint is ever called.
-    """
-    try:
-        rc, out = run_updater_status(updater_bin, updater_cfg)
-    except Exception as exc:
-        return "updater-proof-unavailable", f"status unavailable: {redact(str(exc))}"
-
-    journal_present, journal = updater_journal(state_dir)
-    _, helper = helper_journal(state_dir)
-    pending_present, pending = pending_entries(state_dir)
-
-    if rc != 0:
-        detail = f"status rc={rc}; journal:{'present' if journal_present else 'absent'}"
-        if out:
-            detail += f"; output={redact(' '.join(out.split()))[:DETAIL_LIMIT]}"
-        return "updater-status-failed", detail
-
-    parts = []
-    if _phase_present(journal):
-        job = journal.get("jobId") or journal.get("job")
-        phase = journal.get("phase") or journal.get("state")
-        if job:
-            parts.append(f"job={job}")
-        if phase:
-            parts.append(f"phase={phase}")
-        parts.append("journal:present")
-    elif journal_present:
-        parts.append("journal:unparseable")
-    if _phase_present(helper):
-        job = _journal_job(helper)
-        phase = _journal_phase(helper)
-        label = f"helper-job={job}" if job else "helper:present"
-        if phase:
-            # Report whether the settled helper record is quiescent or mid-swap.
-            label += f",phase={phase}"
-            label += ",quiescent" if phase in HJ_SETTLED_PHASES else ",in-flight"
-        parts.append(label)
-    if pending:
-        parts.append(f"pending={len(pending)}")
-    if not parts:
-        parts.append("journal:absent")
-    return "updater-process-observed", "; ".join(parts)
-
 
 # --- cutover transaction --------------------------------------------------
 
@@ -1424,22 +1148,13 @@ def _health_gate(url: str):
     return health_probe(url)
 
 
-def _rollback(agent_cfg, agent_backup, agent_identity, updater_cfg, updater_backup, updater_identity):
-    """Best-effort rollback. Returns True only when every restore verified.
+def _rollback(agent_cfg, agent_backup, agent_identity):
+    """Best-effort rollback. Returns True only when the restore verified.
 
     Identities are captured before the write, so a rollback restores the
     original owner/mode rather than whatever the interrupted write left.
     """
     ok = True
-    if updater_cfg and updater_backup is not None:
-        try:
-            restore_backup_with_identity(updater_cfg, updater_identity)
-            if not _verify_restore(updater_cfg, updater_backup):
-                ok = False
-                eprint(f"post-restore verification failed for {updater_cfg}")
-        except Exception as exc:
-            ok = False
-            eprint(f"restore of {updater_cfg} failed: {redact(str(exc))}")
     try:
         restore_backup_with_identity(agent_cfg, agent_identity)
         if not _verify_restore(agent_cfg, agent_backup):
@@ -1451,47 +1166,6 @@ def _rollback(agent_cfg, agent_backup, agent_identity, updater_cfg, updater_back
     return ok
 
 
-def do_systemd_cutover(new_url: str, dry_run: bool = False) -> int:
-    """systemd-mode cutover. Returns an exit code.
-
-    Ordering closes the TOCTOU window: the systemd lock guards concurrent CLI
-    invocations, then (when an updater exists) the updater daemon is stopped
-    FIRST, the busy guard is re-checked, and only then is the agent unit
-    stopped and any config written. A busy re-check after the daemon stop
-    restarts that daemon before refusing, so a refusal never leaves the updater
-    down and never mutates its state.
-    """
-    assert_linux()
-    new_url = validate_backend_url(new_url)
-    agent_cfg = agent_config_path()
-    updater_cfg = updater_config_path()
-    agent_bin = agent_bin_path()
-    updater_bin = updater_bin_path()
-    has_updater = bool(updater_cfg) and os.path.exists(updater_cfg)
-
-    if dry_run:
-        ok, detail = _health_gate(new_url)
-        if not ok:
-            fail(f"health probe refused {new_url}: {detail}")
-        if has_updater:
-            try:
-                validate_updater_apibase(new_url)
-            except ValueError as exc:
-                fail(str(exc))
-        print("dry-run: no changes applied")
-        return 0
-
-    lock = LifecycleLock(systemd_lock_path())
-    if not lock.acquire():
-        fail(f"another lifecycle operation holds {systemd_lock_path()}")
-    try:
-        return _do_systemd_cutover_locked(
-            new_url, agent_cfg, updater_cfg, agent_bin, updater_bin, has_updater
-        )
-    finally:
-        lock.release()
-
-
 def _stopped_units_recover(units) -> None:
     """Best-effort restart of every unit we stopped, on a failure path."""
     for unit in units:
@@ -1499,57 +1173,51 @@ def _stopped_units_recover(units) -> None:
         run_systemctl(["restart", unit])
 
 
-def _do_systemd_cutover_locked(new_url, agent_cfg, updater_cfg, agent_bin, updater_bin, has_updater):
+def do_systemd_cutover(new_url: str, dry_run: bool = False) -> int:
+    """Run a systemd agent cutover under the CLI's lifecycle lock."""
+    assert_linux()
+    new_url = validate_backend_url(new_url)
+    if dry_run:
+        ok, detail = _health_gate(new_url)
+        if not ok:
+            fail(f"health probe refused {new_url}: {detail}")
+        print("dry-run: no changes applied")
+        return 0
+    lock = LifecycleLock(systemd_lock_path())
+    if not lock.acquire():
+        fail(f"another lifecycle operation holds {systemd_lock_path()}")
+    try:
+        return _do_systemd_cutover_locked(
+            new_url,
+            agent_config_path(),
+            _env_path("FLEXSERVERCTL_AGENT_BIN", AGENT_BINARY),
+        )
+    finally:
+        lock.release()
+
+
+def _do_systemd_cutover_locked(new_url, agent_cfg, agent_bin):
     agent_cfg_data = load_json_file(agent_cfg)
     validate_agent_config(agent_cfg_data)
-    updater_cfg_data = None
-    if has_updater:
-        updater_cfg_data = load_json_file(updater_cfg)
-        validate_updater_config(updater_cfg_data)
 
     ok, detail = _health_gate(new_url)
     if not ok:
         fail(f"health probe refused {new_url}: {detail}")
 
-    if has_updater:
-        busy, why = updater_busy(UPDATER_STATE_DIR)
-        if busy:
-            fail(
-                f"refusing to act: {why}; retry once it finishes, or clear the "
-                "updater journal via your normal upgrade workflow"
-            )
-        # Stop the updater FIRST so it cannot claim a job after the guard.
-        rc, out = run_systemctl(["stop", UPDATER_UNIT])
-        if rc != 0:
-            fail(f"systemctl stop {UPDATER_UNIT} failed rc={rc}: {redact(out.strip())[:200]}")
-        busy, why = updater_busy(UPDATER_STATE_DIR)
-        if busy:
-            # Never leave the updater down after a refusal.
-            run_systemctl(["restart", UPDATER_UNIT])
-            fail(f"refusing to act: {why}; the updater daemon was restarted")
-
     # Everything past this point runs under the transaction: any failure must
-    # either roll back or recover the units we stopped. The identities are
-    # captured inside the protected region so an unreadable stat never leaves
-    # the updater stopped, and so a rollback always restores the true original
-    # owner/mode rather than a fallback.
+    # either roll back or recover the unit we stopped. The identity is captured
+    # inside the protected region so a rollback always restores the true
+    # original owner/mode rather than a fallback.
     try:
         agent_identity = file_identity(agent_cfg)
-        updater_identity = file_identity(updater_cfg) if has_updater else None
         agent_backup = make_backup(agent_cfg)
-        updater_backup = make_backup(updater_cfg) if has_updater else None
     except Exception as exc:
-        # No config was touched; recover the units so we leave nothing broken.
-        _stopped_units_recover([UPDATER_UNIT] if has_updater else [])
         fail(f"cannot snapshot configs: {redact(str(exc))}")
 
     agent_unit = resolve_agent_unit(agent_cfg, agent_cfg_data.get("vpsId", ""))
     rc, out = run_systemctl(["stop", agent_unit])
     if rc != 0:
         hold_backups(agent_cfg)
-        if has_updater:
-            hold_backups(updater_cfg)
-        _stopped_units_recover([UPDATER_UNIT] if has_updater else [])
         fail(f"systemctl stop {agent_unit} failed rc={rc}: {redact(out.strip())[:200]}")
 
     # Prove process exited before proceeding
@@ -1560,18 +1228,13 @@ def _do_systemd_cutover_locked(new_url, agent_cfg, updater_cfg, agent_bin, updat
         time.sleep(0.1)
     else:
         hold_backups(agent_cfg)
-        if has_updater:
-            hold_backups(updater_cfg)
-        _stopped_units_recover([UPDATER_UNIT] if has_updater else [])
+        _stopped_units_recover([agent_unit])
         fail(f"systemctl stop {agent_unit} failed: process still active after stop")
+
     reason = ""
-    rolled_back = False
     try:
         agent_cfg_data["backendUrl"] = new_url
         atomic_write_json(agent_cfg, agent_cfg_data, agent_identity)
-        if has_updater:
-            updater_cfg_data["apiBase"] = new_url
-            atomic_write_json(updater_cfg, updater_cfg_data, updater_identity)
 
         ok, detail = _preflight(agent_bin, agent_cfg)
         if not ok:
@@ -1591,68 +1254,41 @@ def _do_systemd_cutover_locked(new_url, agent_cfg, updater_cfg, agent_bin, updat
                 f"systemctl is-active {agent_unit} reported inactive after restart: "
                 f"{redact(out.strip())[:200]}"
             )
-        if has_updater:
-            rc, out = run_systemctl(["restart", UPDATER_UNIT])
-            if rc != 0:
-                raise RuntimeError(
-                    f"systemctl restart {UPDATER_UNIT} failed rc={rc}: {redact(out.strip())[:200]}"
-                )
-            rc, out = run_systemctl(["is-active", UPDATER_UNIT])
-            if rc != 0:
-                raise RuntimeError(
-                    f"systemctl is-active {UPDATER_UNIT} reported inactive after "
-                    f"restart: {redact(out.strip())[:200]}"
-                )
-            state, upd_detail = updater_local_proof(UPDATER_STATE_DIR, updater_bin, updater_cfg)
-            if state == "updater-status-failed":
-                raise RuntimeError(f"updater verification failed: {redact(upd_detail)}")
-            eprint(f"updater: {state} ({redact(upd_detail)})")
     except Exception as exc:
         reason = redact(str(exc))
-        rollback_ok = _rollback(
-            agent_cfg, agent_backup, agent_identity, updater_cfg, updater_backup, updater_identity
-        )
-        # The restored bytes only take effect once the units are stopped and
+        rollback_ok = _rollback(agent_cfg, agent_backup, agent_identity)
+        # The restored bytes only take effect once the unit is stopped and
         # restarted onto them: a `start` on an already-running unit would leave
         # the loop holding the new URL in memory.
-        recover = [agent_unit] + ([UPDATER_UNIT] if has_updater else [])
-        for unit in recover:
-            run_systemctl(["stop", unit])
+        run_systemctl(["stop", agent_unit])
         recovered = True
-        for unit in recover:
-            run_systemctl(["reset-failed", unit])
-            rc, out = run_systemctl(["restart", unit])
+        run_systemctl(["reset-failed", agent_unit])
+        rc, out = run_systemctl(["restart", agent_unit])
+        if rc != 0:
+            recovered = False
+            eprint(f"warning: restart {agent_unit} failed rc={rc}")
+        else:
+            rc, out = run_systemctl(["is-active", agent_unit])
             if rc != 0:
                 recovered = False
-                eprint(f"warning: restart {unit} failed rc={rc}")
-                continue
-            rc, out = run_systemctl(["is-active", unit])
-            if rc != 0:
-                recovered = False
-                eprint(f"warning: {unit} not active after restart rc={rc}")
-        rolled_back = True
+                eprint(f"warning: {agent_unit} not active after restart rc={rc}")
         if rollback_ok and recovered:
             cleanup_backups(agent_cfg)
-            if has_updater:
-                cleanup_backups(updater_cfg)
             eprint("restored:", reason)
             return 1
         hold_backups(agent_cfg)
-        if has_updater:
-            hold_backups(updater_cfg)
         eprint(
             "rollback-failed:",
             reason,
-            "; configs may not be safely restored and/or the original loops could "
-            "not be restarted onto them, so backups are retained",
+            "; config may not be safely restored and/or the original loop could "
+            "not be restarted onto it, so backups are retained",
         )
         return 1
 
     cleanup_backups(agent_cfg)
-    if has_updater:
-        cleanup_backups(updater_cfg)
     print(Outcome.SUCCESS)
     return 0
+
 
 
 def do_user_cutover(new_url: str, dry_run: bool = False) -> int:
@@ -1729,7 +1365,7 @@ def _do_user_cutover_locked(new_url, agent_cfg, agent_bin, pid_file):
         )
     except Exception as exc:
         reason = redact(str(exc))
-        rollback_ok = _rollback(agent_cfg, agent_backup, agent_identity, None, None, None)
+        rollback_ok = _rollback(agent_cfg, agent_backup, agent_identity)
         if rollback_ok:
             _stop_spawned(spawned.pid if spawned else "")
             resumed = True
@@ -1795,14 +1431,13 @@ def build_parser() -> argparse.ArgumentParser:
         "validate-url", add_help=False, help="validate a URL with zero side effects"
     )
     validate.add_argument("url")
-    validate.add_argument("--updater", action="store_true", default=False)
     sub.add_parser("help", add_help=False)
     return parser
 
 
-def cmd_validate_url(url: str, updater: bool) -> int:
+def cmd_validate_url(url: str) -> int:
     try:
-        normalized = validate_updater_apibase(url) if updater else validate_backend_url(url)
+        normalized = validate_backend_url(url)
     except ValueError as exc:
         eprint("Error:", str(exc))
         return 1
@@ -1835,7 +1470,7 @@ def main(argv=None) -> int:
     except SystemExit as exc:
         return int(exc.code or 2)
     if getattr(args, "command", None) == "validate-url":
-        return cmd_validate_url(args.url, args.updater)
+        return cmd_validate_url(args.url)
     if getattr(args, "command", None) == "set-backend":
         return cmd_set_backend(args.url_opt or args.url or "", args.mode, args.dry_run)
     sys.stdout.write(HELP_TEXT)

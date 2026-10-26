@@ -12,21 +12,22 @@
 #   --service-name <name> Systemd service name (default: vps-manager-agent).
 #   --service-user <user> System user for the service (default: vps-manager-agent).
 #   --dry-run             Print what would be done without making changes.
-#   --uninstall           Stop, disable, and remove the agent.
 #   --install-cli         Also install the flexserverctl CLI (default: on).
 #   --skip-cli            Do not install the flexserverctl CLI.
 #   --cli-source <path>   Path to flexserverctl.py (default: sibling file,
 #                         else download from the pinned repository).
 #   --cli-dest <path>     CLI install path (default:
 #                         /usr/local/bin/flexserverctl).
-#   --install-ai          Install and enable isolated AI worker subsystem (default: off).
-#   --ai-executor-binary <path>  Path to ai-executor binary.
-#   --ai-host-helper-binary <path> Path to ai-host-helper binary.
-#   --ai-rootfs-tar <path>       Path to minimal rootfs tarball.
-#   --ai-rootfs-manifest <path>  Path to rootfs manifest JSON.
-#   --ai-profiles-dir <path>     Path to root-owned AI profiles directory.
-#   --ai-user <user>             Unprivileged AI execution user (default: flexserver-ai).
-#   --ai-group <group>           Unprivileged AI execution group (default: flexserver-ai).
+#   --install-ai          Install and enable isolated AI worker subsystem.
+#                         Auto-resolves a packaged AI bundle (executor, host
+#                         helper, rootfs tarball + manifest, profiles) from
+#                         sibling files of --binary/--config, /app/agent/ai,
+#                         or /opt/vps-manager by default.
+#   --ai-executor-binary <path>  Override: path to ai-executor binary.
+#   --ai-host-helper-binary <path> Override: path to ai-host-helper binary.
+#   --ai-rootfs-tar <path>       Override: path to minimal rootfs tarball.
+#   --ai-rootfs-manifest <path>  Override: path to rootfs manifest JSON.
+#   --ai-profiles-dir <path>     Override: path to root-owned AI profiles dir.
 #   --help                Show this help.
 #
 # This script:
@@ -40,7 +41,9 @@
 #      atomic, syntax-checked first; requires python3) unless --skip-cli.
 #
 # On --uninstall: stops, disables, removes unit, binary, config, and the CLI.
-# Does NOT remove the API app data (only agent runtime files).
+# Does NOT remove the API app data (only agent runtime files). Never deletes
+# AI host state: the whole /var/lib/flexserver-ai directory (state, receipts,
+# scratch, backups) is preserved in place on --uninstall.
 
 set -euo pipefail
 umask 077
@@ -169,9 +172,9 @@ AI_STATE_DIR="/var/lib/flexserver-ai"
 AI_STATE_FILE="${AI_STATE_DIR}/ai-state.json"
 AI_SCRATCH_DIR="${AI_STATE_DIR}/scratch"
 AI_PROFILES_DIR="/etc/flexserver-ai/profiles"
-AI_ROOTFS_DIR="/usr/local/share/flexserver-ai/rootfs"
-AI_ROOTFS_MANIFEST="/usr/local/share/flexserver-ai/rootfs.manifest.json"
-
+AI_ROOTFS_DIR="${AI_ROOTFS_DIR:-/usr/local/share/flexserver-ai/rootfs}"
+AI_ROOTFS_MANIFEST="${AI_ROOTFS_MANIFEST:-/usr/local/share/flexserver-ai/rootfs.manifest.json}"
+UNINSTALL=false
 INSTALL_AI=false
 AI_EXECUTOR_SRC=""
 AI_HOST_HELPER_SRC=""
@@ -180,7 +183,6 @@ AI_ROOTFS_MANIFEST_SRC=""
 AI_ROOTFS_BUNDLE_SRC=""
 AI_PROFILES_DIR_SRC=""
 AI_PROFILES_BUNDLE_SRC=""
-FLEET_RELEASE_PUB_KEY_SRC=""
 AI_USER="${AI_USER_DEFAULT}"
 AI_GROUP="${AI_GROUP_DEFAULT}"
 
@@ -194,9 +196,6 @@ INSTALL_CLI=true
 SKIP_CLI=false
 CLI_DEST="${FLEXSERVERCTL_DEST_DEFAULT:-/usr/local/bin/flexserverctl}"
 CLI_SRC=""
-UPGRADE_UPDATER=false
-UPDATER_SRC=""
-UPDATER_CONFIG_SRC=""
 INSTALL_HOST_PTY=false
 HOST_PTY_SRC=""
 HOST_PTY_SERVICE_NAME="flexserver-host-pty"
@@ -227,12 +226,6 @@ while [[ $# -gt 0 ]]; do
       UNINSTALL=true; shift ;;
     --enable-docker-metrics-access)
       ENABLE_DOCKER_ACCESS=true; shift ;;
-    --upgrade-updater)
-      UPGRADE_UPDATER=true; shift ;;
-    --updater-binary)
-      UPDATER_SRC="$2"; shift 2 ;;
-    --updater-config)
-      UPDATER_CONFIG_SRC="$2"; shift 2 ;;
     --install-cli)
       INSTALL_CLI=true; SKIP_CLI=false; shift ;;
     --skip-cli)
@@ -273,8 +266,6 @@ while [[ $# -gt 0 ]]; do
       AI_PROFILES_DIR_SRC="$2"; INSTALL_AI=true; shift 2 ;;
     --ai-profiles-bundle)
       AI_PROFILES_BUNDLE_SRC="$2"; INSTALL_AI=true; shift 2 ;;
-    --fleet-release-pub-key)
-      FLEET_RELEASE_PUB_KEY_SRC="$2"; shift 2 ;;
     --ai-user)
       AI_USER="$2"; shift 2 ;;
     --ai-group)
@@ -298,16 +289,15 @@ while [[ $# -gt 0 ]]; do
       echo "  --skip-cli            Do not install the flexserverctl CLI."
       echo "  --cli-source <path>   Path to flexserverctl.py (default: sibling file, else download)."
       echo "  --cli-dest <path>     CLI install path (default: ${FLEXSERVERCTL_DEST_DEFAULT})."
-      echo "  --install-ai          Install and enable isolated AI worker subsystem (default: off)."
-      echo "  --ai-executor-binary <path>  Path to ai-executor binary."
-      echo "  --ai-host-helper-binary <path> Path to ai-host-helper binary."
-      echo "  --ai-rootfs-tar <path>       Path to minimal rootfs tarball."
-      echo "  --ai-rootfs-manifest <path>  Path to rootfs manifest JSON."
-      echo "  --ai-profiles-dir <path>     Path to root-owned AI profiles directory."
+      echo "  --install-ai          Install and enable isolated AI worker subsystem"
+      echo "                        (auto-resolves the packaged AI bundle; see header)."
+      echo "  --ai-executor-binary <path>  Override: ai-executor binary."
+      echo "  --ai-host-helper-binary <path> Override: ai-host-helper binary."
+      echo "  --ai-rootfs-tar <path>       Override: minimal rootfs tarball."
+      echo "  --ai-rootfs-manifest <path>  Override: rootfs manifest JSON."
+      echo "  --ai-profiles-dir <path>     Override: AI profiles directory."
       echo "  --ai-user <user>             Unprivileged AI execution user (default: ${AI_USER_DEFAULT})."
       echo "  --ai-group <group>           Unprivileged AI execution group (default: ${AI_GROUP_DEFAULT})."
-      echo "  --fleet-release-pub-key <path>"
-      echo "                               Path to pinned Ed25519 public key file for signed fleet updates."
       echo "  --help                Show this help."
       exit 0 ;;
     *)
@@ -449,6 +439,13 @@ if [[ "$UNINSTALL" == "true" ]]; then
       rm -f "$AI_HELPER_UNIT_FILE"
     fi
   fi
+  if [[ -S "$AI_HELPER_SOCKET" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would remove: ${AI_HELPER_SOCKET}"
+    else
+      rm -f "$AI_HELPER_SOCKET"
+    fi
+  fi
   for bin in "$AI_HELPER_DEST" "$AI_EXECUTOR_DEST"; do
     if [[ -f "$bin" ]]; then
       if [[ "$DRY_RUN" == "true" ]]; then
@@ -458,23 +455,12 @@ if [[ "$UNINSTALL" == "true" ]]; then
       fi
     fi
   done
-  # Preserve receipts if unresolved state or receipts exist
+  # AI state (state file, receipts, scratch, backups) is never deleted:
+  # /var/lib/flexserver-ai is preserved in place so a later reinstall
+  # reattaches to the existing state, and unmatched pending receipts stay
+  # auditable on the host indefinitely.
   if [[ -d "$AI_STATE_DIR" ]]; then
-    if [[ -f "$AI_STATE_FILE" || -d "${AI_STATE_DIR}/receipts" ]]; then
-      PRESERVE_RECEIPTS_DIR="/var/lib/flexserver-ai-preserved-receipts-$(date +%s)"
-      if [[ "$DRY_RUN" == "true" ]]; then
-        echo "  [DRY-RUN] Would preserve receipts from ${AI_STATE_DIR} to ${PRESERVE_RECEIPTS_DIR}"
-      else
-        echo "  [Uninstall] Preserving unresolved AI receipts in ${PRESERVE_RECEIPTS_DIR}..."
-        mkdir -p "$PRESERVE_RECEIPTS_DIR"
-        cp -a "${AI_STATE_DIR}/." "$PRESERVE_RECEIPTS_DIR/" 2>/dev/null || true
-        rm -rf "$AI_STATE_DIR"
-      fi
-    elif [[ "$DRY_RUN" == "true" ]]; then
-      echo "  [DRY-RUN] Would remove: ${AI_STATE_DIR}"
-    else
-      rm -rf "$AI_STATE_DIR"
-    fi
+    echo "  [Uninstall] Preserving AI state in ${AI_STATE_DIR} (state, receipts, scratch, backups)."
   fi
   if [[ -d "$AI_PROFILES_DIR" ]]; then
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -490,11 +476,11 @@ if [[ "$UNINSTALL" == "true" ]]; then
       rm -rf "$AI_ROOTFS_DIR"
     fi
   fi
-  if [[ -f "$AI_ROOTFS_MANIFEST" ]]; then
+  if [[ -d "$AI_RUN_DIR" ]]; then
     if [[ "$DRY_RUN" == "true" ]]; then
-      echo "  [DRY-RUN] Would remove: ${AI_ROOTFS_MANIFEST}"
+      echo "  [DRY-RUN] Would remove: ${AI_RUN_DIR}"
     else
-      rm -f "$AI_ROOTFS_MANIFEST"
+      rm -rf "$AI_RUN_DIR"
     fi
   fi
 
@@ -514,8 +500,8 @@ if [[ "$UNINSTALL" == "true" ]]; then
     fi
   fi
 
-  # /usr/local/bin/flexserverctl is deliberately preserved: the updater (and
-  # any later component install) may still need it.
+  # /usr/local/bin/flexserverctl is deliberately preserved: any later
+  # component install may still need it.
 
   echo "[Uninstall] Note: API app data in /opt/vps-manager was preserved."
   echo "[Uninstall] Agent tokens can be revoked via the dashboard > Servers > Local Host."
@@ -541,7 +527,7 @@ if [[ ! -f "$CONFIG_SRC" ]]; then
   exit 1
 fi
 
-# Validate config JSON and required fields when jq or node is available.
+# Validate config JSON and required fields when node, python3 or jq is available.
 if command -v node &>/dev/null; then
   if ! node -e '
     const config = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
@@ -555,20 +541,29 @@ if command -v node &>/dev/null; then
     echo "Error: Config file is not a valid VPS Manager agent config: ${CONFIG_SRC}" >&2
     exit 1
   fi
+elif command -v python3 &>/dev/null; then
+  if ! python3 -c '
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    cfg = json.load(f)
+for k in ["backendUrl", "vpsId", "token"]:
+    if not isinstance(cfg.get(k), str) or not cfg[k]:
+        sys.exit(1)
+for k in ["intervalSeconds", "requestTimeoutSeconds"]:
+    v = cfg.get(k)
+    if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+        sys.exit(1)
+' "$CONFIG_SRC" &>/dev/null; then
+    echo "Error: Config file is not a valid VPS Manager agent config: ${CONFIG_SRC}" >&2
+    exit 1
+  fi
 elif command -v jq &>/dev/null; then
   if ! jq -e '.backendUrl and .vpsId and .token and (.intervalSeconds >= 1) and (.requestTimeoutSeconds >= 1)' "$CONFIG_SRC" &>/dev/null; then
     echo "Error: Config file is not a valid VPS Manager agent config: ${CONFIG_SRC}" >&2
     exit 1
   fi
 else
-  if command -v node &>/dev/null; then
-    if ! node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$CONFIG_SRC" &>/dev/null 2>&1; then
-      echo "Error: Config file is not valid JSON: ${CONFIG_SRC}" >&2
-      exit 1
-    fi
-  else
-    echo "Warning: Could not validate config JSON/schema (no jq or node). Proceeding..."
-  fi
+  echo "Warning: Could not validate config JSON/schema (no node, python3, or jq). Proceeding..."
 fi
 
 # ── Docker group check ─────────────────────────────────────────────────────
@@ -607,7 +602,339 @@ if [[ "$INSTALL_CLI" == "true" && "$SKIP_CLI" == "false" ]]; then
   fi
 fi
 
-# ── Install ───────────────────────────────────────────────────────────────
+# ── AI bundle preflight (fail closed BEFORE any install mutation) ─────────
+#
+# Runs before the agent binary, config, unit, users or AI assets are
+# mutated: an incomplete or corrupt/missing AI bundle must refuse to start
+# the install at all, never leave a half-installed AI subsystem behind.
+# Dry-run validates presence AND runs the (temp-only) content verification
+# so a dry run reports exactly what a real run would find, but performs no
+# host mutation: everything stays inside a registered temp directory.
+if [[ "$INSTALL_AI" == "true" ]]; then
+  # python3 is an explicit AI prerequisite: the verifier, the bundled-tar
+  # scans and the config's ai block all need it on the host. Fail closed
+  # before any staging, extraction or mutation instead of silently skipping.
+  if ! command -v python3 &>/dev/null; then
+    echo "Error: python3 is required to install the AI bundle (verifier + config block)." >&2
+    echo "  Install it first, e.g.: sudo apt install python3 (or equivalent)." >&2
+    echo "  Re-run without --install-ai / --skip-ai to install without AI." >&2
+    exit 1
+  fi
+  ai_cand_dir="$(dirname "$BINARY_SRC")"
+  PREFLIGHT_BUNDLE_ROOTS=("${ai_cand_dir}" "${SCRIPT_DIR:-$ai_cand_dir}" "/app/agent/ai" "/opt/vps-manager" "/opt/vps-manager/ai")
+  PREFLIGHT_ARCH="$(uname -m 2>/dev/null || echo unknown)"
+  case "$PREFLIGHT_ARCH" in
+    x86_64|amd64) ai_bundle_arch="amd64" ;;
+    aarch64|arm64) ai_bundle_arch="arm64" ;;
+    *) ai_bundle_arch="" ;;
+  esac
+  if [[ -z "$ai_bundle_arch" ]]; then
+    echo "Error: Unsupported host architecture for the AI bundle: ${PREFLIGHT_ARCH}." >&2
+    exit 1
+  fi
+  # Overrides win; otherwise auto-resolve the packaged bundle from the roots.
+  PREFLIGHT_AI_EXECUTOR="${AI_EXECUTOR_SRC}"
+  PREFLIGHT_AI_HOST_HELPER="${AI_HOST_HELPER_SRC}"
+  PREFLIGHT_AI_ROOTFS_TAR="${AI_ROOTFS_TAR_SRC}"
+  PREFLIGHT_AI_ROOTFS_MANIFEST="${AI_ROOTFS_MANIFEST_SRC}"
+  PREFLIGHT_AI_PROFILES_DIR="${AI_PROFILES_DIR_SRC}"
+  if [[ -z "$PREFLIGHT_AI_EXECUTOR" ]]; then
+    for _root in "${PREFLIGHT_BUNDLE_ROOTS[@]}"; do
+      for _cand in "${_root}/ai-executor-linux-${ai_bundle_arch}" "${_root}/ai-executor"; do
+        if [[ -f "$_cand" ]]; then PREFLIGHT_AI_EXECUTOR="$_cand"; break 2; fi
+      done
+    done
+  fi
+  if [[ -z "$PREFLIGHT_AI_HOST_HELPER" ]]; then
+    for _root in "${PREFLIGHT_BUNDLE_ROOTS[@]}"; do
+      for _cand in "${_root}/ai-host-helper-linux-${ai_bundle_arch}" "${_root}/ai-host-helper"; do
+        if [[ -f "$_cand" ]]; then PREFLIGHT_AI_HOST_HELPER="$_cand"; break 2; fi
+      done
+    done
+  fi
+  if [[ -z "$PREFLIGHT_AI_ROOTFS_TAR" ]]; then
+    for _root in "${PREFLIGHT_BUNDLE_ROOTS[@]}"; do
+      for _cand in "${_root}/ai-rootfs-linux-${ai_bundle_arch}.tar.gz" "${_root}/rootfs.tar.gz"; do
+        if [[ -f "$_cand" ]]; then PREFLIGHT_AI_ROOTFS_TAR="$_cand"; break 2; fi
+      done
+    done
+  fi
+  if [[ -z "$PREFLIGHT_AI_ROOTFS_MANIFEST" ]]; then
+    for _root in "${PREFLIGHT_BUNDLE_ROOTS[@]}"; do
+      for _cand in "${_root}/ai-rootfs-linux-${ai_bundle_arch}.manifest.json" "${_root}/rootfs.manifest.json"; do
+        if [[ -f "$_cand" ]]; then PREFLIGHT_AI_ROOTFS_MANIFEST="$_cand"; break 2; fi
+      done
+    done
+  fi
+  if [[ -z "$PREFLIGHT_AI_PROFILES_DIR" ]]; then
+    for _root in "${PREFLIGHT_BUNDLE_ROOTS[@]}"; do
+      for _cand in "${_root}/ai-profiles" "${_root}/profiles"; do
+        if [[ -d "$_cand" ]]; then PREFLIGHT_AI_PROFILES_DIR="$_cand"; break 2; fi
+      done
+    done
+  fi
+  PREFLIGHT_AI_ROOTFS_BUNDLE="${AI_ROOTFS_BUNDLE_SRC}"
+  PREFLIGHT_AI_PROFILES_BUNDLE="${AI_PROFILES_BUNDLE_SRC}"
+
+  ai_preflight_missing=()
+  [[ -n "$PREFLIGHT_AI_EXECUTOR" && -f "$PREFLIGHT_AI_EXECUTOR" && -r "$PREFLIGHT_AI_EXECUTOR" ]] || ai_preflight_missing+=("executor(ai-executor-linux-${ai_bundle_arch})")
+  [[ -n "$PREFLIGHT_AI_HOST_HELPER" && -f "$PREFLIGHT_AI_HOST_HELPER" && -r "$PREFLIGHT_AI_HOST_HELPER" ]] || ai_preflight_missing+=("helper(ai-host-helper-linux-${ai_bundle_arch})")
+  [[ -n "$PREFLIGHT_AI_ROOTFS_TAR" && -f "$PREFLIGHT_AI_ROOTFS_TAR" && -r "$PREFLIGHT_AI_ROOTFS_TAR" ]] || ai_preflight_missing+=("rootfs(ai-rootfs-linux-${ai_bundle_arch}.tar.gz)")
+  [[ -n "$PREFLIGHT_AI_ROOTFS_MANIFEST" && -f "$PREFLIGHT_AI_ROOTFS_MANIFEST" && -r "$PREFLIGHT_AI_ROOTFS_MANIFEST" ]] || ai_preflight_missing+=("manifest(ai-rootfs-linux-${ai_bundle_arch}.manifest.json)")
+  if [[ -n "$PREFLIGHT_AI_PROFILES_DIR" ]]; then
+    if [[ ! -d "$PREFLIGHT_AI_PROFILES_DIR" || ! -r "$PREFLIGHT_AI_PROFILES_DIR" ]]; then
+      ai_preflight_missing+=("profiles(ai-profiles)")
+    fi
+  elif [[ -n "$PREFLIGHT_AI_PROFILES_BUNDLE" ]]; then
+    if [[ ! -f "$PREFLIGHT_AI_PROFILES_BUNDLE" || ! -r "$PREFLIGHT_AI_PROFILES_BUNDLE" ]]; then
+      ai_preflight_missing+=("profiles-bundle")
+    fi
+  else
+    ai_preflight_missing+=("profiles(ai-profiles)")
+  fi
+  if [[ -n "$PREFLIGHT_AI_ROOTFS_BUNDLE" && (! -f "$PREFLIGHT_AI_ROOTFS_BUNDLE" || ! -r "$PREFLIGHT_AI_ROOTFS_BUNDLE") ]]; then
+    ai_preflight_missing+=("rootfs-bundle(${PREFLIGHT_AI_ROOTFS_BUNDLE})")
+  fi
+  if [[ -n "$PREFLIGHT_AI_PROFILES_BUNDLE" && (! -f "$PREFLIGHT_AI_PROFILES_BUNDLE" || ! -r "$PREFLIGHT_AI_PROFILES_BUNDLE") ]]; then
+    ai_preflight_missing+=("profiles-bundle(${PREFLIGHT_AI_PROFILES_BUNDLE})")
+  fi
+  if [[ ${#ai_preflight_missing[@]} -gt 0 ]]; then
+    echo "Error: AI bundle incomplete: missing ${ai_preflight_missing[*]}" >&2
+    echo "  Search roots: ${PREFLIGHT_BUNDLE_ROOTS[*]}" >&2
+    echo "  Install the complete AI bundle (see scripts/install/install.sh's defaults) or run with --skip-ai to install without AI." >&2
+    exit 1
+  fi
+
+  # Content verification, in a registered temp dir only. Extracts ONCE here;
+  # the mutation phase installs from this verified tree (no second tar).
+  PREFLIGHT_AI_TMP="$(mktemp -d "${TMPDIR:-/tmp}/vai-verify.XXXXXX")"
+  INSTALLER_TMP_FILES+=("$PREFLIGHT_AI_TMP")
+  PREFLIGHT_AI_STAGED="$PREFLIGHT_AI_TMP/rootfs"
+  PREFLIGHT_AI_PROFILES_STAGED="$PREFLIGHT_AI_TMP/profiles"
+  PREFLIGHT_AI_STAGED_TAR="$PREFLIGHT_AI_TMP/rootfs.tar.gz"
+  PREFLIGHT_AI_STAGED_MANIFEST="$PREFLIGHT_AI_TMP/rootfs.manifest.json"
+  PREFLIGHT_AI_VERIFY_SCRIPT="$PREFLIGHT_AI_TMP/verify-bundle.py"
+  mkdir -- "$PREFLIGHT_AI_STAGED" "$PREFLIGHT_AI_PROFILES_STAGED"
+  cp -f -- "$PREFLIGHT_AI_ROOTFS_TAR" "$PREFLIGHT_AI_STAGED_TAR"
+  cp -f -- "$PREFLIGHT_AI_ROOTFS_MANIFEST" "$PREFLIGHT_AI_STAGED_MANIFEST"
+  if [[ -n "$PREFLIGHT_AI_PROFILES_DIR" ]]; then
+    cp -a -- "$PREFLIGHT_AI_PROFILES_DIR/." "$PREFLIGHT_AI_PROFILES_STAGED/"
+  fi
+  cat <<'EOF_VERIFY_PY' > "$PREFLIGHT_AI_VERIFY_SCRIPT"
+import sys, os, json, hashlib, tarfile
+
+def main():
+    if len(sys.argv) < 9:
+        sys.stderr.write("Usage: verify-bundle.py <mode> <tar> <manifest> <tmp> <executor> <helper> <profiles> <rootfs_root>\n")
+        sys.exit(2)
+    mode = sys.argv[1]
+    tar_path = sys.argv[2]
+    manifest_path = sys.argv[3]
+    tmp_dir = sys.argv[4]
+    executor = sys.argv[5]
+    helper = sys.argv[6]
+    profiles_dir = sys.argv[7]
+    rootfs_root = sys.argv[8]
+
+    if mode == "digest-tar":
+        if not os.path.isfile(tar_path):
+            sys.stderr.write(f"Error: tar file does not exist: {tar_path}\n")
+            sys.exit(1)
+        if not os.path.isfile(manifest_path):
+            sys.stderr.write(f"Error: manifest file does not exist: {manifest_path}\n")
+            sys.exit(1)
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                mf = json.load(f)
+        except Exception as e:
+            sys.stderr.write(f"Error: corrupt or invalid manifest JSON: {e}\n")
+            sys.exit(1)
+
+        expected_tar_sha = mf.get("rootfsSha256", "")
+        h = hashlib.sha256()
+        with open(tar_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        actual_tar_sha = h.hexdigest()
+        if expected_tar_sha != actual_tar_sha:
+            sys.stderr.write(f"Error: rootfsSha256 does not match tar bytes: manifest={expected_tar_sha} actual={actual_tar_sha}\n")
+            sys.exit(1)
+
+        for item in mf.get("files", []):
+            raw_p = item.get("path", "")
+            clean = raw_p
+            if clean.startswith("./"):
+                clean = clean[2:]
+            elif clean.startswith("/"):
+                clean = clean[1:]
+            if not clean:
+                sys.stderr.write(f"Error: manifest file entry contains an empty, '.' or '..' component: {raw_p}\n")
+                sys.exit(1)
+            parts = clean.replace("\\", "/").split("/")
+            for part in parts:
+                if part in (".", "..") or part == "":
+                    sys.stderr.write(f"Error: manifest file entry contains an empty, '.' or '..' component: {raw_p}\n")
+                    sys.exit(1)
+        sys.exit(0)
+
+    elif mode == "scan-tar":
+        if not os.path.isfile(tar_path):
+            sys.stderr.write(f"Error: tar file does not exist: {tar_path}\n")
+            sys.exit(1)
+        try:
+            with tarfile.open(tar_path, "r:*") as tf:
+                for m in tf.getmembers():
+                    name = m.name
+                    clean = name
+                    if clean.startswith("./"):
+                        clean = clean[2:]
+                    elif clean.startswith("/"):
+                        sys.stderr.write(f"Error: tarball member has leading slash: {name}\n")
+                        sys.exit(1)
+                    if clean in ("", "."):
+                        continue
+                    parts = clean.replace("\\", "/").split("/")
+                    if any(p == ".." for p in parts):
+                        sys.stderr.write(f"Error: tarball member contains '..' or traversal component: {name}\n")
+                        sys.exit(1)
+                    if m.issym() or m.islnk():
+                        target = m.linkname
+                        if target.startswith("/") or target.startswith("\\"):
+                            sys.stderr.write(f"Error: symlink target escapes rootfs tree: {name} -> {target}\n")
+                            sys.exit(1)
+                        clean_dir = os.path.dirname(clean)
+                        target_norm = os.path.normpath(os.path.join(clean_dir, target)).replace("\\", "/")
+                        if target_norm == ".." or target_norm.startswith("../"):
+                            sys.stderr.write(f"Error: symlink target escapes rootfs tree: {name} -> {target}\n")
+                            sys.exit(1)
+        except Exception as e:
+            if "symlink target escapes" in str(e):
+                sys.exit(1)
+            sys.stderr.write(f"Error: corrupt or invalid tarball: {e}\n")
+            sys.exit(1)
+        sys.exit(0)
+
+    elif mode == "check-extracted":
+        if not os.path.isdir(rootfs_root):
+            sys.stderr.write(f"Error: extracted rootfs root does not exist: {rootfs_root}\n")
+            sys.exit(1)
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                mf = json.load(f)
+        except Exception as e:
+            sys.stderr.write(f"Error: corrupt manifest JSON: {e}\n")
+            sys.exit(1)
+
+        for item in mf.get("files", []):
+            raw_p = item.get("path", "")
+            clean = raw_p
+            if clean.startswith("./"):
+                clean = clean[2:]
+            elif clean.startswith("/"):
+                clean = clean[1:]
+            full_p = os.path.join(rootfs_root, clean)
+            if not os.path.isfile(full_p):
+                sys.stderr.write(f"Error: extracted file missing: {raw_p} at {full_p}\n")
+                sys.exit(1)
+            expected_sha = item.get("sha256", "")
+            h = hashlib.sha256()
+            with open(full_p, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            if h.hexdigest() != expected_sha:
+                sys.stderr.write(f"Error: extracted file SHA mismatch for {raw_p}: expected {expected_sha}, got {h.hexdigest()}\n")
+                sys.exit(1)
+
+        abs_root = os.path.abspath(rootfs_root)
+        for cur_dir, dirs, files in os.walk(rootfs_root, followlinks=False):
+            for entry in dirs + files:
+                entry_p = os.path.join(cur_dir, entry)
+                if os.path.islink(entry_p):
+                    target = os.readlink(entry_p)
+                    if target.startswith("/"):
+                        sys.stderr.write(f"Error: extracted symlink escapes rootfs tree: {entry_p} -> {target}\n")
+                        sys.exit(1)
+                    target_abs = os.path.abspath(os.path.join(cur_dir, target))
+                    if not (target_abs == abs_root or target_abs.startswith(abs_root + os.sep)):
+                        sys.stderr.write(f"Error: extracted symlink escapes rootfs tree: {entry_p} -> {target}\n")
+                        sys.exit(1)
+        sys.exit(0)
+    else:
+        sys.stderr.write(f"Error: unknown verification mode: {mode}\n")
+        sys.exit(2)
+
+if __name__ == "__main__":
+    main()
+EOF_VERIFY_PY
+
+  if [[ ! -s "$PREFLIGHT_AI_VERIFY_SCRIPT" ]]; then
+    echo "Error: AI bundle verifier script could not be written; refusing to mutate." >&2
+    exit 1
+  fi
+
+  VERIFY_SCRIPT="$PREFLIGHT_AI_VERIFY_SCRIPT"
+  VERIFY_TAR="$PREFLIGHT_AI_STAGED_TAR"
+  VERIFY_MANIFEST="$PREFLIGHT_AI_STAGED_MANIFEST"
+  VERIFY_EXECUTOR="$PREFLIGHT_AI_EXECUTOR"
+  VERIFY_HELPER="$PREFLIGHT_AI_HOST_HELPER"
+  # Profiles: resolve to the staged copy so every verifier call sees the
+  # same tree (flag dir, packaged dir or extracted --ai-profiles-bundle).
+  VERIFY_PROFILES_DIR="$PREFLIGHT_AI_PROFILES_STAGED"
+  VERIFY_TMP="$PREFLIGHT_AI_TMP"
+  VERIFY_ROOTFS_ROOT="$PREFLIGHT_AI_STAGED"
+
+  # AI_PROFILES_STAGED_SRC points at the profiles staged tree for the
+  # mutation phase (never the nonexistent "profiles-bundle" name).
+  AI_PROFILES_STAGED_SRC="$PREFLIGHT_AI_PROFILES_STAGED"
+  # Stage 1: tar digest against manifest (no extraction). Stage 2: tar member
+  # scan (traversal, symlink/hardlink escapes) BEFORE any extraction.
+  python3 "$VERIFY_SCRIPT" digest-tar "$VERIFY_TAR" "$VERIFY_MANIFEST" "$VERIFY_TMP" \
+    "$VERIFY_EXECUTOR" "$VERIFY_HELPER" "$VERIFY_PROFILES_DIR" "$VERIFY_ROOTFS_ROOT" || exit 1
+  python3 "$VERIFY_SCRIPT" scan-tar "$VERIFY_TAR" "$VERIFY_MANIFEST" "$VERIFY_TMP" \
+    "$VERIFY_EXECUTOR" "$VERIFY_HELPER" "$VERIFY_PROFILES_DIR" "$VERIFY_ROOTFS_ROOT" || exit 1
+
+  # Scan and stage optional bundles inside the temp tree before extracting
+  if [[ -n "$AI_ROOTFS_BUNDLE_SRC" ]]; then
+    python3 "$VERIFY_SCRIPT" scan-tar "$AI_ROOTFS_BUNDLE_SRC" "$VERIFY_MANIFEST" "$VERIFY_TMP" \
+      "$VERIFY_EXECUTOR" "$VERIFY_HELPER" "$VERIFY_PROFILES_DIR" "$PREFLIGHT_AI_TMP/rootfs-bundle" || exit 1
+    mkdir -p "$PREFLIGHT_AI_TMP/rootfs-bundle"
+    tar -xzf "$AI_ROOTFS_BUNDLE_SRC" -C "$PREFLIGHT_AI_TMP/rootfs-bundle" --strip-components=1 || {
+      echo "Error: AI rootfs bundle tarball is corrupt or unreadable: ${AI_ROOTFS_BUNDLE_SRC}" >&2
+      exit 1
+    }
+  fi
+  if [[ -n "$AI_PROFILES_BUNDLE_SRC" ]]; then
+    python3 "$VERIFY_SCRIPT" scan-tar "$AI_PROFILES_BUNDLE_SRC" "$VERIFY_MANIFEST" "$VERIFY_TMP" \
+      "$VERIFY_EXECUTOR" "$VERIFY_HELPER" "$VERIFY_PROFILES_DIR" "$PREFLIGHT_AI_PROFILES_STAGED" || exit 1
+    mkdir -p "$PREFLIGHT_AI_PROFILES_STAGED"
+    tar -xzf "$AI_PROFILES_BUNDLE_SRC" -C "$PREFLIGHT_AI_PROFILES_STAGED" --strip-components=1 || {
+      echo "Error: AI profiles bundle tarball is corrupt or unreadable: ${AI_PROFILES_BUNDLE_SRC}" >&2
+      exit 1
+    }
+  fi
+
+  # Only now extract, once, into the registered temp tree.
+  tar -xzf "$PREFLIGHT_AI_STAGED_TAR" -C "$PREFLIGHT_AI_STAGED" || {
+    echo "Error: AI rootfs tarball is corrupt or unreadable: ${PREFLIGHT_AI_ROOTFS_TAR}" >&2
+    exit 1
+  }
+  if [[ ! -d "$PREFLIGHT_AI_STAGED/bin" ]]; then
+    echo "Error: AI rootfs tarball must unpack a ./bin directory: ${PREFLIGHT_AI_ROOTFS_TAR}" >&2
+    exit 1
+  fi
+  # Stage 3: per-file digests + symlink escapes in the extracted tree.
+  python3 "$VERIFY_SCRIPT" check-extracted "$VERIFY_TAR" "$VERIFY_MANIFEST" "$VERIFY_TMP" \
+    "$VERIFY_EXECUTOR" "$VERIFY_HELPER" "$VERIFY_PROFILES_DIR" "$VERIFY_ROOTFS_ROOT" || exit 1
+
+  # Feed the mutation phase from the verified temp tree.
+  AI_EXECUTOR_SRC="$PREFLIGHT_AI_EXECUTOR"
+  AI_HOST_HELPER_SRC="$PREFLIGHT_AI_HOST_HELPER"
+  AI_ROOTFS_MANIFEST_SRC="$PREFLIGHT_AI_ROOTFS_MANIFEST"
+  AI_ROOTFS_STAGED_SRC="$PREFLIGHT_AI_TMP/rootfs-bundle"
+  AI_PROFILES_STAGED_SRC="$PREFLIGHT_AI_PROFILES_STAGED"
+  AI_VERIFIED_ROOTFS_TMP="$PREFLIGHT_AI_STAGED"
+fi
+
 
 echo "[Install] Installing VPS Manager Agent..."
 
@@ -779,71 +1106,345 @@ else
   if command -v systemd-tmpfiles &>/dev/null; then
     systemd-tmpfiles --create "$TMPFILES_FILE" 2>/dev/null || true
   fi
-  echo "  Provisioned singleton lock and tmpfiles: ${LOCK_PATH} (${TMPFILES_FILE})"
-fi
+    echo "  Provisioned singleton lock and tmpfiles: ${LOCK_PATH} (${TMPFILES_FILE})"
+  fi
 
+# ── AI rootfs atomic staging and installation ────────────────────────────
+verify_staged_rootfs() {
+  local rootfs_dir="$1"
+  local manifest_file="$2"
+
+  if [[ ! -d "$rootfs_dir/bin" ]]; then
+    echo "Error: Staged rootfs is missing /bin directory: ${rootfs_dir}" >&2
+    return 1
+  fi
+
+  if [[ ! -f "$manifest_file" ]]; then
+    echo "Error: Manifest file does not exist: ${manifest_file}" >&2
+    return 1
+  fi
+
+  python3 - "$rootfs_dir" "$manifest_file" <<'PY_EOF_VERIFY_STAGE'
+import os, sys, json, hashlib
+
+rootfs_dir = os.path.abspath(sys.argv[1])
+manifest_path = sys.argv[2]
+abs_root = os.path.abspath(rootfs_dir)
+real_root = os.path.realpath(rootfs_dir)
+
+try:
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        mf = json.load(f)
+except Exception as e:
+    sys.stderr.write(f"Error: Invalid manifest JSON: {e}\n")
+    sys.exit(1)
+
+for item in mf.get("files", []):
+    raw_p = item.get("path", "")
+    clean = raw_p
+    if clean.startswith("./"):
+        clean = clean[2:]
+    elif clean.startswith("/"):
+        clean = clean[1:]
+    parts = clean.replace("\\", "/").split("/")
+    if not clean or any(p in (".", "..") or not p for p in parts):
+        sys.stderr.write(f"Error: manifest file entry contains traversal component: {raw_p}\n")
+        sys.exit(1)
+    full_p = os.path.normpath(os.path.join(rootfs_dir, clean))
+    if not (full_p == abs_root or full_p.startswith(abs_root + os.sep)):
+        sys.stderr.write(f"Error: manifest file path escapes rootfs: {raw_p}\n")
+        sys.exit(1)
+    if os.path.islink(full_p):
+        target = os.readlink(full_p)
+        if target.startswith("/") or target.startswith("\\"):
+            sys.stderr.write(f"Error: Symlink target is absolute (escapes rootfs): {raw_p} -> {target}\n")
+            sys.exit(1)
+        target_abs = os.path.abspath(os.path.join(os.path.dirname(full_p), target))
+        if not (target_abs == abs_root or target_abs.startswith(abs_root + os.sep)):
+            sys.stderr.write(f"Error: Symlink escapes rootfs tree: {raw_p} -> {target}\n")
+            sys.exit(1)
+        real_p = os.path.realpath(full_p)
+        if not (real_p == real_root or real_p.startswith(real_root + os.sep)):
+            sys.stderr.write(f"Error: Symlink escapes rootfs tree: {raw_p} -> {target}\n")
+            sys.exit(1)
+        if not os.path.isfile(full_p):
+            sys.stderr.write(f"Error: Broken or non-regular symlink in manifest: {raw_p} at {full_p}\n")
+            sys.exit(1)
+    else:
+        if not os.path.isfile(full_p):
+            sys.stderr.write(f"Error: Missing regular rootfs file from manifest: {raw_p} at {full_p}\n")
+            sys.exit(1)
+    expected_sha = item.get("sha256", "")
+    if expected_sha:
+        h = hashlib.sha256()
+        with open(full_p, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        if h.hexdigest() != expected_sha:
+            sys.stderr.write(f"Error: SHA256 mismatch for {raw_p}: expected {expected_sha}, got {h.hexdigest()}\n")
+            sys.exit(1)
+
+for cur_dir, dirs, files in os.walk(rootfs_dir, followlinks=False):
+    for entry in dirs + files:
+        p = os.path.join(cur_dir, entry)
+        if os.path.islink(p):
+            target = os.readlink(p)
+            if target.startswith("/") or target.startswith("\\"):
+                sys.stderr.write(f"Error: Symlink target is absolute (escapes rootfs): {p} -> {target}\n")
+                sys.exit(1)
+            target_abs = os.path.abspath(os.path.join(cur_dir, target))
+            if not (target_abs == abs_root or target_abs.startswith(abs_root + os.sep)):
+                sys.stderr.write(f"Error: Symlink escapes rootfs tree: {p} -> {target}\n")
+                sys.exit(1)
+            real_p = os.path.realpath(p)
+            if not (real_p == real_root or real_p.startswith(real_root + os.sep)):
+                sys.stderr.write(f"Error: Symlink escapes rootfs tree: {p} -> {target}\n")
+                sys.exit(1)
+            if not os.path.exists(p):
+                sys.stderr.write(f"Error: Broken symlink in rootfs tree: {p} -> {target}\n")
+                sys.exit(1)
+PY_EOF_VERIFY_STAGE
+}
+
+install_ai_rootfs() {
+  local rootfs_dest="${1}"
+  local manifest_dest="${2}"
+  local bundle_src="${3:-}"
+  local verified_tmp="${4}"
+  local manifest_src="${5}"
+
+  if [[ -z "$verified_tmp" || ! -d "$verified_tmp" ]]; then
+    echo "Error: Verified rootfs source directory does not exist: ${verified_tmp}" >&2
+    return 1
+  fi
+  if [[ -z "$manifest_src" || ! -f "$manifest_src" ]]; then
+    echo "Error: Manifest source file does not exist: ${manifest_src}" >&2
+    return 1
+  fi
+
+  local parent_dir
+  parent_dir="$(dirname "$rootfs_dest")"
+  mkdir -p "$parent_dir"
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    chown root:root "$parent_dir"
+  fi
+  chmod 0755 "$parent_dir"
+
+  mkdir -p "$(dirname "$manifest_dest")"
+
+  local stage_dir
+  stage_dir="$(mktemp -d "${rootfs_dest}.stage.XXXXXX")" || {
+    echo "Error: Failed to create rootfs staging directory next to ${rootfs_dest}" >&2
+    return 1
+  }
+  if declare -p INSTALLER_TMP_FILES &>/dev/null; then
+    INSTALLER_TMP_FILES+=("$stage_dir")
+  fi
+
+  # 1. Optional remote-style rootfs bundle is mapped first
+  if [[ -n "$bundle_src" && -d "$bundle_src" ]]; then
+    echo "[install-ai] Staging verified rootfs bundle tree into ${stage_dir}"
+    if ! cp -a "$bundle_src/." "$stage_dir/"; then
+      echo "Error: Failed to copy rootfs bundle into staging directory: ${stage_dir}" >&2
+      rm -rf "$stage_dir"
+      return 1
+    fi
+  fi
+
+  # 2. Verified preflight rootfs tree from tarball overlays it
+  echo "[install-ai] Staging verified rootfs tree into ${stage_dir}"
+  if ! cp -a "$verified_tmp/." "$stage_dir/"; then
+    echo "Error: Failed to copy verified rootfs into staging directory: ${stage_dir}" >&2
+    rm -rf "$stage_dir"
+    return 1
+  fi
+
+  # 3. Manifest installed in staged tree
+  if ! cp -f "$manifest_src" "$stage_dir/rootfs.manifest.json"; then
+    echo "Error: Failed to copy manifest into staged rootfs: ${stage_dir}" >&2
+    rm -rf "$stage_dir"
+    return 1
+  fi
+  if ! chmod 0644 "$stage_dir/rootfs.manifest.json"; then
+    echo "Error: Failed to chmod manifest in staged rootfs: ${stage_dir}" >&2
+    rm -rf "$stage_dir"
+    return 1
+  fi
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    if ! chown root:root "$stage_dir/rootfs.manifest.json"; then
+      echo "Error: Failed to chown manifest in staged rootfs: ${stage_dir}" >&2
+      rm -rf "$stage_dir"
+      return 1
+    fi
+  fi
+
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    chown -R root:root "$stage_dir"
+  fi
+  chmod -R go-w "$stage_dir"
+  chmod 0755 "$stage_dir"
+
+  # 4. Stage external manifest on same filesystem
+  local manifest_stage
+  manifest_stage="$(mktemp "${manifest_dest}.stage.XXXXXX")" || {
+    echo "Error: Failed to create manifest staging file next to ${manifest_dest}" >&2
+    rm -rf "$stage_dir"
+    return 1
+  }
+  if declare -p INSTALLER_TMP_FILES &>/dev/null; then
+    INSTALLER_TMP_FILES+=("$manifest_stage")
+  fi
+
+  if ! cp -f "$manifest_src" "$manifest_stage"; then
+    echo "Error: Failed to copy manifest to ${manifest_stage}" >&2
+    rm -rf "$stage_dir" "$manifest_stage"
+    return 1
+  fi
+  if ! chmod 0644 "$manifest_stage"; then
+    echo "Error: Failed to chmod ${manifest_stage}" >&2
+    rm -rf "$stage_dir" "$manifest_stage"
+    return 1
+  fi
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    if ! chown root:root "$manifest_stage"; then
+      echo "Error: Failed to chown ${manifest_stage}" >&2
+      rm -rf "$stage_dir" "$manifest_stage"
+      return 1
+    fi
+  fi
+
+  # 5. Verify staged rootfs after overlay
+  if ! verify_staged_rootfs "$stage_dir" "$manifest_src"; then
+    echo "Error: Staged rootfs verification failed" >&2
+    rm -rf "$stage_dir" "$manifest_stage"
+    return 1
+  fi
+
+  # 6. All fallible steps passed. Move existing rootfs/manifest aside to backup directories.
+  local backup_dir=""
+  if [[ -e "$rootfs_dest" || -L "$rootfs_dest" ]]; then
+    backup_dir="$(mktemp -d "${rootfs_dest}.old.XXXXXX")" || {
+      echo "Error: Failed to create rootfs backup directory" >&2
+      rm -rf "$stage_dir" "$manifest_stage"
+      return 1
+    }
+    if ! mv "$rootfs_dest" "$backup_dir/rootfs"; then
+      echo "Error: Failed to move existing rootfs aside into ${backup_dir}/rootfs" >&2
+      rm -rf "$stage_dir" "$manifest_stage" "$backup_dir"
+      return 1
+    fi
+  fi
+
+  local backup_manifest_dir=""
+  if [[ -e "$manifest_dest" || -L "$manifest_dest" ]]; then
+    backup_manifest_dir="$(mktemp -d "${manifest_dest}.old.XXXXXX")" || {
+      echo "Error: Failed to create manifest backup directory" >&2
+      if [[ -n "$backup_dir" && -e "$backup_dir/rootfs" ]]; then
+        mv "$backup_dir/rootfs" "$rootfs_dest"
+      fi
+      rm -rf "$stage_dir" "$manifest_stage" ${backup_dir:+"$backup_dir"}
+      return 1
+    }
+    if ! mv "$manifest_dest" "$backup_manifest_dir/manifest"; then
+      echo "Error: Failed to move existing manifest aside into ${backup_manifest_dir}/manifest" >&2
+      if [[ -n "$backup_dir" && -e "$backup_dir/rootfs" ]]; then
+        mv "$backup_dir/rootfs" "$rootfs_dest"
+      fi
+      rm -rf "$stage_dir" "$manifest_stage" ${backup_dir:+"$backup_dir"} "$backup_manifest_dir"
+      return 1
+    fi
+  fi
+
+  # 7. Swap staged rootfs into place
+  if ! mv "$stage_dir" "$rootfs_dest"; then
+    echo "Error: Failed to swap staged rootfs into place; rolling back..." >&2
+    if [[ -n "$backup_dir" && -e "$backup_dir/rootfs" ]]; then
+      mv "$backup_dir/rootfs" "$rootfs_dest"
+    fi
+    if [[ -n "$backup_manifest_dir" && -e "$backup_manifest_dir/manifest" ]]; then
+      mv "$backup_manifest_dir/manifest" "$manifest_dest"
+    fi
+    rm -rf "$stage_dir" "$manifest_stage" ${backup_dir:+"$backup_dir"} ${backup_manifest_dir:+"$backup_manifest_dir"}
+    return 1
+  fi
+
+  # 8. Swap staged manifest into place
+  if ! mv "$manifest_stage" "$manifest_dest"; then
+    echo "Error: Failed to swap staged manifest into place; rolling back..." >&2
+    mv "$rootfs_dest" "$stage_dir"
+    if [[ -n "$backup_dir" && -e "$backup_dir/rootfs" ]]; then
+      mv "$backup_dir/rootfs" "$rootfs_dest"
+    fi
+    if [[ -n "$backup_manifest_dir" && -e "$backup_manifest_dir/manifest" ]]; then
+      mv "$backup_manifest_dir/manifest" "$manifest_dest"
+    fi
+    rm -rf "$stage_dir" "$manifest_stage" ${backup_dir:+"$backup_dir"} ${backup_manifest_dir:+"$backup_manifest_dir"}
+    return 1
+  fi
+
+  # 9. Swaps succeeded completely; remove old backup directories
+  if [[ -n "$backup_dir" && -d "$backup_dir" ]]; then
+    rm -rf "$backup_dir"
+  fi
+  if [[ -n "$backup_manifest_dir" && -d "$backup_manifest_dir" ]]; then
+    rm -rf "$backup_manifest_dir"
+  fi
+  return 0
+}
+
+# ── AI subsystem mutation — only after the preflight gate passed ──────────
+#
+# Consumes ONLY the preflight-verified bundle (staged executor/helper/
+# rootfs/profiles inside the registered temp dir). The rootfs tar is never
+# extracted again: the verified tree is copied into place as-is.
 if [[ "$INSTALL_AI" == "true" ]]; then
   echo "[AI] Installing isolated AI worker subsystem..."
-  cand_dir="$(dirname "$BINARY_SRC")"
-  if [[ -z "$AI_EXECUTOR_SRC" ]]; then
-    for cand in "${cand_dir}/ai-executor-linux-amd64" "${cand_dir}/ai-executor" "/app/agent/ai-executor-linux-amd64" "/opt/vps-manager/ai-executor-linux-amd64"; do
-      if [[ -f "$cand" ]]; then AI_EXECUTOR_SRC="$cand"; break; fi
-    done
-  fi
-  if [[ -z "$AI_HOST_HELPER_SRC" ]]; then
-    for cand in "${cand_dir}/ai-host-helper-linux-amd64" "${cand_dir}/ai-host-helper" "/app/agent/ai-host-helper-linux-amd64" "/opt/vps-manager/ai-host-helper-linux-amd64"; do
-      if [[ -f "$cand" ]]; then AI_HOST_HELPER_SRC="$cand"; break; fi
-    done
-  fi
-  if [[ -z "$AI_ROOTFS_TAR_SRC" ]]; then
-    for cand in "${cand_dir}/ai-rootfs-linux-amd64.tar.gz" "/app/agent/ai-rootfs-linux-amd64.tar.gz"; do
-      if [[ -f "$cand" ]]; then AI_ROOTFS_TAR_SRC="$cand"; break; fi
-    done
-  fi
-  if [[ -z "$AI_ROOTFS_MANIFEST_SRC" ]]; then
-    for cand in "${cand_dir}/ai-rootfs-linux-amd64.manifest.json" "/app/agent/ai-rootfs-linux-amd64.manifest.json"; do
-      if [[ -f "$cand" ]]; then AI_ROOTFS_MANIFEST_SRC="$cand"; break; fi
-    done
-  fi
-  if [[ -z "$AI_PROFILES_DIR_SRC" ]]; then
-    for cand in "${cand_dir}/ai-profiles" "/app/agent/ai-profiles" "${cand_dir}/../profiles"; do
-      if [[ -d "$cand" ]]; then AI_PROFILES_DIR_SRC="$cand"; break; fi
-    done
-  fi
-
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "  [DRY-RUN] Would create dedicated AI system user ${AI_USER} and group ${AI_GROUP}"
-    echo "  [DRY-RUN] Would install helper: ${AI_HOST_HELPER_SRC:-<unknown>} -> ${AI_HELPER_DEST}"
-    echo "  [DRY-RUN] Would install executor: ${AI_EXECUTOR_SRC:-<unknown>} -> ${AI_EXECUTOR_DEST}"
+    echo "  [DRY-RUN] Would install helper: ${AI_HOST_HELPER_SRC} -> ${AI_HELPER_DEST}"
+    echo "  [DRY-RUN] Would install executor: ${AI_EXECUTOR_SRC} -> ${AI_EXECUTOR_DEST}"
+    echo "  [DRY-RUN] Would install verified AI rootfs into ${AI_ROOTFS_DIR} and manifest at ${AI_ROOTFS_MANIFEST}"
+    if [[ -n "$(ls -A "$AI_PROFILES_STAGED_SRC" 2>/dev/null)" ]]; then
+      echo "  [DRY-RUN] Would install profiles from bundle into ${AI_PROFILES_DIR}"
+    else
+      echo "  [DRY-RUN] Would write default ${AI_PROFILES_DIR}/nginx.json (no packaged profiles in bundle)"
+    fi
     echo "  [DRY-RUN] Would configure ${AI_HELPER_SERVICE_NAME}.service and start it"
   else
     # Create group and user (no shell, no home, no docker group, no sudo)
     getent group "$AI_GROUP" &>/dev/null || groupadd -r "$AI_GROUP"
     getent passwd "$AI_USER" &>/dev/null || useradd -r -g "$AI_GROUP" -s /usr/sbin/nologin -d /var/empty -M "$AI_USER"
 
-    # Create AI state, scratch, profiles, rootfs directories
-    mkdir -p "$AI_STATE_DIR" "$AI_SCRATCH_DIR"
-    chown -R "$AI_USER:$AI_GROUP" "$AI_STATE_DIR"
+    # AI state dirs: mkdir + non-recursive chown of the top level only;
+    # prior AI state is never recursively re-owned.
+    mkdir -p "$AI_STATE_DIR" "$AI_SCRATCH_DIR" "$AI_STATE_DIR/backups"
+    chown "$AI_USER:$AI_GROUP" "$AI_STATE_DIR" "$AI_SCRATCH_DIR" "$AI_STATE_DIR/backups"
     chmod 0750 "$AI_STATE_DIR"
-    chmod 0700 "$AI_SCRATCH_DIR"
+    chmod 0700 "$AI_SCRATCH_DIR" "$AI_STATE_DIR/backups"
 
-    mkdir -p "$AI_PROFILES_DIR" "$AI_ROOTFS_DIR"
-    chown root:root "$AI_PROFILES_DIR" "$AI_ROOTFS_DIR"
-    chmod 0755 "$AI_PROFILES_DIR" "$AI_ROOTFS_DIR"
+    # Rootfs dirs are root-owned; the helper read-executes them via its own
+    # privileges, the AI user never needs write access.
+    mkdir -p "$AI_PROFILES_DIR"
+    chown root:root "$AI_PROFILES_DIR"
+    chmod 0755 "$AI_PROFILES_DIR"
 
-    # Extract rootfs bundle (remote-style tar enclosing a rootfs/ directory)
-    if [[ -n "$AI_ROOTFS_BUNDLE_SRC" && -f "$AI_ROOTFS_BUNDLE_SRC" ]]; then
-      echo "[install-ai] Unpacking rootfs bundle ${AI_ROOTFS_BUNDLE_SRC} into ${AI_ROOTFS_DIR}"
-      tar -xzf "$AI_ROOTFS_BUNDLE_SRC" -C "$AI_ROOTFS_DIR" --strip-components=1 2>/dev/null || true
-    fi
-    # Extract profiles bundle (remote-style tar enclosing a profiles/ directory)
-    if [[ -n "$AI_PROFILES_BUNDLE_SRC" && -f "$AI_PROFILES_BUNDLE_SRC" ]]; then
-      echo "[install-ai] Unpacking profiles bundle ${AI_PROFILES_BUNDLE_SRC} into ${AI_PROFILES_DIR}"
-      tar -xzf "$AI_PROFILES_BUNDLE_SRC" -C "$AI_PROFILES_DIR" --strip-components=1 2>/dev/null || true
-      chmod 0644 "${AI_PROFILES_DIR}"/*.json 2>/dev/null || true
-      chown root:root "${AI_PROFILES_DIR}"/*.json 2>/dev/null || true
-    fi
-    if [[ ! -f "${AI_PROFILES_DIR}/nginx.json" ]]; then
+    install_ai_rootfs "$AI_ROOTFS_DIR" "$AI_ROOTFS_MANIFEST" "${AI_ROOTFS_STAGED_SRC:-}" "$AI_VERIFIED_ROOTFS_TMP" "$AI_ROOTFS_MANIFEST_SRC" || {
+      echo "Error: Failed to install AI rootfs into ${AI_ROOTFS_DIR}" >&2
+      exit 1
+    }
+
+    # Profiles: packaged profiles (flag dir or bundle, staged+verified in
+    # preflight) win; the default nginx profile is written ONLY when no
+    # packaged profile exists at all.
+    if [[ -n "$(ls -A "$AI_PROFILES_STAGED_SRC" 2>/dev/null)" ]]; then
+      echo "[install-ai] Installing packaged AI profiles into ${AI_PROFILES_DIR}"
+      cp -a "$AI_PROFILES_STAGED_SRC/." "$AI_PROFILES_DIR/"
+      chown root:root "$AI_PROFILES_DIR"
+      chmod 0755 "$AI_PROFILES_DIR"
+      chown root:root "${AI_PROFILES_DIR}"/*.json
+      chmod 0644 "${AI_PROFILES_DIR}"/*.json
+    else
+      echo "[install-ai] No packaged profiles in bundle; writing default ${AI_PROFILES_DIR}/nginx.json"
       cat << 'EOF_NGINX' > "${AI_PROFILES_DIR}/nginx.json"
 {
   "id": "nginx",
@@ -866,35 +1467,17 @@ EOF_NGINX
       chown root:root "${AI_PROFILES_DIR}/nginx.json"
     fi
 
-    # Unpack rootfs tarball if present
-    if [[ -n "$AI_ROOTFS_TAR_SRC" && -f "$AI_ROOTFS_TAR_SRC" ]]; then
-      tar -xzf "$AI_ROOTFS_TAR_SRC" -C "$AI_ROOTFS_DIR" 2>/dev/null || true
-    fi
-    if [[ -n "$AI_ROOTFS_MANIFEST_SRC" && -f "$AI_ROOTFS_MANIFEST_SRC" ]]; then
-      cp -f "$AI_ROOTFS_MANIFEST_SRC" "$AI_ROOTFS_MANIFEST"
-      chmod 0644 "$AI_ROOTFS_MANIFEST"
-      chown root:root "$AI_ROOTFS_MANIFEST"
-    fi
+    # Install verified binaries (staged copies from the preflight temp).
+    install -m 0755 "$AI_HOST_HELPER_SRC" "$AI_HELPER_DEST"
+    install -m 0755 "$AI_EXECUTOR_SRC" "$AI_EXECUTOR_DEST"
 
-    # Install pinned release public key for signed fleet updates
-    if [[ -n "$FLEET_RELEASE_PUB_KEY_SRC" && -f "$FLEET_RELEASE_PUB_KEY_SRC" ]]; then
-      install -m 0644 -o root -g root "$FLEET_RELEASE_PUB_KEY_SRC" /etc/vps-updater/fleet-release.pub
+    # Resolve UID and GID for helper pinned identity and config injection.
+    AI_UID_NUM="$(id -u "$AI_USER")"
+    AI_GID_NUM="$(getent group "$AI_GROUP" | cut -d: -f3)"
+    if [[ ! "$AI_UID_NUM" =~ ^[0-9]+$ || ! "$AI_GID_NUM" =~ ^[0-9]+$ ]]; then
+      echo "Error: Could not resolve numeric UID/GID for AI user: ${AI_USER}:${AI_GROUP}" >&2
+      exit 1
     fi
-
-    # Install binaries
-    if [[ -n "$AI_HOST_HELPER_SRC" && -f "$AI_HOST_HELPER_SRC" ]]; then
-      install -m 0755 "$AI_HOST_HELPER_SRC" "$AI_HELPER_DEST"
-    fi
-    if [[ -n "$AI_EXECUTOR_SRC" && -f "$AI_EXECUTOR_SRC" ]]; then
-      install -m 0755 "$AI_EXECUTOR_SRC" "$AI_EXECUTOR_DEST"
-    fi
-
-    # Resolve UID and GID for helper pinned identity and config injection
-    AI_UID_NUM=$(id -u "$AI_USER" 2>/dev/null || echo "1001")
-    AI_GID_NUM=$(getent group "$AI_GROUP" | cut -d: -f3 2>/dev/null || echo "1001")
-
-    mkdir -p "/var/lib/flexserver-ai/backups" "/var/lib/flexserver-ai/scratch"
-    chmod 0700 "/var/lib/flexserver-ai/backups"
 
     # Write and start helper unit
     cat << EOF_HELPER > "$AI_HELPER_UNIT_FILE"
@@ -908,10 +1491,13 @@ User=root
 Group=${AI_GROUP}
 RuntimeDirectory=flexserver-ai
 RuntimeDirectoryMode=0770
-ExecStart=${AI_HELPER_DEST} --socket ${AI_HELPER_SOCKET} --socket-mode 0660 --socket-uid 0 --socket-gid %G --profiles-dir ${AI_PROFILES_DIR} --execution-uid ${AI_UID_NUM} --execution-gid ${AI_GID_NUM} --executor-binary ${AI_EXECUTOR_DEST} --rootfs-dir ${AI_ROOTFS_DIR} --backups-dir /var/lib/flexserver-ai/backups
+ExecStart=${AI_HELPER_DEST} --socket ${AI_HELPER_SOCKET} --socket-mode 0660 --socket-uid 0 --socket-gid %G --profiles-dir ${AI_PROFILES_DIR} --execution-uid ${AI_UID_NUM} --execution-gid ${AI_GID_NUM} --executor-binary ${AI_EXECUTOR_DEST} --rootfs-dir ${AI_ROOTFS_DIR} --backups-dir ${AI_STATE_DIR}/backups
 Restart=on-failure
 RestartSec=2
-CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SYS_CHROOT CAP_MKNOD CAP_SYS_ADMIN CAP_KILL CAP_DAC_OVERRIDE
+# CAP_CHOWN is required for the helper to take ownership of the runtime
+# socket (/run/flexserver-ai/helper.sock) on restart; without it chown fails
+# with EPERM and the unit crash-loops under `Restart=on-failure`.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_SYS_CHROOT CAP_MKNOD CAP_SYS_ADMIN CAP_KILL CAP_DAC_OVERRIDE
 NoNewPrivileges=no
 PrivateTmp=yes
 PrivateDevices=no
@@ -935,27 +1521,35 @@ EOF_HELPER
     systemctl enable "${AI_HELPER_SERVICE_NAME}"
     systemctl restart "${AI_HELPER_SERVICE_NAME}"
     echo "  Started ${AI_HELPER_SERVICE_NAME}"
-    # Update config.json with AI block
-    if command -v node &>/dev/null; then
-      node -e "
-        const fs = require('fs');
-        const cfg = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
-        cfg.ai = {
-          enabled: true,
-          executionUid: parseInt(process.argv[2], 10),
-          executionGid: parseInt(process.argv[3], 10),
-          helperSocketPath: process.argv[4],
-          executorPath: process.argv[5],
-          scratchRootPath: process.argv[6],
-          statePath: process.argv[7],
-          rootfsDirPath: process.argv[8],
-          rootfsManifestPath: process.argv[9],
-          profilesDirPath: process.argv[10],
-          maxConcurrentTasks: 1
-        };
-        fs.writeFileSync(process.argv[1], JSON.stringify(cfg, null, 2) + '\n');
-      " "$CONFIG_FILE" "$AI_UID_NUM" "$AI_GID_NUM" "$AI_HELPER_SOCKET" "$AI_EXECUTOR_DEST" "$AI_SCRATCH_DIR" "$AI_STATE_FILE" "$AI_ROOTFS_DIR" "$AI_ROOTFS_MANIFEST" "$AI_PROFILES_DIR"
+    # Update config.json with the AI block. python3 is guaranteed by the
+    # preflight prerequisite gate; a failure here means the verifier lost
+    # python3 mid-run, so fail closed instead of shipping a broken config.
+    if ! python3 - "$CONFIG_FILE" "$AI_UID_NUM" "$AI_GID_NUM" "$AI_HELPER_SOCKET" "$AI_EXECUTOR_DEST" "$AI_SCRATCH_DIR" "$AI_STATE_FILE" "$AI_ROOTFS_DIR" "$AI_ROOTFS_MANIFEST" "$AI_PROFILES_DIR" <<'PY_EOF_AI_CFG'
+import json, sys
+cfg_path = sys.argv[1]
+uid, gid = int(sys.argv[2]), int(sys.argv[3])
+cfg = json.load(open(cfg_path, encoding="utf-8"))
+cfg["ai"] = {
+    "enabled": True,
+    "executionUid": uid,
+    "executionGid": gid,
+    "helperSocketPath": sys.argv[4],
+    "executorPath": sys.argv[5],
+    "scratchRootPath": sys.argv[6],
+    "statePath": sys.argv[7],
+    "rootfsDirPath": sys.argv[8],
+    "rootfsManifestPath": sys.argv[9],
+    "profilesDirPath": sys.argv[10],
+    "maxConcurrentTasks": 1,
+}
+open(cfg_path, "w", encoding="utf-8").write(json.dumps(cfg, indent=2) + "\n")
+PY_EOF_AI_CFG
+    then
+      echo "Error: Could not write the ai block into ${CONFIG_FILE}." >&2
+      exit 1
     fi
+    chown root:"${SERVICE_USER}" "$CONFIG_FILE"
+    chmod 0640 "$CONFIG_FILE"
   fi
 fi
 
@@ -1032,15 +1626,6 @@ else
   chmod 0644 "$UNIT_FILE"
   echo "  Written systemd unit: ${UNIT_FILE}"
 fi
-  if [[ "$DRY_RUN" == "true" ]]; then
-    echo "  [DRY-RUN] Would run offline config validation: ${BINARY_DEST} -config ${CONFIG_FILE} -validate-config"
-  else
-    echo "  Running offline config validation..."
-    "$BINARY_DEST" -config "$CONFIG_FILE" -validate-config || {
-      echo "Error: Agent offline config validation failed" >&2
-      exit 1
-    }
-  fi
 
 # Reload and start
 if [[ "$DRY_RUN" == "true" ]]; then
@@ -1241,91 +1826,3 @@ echo ""
 echo "Check status: sudo systemctl status ${SERVICE_NAME}"
 echo "View logs:    sudo journalctl -u ${SERVICE_NAME} -f"
 echo ""
-# Runbook pointer (plan §5): safe-upgrade updater
-locate_updater_installer() {
-  local script=""
-  if [[ -n "${INSTALLER_DIR:-}" && -f "${INSTALLER_DIR}/install-updater.sh" ]]; then
-    script="${INSTALLER_DIR}/install-updater.sh"
-  elif [[ -n "${SCRIPT_DIR:-}" && -f "${SCRIPT_DIR}/install-updater.sh" ]]; then
-    script="${SCRIPT_DIR}/install-updater.sh"
-  elif [[ -f "./scripts/install/install-updater.sh" ]]; then
-    script="$(pwd)/scripts/install/install-updater.sh"
-  elif [[ -f "./install-updater.sh" ]]; then
-    script="$(pwd)/install-updater.sh"
-  fi
-
-  if [[ -z "$script" ]]; then
-    if [[ "$DRY_RUN" == "true" ]]; then
-      script="${INSTALLER_DIR:-.}/install-updater.sh"
-    elif command -v curl &>/dev/null; then
-      script="$(mktemp)"
-      INSTALLER_TMP_FILES+=("$script")
-      if curl -fsSL -o "$script" "https://raw.githubusercontent.com/sondoan17/vps-manager-nodejs/main/scripts/install/install-updater.sh"; then
-        chmod 0755 "$script"
-      else
-        rm -f "$script"
-        script=""
-      fi
-    fi
-  fi
-  printf '%s' "$script"
-}
-
-UPDATER_INSTALL_SCRIPT="$(locate_updater_installer)"
-
-if [[ -x /usr/local/lib/vps-manager-agent/vps-updater || -f /etc/vps-updater/config.json ]]; then
-  echo "Updater:  installed (pull-only safe-upgrade daemon)"
-  if [[ -z "$UPDATER_SRC" ]]; then
-    cand_dir="$(dirname "$BINARY_SRC")"
-    for cand in "${cand_dir}/vps-updater-linux-amd64" "${cand_dir}/vps-updater" "/app/agent/vps-updater-linux-amd64" "/opt/vps-manager/vps-updater-linux-amd64"; do
-      if [[ -f "$cand" ]]; then
-        UPDATER_SRC="$cand"
-        break
-      fi
-    done
-  fi
-  if [[ "$UPGRADE_UPDATER" == "true" || -n "$UPDATER_SRC" ]] && [[ -n "$UPDATER_SRC" && -f "$UPDATER_SRC" ]]; then
-    UPGRADE_CONFIG="${UPDATER_CONFIG_SRC:-/etc/vps-updater/config.json}"
-    echo "[Install] Refreshing updater via ${UPDATER_INSTALL_SCRIPT:-install-updater.sh} --upgrade..."
-    UPGRADE_ARGS=(--upgrade --binary "$UPDATER_SRC")
-    if [[ -f "$UPGRADE_CONFIG" ]]; then
-      UPGRADE_ARGS+=(--config "$UPGRADE_CONFIG")
-    fi
-    if [[ -n "$FLEET_RELEASE_PUB_KEY_SRC" && -f "$FLEET_RELEASE_PUB_KEY_SRC" ]]; then
-      UPGRADE_ARGS+=(--pubkey-file "$FLEET_RELEASE_PUB_KEY_SRC")
-    fi
-    if [[ "$DRY_RUN" == "true" ]]; then
-      UPGRADE_ARGS+=(--dry-run)
-    fi
-    if [[ -z "$UPDATER_INSTALL_SCRIPT" || (! -f "$UPDATER_INSTALL_SCRIPT" && "$DRY_RUN" != "true") ]]; then
-      echo "Error: install-updater.sh not found for updater upgrade." >&2
-      exit 1
-    fi
-    if ! "$UPDATER_INSTALL_SCRIPT" "${UPGRADE_ARGS[@]}"; then
-      echo "Error: Updater upgrade failed." >&2
-      exit 1
-    fi
-    echo "  Status: sudo /usr/local/lib/vps-manager-agent/vps-updater status -config /etc/vps-updater/config.json"
-  else
-    echo "  Status: sudo /usr/local/lib/vps-manager-agent/vps-updater status -config /etc/vps-updater/config.json"
-    echo "  Upgrade to bundled protocol: sudo ${UPDATER_INSTALL_SCRIPT:-./scripts/install/install-updater.sh} --upgrade --binary <vps-updater>"
-  fi
-elif [[ -n "${UPDATER_CONFIG_SRC:-}" && -f "${UPDATER_CONFIG_SRC:-}" ]] && [[ -n "$UPDATER_SRC" && -f "$UPDATER_SRC" ]]; then
-  echo "Updater:  bootstrapping bundled safe-upgrade daemon..."
-  BOOTSTRAP_ARGS=(--upgrade --binary "$UPDATER_SRC" --config "$UPDATER_CONFIG_SRC")
-  if [[ -n "$FLEET_RELEASE_PUB_KEY_SRC" && -f "$FLEET_RELEASE_PUB_KEY_SRC" ]]; then
-    BOOTSTRAP_ARGS+=(--pubkey-file "$FLEET_RELEASE_PUB_KEY_SRC")
-  fi
-  if [[ "$DRY_RUN" == "true" ]]; then
-    BOOTSTRAP_ARGS+=(--dry-run)
-  fi
-  if ! "$UPDATER_INSTALL_SCRIPT" "${BOOTSTRAP_ARGS[@]}"; then
-    echo "Error: Bundled updater bootstrap failed." >&2
-    exit 1
-  fi
-  echo "  Status: sudo /usr/local/lib/vps-manager-agent/vps-updater status -config /etc/vps-updater/config.json"
-else
-  echo "Updater:  not installed."
-  echo "  Bootstrap: sudo ${UPDATER_INSTALL_SCRIPT:-./scripts/install/install-updater.sh} --upgrade --binary <vps-updater> --config <config.json>"
-fi
-echo "Runbook:  docs/local-agent-upgrade-operations.md (offline recovery, rollback hold/ack)"

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -13,7 +13,6 @@ import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../ui/card";
 import { Switch } from "../../ui/switch";
-import { getVpsAgentUpdate, type AgentUpdateView } from "../../../lib/api";
 import {
   getAiBundle,
   getVpsAiCapability,
@@ -25,6 +24,7 @@ import {
   type AiPolicy,
   type UpdateAiPolicy,
 } from "../../../lib/ai-api";
+import { DashboardContext } from "../../../context/DashboardContext";
 import { cn } from "../../../lib/utils";
 import { freshnessLabel } from "../../../lib/dashboard-formatters";
 
@@ -39,14 +39,10 @@ import { freshnessLabel } from "../../../lib/dashboard-formatters";
  * refresh on window focus and poll while an install job is active. Every
  * section fails independently so a missing endpoint never blocks the page.
  *
- * Bundle install state is channel-aware: remote SSH jobs (installChannel
- * "ssh", or APIs without the field) expose states only and their progress
- * stays indeterminate; local updater jobs (installChannel "updater", tracked
- * in `localJob`) may report a real 0-100 progress and phase — the bar is
- * determinate only when a real number is present, never estimated. The
- * updater channel gates the button on explicit server readiness
- * (installSupported === true, no optimistic inference) and fails closed when
- * the API omits the local job: nothing is fabricated.
+ * Install state is unified: `lastJob` carries the scheduled/running job for
+ * all hosts (states only; no percentage is ever estimated), and the button
+ * gates on server readiness only (installSupported=false disables, absent
+ * stays enabled). Nothing is fabricated when the field is missing.
  */
 
 const BUNDLE_JOB_POLL_MS = 5_000;
@@ -163,9 +159,12 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
   const [ackOpen, setAckOpen] = useState(false);
   const [ackChecked, setAckChecked] = useState(false);
 
-  // Runtime rows (agent version, AI bundle + capability)
-  const [agentUpdate, setAgentUpdate] = useState<AgentUpdateView | null>(null);
-  const [agentUpdateError, setAgentUpdateError] = useState<string | null>(null);
+  // Runtime rows (agent version, AI bundle + capability). The agent version
+  // comes from the dashboard's system-info sample (same projection the
+  // Overview uses) — no separate version request is issued; the dashboard
+  // context is optional (tests render the card standalone).
+  const dashboard = useContext(DashboardContext);
+  const systemAgent = dashboard?.systemInfo?.find((sys) => sys.vpsId === vpsId);
   const [bundle, setBundle] = useState<AiBundleStatus | null>(null);
   const [bundleError, setBundleError] = useState<string | null>(null);
   const [standaloneCapability, setStandaloneCapability] = useState<{
@@ -199,16 +198,15 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
     [vpsId],
   );
 
-  // Bundle + capability + agent-update fail independently; the standalone
-  // capability endpoint (available on older APIs) backs the sandbox
-  // diagnosis in when the bundle endpoint is missing.
+  // Bundle + capability fail independently; the standalone capability
+  // endpoint (available on older APIs) backs the sandbox diagnosis in when
+  // the bundle endpoint is missing.
   const loadRuntime = useCallback(
     async (signal?: AbortSignal) => {
       const seq = ++runtimeSeqRef.current;
-      const [bundleRes, capRes, updateRes] = await Promise.allSettled([
+      const [bundleRes, capRes] = await Promise.allSettled([
         getAiBundle(vpsId, signal),
         getVpsAiCapability(vpsId, signal),
-        getVpsAgentUpdate(vpsId, signal),
       ]);
       // Drop superseded responses: aborted by unmount, a newer runtime load,
       // or a completed install POST (which invalidates in-flight GETs so a
@@ -231,12 +229,6 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
               }
             : null,
         );
-      }
-      if (updateRes.status === "fulfilled") {
-        setAgentUpdate(updateRes.value);
-        setAgentUpdateError(null);
-      } else {
-        setAgentUpdateError(errorMessage(updateRes.reason, "Agent version is unavailable."));
       }
     },
     [vpsId],
@@ -261,57 +253,26 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
     return () => window.removeEventListener("focus", onFocus);
   }, [loadPolicy, loadRuntime]);
 
-  // Install channel: "updater" jobs run through the local host's own updater
-  // (tracked in `localJob`); "ssh" — or the field absent on older APIs —
-  // keeps the legacy remote lastJob behavior. A missing localJob on an
-  // updater host fails closed: no job state is inferred or fabricated.
-  const localChannel = bundle?.installChannel === "updater";
-  const localJob = bundle?.localJob ?? null;
-  const localJobState = localJob?.state ?? null;
-  const localJobActive =
-    localJobState === "pending" || localJobState === "running";
-  const remoteJobState = bundle?.lastJob?.state ?? null;
-  const remoteJobActive =
-    remoteJobState === "pending" || remoteJobState === "running";
-  const bundleJobActive = localJobActive || remoteJobActive;
+  // Unified install job:
+  // Unified install job: `lastJob` carries the scheduled/running job for all
+  // hosts (AiBundleJob is state-only, so the progress bar stays
+  // indeterminate and never estimates).
+  const jobState = bundle?.lastJob?.state ?? null;
+  const jobActive = jobState === "pending" || jobState === "running";
   // True from the Install click (POST in flight, fresh job view not yet
   // applied) until the polled job reaches a terminal state.
-  const installInProgress = installPending || bundleJobActive;
-  // The updater's real numeric progress (0-100). Null unless the local job
-  // is active AND reports a finite number — no percentage is ever inferred.
-  const localProgress =
-    localJobActive &&
-    localJob &&
-    typeof localJob.progress === "number" &&
-    Number.isFinite(localJob.progress)
-      ? Math.min(100, Math.max(0, localJob.progress))
-      : null;
-  const localProgressPct =
-    localProgress === null ? null : Math.round(localProgress);
-  // Terminal outcome surfaces the channel's own job only: localJob on
-  // updater hosts, lastJob on remote SSH hosts (unchanged) — the two are
-  // never mixed.
-  const outcomeJobState = localChannel ? localJobState : remoteJobState;
-  const outcomeJobError = localChannel
-    ? (localJob?.error ?? null)
-    : (bundle?.lastJob?.error ?? null);
-  const installStateLabel = installPending
+  const installInProgress = installPending || jobActive;
+  const stateLabel = installPending
     ? "Starting install…"
-    : localJobActive
-      ? localJobState === "pending"
-        ? "Install queued…"
-        : "Installing AI bundle…"
-      : remoteJobState === "running"
-        ? "Installing AI bundle…"
-        : remoteJobState === "pending"
-          ? "Install queued…"
-          : "Starting install…";
+    : jobState === "pending"
+      ? "Install queued…"
+      : "Installing AI bundle…";
 
   useEffect(() => {
-    if (!bundleJobActive) return;
+    if (!jobActive) return;
     const timer = window.setInterval(() => void loadRuntime(), BUNDLE_JOB_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [bundleJobActive, loadRuntime]);
+  }, [jobActive, loadRuntime]);
 
   const execMode: AiExecMode = policy?.execMode === "privileged" ? "privileged" : "sandbox";
   const policyControlsDisabled = policy === null;
@@ -378,17 +339,12 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
   };
 
   const installBundle = async () => {
-    if (installPending || bundleJobActive || bundle?.available !== true) {
+    if (installPending || jobActive || bundle?.available !== true) {
       return;
     }
     // Mirrors the button gate — server readiness only, no optimistic
-    // inference: on the updater channel install requires installSupported
-    // to be explicitly true; on ssh (or absent) the legacy rule applies.
-    if (
-      bundle.installChannel === "updater"
-        ? bundle.installSupported !== true
-        : bundle.installSupported === false
-    ) {
+    // inference: false disables, absent stays enabled (legacy rule).
+    if (bundle.installSupported === false) {
       return;
     }
     setInstallPending(true);
@@ -413,24 +369,17 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
     }
   };
 
-  const installedAgent = agentUpdate?.installed ?? null;
-  const agentBuild = shortId(installedAgent?.buildId);
   const capView = capabilityView(bundle, standaloneCapability);
 
-  // Server readiness only, no optimistic inference: on the updater channel
-  // the button is enabled only when installSupported is explicitly true
-  // (absent fails closed); on ssh — or absent on older APIs — the legacy
-  // rule applies (false disables, absent stays enabled).
-  const installGateOk = localChannel
-    ? bundle?.installSupported === true
-    : bundle?.installSupported !== false;
+  // Server readiness only, no optimistic inference: false disables (with
+  // the server's installReason), absent stays enabled (legacy rule).
+  const installGateOk = bundle?.installSupported !== false;
 
   const installEnabled =
     bundle !== null &&
-    bundleError === null &&
     bundle.available === true &&
     installGateOk &&
-    !bundleJobActive;
+    !jobActive;
   // A bundle load error is already rendered on the bundle line; only the
   // actionable disabled reasons need a separate hint.
   const installDisabledReason = bundleError
@@ -442,7 +391,7 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
         : !installGateOk
           ? (bundle.installReason ??
             "AI bundle install is not supported on this host.")
-          : bundleJobActive
+          : jobActive
             ? "An install or update job is already running."
             : null;
 
@@ -591,34 +540,24 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
               className="mt-0.5 text-xs text-dim"
               data-testid="agent-version-line"
             >
-              {agentUpdateError ? (
-                <span className="text-crit">{agentUpdateError}</span>
-              ) : installedAgent?.version ? (
-                <>
-                  <span className="font-medium text-text">
-                    v{installedAgent.version}
-                  </span>
-                  {agentBuild ? (
-                    <span className="ml-1.5 font-mono">({agentBuild})</span>
-                  ) : null}
-                  {installedAgent.lastSeenAt ? (
-                    <span className="ml-1.5">
-                      · last seen {freshnessLabel(installedAgent.lastSeenAt)}
-                    </span>
-                  ) : null}
-                </>
+              {capView?.agentVersion ? (
+                <span className="font-medium text-text">
+                  v{capView.agentVersion}
+                </span>
+              ) : systemAgent?.agentVersion ? (
+                <span className="font-medium text-text">
+                  v{systemAgent.agentVersion}
+                </span>
               ) : (
                 "Not reported yet"
               )}
+              {systemAgent?.collectedAt ? (
+                <span className="ml-1.5">
+                  · last check {freshnessLabel(systemAgent.collectedAt)}
+                </span>
+              ) : null}
             </p>
           </div>
-          {!agentUpdateError && installedAgent ? (
-            installedAgent.fresh ? (
-              <Badge variant="ready">Fresh</Badge>
-            ) : (
-              <Badge variant="warning">Stale</Badge>
-            )
-          ) : null}
         </div>
 
         <div className="space-y-2.5 p-4">
@@ -635,19 +574,19 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
                 {/* Terminal job outcome; while a job is in flight the live
                     progress block below is the single status surface. */}
                 {!installInProgress &&
-                (outcomeJobState === "succeeded" ||
-                  outcomeJobState === "failed") ? (
+                (jobState === "succeeded" ||
+                  jobState === "failed") ? (
                   <span
                     role="status"
                     data-testid="ai-bundle-job-state"
                     className={cn(
                       "inline-flex items-center gap-1",
-                      outcomeJobState === "succeeded"
+                      jobState === "succeeded"
                         ? "text-signal"
                         : "text-crit",
                     )}
                   >
-                    {outcomeJobState === "succeeded" ? (
+                    {jobState === "succeeded" ? (
                       <CheckCircle2
                         size={12}
                         className="shrink-0"
@@ -660,7 +599,7 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
                         aria-hidden="true"
                       />
                     )}
-                    {outcomeJobState === "succeeded"
+                    {jobState === "succeeded"
                       ? "last install succeeded"
                       : "last install failed"}
                   </span>
@@ -717,47 +656,30 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
                     aria-hidden="true"
                   />
                   <span data-testid="ai-bundle-install-state">
-                    {installStateLabel}
+                    {stateLabel}
                   </span>
                 </span>
                 <span
                   className="text-[11px] text-dim"
                   data-testid="ai-bundle-install-meta"
                 >
-                  {localProgressPct !== null
-                    ? `${localProgressPct}%`
-                    : "Progress is reported by job state — no percentage estimate."}
-                  {localJobActive && localJob?.phase
-                    ? ` · ${localJob.phase}`
-                    : null}
+                  Progress is reported by job state — no percentage estimate.
                 </span>
               </div>
-              {/* Determinate only with the updater's real numeric progress;
-                  otherwise the bar stays indeterminate and claims no value. */}
+              {/* State-only job record: the bar stays indeterminate and
+                  claims no value — no progress is ever estimated. */}
               <div
                 role="progressbar"
                 aria-label="AI bundle install progress"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                {...(localProgressPct !== null
-                  ? { "aria-valuenow": localProgressPct }
-                  : {})}
                 className="h-1.5 w-full overflow-hidden bg-panel"
               >
-                {localProgressPct !== null ? (
-                  <div
-                    className="h-full bg-signal transition-[width] duration-300"
-                    style={{ width: `${localProgressPct}%` }}
-                  />
-                ) : (
-                  <div className="h-full w-1/3 animate-pulse bg-signal motion-reduce:animate-none" />
-                )}
+                <div className="h-full w-1/3 animate-pulse bg-signal motion-reduce:animate-none" />
               </div>
             </div>
           ) : null}
           {!installInProgress &&
-          outcomeJobState === "failed" &&
-          outcomeJobError ? (
+          jobState === "failed" &&
+          bundle?.lastJob?.error ? (
             <div
               className="flex items-start gap-2 border border-crit/40 bg-crit/10 p-2.5 text-xs text-crit"
               data-testid="ai-bundle-job-error"
@@ -767,7 +689,7 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
                 className="mt-0.5 shrink-0"
                 aria-hidden="true"
               />
-              <span>{outcomeJobError}</span>
+              <span>{bundle?.lastJob?.error}</span>
             </div>
           ) : null}
 

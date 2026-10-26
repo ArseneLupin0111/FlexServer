@@ -35,8 +35,8 @@ const publicProviderProfile = (profile: AiProviderProfileInternal): AiProviderPr
 });
 
 /** Idempotency-Key header as a single trimmed string; blank/absent →
- * undefined (the local updater channel then rejects the request — it never
- * creates a job without an explicit key). */
+ * undefined (the install path is idempotent per pending/running job and
+ * ignores the key). */
 function requestIdempotencyKey(request: Request): string | undefined {
   const raw = request.headers?.["idempotency-key"];
   const value = Array.isArray(raw) ? raw[0] : raw;
@@ -318,9 +318,8 @@ export class AiRoutesService {
 
   /** POST /api/vps/:id/ai/bundle/install — deliberate "Install/Update AI
    * bundle" action; idempotent while a job is pending/running, 503 when the
-   * bundle is unavailable. The Idempotency-Key header is required by (and
-   * replayed on) the local updater channel; the SSH channel is idempotent
-   * per pending/running job and ignores it. */
+   * bundle is unavailable. Idempotent per pending/running job; an
+   * Idempotency-Key header is accepted but ignored. */
   async installBundle(request: Request, vpsId: string) {
     this.authorize(request);
     if (!await this.vps.get(vpsId)) throw new NotFoundException("VPS not found");

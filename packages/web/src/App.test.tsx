@@ -1716,101 +1716,6 @@ describe("React dashboard", () => {
       expect(screen.queryByRole("heading", { name: "Docker monitoring" })).not.toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Docker" })).toHaveAttribute("href", "/vps/vps-1/docker");
     });
-    it("renders workspace settings page and executes remote agent upgrade", async () => {
-      const onlineServers = [{ ...twoServers[0], agentStatus: "online" as const }, twoServers[1]];
-      const mockAgentUpdate = {
-        installed: { version: "0.9.0", buildId: "aaaa", lastSeenAt: new Date().toISOString(), fresh: true },
-        available: { releaseId: "rel-1", version: "1.0.0", buildId: "bbbb", publishedAt: new Date().toISOString(), artifacts: [] },
-        compatibility: { compatible: true, apiContractVersion: 3, reason: "ok" },
-        updater: { installed: true, healthy: true, lastSeenAt: new Date().toISOString() },
-        state: "available",
-        job: null,
-        automation: { state: "pending", reason: null, targetBuildId: "bbbb", retryAllowed: true },
-      };
-      let postReceived = false;
-      fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
-        if (url === "/api/auth/me") return authOk();
-        if (url === "/api/vps/vps-1/agent-update" && init?.method === "POST") {
-          postReceived = true;
-          return {
-            ok: true,
-            status: 202,
-            json: async () => ({
-              data: {
-                ...mockAgentUpdate,
-                automation: { state: "updating", reason: "queued", targetBuildId: "bbbb", retryAllowed: false },
-                job: { id: "job-upgrade-1", state: "queued" },
-              },
-            }),
-          };
-        }
-        if (url === "/api/vps/vps-1/agent-update") {
-          return { ok: true, status: 200, json: async () => ({ data: mockAgentUpdate }) };
-        }
-        const data = url === "/api/dashboard" ? dashboardData
-          : url === "/api/vps" ? onlineServers
-          : url === "/api/vps/vps-1/files/capabilities"
-            ? { enabled: false, available: false, transport: "sftp", reason: "disabled" }
-            : [];
-        return { ok: true, status: 200, json: async () => ({ data }) };
-      });
-
-      const user = userEvent.setup();
-      renderApp(["/vps/vps-1/settings"]);
-
-      expect(await screen.findByRole("heading", { name: "Settings for web-01" })).toBeInTheDocument();
-      expect(screen.getByText("Agent updates")).toBeInTheDocument();
-
-      const upgradeButton = await screen.findByRole("button", { name: "Upgrade agent" });
-      expect(upgradeButton).toBeEnabled();
-      await user.click(upgradeButton);
-
-      await waitFor(() => {
-        expect(postReceived).toBe(true);
-      });
-      expect(await screen.findByText("Queued")).toBeInTheDocument();
-    });
-
-    it("displays error when remote agent upgrade fails in Settings", async () => {
-      const onlineServers = [{ ...twoServers[0], agentStatus: "online" as const }, twoServers[1]];
-      const mockAgentUpdate = {
-        installed: { version: "0.9.0", buildId: "aaaa", lastSeenAt: new Date().toISOString(), fresh: true },
-        available: { releaseId: "rel-1", version: "1.0.0", buildId: "bbbb", publishedAt: new Date().toISOString(), artifacts: [] },
-        compatibility: { compatible: true, apiContractVersion: 3, reason: "ok" },
-        updater: { installed: true, healthy: true, lastSeenAt: new Date().toISOString() },
-        state: "available",
-        job: null,
-        automation: { state: "pending", reason: null, targetBuildId: "bbbb", retryAllowed: true },
-      };
-      fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
-        if (url === "/api/auth/me") return authOk();
-        if (url === "/api/vps/vps-1/agent-update" && init?.method === "POST") {
-          return {
-            ok: false,
-            status: 500,
-            json: async () => ({ error: { code: "UPGRADE_FAILED", message: "SSH connection timed out" } }),
-          };
-        }
-        if (url === "/api/vps/vps-1/agent-update") {
-          return { ok: true, status: 200, json: async () => ({ data: mockAgentUpdate }) };
-        }
-        const data = url === "/api/dashboard" ? dashboardData
-          : url === "/api/vps" ? onlineServers
-          : url === "/api/vps/vps-1/files/capabilities"
-            ? { enabled: false, available: false, transport: "sftp", reason: "disabled" }
-            : [];
-        return { ok: true, status: 200, json: async () => ({ data }) };
-      });
-
-      const user = userEvent.setup();
-      renderApp(["/vps/vps-1/settings"]);
-
-      expect(await screen.findByRole("heading", { name: "Settings for web-01" })).toBeInTheDocument();
-      const upgradeButton = await screen.findByRole("button", { name: "Upgrade agent" });
-      await user.click(upgradeButton);
-
-      expect(await screen.findByRole("alert")).toHaveTextContent("SSH connection timed out");
-    });
 
 
 
@@ -1923,9 +1828,8 @@ describe("React dashboard", () => {
 
     const agentPolicyFixture = {
       vpsId: "vps-1",
-      aiEnabled: false,
-      readEnabled: true,
       dockerActionsEnabled: true,
+      aiEnabled: false,
       composeActionsEnabled: true,
       shellEnabled: false,
       execMode: "sandbox",
@@ -1938,21 +1842,6 @@ describe("React dashboard", () => {
       sendFilesToProvider: false,
       revision: 11,
       updatedAt: "2026-01-01T00:00:00.000Z",
-    };
-
-    const agentUpdateFixture = {
-      installed: {
-        version: "0.9.0",
-        buildId: "aaaa1111bbbb",
-        lastSeenAt: new Date().toISOString(),
-        fresh: true,
-      },
-      available: null,
-      compatibility: { compatible: true, apiContractVersion: 3, reason: "ok" },
-      updater: { installed: true, healthy: true, lastSeenAt: new Date().toISOString() },
-      state: "current",
-      job: null,
-      automation: { state: "current", reason: null, targetBuildId: null, retryAllowed: false },
     };
 
     const aiBundleFixture = {
@@ -2051,7 +1940,6 @@ describe("React dashboard", () => {
           });
         }
         if (url === "/api/vps/vps-1/ai/capability") return aiOk(aiCapabilityFixture);
-        if (url === "/api/vps/vps-1/agent-update") return aiOk(agentUpdateFixture);
         const data =
           url === "/api/dashboard" ? dashboardData
           : url === "/api/vps" ? [{ ...twoServers[0], agentStatus: "online" as const }, twoServers[1]]
@@ -2084,9 +1972,6 @@ describe("React dashboard", () => {
 
       const versionLine = within(card).getByTestId("agent-version-line");
       expect(versionLine).toHaveTextContent("v0.9.0");
-      expect(versionLine).toHaveTextContent("aaaa1111bbbb");
-      expect(versionLine).toHaveTextContent(/last seen/);
-      expect(within(card).getByText("Fresh")).toBeInTheDocument();
 
       // Bundle row: installed + short bundle id + capability diagnosis.
       const bundleLine = within(card).getByTestId("ai-bundle-line");
@@ -2203,8 +2088,6 @@ describe("React dashboard", () => {
       });
       // Indeterminate: no aria-valuenow, since the job carries no numeric progress.
       expect(progress).not.toHaveAttribute("aria-valuenow");
-      expect(progress).toHaveAttribute("aria-valuemin", "0");
-      expect(progress).toHaveAttribute("aria-valuemax", "100");
       // The live region announces queued → running transitions.
       expect(screen.getByTestId("ai-bundle-install-progress")).toHaveAttribute(
         "aria-live",

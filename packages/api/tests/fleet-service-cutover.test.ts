@@ -4,16 +4,12 @@ import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { FleetService } from "../src/agent-updates/fleet.service.js";
-import { AgentLifecycleCoordinator } from "../src/agents/agent-lifecycle-coordinator.js";
-import type { LocalUpgradeService } from "../src/local-upgrade/local-upgrade.service.js";
 import { signFleetManifest } from "../../../scripts/release/fleet-release.mjs";
 import type { AppConfig } from "../src/config/app-config.js";
 import type { FleetRepository } from "../src/persistence/repositories/fleet.repository.js";
 import type { VpsRepository } from "../src/persistence/repositories/vps.repository.js";
 import type { AgentRepository } from "../src/persistence/repositories/agent.repository.js";
-import type { LocalUpgradeRepository } from "../src/persistence/repositories/local-upgrade.repository.js";
 import type { FleetRelease, FleetRollout } from "../src/agent-updates/fleet.models.js";
-import type { LocalUpgradeJob } from "../src/local-upgrade/local-upgrade.models.js";
 import type { Vps } from "../src/vps/vps.models.js";
 import { BadRequestException } from "@nestjs/common";
 
@@ -22,15 +18,6 @@ interface MockVps {
   name: string;
 }
 
-interface MockJob {
-  id: string;
-  vpsId: string;
-  revision: number;
-  state: string;
-  error?: { message: string };
-  reason?: string;
-  completedAt?: string;
-}
 
 describe("FleetService deployment cutover", () => {
   function makeKeys() {
@@ -44,13 +31,10 @@ describe("FleetService deployment cutover", () => {
     release?: FleetRelease;
     activeRollout?: FleetRollout;
     vpsList?: MockVps[];
-    jobs?: MockJob[];
-    localUpgradeService?: LocalUpgradeService;
   } = {}) {
     const releases: FleetRelease[] = overrides.release ? [overrides.release] : [];
     const rollouts: FleetRollout[] = overrides.activeRollout ? [overrides.activeRollout] : [];
     const vpsEntries: MockVps[] = overrides.vpsList ?? [];
-    const jobEntries: MockJob[] = overrides.jobs ?? [];
     const tempDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
 
     const fleetRepo: Partial<FleetRepository> = {
@@ -91,18 +75,6 @@ describe("FleetService deployment cutover", () => {
       }),
     };
 
-    const localUpgradeRepo: Partial<LocalUpgradeRepository> = {
-      getUpdaterHeartbeat: async () => undefined,
-      get: async (id: string) => jobEntries.find((j) => j.id === id) as unknown as LocalUpgradeJob | undefined,
-      compareAndSet: async (id: string, _rev: number, patch: Partial<LocalUpgradeJob>) => {
-        const job = jobEntries.find((j) => j.id === id);
-        if (job) {
-          Object.assign(job, patch);
-          return job as unknown as LocalUpgradeJob;
-        }
-        return undefined;
-      },
-    };
 
     const config: Partial<AppConfig> = {
       dataDir: tempDir,
@@ -114,8 +86,6 @@ describe("FleetService deployment cutover", () => {
       fleetRepository: fleetRepo as FleetRepository,
       vpsRepository: vpsRepo as VpsRepository,
       agentRepository: agentRepo as AgentRepository,
-      localUpgradeRepository: localUpgradeRepo as LocalUpgradeRepository,
-      localUpgradeService: overrides.localUpgradeService,
       clock: () => Date.now(),
     });
     return { service, releases, rollouts, tempDir, config };
@@ -129,7 +99,7 @@ describe("FleetService deployment cutover", () => {
       publishedAt: new Date().toISOString(),
       channel: "stable",
       rollbackSafe: true,
-      components: ["agent", "updater"],
+      components: ["agent"],
       artifacts: [
         {
           component: "agent",
@@ -177,7 +147,6 @@ describe("FleetService deployment cutover", () => {
       releaseId: "c".repeat(40),
       buildId: "c".repeat(40),
       version: "2.0.0",
-      minUpdaterVersion: "1.0.0",
       publishedAt: new Date().toISOString(),
       rollbackSafe: true,
       artifacts: [
@@ -187,15 +156,6 @@ describe("FleetService deployment cutover", () => {
           arch: "amd64",
           url: "https://example.com/agent",
           sha256: "d".repeat(64),
-          size: 500,
-          version: "2.0.0",
-        },
-        {
-          component: "updater",
-          os: "linux",
-          arch: "amd64",
-          url: "https://example.com/updater",
-          sha256: "e".repeat(64),
           size: 500,
           version: "2.0.0",
         },
@@ -295,100 +255,4 @@ describe("FleetService deployment cutover", () => {
     }
   });
 
-  it("releases coordinator update fence on rollout pause and admits subsequent activity", async () => {
-    const coordinator = new AgentLifecycleCoordinator();
-    const activeFences = new Map<string, () => void>();
-    const localUpgradeService = {
-      registerUpdateFenceRelease: (vpsId: string, release: () => void) => {
-        activeFences.set(vpsId, release);
-      },
-      releaseUpdateFence: (vpsId: string) => {
-        const release = activeFences.get(vpsId);
-        if (release) {
-          activeFences.delete(vpsId);
-          release();
-        }
-      },
-    } as unknown as LocalUpgradeService;
-
-    // Simulate update fence acquired during claim for vps-2
-    const releaseVps2Update = await coordinator.tryAcquire("vps-2", "update");
-    localUpgradeService.registerUpdateFenceRelease("vps-2", releaseVps2Update);
-
-    // Prior to pause, activity admission for vps-2 MUST throw ConflictException
-    expect(() => coordinator.tryAcquireActivity("vps-2", "job")).toThrow(
-      /Agent update is in progress for this VPS/,
-    );
-
-    const nowIso = new Date().toISOString();
-    const jobs: MockJob[] = [
-      {
-        id: "job-1",
-        vpsId: "vps-1",
-        state: "failed",
-        revision: 1,
-        error: { message: "Health check failed" },
-      },
-      {
-        id: "job-2",
-        vpsId: "vps-2",
-        state: "claimed",
-        revision: 1,
-      },
-    ];
-
-    const release: FleetRelease = {
-      id: "rel-123",
-      version: "3.0.0",
-      buildId: "1".repeat(40),
-      publishedAt: nowIso,
-      channel: "stable",
-      schemaVersion: 1,
-      rollbackSafe: true,
-      components: ["ai-executor"],
-      artifacts: [],
-    };
-
-    const activeRollout: FleetRollout = {
-      id: "rollout-pause-test",
-      releaseId: "rel-123",
-      state: "running",
-      createdAt: nowIso,
-      updatedAt: nowIso,
-      hosts: [
-        { vpsId: "vps-1", state: "updating", jobId: "job-1" },
-        { vpsId: "vps-2", state: "updating", jobId: "job-2" },
-      ],
-    };
-
-    const vpsList: MockVps[] = [
-      { id: "vps-1", name: "Host 1" },
-      { id: "vps-2", name: "Host 2" },
-    ];
-
-    const { service, tempDir } = mockDeps({
-      release,
-      activeRollout,
-      vpsList,
-      jobs,
-      localUpgradeService,
-    });
-
-    try {
-      await service.tick();
-
-      // Rollout is now paused due to vps-1 failure
-      expect(activeRollout.state).toBe("paused");
-      // Pre-swap job-2 was cancelled
-      const job2 = jobs.find((j) => j.id === "job-2");
-      expect(job2.state).toBe("failed");
-
-      // The coordinator update fence for vps-2 was released, admitting activity immediately
-      const releaseJobActivity = coordinator.tryAcquireActivity("vps-2", "job");
-      expect(typeof releaseJobActivity).toBe("function");
-      releaseJobActivity();
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
 });

@@ -51,11 +51,6 @@ export class AgentLifecycleCoordinator {
   }
   tryAcquireActivity(vpsId: string, kind: ActivityKind): () => void {
     const s = this.slot(vpsId);
-    if (s.lifecycle === "update") {
-      throw new ConflictException(
-        "Agent update is in progress for this VPS",
-      );
-    }
     s.activities[kind]++;
     let released = false;
     return () => {
@@ -65,37 +60,6 @@ export class AgentLifecycleCoordinator {
       this.drain(vpsId, s);
     };
   }
-
-  seedUpdateFence(vpsId: string): () => void {
-    const s = this.slot(vpsId);
-    if (s.lifecycle) {
-      throw new ConflictException(
-        "An agent lifecycle operation is already in progress for this VPS",
-      );
-    }
-    s.lifecycle = "update";
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      s.lifecycle = undefined;
-      this.drain(vpsId, s);
-    };
-  }
-
-  reconstructExecutingFences(
-    vpsIds: Iterable<string>,
-  ): Map<string, () => void> {
-    const releases = new Map<string, () => void>();
-    for (const vpsId of vpsIds) {
-      if (!releases.has(vpsId)) {
-        releases.set(vpsId, this.seedUpdateFence(vpsId));
-      }
-    }
-    return releases;
-  }
-
-
   async beginIngest(vpsId: string): Promise<() => void> {
     const s = this.slot(vpsId);
     if (s.lifecycle === "uninstall")

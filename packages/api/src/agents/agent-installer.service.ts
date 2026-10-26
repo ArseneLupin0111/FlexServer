@@ -1,7 +1,6 @@
 import { BadRequestException, ConflictException, Inject, Injectable, Optional } from "@nestjs/common";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import type { AppConfig } from "../config/app-config.js";
 import {
   DuplicateAgentInstallError,
@@ -21,17 +20,18 @@ import { AgentLifecycleCoordinator } from "./agent-lifecycle-coordinator.js";
 import {
   APP_CONFIG,
   AGENT_REPOSITORY,
-  FLEET_PROVISIONING_SERVICE,
-  FLEET_SERVICE,
   KEY_SERVICE,
   VPS_REPOSITORY,
 } from "../tokens.js";
-import type { FleetService } from "../agent-updates/fleet.service.js";
-import {
-  FleetProvisioningService,
-  normalizeArchitecture,
-  type Architecture,
-} from "./fleet-provisioning.service.js";
+type Architecture = "amd64" | "arm64";
+
+/** Extract "linux/<arch>" from `uname -m` output; null on anything else. */
+function normalizeArchitecture(raw: string): Architecture | null {
+  if (/arm64|aarch64/i.test(raw)) return "arm64";
+  if (/x86_64|amd64/i.test(raw)) return "amd64";
+  return null;
+}
+import { BundledAgentService } from "../local-upgrade/bundled-agent.service.js";
 import {
   AGENT_LIFECYCLE_LOCK,
   buildDockerStateProvisionCommand,
@@ -116,6 +116,7 @@ export class AgentInstallerService {
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(SshService) private readonly ssh: SshService,
+    @Inject(BundledAgentService) private readonly bundledAgent: BundledAgentService,
     @Inject(AgentService) private readonly agentService: AgentService,
     @Inject(AGENT_REPOSITORY) private readonly agentRepository: AgentRepository,
     @Inject(VPS_REPOSITORY) private readonly vpsRepository: VpsRepository,
@@ -126,10 +127,6 @@ export class AgentInstallerService {
     @Inject(AgentLifecycleCoordinator)
     private readonly lifecycle: AgentLifecycleCoordinator,
     @Optional() private readonly polling?: Partial<Polling>,
-    @Optional()
-    @Inject(FLEET_PROVISIONING_SERVICE)
-    private readonly fleetProvisioning?: FleetProvisioningService,
-    @Optional() @Inject(FLEET_SERVICE) private readonly _fleetService?: FleetService,
   ) {}
 
   /**
@@ -168,13 +165,9 @@ export class AgentInstallerService {
       const isReinstall =
         priorState !== undefined && priorState.status !== "not_installed";
 
-      // 4. Initial check that an agent binary exists locally (defaulting to amd64 check)
-      let binaryPath = this.resolveBinaryPath("amd64");
-      if (!existsSync(binaryPath)) {
-        throw new BadRequestException(
-          "Agent binary not found. Run 'npm run build:agent' first or configure AGENT_BINARY_PATH.",
-        );
-      }
+      // 4. Agent binary selection happens after remote `uname -m` detection
+      // inside the install job; no amd64 pre-check here so an arm64-only host
+      // is never preempted before upload.
 
       // 5. Resolve SSH auth
       const sshAuth = await resolveSshAuth(vps, password, this.keys);
@@ -249,10 +242,15 @@ export class AgentInstallerService {
             throw new Error("Could not determine remote home directory");
           }
 
-          // Detect remote host architecture (no hardcoded amd64 override)
+          // Detect remote host architecture; unknown arch fails closed
+          // (never guess amd64) before any upload occurs.
           const unameResult = await this.ssh.execCommand(vps, "uname -m", sshAuth, 10_000);
           const targetArch = normalizeArchitecture(unameResult.stdout);
-          binaryPath = this.resolveBinaryPath(targetArch);
+          if (!targetArch) {
+            throw new BadRequestException(
+              `Unsupported remote architecture: ${unameResult.stdout.trim() || "(empty)"}`,
+            );
+          }
           liveDir = `${homeDir}/.vps-manager-agent`;
           liveBinary = `${liveDir}/vps-agent`;
           liveConfig = `${liveDir}/config.json`;
@@ -289,6 +287,7 @@ export class AgentInstallerService {
           // (Linux returns ETXTBSY/text-file-busy on open-for-write of a
           // running image). Staged path is removed on every failure path.
           await ctx.update("uploading-binary", 30);
+          const binaryPath = this.resolveBinaryPath(targetArch);
           const binaryContent = readFileSync(binaryPath);
           const checksum = createHash("sha256")
             .update(binaryContent)
@@ -465,30 +464,6 @@ export class AgentInstallerService {
           });
 
           await ctx.succeed("complete");
-          try {
-            if (this.fleetProvisioning) {
-              await this.fleetProvisioning.provisionHost(vpsId, sshAuth, {
-                source: "bundled",
-                isNewHost: !isReinstall,
-              });
-            }
-          } catch (provisionError) {
-            await this.audit
-              .record({
-                actor: "system",
-                action: "fleet.updater.provision.failure",
-                resourceType: "vps",
-                resourceId: vpsId,
-                result: "failure",
-                metadata: {
-                  error:
-                    provisionError instanceof Error
-                      ? provisionError.message
-                      : String(provisionError),
-                },
-              })
-              .catch(() => undefined);
-          }
           await this.ssh.execCommand(vps,
             `rm -f -- ${shellQuote(backupBinary)} ${shellQuote(backupConfig)} ${shellQuote(stagedBinary)} ${shellQuote(stagedConfig)}`,
             sshAuth, 10_000).catch(() => undefined);
@@ -665,29 +640,20 @@ export class AgentInstallerService {
     });
   }
 
-  private resolveBinaryPath(arch: Architecture = "amd64"): string {
-    if (this.config.agentBinaryPath && existsSync(this.config.agentBinaryPath)) {
-      return this.config.agentBinaryPath;
+  /**
+   * Delegate arch-verified binary resolution to BundledAgentService: it
+   * validates the ELF header per requested architecture, honours the explicit
+   * AGENT_BINARY_PATH only when it genuinely targets that arch (else falls
+   * back to a matching sibling) and returns null (never an amd64 guess) when
+   * nothing valid exists.
+   */
+  private resolveBinaryPath(arch: Architecture): string {
+    const path = this.bundledAgent.resolveBinaryPath(arch);
+    if (!path) {
+      throw new BadRequestException(
+        `Host agent binary for ${arch} not found. Run 'npm run build:agent' first or configure AGENT_BINARY_PATH.`,
+      );
     }
-    const candidates = [
-      // Docker path with matching arch
-      `/app/agent/vps-agent-linux-${arch}`,
-      join(process.cwd(), "agent", `vps-agent-linux-${arch}`),
-      join(process.cwd(), "packages", "agent", "dist", `vps-agent-linux-${arch}`),
-      join(
-        process.cwd(),
-        "..",
-        "..",
-        "packages",
-        "agent",
-        "dist",
-        `vps-agent-linux-${arch}`,
-      ),
-    ];
-    const found = candidates.find((candidate) => existsSync(candidate));
-    if (found) return found;
-    throw new BadRequestException(
-      `Host agent binary for ${arch} not found. Looked in: ${candidates.join(", ")}`,
-    );
+    return path;
   }
 }

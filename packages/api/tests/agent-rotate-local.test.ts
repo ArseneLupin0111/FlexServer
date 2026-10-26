@@ -245,45 +245,6 @@ describe("POST /api/vps/:id/rotate-agent", () => {
     expect(JSON.stringify(jobsRes.body)).not.toContain("vma_");
   }, 15_000);
 
-  it("preserves active local-updater credential when rotating agent credential", async () => {
-    const server = app();
-    const vpsId = await createLocalVps();
-    const oldAgent = await sharedAgentRepo.createCredential({
-      vpsId,
-      secretHash: "sha256_old_agent",
-      status: "active",
-      scope: "agent",
-    });
-    const updaterCred = await sharedAgentRepo.createCredential({
-      vpsId,
-      secretHash: "sha256_updater",
-      status: "active",
-      scope: "local-updater",
-    });
-
-    vi.spyOn(
-      LocalAgentRotationHelper.prototype,
-      "applyCredential",
-    ).mockResolvedValueOnce(undefined);
-
-    const post = await withCookie(
-      request(server).post(`/api/vps/${vpsId}/rotate-agent`),
-    ).expect(201);
-
-    await waitForJob(post.body.data.jobId, "succeeded");
-
-    const creds = await sharedAgentRepo.listCredentialsByVps(vpsId);
-    const rotated = creds.find((c) => c.id === post.body.data.credentialId);
-    expect(rotated?.status).toBe("active");
-    expect(rotated?.scope).toBe("agent");
-
-    const oldAgentAfter = creds.find((c) => c.id === oldAgent.id);
-    expect(oldAgentAfter?.status).toBe("revoked");
-
-    const updaterAfter = creds.find((c) => c.id === updaterCred.id);
-    expect(updaterAfter?.status).toBe("active");
-    expect(updaterAfter?.scope).toBe("local-updater");
-  }, 15_000);
 });
 
 describe("LocalAgentRotationHelper process execution", () => {

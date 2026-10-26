@@ -9,7 +9,6 @@ import type {
 
 const VALID_COMPONENTS: Record<FleetArtifactComponent, true> = {
   agent: true,
-  updater: true,
   "ai-executor": true,
   "ai-host-helper": true,
   "ai-rootfs": true,
@@ -46,10 +45,14 @@ export function validateFleetPayload(raw: unknown): FleetManifestPayload {
   );
   requireValue(
     typeof payload.version === "string" &&
-      VERSION_REGEX.test(payload.version) &&
-      typeof payload.minUpdaterVersion === "string" &&
-      VERSION_REGEX.test(payload.minUpdaterVersion),
-    "Invalid release/updater semantic version",
+      VERSION_REGEX.test(payload.version),
+    "Invalid release semantic version",
+  );
+  requireValue(
+    !payload.minUpdaterVersion ||
+      (typeof payload.minUpdaterVersion === "string" &&
+        VERSION_REGEX.test(payload.minUpdaterVersion)),
+    "Invalid updater semantic version",
   );
   requireValue(
     typeof payload.rollbackSafe === "boolean" &&
@@ -82,6 +85,7 @@ export function validateFleetPayload(raw: unknown): FleetManifestPayload {
     requireValue(
       typeof a.component === "string" &&
         Object.hasOwn(VALID_COMPONENTS, a.component) &&
+        a.os === "linux" &&
         (a.arch === "amd64" || a.arch === "arm64"),
       `Unsupported component/platform: ${String(a.component)}/${String(a.os)}/${String(a.arch)}`,
     );
@@ -111,12 +115,6 @@ export function validateFleetPayload(raw: unknown): FleetManifestPayload {
       seen.has(`${component}/linux/${arch}`);
     const artifacts = payload.artifacts as FleetArtifact[];
     if (artifacts.some((a) => a.arch === arch)) {
-      if (has("agent") || has("updater")) {
-        requireValue(
-          has("agent") && has("updater"),
-          `Missing agent/updater pair for ${arch}`,
-        );
-      }
       const ai: FleetArtifactComponent[] = [
         "ai-executor",
         "ai-host-helper",
@@ -127,7 +125,7 @@ export function validateFleetPayload(raw: unknown): FleetManifestPayload {
         requireValue(ai.every(has), `Incomplete AI runtime for ${arch}`);
       }
       requireValue(
-        (has("agent") && has("updater")) || ai.every(has),
+        has("agent") || ai.every(has),
         `Missing required component set for ${arch}`,
       );
     }

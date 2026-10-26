@@ -6,9 +6,8 @@ import { AgentLifecycleStatus, localAgentLabel } from "./AgentLifecycleStatus";
 import { ServerTable } from "./ServerTable";
 import type { VpsRecord } from "../../../lib/api";
 
-// The shared upgrade control has its own suite; this file only asserts the
-// lifecycle labels beside it, so keep its network/SSE side effects out.
-vi.mock("./LocalAgentUpdate", () => ({ LocalAgentUpdate: () => null }));
+// Only lifecycle labels are asserted here - keep network/SSE side effects
+// out (subscribeMonitoring is mocked by the shared test setup).
 
 const base: VpsRecord = { id: "vps-1", name: "web-01", host: "example.test", port: 22, username: "root", createdAt: "", updatedAt: "" };
 const local = (overrides: Partial<VpsRecord> = {}): VpsRecord => ({ ...base, kind: "local", managedBy: "system", ...overrides });

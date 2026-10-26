@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { ConflictException } from "@nestjs/common";
 import { AgentLifecycleCoordinator } from "../src/agents/agent-lifecycle-coordinator.js";
 import { TerminalSessionRegistry } from "../src/terminal/terminal-registry.js";
 import {
@@ -78,89 +77,6 @@ function createInMemoryJobRepo(initialJobs: CommandJob[] = []): JobRepository {
   } as unknown as JobRepository;
 }
 
-describe("AgentLifecycleCoordinator activity admission and fencing", () => {
-  it("allows update fence acquisition during active activities, blocks new activity and concurrent update, drains accounting", async () => {
-    const coordinator = new AgentLifecycleCoordinator();
-    const vpsId = "vps-test-1";
-
-    // Initially, update lifecycle can be acquired
-    const releaseInit = await coordinator.tryAcquire(vpsId, "update");
-    releaseInit();
-
-    const releaseJob1 = coordinator.tryAcquireActivity(vpsId, "job");
-    const releaseJob2 = coordinator.tryAcquireActivity(vpsId, "job");
-    const releaseTerm1 = coordinator.tryAcquireActivity(vpsId, "terminal");
-
-    // With active ongoing activities, tryAcquire("update") succeeds and fences the VPS
-    const releaseUpdate = await coordinator.tryAcquire(vpsId, "update");
-    expect(coordinator.isLifecycleActive(vpsId)).toBe(true);
-
-    // Concurrent update or lifecycle operation is blocked while update is active
-    await expect(coordinator.tryAcquire(vpsId, "update")).rejects.toThrow(ConflictException);
-    await expect(coordinator.tryAcquire(vpsId, "install")).rejects.toThrow(ConflictException);
-
-    // New activities must reject while update is active
-    expect(() => coordinator.tryAcquireActivity(vpsId, "job")).toThrow(ConflictException);
-    expect(() => coordinator.tryAcquireActivity(vpsId, "terminal")).toThrow(ConflictException);
-
-    // Idempotent release of ongoing activities: calling multiple times only decrements once
-    releaseJob1();
-    releaseJob1();
-    releaseJob2();
-    releaseTerm1();
-    releaseTerm1();
-
-    // Lifecycle remains active until update itself releases
-    expect(coordinator.isLifecycleActive(vpsId)).toBe(true);
-    expect(() => coordinator.tryAcquireActivity(vpsId, "job")).toThrow(ConflictException);
-
-    // Release update fence
-    releaseUpdate();
-    expect(coordinator.isLifecycleActive(vpsId)).toBe(false);
-
-    // After update release and ongoing activity completion, new activities can be acquired again
-    const releaseNewJob = coordinator.tryAcquireActivity(vpsId, "job");
-    releaseNewJob();
-  });
-
-  it("permits activity during non-update lifecycle operations such as install", async () => {
-    const coordinator = new AgentLifecycleCoordinator();
-    const vpsId = "vps-test-2";
-
-    const releaseInstall = await coordinator.tryAcquire(vpsId, "install");
-    expect(coordinator.isLifecycleActive(vpsId)).toBe(true);
-
-    // Activities (e.g. install job) are permitted during install
-    const releaseJob = coordinator.tryAcquireActivity(vpsId, "job");
-    releaseJob();
-    releaseInstall();
-  });
-
-  it("supports durable update-fence reconstruction and batch reconstruction", () => {
-    const coordinator = new AgentLifecycleCoordinator();
-
-    const releases = coordinator.reconstructExecutingFences(["vps-a", "vps-b"]);
-    expect(coordinator.isLifecycleActive("vps-a")).toBe(true);
-    expect(coordinator.isLifecycleActive("vps-b")).toBe(true);
-
-    // Cannot acquire activity while fence is active
-    expect(() => coordinator.tryAcquireActivity("vps-a", "job")).toThrow(ConflictException);
-    expect(() => coordinator.tryAcquireActivity("vps-b", "terminal")).toThrow(ConflictException);
-
-    // Release fence for vps-a
-    releases.get("vps-a")?.();
-    expect(coordinator.isLifecycleActive("vps-a")).toBe(false);
-    expect(coordinator.isLifecycleActive("vps-b")).toBe(true);
-
-    // vps-a can now acquire activity, vps-b still cannot
-    const releaseA = coordinator.tryAcquireActivity("vps-a", "job");
-    releaseA();
-    expect(() => coordinator.tryAcquireActivity("vps-b", "terminal")).toThrow(ConflictException);
-
-    releases.get("vps-b")?.();
-    expect(coordinator.isLifecycleActive("vps-b")).toBe(false);
-  });
-});
 
 describe("TerminalSessionRegistry.hasActive", () => {
   it("reports active session presence and clears on release or bulk close", async () => {
@@ -284,85 +200,11 @@ describe("TerminalSessionService activity admission and leak prevention", () => 
     ).rejects.toMatchObject({ code: "SSH_FAILURE" });
 
     expect(service.registry.hasActive("vps-1")).toBe(false);
-    const releaseUpdate = await coordinator.tryAcquire("vps-1", "update");
-    releaseUpdate();
   });
 
-  it("rejects terminal open when agent update fence is active", async () => {
-    const coordinator = new AgentLifecycleCoordinator();
-    const releaseUpdate = await coordinator.tryAcquire("vps-updating", "update");
-
-    const sessions = {
-      authenticateById: vi.fn(async () => ({
-        id: "dash-1",
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      })),
-    } as unknown as DashboardSessionService;
-    const service = new TerminalSessionService(
-      config,
-      {} as unknown as VpsRepository,
-      {} as unknown as KeyService,
-      {} as unknown as SshService,
-      sessions,
-      coordinator,
-    );
-
-    const socket = new MockSocket();
-    await expect(
-      service.open(socket, "dash-1", {
-        type: "open",
-        version: 1,
-        vpsId: "vps-updating",
-        cols: 80,
-        rows: 24,
-      }),
-    ).rejects.toThrow(ConflictException);
-
-    expect(service.registry.hasActive("vps-updating")).toBe(false);
-    releaseUpdate();
-  });
 });
 
 describe("JobRunnerService activity admission and conflict safety", () => {
-  it("acquires activity before status running and releases in finally upon task completion", async () => {
-    const coordinator = new AgentLifecycleCoordinator();
-    const jobRepo = createInMemoryJobRepo();
-    const activity = new JobActivityService();
-    const runner = new JobRunnerService(jobRepo, activity, coordinator);
-
-    const job = await jobRepo.create({
-      vpsId: "vps-job-1",
-      type: "command",
-      status: "queued",
-      step: "queued",
-      progress: 0,
-    });
-
-    let updateAllowedDuringExecution = false;
-    let releaseInFlightUpdate: (() => void) | undefined;
-    const { promise, resolve } = Promise.withResolvers<void>();
-    runner.start(job, async (ctx) => {
-      // Under disruptive update policy, update acquisition is allowed during active activity
-      try {
-        releaseInFlightUpdate = await coordinator.tryAcquire("vps-job-1", "update");
-        updateAllowedDuringExecution = true;
-      } catch {
-        updateAllowedDuringExecution = false;
-      }
-      await ctx.succeed();
-      resolve();
-    });
-    await promise;
-    await flushMicrotasks();
-    expect(updateAllowedDuringExecution).toBe(true);
-    releaseInFlightUpdate?.();
-
-    // After completion, activity was released so update can be acquired and released
-    const releaseUpdate = await coordinator.tryAcquire("vps-job-1", "update");
-    releaseUpdate();
-    const completed = await jobRepo.get(job.id);
-    expect(completed?.status).toBe("succeeded");
-  });
 
   it("releases activity in finally even when task throws an error", async () => {
     const coordinator = new AgentLifecycleCoordinator();
@@ -391,44 +233,9 @@ describe("JobRunnerService activity admission and conflict safety", () => {
     });
     await promise;
     await flushMicrotasks();
-    // After failure, activity was released in finally
-    const releaseUpdate = await coordinator.tryAcquire("vps-job-2", "update");
-    releaseUpdate();
 
     const completed = await jobRepo.get(job.id);
     expect(completed?.status).toBe("failed");
   });
 
-  it("synchronously rejects at start admission with retriable ConflictException when update is in progress", async () => {
-    const coordinator = new AgentLifecycleCoordinator();
-    const jobRepo = createInMemoryJobRepo();
-    const activity = new JobActivityService();
-    const runner = new JobRunnerService(jobRepo, activity, coordinator);
-
-    // Active update fence on vps-job-3
-    const releaseUpdate = await coordinator.tryAcquire("vps-job-3", "update");
-
-    const job = await jobRepo.create({
-      vpsId: "vps-job-3",
-      type: "command",
-      status: "queued",
-      step: "queued",
-      progress: 0,
-    });
-
-    const taskExecuted = vi.fn(async () => {});
-    // start() must synchronously throw ConflictException at admission
-    expect(() => runner.start(job, taskExecuted)).toThrow(ConflictException);
-
-    // Task must never have been called
-    expect(taskExecuted).not.toHaveBeenCalled();
-
-    // Queued job in repo should be cancelled due to admission conflict rather than permanently failed
-    const finalJob = await jobRepo.get(job.id);
-    expect(finalJob?.status).toBe("cancelled");
-    expect(finalJob?.step).toBe("admission_rejected");
-    expect(finalJob?.errorMessage).toMatch(/Agent update is in progress/i);
-
-    releaseUpdate();
-  });
 });

@@ -5,13 +5,7 @@ import type { AppConfig } from "../config/app-config.js";
 import type { FleetRepository } from "../persistence/repositories/fleet.repository.js";
 import type { VpsRepository } from "../persistence/repositories/vps.repository.js";
 import type { AgentRepository } from "../persistence/repositories/agent.repository.js";
-import type { LocalUpgradeRepository } from "../persistence/repositories/local-upgrade.repository.js";
-import type { LocalUpgradeService } from "../local-upgrade/local-upgrade.service.js";
-import {
-  LOCAL_UPGRADE_POST_SWAP_STATES,
-  LOCAL_UPGRADE_TERMINAL_STATES,
-  type UpdaterHeartbeat,
-} from "../local-upgrade/local-upgrade.models.js";
+import type { AiRepository } from "../persistence/repositories/ai.persistence.js";
 import type { MetricRepository } from "../persistence/repositories/metric.repository.js";
 import type { AuditService } from "../audit/audit.service.js";
 import type { SshService } from "../ssh/ssh.service.js";
@@ -39,7 +33,6 @@ import {
 
 const ADVISORY_LOCK_ID = 99283741;
 const CANARY_OBSERVATION_MS = 5 * 60 * 1000;
-const MAX_CONCURRENT_PER_COHORT = 3;
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 
 function lookupPolicy(
@@ -66,12 +59,8 @@ export interface FleetServiceDependencies {
   fleetRepository: FleetRepository;
   vpsRepository: VpsRepository;
   agentRepository: AgentRepository;
-  localUpgradeRepository: LocalUpgradeRepository;
-  localUpgradeService?: LocalUpgradeService;
+  aiRepository?: AiRepository;
   metricRepository?: MetricRepository;
-  auditService?: AuditService;
-  sshService?: SshService;
-  keyService?: KeyService;
   pool?: Pool;
   clock?: () => number;
 }
@@ -81,12 +70,8 @@ export class FleetService {
   private readonly fleetRepo: FleetRepository;
   private readonly vpsRepo: VpsRepository;
   private readonly agentRepo: AgentRepository;
-  private readonly localUpgradeRepo: LocalUpgradeRepository;
-  private readonly localUpgradeService?: LocalUpgradeService;
+  private readonly aiRepo?: AiRepository;
   private readonly metricRepo?: MetricRepository;
-  private readonly auditService?: AuditService;
-  private readonly sshService?: SshService;
-  private readonly keyService?: KeyService;
   private readonly pool?: Pool;
   private readonly getNow: () => number;
 
@@ -95,16 +80,8 @@ export class FleetService {
     this.fleetRepo = deps.fleetRepository;
     this.vpsRepo = deps.vpsRepository;
     this.agentRepo = deps.agentRepository;
-    this.localUpgradeRepo = deps.localUpgradeRepository;
+    this.aiRepo = deps.aiRepository;
     this.metricRepo = deps.metricRepository;
-    this.localUpgradeService = deps.localUpgradeService;
-    this.auditService = deps.auditService;
-    this.sshService = deps.sshService;
-    this.keyService = deps.keyService;
-    void this.localUpgradeService;
-    void this.auditService;
-    void this.sshService;
-    void this.keyService;
 
     let pool = deps.pool;
     if (!pool && deps.fleetRepository && typeof deps.fleetRepository === "object" && "pool" in deps.fleetRepository) {
@@ -118,115 +95,78 @@ export class FleetService {
     this.getNow = deps.clock ?? (() => Date.now());
   }
 
+  /** Signed AI releases dashboard. Host health is real agent state only:
+   * online = agent state fresh (5 min), ai = live AI capability record; a
+   * host without a fresh agent heartbeat or without AI evidence fails closed
+   * (status "offline" / "ai_unhealthy") — never fabricated from updater
+   * heartbeats. */
   async getOverview(): Promise<FleetOverviewResponse> {
-    const [allVps, allAgentStates, allPolicies, enrolledVpsIds, releases, rollouts, notifications] =
-      await Promise.all([
-        this.vpsRepo.list(),
-        this.agentRepo.listStates(),
-        this.fleetRepo.listPolicies(),
-        this.fleetRepo.listEnrolledVpsIds(),
-        this.fleetRepo.listReleases(),
-        this.fleetRepo.listRollouts(),
-        this.fleetRepo.listNotifications(100),
-      ]);
+    const [releases, rollouts, notifications] = await Promise.all([
+      this.fleetRepo.listReleases(),
+      this.fleetRepo.listRollouts(),
+      this.fleetRepo.listNotifications(100),
+    ]);
+    await this.fleetRepo.pruneNotifications(NINETY_DAYS_MS);
 
-    const allHeartbeats = await Promise.all(
-      allVps.map((vps) => this.localUpgradeRepo.getUpdaterHeartbeat(vps.id)),
-    );
-    const heartbeatByVps = new Map<string, UpdaterHeartbeat>();
-    allHeartbeats.forEach((hb, idx) => {
-      if (hb) heartbeatByVps.set(allVps[idx].id, hb);
-    });
-
-    const enrolledSet = new Set(enrolledVpsIds);
+    const latestRelease = releases[0];
     const activeRollout = rollouts.find(
       (r) => r.state === "running" || r.state === "pending",
     );
-    const latestRelease = releases[0];
-
-    const agentStateByVps = new Map(allAgentStates.map((s) => [s.vpsId, s]));
-
-    const groupNames = new Set<string>(["Default"]);
-    for (const p of policyValues(allPolicies)) {
-      if (p.group) groupNames.add(p.group);
-    }
-    for (const r of rollouts) {
-      if (r.group) groupNames.add(r.group);
-    }
-    const groups: FleetGroup[] = Array.from(groupNames).map((name) => ({ name }));
+    const rolloutHostByVps = new Map(
+      activeRollout?.hosts.map((h) => [h.vpsId, h]) ?? [],
+    );
 
     const now = this.getNow();
-
-    const hosts: FleetHost[] = allVps.map((vps) => {
-      const agentState = agentStateByVps.get(vps.id);
-      const heartbeat = heartbeatByVps.get(vps.id);
-      const policy: FleetPolicy = lookupPolicy(allPolicies, vps.id) ?? {
-        mode: "auto",
-        group: "Default",
-      };
-      const enrolled = enrolledSet.has(vps.id);
-
+    const hosts: FleetHost[] = [];
+    const vpsList = await this.vpsRepo.list().catch(() => []);
+    const stateByVps = new Map(
+      (await this.agentRepo.listStates().catch(() => [])).map((s) => [s.vpsId, s]),
+    );
+    for (const vps of vpsList) {
+      const agentState = stateByVps.get(vps.id);
       const lastSeenMs = agentState?.lastSeenAt
         ? new Date(agentState.lastSeenAt).getTime()
         : 0;
-      const isOnline = agentState?.status === "online" && (now - lastSeenMs <= 5 * 60 * 1000);
-
-      const installedBuildId = agentState?.buildId ?? null;
-      const targetReleaseId = latestRelease?.id ?? null;
-
-      const setupRequired = !heartbeat;
+      const online =
+        agentState?.status === "online" && now - lastSeenMs <= 5 * 60 * 1000;
+      const rh = rolloutHostByVps.get(vps.id);
 
       let status: FleetHostStatus = "idle";
-      if (!enrolled || setupRequired) {
-        status = "needs_setup";
-      } else if (!isOnline) {
+      if (rh) {
+        status = rh.state as FleetHostStatus;
+      } else if (!online) {
         status = "offline";
-      } else if (policy.mode === "pinned") {
-        status = "pinned";
       } else {
-        const rolloutHost = activeRollout?.hosts.find((h) => h.vpsId === vps.id);
-        if (rolloutHost) {
-          if (rolloutHost.state === "updating") status = "updating";
-          else if (rolloutHost.state === "observing") status = "observing";
-          else if (rolloutHost.state === "queued") status = "queued";
-          else if (rolloutHost.state === "succeeded") status = "succeeded";
-          else if (rolloutHost.state === "failed") status = "failed";
-          else if (rolloutHost.state === "rolled_back") status = "rolled_back";
-        } else if (heartbeat && heartbeat.idle === false) {
-          status = "busy";
+        const capability = this.aiRepo
+          ? await this.aiRepo.getAiCapability(vps.id).catch(() => undefined)
+          : undefined;
+        if (capability && capability.supported && capability.freshness) {
+          status =
+            now - new Date(capability.freshness).getTime() <= 15 * 60 * 1000
+              ? "idle"
+              : "ai_stale";
         } else {
-          status = "idle";
+          status = "ai_unhealthy";
         }
       }
 
-      return {
+      hosts.push({
         vpsId: vps.id,
         name: vps.name,
-        online: isOnline,
-        installedBuildId,
-        targetReleaseId,
-        policy,
-        enrolled,
-        setupRequired,
+        online,
+        installedBuildId: agentState?.buildId ?? null,
+        targetReleaseId: latestRelease?.id ?? null,
+        policy: { mode: "auto", group: "Default" },
+        enrolled: true,
+        setupRequired: false,
         status,
         lastSeenAt: agentState?.lastSeenAt ?? null,
-        platform: heartbeat?.platform,
-        updaterVersion: heartbeat?.updaterVersion ?? null,
-        installedAi: heartbeat?.installedAi,
-        aiHealth: heartbeat?.aiHealth
-          ? {
-              ...heartbeat.aiHealth,
-              status:
-                heartbeat.aiHealth.status ??
-                (heartbeat.aiHealth.healthy ? "healthy" : "unhealthy"),
-            }
-          : undefined,
-      };
-    });
+      });
+    }
 
     return {
       hosts,
-      groups,
+      groups: [{ name: "Default" }],
       releases,
       rollouts,
       notifications,
@@ -246,14 +186,12 @@ export class FleetService {
       throw new NotFoundException(`Release not found: ${params.releaseId}`);
     }
 
-    const hasAgentOrUpdater =
-      release.components?.some((c) => c === "agent" || c === "updater") ||
-      release.artifacts?.some(
-        (a) => a.component === "agent" || a.component === "updater",
-      );
-    if (hasAgentOrUpdater) {
+    const hasAgentComponent =
+      release.components?.some((c) => c === "agent") ||
+      release.artifacts?.some((a) => a.component === "agent");
+    if (hasAgentComponent) {
       throw new BadRequestException(
-        "Rollouts for agent or updater components are rejected; agent updates are managed automatically by deployment convergence.",
+        "Rollouts for agent or updater components are rejected; agent updates are not automatic. Use the per-host installer.",
       );
     }
 
@@ -368,7 +306,7 @@ export class FleetService {
     const hasAi = verified.artifacts.some((a) => a.component.startsWith("ai-"));
     if (!hasAi) {
       throw new BadRequestException(
-        "External agent target manifests are no longer imported. Agent updates are managed automatically by deployment convergence. Only signed AI runtime manifests are supported.",
+        "External agent target manifests are no longer imported. Agent updates are not automatic; only signed AI runtime manifests are supported. Install agents via the per-host installer.",
       );
     }
 
@@ -384,7 +322,7 @@ export class FleetService {
       publishedAt: verified.publishedAt,
       channel: verified.channel,
       rollbackSafe: verified.rollbackSafe,
-      minUpdaterVersion: verified.minUpdaterVersion,
+      ...(verified.minUpdaterVersion ? { minUpdaterVersion: verified.minUpdaterVersion } : {}),
       upgradeFrom: verified.upgradeFrom,
       components: Array.from(new Set(verified.artifacts.map((a) => a.component))),
       artifacts: verified.artifacts,
@@ -479,70 +417,58 @@ export class FleetService {
 
       const pol = lookupPolicy(policies, rh.vpsId);
       const agentState = await this.agentRepo.getState(rh.vpsId);
-      const updaterHeartbeat = await this.localUpgradeRepo.getUpdaterHeartbeat(rh.vpsId);
 
       const lastSeenMs = agentState?.lastSeenAt
         ? new Date(agentState.lastSeenAt).getTime()
         : 0;
       const isOnline = agentState?.status === "online" && (now - lastSeenMs <= 5 * 60 * 1000);
 
-      if (rh.state === "updating" || rh.state === "queued") {
-        if (!rh.jobId) continue;
-        const job = await this.localUpgradeRepo.get(rh.jobId);
-        if (!job) continue;
-
-        if (job.state === "succeeded") {
-          if (rh.isCanary || pol?.canary) {
-            rh.state = "observing";
-            rh.observationStartedAt = new Date(now).toISOString();
-            rh.updatedAt = new Date(now).toISOString();
-          } else {
-            rh.state = "succeeded";
-            rh.updatedAt = new Date(now).toISOString();
-          }
-        } else if (job.state === "failed" || job.state === "rolled_back") {
-          rh.state = "failed";
-          rh.reason = job.error?.message ?? "Upgrade failed";
-          rh.updatedAt = new Date(now).toISOString();
-          hasFailure = true;
-          failureReason = `Host ${vps.name} failed: ${rh.reason}`;
-        }
-      } else if (rh.state === "observing") {
+      if (rh.state === "queued" && rh.jobId) {
+        // Local upgrade job records were part of the retired updater
+        // channel; staged-but-never-claimed queued hosts simply go failed —
+        // agent installs are per-host explicit, not dispatched from here.
+        rh.state = "failed";
+        rh.reason = "queued host never claimed an agent update job";
+        rh.updatedAt = new Date(now).toISOString();
+        continue;
+      }
+      if (rh.state === "updating") {
+        // No remote job ledger exists any more (updater jobs lived in the
+        // local-upgrade repository). A host stuck in "updating" with no
+        // evidence of progress fails closed.
+        rh.state = "failed";
+        rh.reason = "updating host has no live upgrade evidence";
+        rh.updatedAt = new Date(now).toISOString();
+        continue;
+      }
+      if (rh.state === "observing") {
         const observationDuration = rh.observationStartedAt
           ? now - new Date(rh.observationStartedAt).getTime()
           : 0;
 
-        let metricsFresh = false;
-        if (this.metricRepo) {
-          const latest = await this.metricRepo.getLatest(rh.vpsId);
-          if (latest && (now - new Date(latest.collectedAt).getTime() <= 60_000)) {
-            metricsFresh = true;
-          }
-        }
-
+        // Real, locally-produced evidence only: fresh agent state + live AI
+        // capability record. Missing evidence fails closed.
         const heartbeatFresh = isOnline && (now - lastSeenMs <= 60_000);
 
-        const hasAi = Boolean(
-          (updaterHeartbeat?.installedAi && updaterHeartbeat.installedAi.length > 0) ||
-          (release.ai && release.ai.components.length > 0),
-        );
         let aiHealthy = true;
-        if (hasAi) {
-          if (!updaterHeartbeat?.aiHealth) {
-            aiHealthy = false;
-          } else {
-            aiHealthy = updaterHeartbeat.aiHealth.healthy === true;
-          }
+        if (release.ai && release.ai.components.length > 0) {
+          const capability = this.aiRepo
+            ? await this.aiRepo.getAiCapability(rh.vpsId).catch(() => undefined)
+            : undefined;
+          aiHealthy = Boolean(
+            capability?.supported === true &&
+              capability.freshness &&
+              now - new Date(capability.freshness).getTime() <= 15 * 60 * 1000,
+          );
         }
 
         const buildMatches = agentState?.buildId === release.buildId;
 
-        const healthy = metricsFresh && heartbeatFresh && aiHealthy && buildMatches;
+        const healthy = heartbeatFresh && aiHealthy && buildMatches;
 
         if (!healthy) {
           rh.state = "failed";
           const failReasons = [];
-          if (!metricsFresh) failReasons.push("metrics stale");
           if (!heartbeatFresh) failReasons.push("agent heartbeat stale");
           if (!aiHealthy) failReasons.push("AI health regression or missing evidence");
           if (!buildMatches) failReasons.push("buildId mismatch");
@@ -562,25 +488,13 @@ export class FleetService {
       rollout.reason = failureReason;
       rollout.updatedAt = new Date(now).toISOString();
 
-      // Safely cancel pre-swap jobs without interrupting swapping/post-swap jobs
+      // No pre-swap job ledger exists post-cutover; rollout pause simply
+      // withdraws any in-flight host state.
       for (const h of rollout.hosts) {
-        if (h.jobId && (h.state === "updating" || h.state === "queued")) {
-          const job = await this.localUpgradeRepo.get(h.jobId);
-          if (
-            job &&
-            !LOCAL_UPGRADE_POST_SWAP_STATES.includes(job.state) &&
-            !LOCAL_UPGRADE_TERMINAL_STATES.includes(job.state)
-          ) {
-            await this.localUpgradeRepo.compareAndSet(job.id, job.revision, {
-              state: "failed",
-              error: { code: "rollout_paused", message: `Rollout paused: ${failureReason}` },
-              completedAt: new Date(now).toISOString(),
-            });
-            this.localUpgradeService?.releaseUpdateFence(job.vpsId);
-            h.state = "failed";
-            h.reason = `Paused: ${failureReason}`;
-            h.updatedAt = new Date(now).toISOString();
-          }
+        if (h.state === "updating" || h.state === "queued") {
+          h.state = "failed";
+          h.reason = `Paused: ${failureReason}`;
+          h.updatedAt = new Date(now).toISOString();
         }
       }
 
@@ -606,348 +520,8 @@ export class FleetService {
       return;
     }
 
-    await this.dispatchRolloutHosts(rollout, release, now);
     rollout.updatedAt = new Date(now).toISOString();
     await this.fleetRepo.updateRollout(rollout);
-  }
-
-  private async isHostEligible(
-    rh: FleetRolloutHost,
-    release: FleetRelease,
-    policies: Map<string, FleetPolicy> | Record<string, FleetPolicy>,
-    now: number,
-  ): Promise<boolean> {
-    const vps = await this.vpsRepo.get(rh.vpsId);
-    if (!vps) return false;
-
-    const enrolled = await this.fleetRepo.isEnrolled(rh.vpsId);
-    if (!enrolled) return false;
-
-    const agentState = await this.agentRepo.getState(rh.vpsId);
-    const lastSeenMs = agentState?.lastSeenAt
-      ? new Date(agentState.lastSeenAt).getTime()
-      : 0;
-    const isOnline = agentState?.status === "online" && (now - lastSeenMs <= 5 * 60 * 1000);
-    if (!isOnline) return false;
-
-    const pol = lookupPolicy(policies, rh.vpsId) ?? { mode: "auto", group: "Default" };
-    if (pol.mode === "pinned") return false;
-
-    if (
-      pol.maintenanceWindow &&
-      !this.isInsideMaintenanceWindow(pol.maintenanceWindow, now)
-    ) {
-      return false;
-    }
-
-    const heartbeat = await this.localUpgradeRepo.getUpdaterHeartbeat(rh.vpsId);
-    if (!this.isHostIdle(heartbeat, now)) return false;
-
-    if (release.minUpdaterVersion && heartbeat?.updaterVersion) {
-      if (this.isVersionOlder(heartbeat.updaterVersion, release.minUpdaterVersion)) {
-        return false;
-      }
-    }
-
-    const os = heartbeat?.platform?.os;
-    const arch = heartbeat?.platform?.arch;
-    const hasAgentArtifact = release.artifacts?.some(
-      (a) => a.os === os && a.arch === arch && a.component === "agent",
-    );
-    if (!hasAgentArtifact) return false;
-
-    return true;
-  }
-
-  private async dispatchRolloutHosts(
-    rollout: FleetRollout,
-    release: FleetRelease,
-    now: number,
-  ): Promise<void> {
-    const policies = await this.fleetRepo.listPolicies();
-
-    const cohortGroups = new Map<string, FleetRolloutHost[]>();
-
-    for (const rh of rollout.hosts) {
-      const pol = lookupPolicy(policies, rh.vpsId);
-      const heartbeat = await this.localUpgradeRepo.getUpdaterHeartbeat(rh.vpsId);
-      const os = heartbeat?.platform?.os ?? "linux";
-      const arch = heartbeat?.platform?.arch ?? "amd64";
-      const runtime =
-        heartbeat?.installedAi && heartbeat.installedAi.length > 0
-          ? "ai"
-          : "standard";
-      const groupName = pol?.group ?? rollout.group ?? "Default";
-      const cohortKey = `${groupName}:${os}:${arch}:${runtime}`;
-
-      let list = cohortGroups.get(cohortKey);
-      if (!list) {
-        list = [];
-        cohortGroups.set(cohortKey, list);
-      }
-      list.push(rh);
-    }
-
-    for (const [, cohortHosts] of cohortGroups) {
-      const activeOrObserving = cohortHosts.filter(
-        (h) => h.state === "updating" || h.state === "observing",
-      );
-      const hasSucceededCanary = cohortHosts.some(
-        (h) => h.isCanary && h.state === "succeeded",
-      );
-
-      if (!hasSucceededCanary) {
-        if (activeOrObserving.length === 0) {
-          const queuedHosts = cohortHosts.filter((h) => h.state === "queued");
-
-          let candidate: FleetRolloutHost | undefined;
-          for (const h of queuedHosts) {
-            const pol = lookupPolicy(policies, h.vpsId);
-            if (pol?.canary) {
-              if (await this.isHostEligible(h, release, policies, now)) {
-                candidate = h;
-                break;
-              }
-            }
-          }
-
-          if (!candidate) {
-            for (const h of queuedHosts) {
-              if (await this.isHostEligible(h, release, policies, now)) {
-                candidate = h;
-                break;
-              }
-            }
-          }
-
-          if (candidate) {
-            candidate.isCanary = true;
-            await this.tryDispatchHost(candidate, rollout, release, now);
-          }
-        }
-      } else {
-        const activeUpdating = cohortHosts.filter((h) => h.state === "updating");
-        const availableSlots = Math.max(0, MAX_CONCURRENT_PER_COHORT - activeUpdating.length);
-
-        if (availableSlots > 0) {
-          const queuedHosts = cohortHosts.filter((h) => h.state === "queued");
-          let dispatchedCount = 0;
-          for (const h of queuedHosts) {
-            if (dispatchedCount >= availableSlots) break;
-            if (await this.isHostEligible(h, release, policies, now)) {
-              const dispatched = await this.tryDispatchHost(h, rollout, release, now);
-              if (dispatched) {
-                dispatchedCount++;
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-
-  private async tryDispatchHost(
-    rh: FleetRolloutHost,
-    rollout: FleetRollout,
-    release: FleetRelease,
-    now: number,
-  ): Promise<boolean> {
-    const vps = await this.vpsRepo.get(rh.vpsId);
-    if (!vps) {
-      rh.state = "failed";
-      rh.reason = "VPS not found";
-      rh.updatedAt = new Date(now).toISOString();
-      return false;
-    }
-
-    const enrolled = await this.fleetRepo.isEnrolled(rh.vpsId);
-    if (!enrolled) {
-      rh.state = "failed";
-      rh.reason = "Host not enrolled";
-      rh.updatedAt = new Date(now).toISOString();
-      return false;
-    }
-
-    const agentState = await this.agentRepo.getState(rh.vpsId);
-    const lastSeenMs = agentState?.lastSeenAt
-      ? new Date(agentState.lastSeenAt).getTime()
-      : 0;
-    const isOnline = agentState?.status === "online" && (now - lastSeenMs <= 5 * 60 * 1000);
-
-    if (!isOnline) {
-      return false;
-    }
-
-    const pol = (await this.fleetRepo.getPolicy(rh.vpsId)) ?? {
-      mode: "auto",
-      group: "Default",
-    };
-
-    if (pol.mode === "pinned") {
-      rh.state = "failed";
-      rh.reason = "Host is pinned; automatic update disallowed";
-      rh.updatedAt = new Date(now).toISOString();
-      return false;
-    }
-
-    if (
-      pol.maintenanceWindow &&
-      !this.isInsideMaintenanceWindow(pol.maintenanceWindow, now)
-    ) {
-      return false;
-    }
-
-    const heartbeat = await this.localUpgradeRepo.getUpdaterHeartbeat(rh.vpsId);
-    if (!this.isHostIdle(heartbeat, now)) {
-      return false;
-    }
-
-    if (release.minUpdaterVersion && heartbeat?.updaterVersion) {
-      if (this.isVersionOlder(heartbeat.updaterVersion, release.minUpdaterVersion)) {
-        rh.state = "failed";
-        rh.reason = `Host updater version ${heartbeat.updaterVersion} is older than required ${release.minUpdaterVersion}`;
-        rh.updatedAt = new Date(now).toISOString();
-        return false;
-      }
-    }
-
-    const allReleases = await this.fleetRepo.listReleases();
-    let releaseToDispatch = release;
-
-    if (release.upgradeFrom && release.upgradeFrom.length > 0) {
-      const currentBuild = agentState?.buildId;
-      if (!currentBuild || !release.upgradeFrom.includes(currentBuild)) {
-        const nextRelease = this.findNextReleaseInChain(
-          currentBuild ?? "",
-          release,
-          allReleases,
-        );
-        if (!nextRelease) {
-          rh.state = "failed";
-          rh.reason = `No intermediate upgrade path from ${currentBuild} to ${release.buildId}`;
-          rh.updatedAt = new Date(now).toISOString();
-          return false;
-        }
-        releaseToDispatch = nextRelease;
-      }
-    }
-
-    const os = heartbeat?.platform?.os ?? "linux";
-    const arch = heartbeat?.platform?.arch ?? "amd64";
-    const artifacts = releaseToDispatch.artifacts ?? [];
-    const matchingArtifacts = artifacts.filter(
-      (a) => a.os === os && a.arch === arch,
-    );
-    const agentArtifact = matchingArtifacts.find((a) => a.component === "agent");
-    if (!agentArtifact) {
-      rh.state = "failed";
-      rh.reason = `Unsupported platform: no agent artifact found for ${os}/${arch}`;
-      rh.updatedAt = new Date(now).toISOString();
-      return false;
-    }
-
-    const targetSha256 = agentArtifact.sha256;
-    const targetUrl = agentArtifact.url;
-    const targetSizeBytes = agentArtifact.size;
-
-    const hasAiInstalled = Boolean(
-      heartbeat?.installedAi && heartbeat.installedAi.length > 0,
-    );
-    const selectedComponents = matchingArtifacts
-      .filter((a) => {
-        if (a.component.startsWith("ai-")) return hasAiInstalled;
-        return true;
-      })
-      .map((a) => a.component);
-    if (!selectedComponents.includes("agent")) {
-      selectedComponents.push("agent");
-    }
-
-    if (!releaseToDispatch.rawPayload || !releaseToDispatch.signature) {
-      rh.state = "failed";
-      rh.reason = "Unsigned release cannot be dispatched";
-      rh.updatedAt = new Date(now).toISOString();
-      return false;
-    }
-
-    const envelope: FleetManifestEnvelope = {
-      payload: releaseToDispatch.rawPayload,
-      signature: releaseToDispatch.signature,
-      keyId: releaseToDispatch.keyId ?? "",
-    };
-    const manifestRaw = JSON.stringify(envelope);
-    const manifestSha256 = createHash("sha256").update(manifestRaw, "utf8").digest("hex");
-
-    const upgradeJob = await this.localUpgradeRepo.create({
-      id: randomUUID(),
-      vpsId: rh.vpsId,
-      state: "queued",
-      progress: 0,
-      releaseId: releaseToDispatch.id,
-      releaseVersion: releaseToDispatch.version,
-      releaseBuildId: releaseToDispatch.buildId,
-      targetSha256,
-      targetUrl,
-      targetSizeBytes,
-      manifestRaw,
-      manifestSha256,
-      actor: "fleet-orchestrator",
-      fencingToken: 0,
-      reclaimCount: 0,
-      claimedAt: null,
-      leaseExpiresAt: null,
-      deadlineAt: new Date(now + 30 * 60 * 1000).toISOString(),
-      error: null,
-      result: null,
-      revision: 0,
-      createdAt: new Date(now).toISOString(),
-      updatedAt: new Date(now).toISOString(),
-      completedAt: null,
-      components: selectedComponents,
-    });
-
-    rh.state = "updating";
-    rh.jobId = upgradeJob.id;
-    rh.updatedAt = new Date(now).toISOString();
-    return true;
-  }
-
-  private findNextReleaseInChain(
-    currentBuild: string,
-    targetRelease: FleetRelease,
-    allReleases: FleetRelease[],
-  ): FleetRelease | null {
-    if (!targetRelease.upgradeFrom || targetRelease.upgradeFrom.length === 0) {
-      return targetRelease;
-    }
-    if (targetRelease.upgradeFrom.includes(currentBuild)) {
-      return targetRelease;
-    }
-
-    const visited = new Set<string>();
-    const queue: Array<{ release: FleetRelease; path: FleetRelease[] }> = [
-      { release: targetRelease, path: [targetRelease] },
-    ];
-
-    while (queue.length > 0) {
-      const { release, path } = queue.shift()!;
-      if (!release.upgradeFrom) continue;
-
-      for (const requiredFrom of release.upgradeFrom) {
-        if (requiredFrom === currentBuild) {
-          return path[path.length - 1] ?? targetRelease;
-        }
-        if (!visited.has(requiredFrom)) {
-          visited.add(requiredFrom);
-          const parent = allReleases.find((r) => r.buildId === requiredFrom);
-          if (parent) {
-            queue.push({ release: parent, path: [...path, parent] });
-          }
-        }
-      }
-    }
-
-    return null;
   }
 
   private isInsideMaintenanceWindow(
@@ -1009,33 +583,6 @@ export class FleetService {
     } catch {
       return false;
     }
-  }
-
-  private isHostIdle(
-    heartbeat: UpdaterHeartbeat | undefined,
-    now: number,
-  ): boolean {
-    if (!heartbeat) return false;
-    const lastSeenMs = heartbeat.lastSeenAt
-      ? new Date(heartbeat.lastSeenAt).getTime()
-      : 0;
-    if (now - lastSeenMs > 60_000) return false;
-    if (heartbeat.protocolVersion !== 3) return false;
-    if (heartbeat.idle !== true) return false;
-    if (!heartbeat.platform?.os || !heartbeat.platform?.arch) return false;
-    return true;
-  }
-
-  private isVersionOlder(current: string, required: string): boolean {
-    const p1 = current.split(".").map(Number);
-    const p2 = required.split(".").map(Number);
-    for (let i = 0; i < Math.max(p1.length, p2.length); i++) {
-      const n1 = p1[i] ?? 0;
-      const n2 = p2[i] ?? 0;
-      if (n1 < n2) return true;
-      if (n1 > n2) return false;
-    }
-    return false;
   }
 
 }

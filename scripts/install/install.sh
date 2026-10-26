@@ -3,7 +3,7 @@
 # install.sh — One-command VPS Manager installer.
 #
 # Installs the Docker app (web + API) and optionally the host systemd agent
-# on a Linux amd64 server. Also installs flexserverctl
+# on a Linux amd64/arm64 server. Also installs flexserverctl
 # (scripts/install/flexserverctl.py) to /usr/local/bin/flexserverctl when
 # present (requires python3).
 #
@@ -28,7 +28,7 @@
 #   --rotate-agent           Rotate local agent token/config even if one already exists.
 #
 # The script:
-#   1. Checks root, Linux amd64, Docker availability.
+#   1. Checks root, Linux amd64/arm64, Docker availability.
 #   2. Generates /opt/vps-manager/.env (preserving existing secrets).
 #   3. Generates a docker-compose.yml for web + API services.
 #   4. Pulls images and starts containers.
@@ -57,10 +57,9 @@ for arg in "$@"; do
       echo "Usage: sudo $0 [options]"
       echo ""
       echo "Options:"
-      echo "  --enable-ai               Install and enable isolated AI worker subsystem (default: off)."
+      echo "  --enable-ai               Legacy no-op flag accepted for compatibility; the AI worker installs by default."
       echo "                            Full AI options are listed in the script header of"
       echo "                            scripts/install/install-local-agent.sh."
-      exit 0
       ;;
     --dry-run)
       DRY_RUN=true
@@ -150,7 +149,7 @@ random_hex() {
 
 # ── Arg parsing ───────────────────────────────────────────────────────────
 ENABLE_LOCAL_TERMINAL=false
-ENABLE_AI=false
+ENABLE_AI=true
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -178,7 +177,9 @@ while [[ $# -gt 0 ]]; do
       echo "                            root-equivalent; only needed if Docker metrics are"
       echo "                            enabled via the dashboard."
       echo "  --enable-local-terminal   Enable local host web terminal daemon (host-pty) and compose mount."
-      echo "  --enable-ai               Install and enable isolated AI worker subsystem (default: off)."
+      echo "  --skip-ai                 Skip the isolated AI worker subsystem (default: on)."
+      echo "                            Full AI options are listed in the script header of"
+      echo "                            scripts/install/install-local-agent.sh."
       exit 0 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --app-dir) APP_DIR="$2"; shift 2 ;;
@@ -195,7 +196,8 @@ while [[ $# -gt 0 ]]; do
     --rotate-agent) ROTATE_AGENT=true; shift ;;
     --enable-docker-metrics-access) ENABLE_DOCKER_METRICS_ACCESS=true; shift ;;
     --enable-local-terminal) ENABLE_LOCAL_TERMINAL=true; shift ;;
-    --enable-ai|--install-ai) ENABLE_AI=true; shift ;;
+    --skip-ai) ENABLE_AI=false; shift ;;
+    --enable-ai) shift ;; # legacy no-op; the AI worker installs by default
     *)
       echo "Error: Unknown argument: $1"
       echo "Usage: sudo $0 [options]"
@@ -211,10 +213,13 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 ARCH="$(uname -m)"
-if [[ "$(uname -s)" != "Linux" ]] || [[ "$ARCH" != "x86_64" ]]; then
-  echo "Error: Only Linux amd64 is supported (detected: $(uname -s) ${ARCH})." >&2
+case "$ARCH" in
+  x86_64|amd64) TARGET_ARCH="amd64" ;;
+  aarch64|arm64) TARGET_ARCH="arm64" ;;
+  *)
+  echo "Error: Only Linux amd64/arm64 are supported (detected: $(uname -s) ${ARCH})." >&2
   exit 1
-fi
+esac
 
 # Python3 prerequisite plus CLI source readiness — both checked before any
 # mutation (directory creation, Docker work, or image pulls) so a missing
@@ -700,39 +705,76 @@ else
   else
     AGENT_BIN_TMP="$(mktemp)"
     INSTALLER_TMP_FILES+=("$AGENT_BIN_TMP")
-    if ! docker cp "${API_CONTAINER}:/app/agent/vps-agent-linux-amd64" "$AGENT_BIN_TMP" &>/dev/null; then
+    if ! docker cp "${API_CONTAINER}:/app/agent/vps-agent-linux-${TARGET_ARCH}" "$AGENT_BIN_TMP" &>/dev/null; then
       echo "Error: Failed to extract agent binary from API container." >&2
-      echo "  Ensure API image has the agent at /app/agent/vps-agent-linux-amd64" >&2
-      echo "  Skipping agent installation." >&2
-      AGENT_BIN_TMP=""
+      echo "  Ensure API image has the agent at /app/agent/vps-agent-linux-${TARGET_ARCH}" >&2
+      exit 1
     else
       chmod 0755 "$AGENT_BIN_TMP"
       echo "  Extracted agent binary."
     fi
   fi
 
-  # Prepare local agent updater using shared helper
-  PREPARE_UPDATER_SCRIPT=""
-  if [[ -f "$(dirname "$0")/prepare-agent-updater.sh" ]]; then
-    PREPARE_UPDATER_SCRIPT="$(dirname "$0")/prepare-agent-updater.sh"
-  elif [[ -f "$(dirname "$0")/scripts/install/prepare-agent-updater.sh" ]]; then
-    PREPARE_UPDATER_SCRIPT="$(dirname "$0")/scripts/install/prepare-agent-updater.sh"
-  elif [[ -f "./scripts/install/prepare-agent-updater.sh" ]]; then
-    PREPARE_UPDATER_SCRIPT="./scripts/install/prepare-agent-updater.sh"
-  fi
-
-  if [[ -n "$PREPARE_UPDATER_SCRIPT" ]]; then
-    echo "  Running shared prepare-agent-updater helper..."
-    PREP_ARGS=(--compose-file "$COMPOSE_FILE" --agent-state-dir "/var/lib/vps-manager-agent")
-    if [[ -n "$API_CONTAINER" ]]; then PREP_ARGS+=(--container "$API_CONTAINER"); fi
-    if [[ -n "$BACKEND_URL" ]]; then PREP_ARGS+=(--backend-url "$BACKEND_URL"); fi
-    if [[ "$DRY_RUN" == "true" ]]; then PREP_ARGS+=(--dry-run); fi
-    if ! bash "$PREPARE_UPDATER_SCRIPT" "${PREP_ARGS[@]}"; then
-      echo "Warning: Shared local updater preparation failed; continuing agent install." >&2
+  # AI bundle artifacts live inside the API image at /app/agent/ai (see
+  # Dockerfile): per-arch executor/helper binaries, rootfs tarballs +
+  # manifests, and the top-level profiles/ directory. Everything is stashed in
+  # a temp directory and handed to install-local-agent.sh via its --ai-* flags;
+  # the flag set is the same contract the remote AI bundle runner
+  # (ai-bundle-install.service.ts) uses, so the on-host invocation can be
+  # driven and audited exactly like the remote one.
+  AI_STAGE=""
+  AI_READY=false
+  AI_EXECUTOR_TMP=""
+  AI_HELPER_TMP=""
+  AI_ROOTFS_TAR_TMP=""
+  AI_ROOTFS_MANIFEST_TMP=""
+  AI_PROFILES_SRC=""
+  if [[ "$ENABLE_AI" == "true" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  [DRY-RUN] Would extract AI executor, helper, rootfs tarball + manifest, and profiles"
+      echo "           from the API container at /app/agent/ai into a temp staging directory."
+      AI_READY=true
+    else
+      AI_STAGE="$(mktemp -d)"
+      INSTALLER_TMP_FILES+=("$AI_STAGE")
+      AI_MISSING=""
+      AI_EXECUTOR_TMP=""
+      AI_HELPER_TMP=""
+      AI_ROOTFS_TAR_TMP=""
+      AI_ROOTFS_MANIFEST_TMP=""
+      AI_PROFILES_SRC=""
+      for pair in "executor:ai-executor-linux-${TARGET_ARCH}" \
+                  "helper:ai-host-helper-linux-${TARGET_ARCH}" \
+                  "rootfs:ai-rootfs-linux-${TARGET_ARCH}.tar.gz" \
+                  "manifest:ai-rootfs-linux-${TARGET_ARCH}.manifest.json"; do
+        label="${pair%%:*}"
+        src="${pair#*:}"
+        if docker cp "${API_CONTAINER}:/app/agent/ai/${src}" "${AI_STAGE}/${src}" 2>/dev/null; then
+          case "$label" in
+            executor) AI_EXECUTOR_TMP="${AI_STAGE}/${src}"; chmod 0755 "$AI_EXECUTOR_TMP" ;;
+            helper)   AI_HELPER_TMP="${AI_STAGE}/${src}"; chmod 0755 "$AI_HELPER_TMP" ;;
+            rootfs)   AI_ROOTFS_TAR_TMP="${AI_STAGE}/${src}" ;;
+            manifest) AI_ROOTFS_MANIFEST_TMP="${AI_STAGE}/${src}" ;;
+          esac
+        else
+          AI_MISSING+="${src} "
+        fi
+      done
+      if docker cp "${API_CONTAINER}:/app/agent/ai/profiles" "${AI_STAGE}/profiles" 2>/dev/null && [[ -d "${AI_STAGE}/profiles" ]]; then
+        AI_PROFILES_SRC="${AI_STAGE}/profiles"
+      else
+        AI_MISSING+="profiles/ "
+      fi
+      if [[ -z "$AI_MISSING" ]]; then
+        AI_READY=true
+      else
+        echo "Error: AI bundle incomplete in API image at /app/agent/ai: missing: ${AI_MISSING}" >&2
+        echo "  AI install is on by default; a complete AI bundle is required." >&2
+        echo "  Rebuild/re-pull the API image with a complete AI bundle (per host arch ${TARGET_ARCH}), or run with --skip-ai to install without AI." >&2
+        exit 1
+      fi
     fi
   fi
-  UPDATER_BIN_TMP=""
-
   # Extract bundled host-pty binary from API container
   HOST_PTY_BIN_TMP=""
   if [[ "$DRY_RUN" == "true" ]]; then
@@ -740,8 +782,8 @@ else
   else
     HOST_PTY_BIN_TMP="$(mktemp)"
     INSTALLER_TMP_FILES+=("$HOST_PTY_BIN_TMP")
-    if ! docker cp "${API_CONTAINER}:/app/agent/host-pty-linux-amd64" "$HOST_PTY_BIN_TMP" &>/dev/null; then
-      echo "Warning: Failed to extract host-pty binary from API container (/app/agent/host-pty-linux-amd64)." >&2
+    if ! docker cp "${API_CONTAINER}:/app/agent/host-pty-linux-${TARGET_ARCH}" "$HOST_PTY_BIN_TMP" &>/dev/null; then
+      echo "Warning: Failed to extract host-pty binary from API container (/app/agent/host-pty-linux-${TARGET_ARCH})." >&2
       rm -f "$HOST_PTY_BIN_TMP"
       HOST_PTY_BIN_TMP=""
     else
@@ -755,7 +797,7 @@ else
   else
     ROTATOR_BIN_TMP="$(mktemp)"
     INSTALLER_TMP_FILES+=("$ROTATOR_BIN_TMP")
-    if ! docker cp "${API_CONTAINER}:/app/agent/local-agent-rotator-linux-amd64" "$ROTATOR_BIN_TMP" &>/dev/null; then
+    if ! docker cp "${API_CONTAINER}:/app/agent/local-agent-rotator-linux-${TARGET_ARCH}" "$ROTATOR_BIN_TMP" &>/dev/null; then
       echo "Error: Failed to extract bundled local-agent-rotator; cannot migrate host socket services safely." >&2
       exit 1
     fi
@@ -782,72 +824,11 @@ else
       if ! docker compose -f "$COMPOSE_FILE" exec -T api "${BOOTSTRAP_ARGS[@]}" > "$AGENT_CONFIG_TMP" 2>/dev/null; then
         echo "Error: Bootstrap failed." >&2
         echo "  Check logs: docker compose -f ${COMPOSE_FILE} logs api" >&2
-        rm -f "$AGENT_BIN_TMP"
-        AGENT_BIN_TMP=""
-        AGENT_CONFIG_TMP=""
-      else
-        echo "  Agent credential bootstrapped."
+        exit 1
       fi
     fi
   fi
 
-  # Prepare local agent updater using shared preparation helper
-  PREPARE_UPDATER_SCRIPT="$(cd "$(dirname "$0")" && pwd)/prepare-agent-updater.sh"
-  if [[ ! -f "$PREPARE_UPDATER_SCRIPT" ]]; then
-    for cand in "${INSTALLER_DIR}/prepare-agent-updater.sh" "./scripts/install/prepare-agent-updater.sh" "/tmp/prepare-agent-updater.sh"; do
-      if [[ -f "$cand" ]]; then PREPARE_UPDATER_SCRIPT="$cand"; break; fi
-    done
-  fi
-  if [[ -f "$PREPARE_UPDATER_SCRIPT" ]]; then
-    echo "  Running shared host updater preparation..."
-    PREP_ARGS=(--compose-file "$COMPOSE_FILE" --backend-url "$BACKEND_URL")
-    if [[ "$DRY_RUN" == "true" ]]; then PREP_ARGS+=(--dry-run); fi
-    if ! bash "$PREPARE_UPDATER_SCRIPT" "${PREP_ARGS[@]}"; then
-      echo "Warning: Shared host updater preparation encountered an issue; continuing agent installation." >&2
-    fi
-  fi
-  AI_EXECUTOR_TMP=""
-  AI_HELPER_TMP=""
-  AI_ROOTFS_TAR_TMP=""
-  AI_ROOTFS_MANIFEST_TMP=""
-  AI_PROFILES_TMP=""
-  if [[ "$ENABLE_AI" == "true" ]]; then
-    if [[ "$DRY_RUN" == "true" ]]; then
-      echo "  [DRY-RUN] Would extract AI executor, helper, rootfs, manifest, profiles from API container..."
-    else
-      AI_EXECUTOR_TMP="$(mktemp)"
-      INSTALLER_TMP_FILES+=("$AI_EXECUTOR_TMP")
-      if docker cp "${API_CONTAINER}:/app/agent/ai/ai-executor-linux-amd64" "$AI_EXECUTOR_TMP" &>/dev/null; then
-        chmod 0755 "$AI_EXECUTOR_TMP"
-      else
-        echo "Warning: Failed to extract /app/agent/ai/ai-executor-linux-amd64 from container" >&2
-      fi
-
-      AI_HELPER_TMP="$(mktemp)"
-      INSTALLER_TMP_FILES+=("$AI_HELPER_TMP")
-      if docker cp "${API_CONTAINER}:/app/agent/ai/ai-host-helper-linux-amd64" "$AI_HELPER_TMP" &>/dev/null; then
-        chmod 0755 "$AI_HELPER_TMP"
-      else
-        echo "Warning: Failed to extract /app/agent/ai/ai-host-helper-linux-amd64 from container" >&2
-      fi
-
-      AI_ROOTFS_TAR_TMP="$(mktemp)"
-      INSTALLER_TMP_FILES+=("$AI_ROOTFS_TAR_TMP")
-      if ! docker cp "${API_CONTAINER}:/app/agent/ai/ai-rootfs-linux-amd64.tar.gz" "$AI_ROOTFS_TAR_TMP" &>/dev/null; then
-        echo "Warning: Failed to extract /app/agent/ai/ai-rootfs-linux-amd64.tar.gz from container" >&2
-      fi
-
-      AI_ROOTFS_MANIFEST_TMP="$(mktemp)"
-      INSTALLER_TMP_FILES+=("$AI_ROOTFS_MANIFEST_TMP")
-      if ! docker cp "${API_CONTAINER}:/app/agent/ai/ai-rootfs-linux-amd64.manifest.json" "$AI_ROOTFS_MANIFEST_TMP" &>/dev/null; then
-        echo "Warning: Failed to extract /app/agent/ai/ai-rootfs-linux-amd64.manifest.json from container" >&2
-      fi
-
-      AI_PROFILES_TMP="$(mktemp -d)"
-      INSTALLER_TMP_FILES+=("$AI_PROFILES_TMP")
-      docker cp "${API_CONTAINER}:/app/agent/ai/profiles/." "$AI_PROFILES_TMP/" 2>/dev/null || true
-    fi
-  fi
   # Run install-local-agent.sh
   if { [[ -n "$AGENT_BIN_TMP" ]] && [[ -n "$AGENT_CONFIG_TMP" ]]; } || [[ "$DRY_RUN" == "true" ]]; then
     INSTALL_SCRIPT="$(cd "$(dirname "$0")" && pwd)/install-local-agent.sh"
@@ -874,14 +855,6 @@ else
       if [[ "$ENABLE_DOCKER_METRICS_ACCESS" == "true" ]]; then
         AGENT_INSTALL_ARGS+=(--enable-docker-metrics-access)
       fi
-      if [[ -f /etc/vps-updater/config.json && -x /usr/local/lib/vps-manager-agent/vps-updater ]]; then
-        : # Updater already prepared and installed by shared helper
-      elif [[ -n "$UPDATER_BIN_TMP" ]] || [[ "$DRY_RUN" == "true" ]]; then
-        AGENT_INSTALL_ARGS+=(--upgrade-updater)
-        if [[ -n "$UPDATER_BIN_TMP" ]]; then
-          AGENT_INSTALL_ARGS+=(--updater-binary "$UPDATER_BIN_TMP")
-        fi
-      fi
       if [[ -n "$HOST_PTY_BIN_TMP" ]] || [[ "$ENABLE_LOCAL_TERMINAL" == "true" ]]; then
         if [[ -n "$HOST_PTY_BIN_TMP" ]]; then
           AGENT_INSTALL_ARGS+=(--host-pty-binary "$HOST_PTY_BIN_TMP")
@@ -892,7 +865,7 @@ else
           AGENT_INSTALL_ARGS+=(--api-uid-gid "$API_UID_GID")
         fi
       fi
-      if [[ "$ENABLE_AI" == "true" ]]; then
+      if [[ "$AI_READY" == "true" ]]; then
         AGENT_INSTALL_ARGS+=(--install-ai)
         if [[ -n "$AI_EXECUTOR_TMP" ]]; then
           AGENT_INSTALL_ARGS+=(--ai-executor-binary "$AI_EXECUTOR_TMP")
@@ -906,8 +879,8 @@ else
         if [[ -n "$AI_ROOTFS_MANIFEST_TMP" ]]; then
           AGENT_INSTALL_ARGS+=(--ai-rootfs-manifest "$AI_ROOTFS_MANIFEST_TMP")
         fi
-        if [[ -n "$AI_PROFILES_TMP" ]]; then
-          AGENT_INSTALL_ARGS+=(--ai-profiles-dir "$AI_PROFILES_TMP")
+        if [[ -n "$AI_PROFILES_SRC" ]]; then
+          AGENT_INSTALL_ARGS+=(--ai-profiles-dir "$AI_PROFILES_SRC")
         fi
       fi
       if [[ "$DRY_RUN" == "true" ]]; then
@@ -936,12 +909,15 @@ else
         echo "  Host agent installed."
       fi
     else
-      echo "Warning: install-local-agent.sh not found. Skipping agent installation." >&2
+      echo "Error: install-local-agent.sh not found. Aborting agent installation." >&2
       echo "  To install manually:" >&2
       echo "    curl -fsSL https://raw.githubusercontent.com/sondoan17/vps-manager-nodejs/main/scripts/install/install-local-agent.sh | sudo bash -s -- --binary <binary> --config <config>" >&2
+      exit 1
     fi
   else
-    echo "Warning: Agent binary or config could not be obtained. Skipping agent installation." >&2
+    echo "Error: Agent binary or config could not be obtained. Aborting agent installation." >&2
+    echo "  Ensure the API container is running and exposes /app/agent/vps-agent-linux-${TARGET_ARCH}." >&2
+    exit 1
   fi
 fi
 
@@ -991,9 +967,5 @@ echo "Upgrade:   docker compose -f ${COMPOSE_FILE} pull && docker compose -f ${C
 echo "Uninstall agent: sudo systemctl disable --now ${AGENT_SERVICE_NAME}; sudo rm -f /etc/systemd/system/${AGENT_SERVICE_NAME}.service /usr/local/bin/vps-manager-agent; sudo rm -rf /etc/vps-manager-agent"
 echo "Uninstall app:   docker compose -f ${COMPOSE_FILE} down    # add -v and rm -rf ${APP_DIR} only if you want to purge data"
 echo ""
-# Runbook pointer (plan §5): the app never silently upgrades the local
-# agent or the updater; both stay operator-driven.
-echo "Local agent upgrades are managed via bundled updater protocol."
-echo "  Updater status:           sudo /usr/local/lib/vps-manager-agent/vps-updater status -config /etc/vps-updater/config.json"
-echo "  Manual updater upgrade:   sudo ./scripts/install/install-updater.sh --upgrade --binary <vps-updater>"
-echo "  Runbook:                  docs/local-agent-upgrade-operations.md"
+echo "AI subsystem: executor/helper in /usr/local/sbin, sandbox rootfs in /usr/local/share/flexserver-ai/rootfs"
+echo "  profiles in /etc/flexserver-ai/profiles, state in /var/lib/flexserver-ai"

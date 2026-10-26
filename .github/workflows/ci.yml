@@ -83,7 +83,6 @@ jobs:
       web: ${{ steps.scope.outputs.web }}
       agent: ${{ steps.scope.outputs.agent }}
       installer: ${{ steps.scope.outputs.installer }}
-      updater: ${{ steps.scope.outputs.updater }}
       db: ${{ steps.scope.outputs.db }}
     steps:
       - name: Checkout
@@ -142,18 +141,6 @@ jobs:
               - 'Dockerfile'
               - 'docker-compose.yml'
               - '.github/workflows/ci.yml'
-            updater:
-              - 'scripts/install/install.sh'
-              - 'scripts/install/install-local-agent.sh'
-              - 'scripts/install/install-updater.sh'
-              - 'scripts/tests/test-updater.sh'
-              - 'packages/agent/**'
-              - 'scripts/tests/**'
-              - 'scripts/release/**'
-              - 'packages/api/src/scripts/bootstrap-local-agent.ts'
-              - 'Dockerfile'
-              - 'docker-compose.yml'
-              - '.github/workflows/ci.yml'
             db:
               - 'packages/api/**'
               - 'package.json'
@@ -169,7 +156,6 @@ jobs:
           RAW_WEB: ${{ steps.changes.outputs.web }}
           RAW_AGENT: ${{ steps.changes.outputs.agent }}
           RAW_INSTALLER: ${{ steps.changes.outputs.installer }}
-          RAW_UPDATER: ${{ steps.changes.outputs.updater }}
           RAW_DB: ${{ steps.changes.outputs.db }}
           FULL: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
           FORCE_API: ${{ github.event_name == 'workflow_dispatch' && inputs.force_api_build == true }}
@@ -193,7 +179,6 @@ jobs:
             echo "web=$(resolve "$RAW_WEB" "$FORCE_WEB")"
             echo "agent=$(resolve "$RAW_AGENT" false)"
             echo "installer=$(resolve "$RAW_INSTALLER" false)"
-            echo "updater=$(resolve "$RAW_UPDATER" false)"
             echo "db=$(resolve "$RAW_DB" false)"
           } >> "$GITHUB_OUTPUT"
 
@@ -256,29 +241,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js for updater validation
-        if: needs.changes.outputs.full == 'true' || needs.changes.outputs.updater == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
       - name: Validate installer hardening
         if: needs.changes.outputs.full == 'true' || needs.changes.outputs.installer == 'true'
         run: bash scripts/tests/test-installer-docker-access.sh
 
       - name: Setup Go
-        # Pinned ahead of the updater check so its scoped Go verification
-        # (vet/test/GOOS=linux build) and the agent race/vet tests share one
-        # cached toolchain instead of the runner's preinstalled Go.
-        if: needs.changes.outputs.full == 'true' || needs.changes.outputs.agent == 'true' || needs.changes.outputs.updater == 'true'
+        # Pinned so the agent race/vet tests share one cached toolchain instead
+        # of the runner's preinstalled Go.
+        if: needs.changes.outputs.full == 'true' || needs.changes.outputs.agent == 'true'
         uses: actions/setup-go@v5
         with:
           go-version: "1.23.x"
           cache-dependency-path: packages/agent/go.mod
-
-      - name: Validate updater bootstrap and unit hardening
-        if: needs.changes.outputs.full == 'true' || needs.changes.outputs.updater == 'true'
-        run: bash scripts/tests/test-updater.sh
 
       - name: Validate Docker Compose configuration
         env:
@@ -388,7 +362,6 @@ jobs:
             test -f /app/db/migrations/015_docker_metric_rollup_metric_name.sql
             test -f /app/db/migrations/016_docker_alert_resolution.sql
             test -x /app/agent/vps-agent-linux-amd64
-            test -x /app/agent/vps-updater-linux-amd64
 
             # AI sandbox bundle under /app/agent/ai: required file names for
             # BOTH architectures (rootfs tarball + manifest, executor and
@@ -437,17 +410,13 @@ jobs:
             }
           '
 
-      - name: Verify embedded agent and updater identity
-        # Direct -version checks on the embedded binaries inside the API image.
-        # Validates that both the agent and updater binaries built into the image
-        # share the same canonical content identity matching VERSION+40-hex.
+      - name: Verify embedded agent identity
+        # Direct -version check on the embedded agent binary inside the API image.
+        # Validates the canonical content identity matching VERSION+40-hex.
         if: needs.changes.outputs.api == 'true'
         run: |
           AGENT_ID="$(docker run --rm --entrypoint /app/agent/vps-agent-linux-amd64 vps-manager-nodejs-api:ci -version)"
-          UPDATER_ID="$(docker run --rm --entrypoint /app/agent/vps-updater-linux-amd64 vps-manager-nodejs-api:ci -version)"
           echo "agent:    $AGENT_ID"
-          echo "updater:  $UPDATER_ID"
-          test "$AGENT_ID" = "$UPDATER_ID"
           echo "$AGENT_ID" | grep -Eq "^dev\+[0-9a-f]{40}$"
           echo "embedded binary identity OK: $AGENT_ID"
 
@@ -758,7 +727,7 @@ jobs:
       - name: Run PostgreSQL migration tests
         env:
           VPS_MANAGER_TEST_POSTGRES_URL: postgres://vps_manager:vps_manager@localhost:5432/vps_manager
-        run: npx vitest run packages/api/tests/docker-migration-009.postgres.test.ts packages/api/tests/docker-migration-013.postgres.test.ts packages/api/tests/docker-migration-014.postgres.test.ts packages/api/tests/docker-monitoring-repository.postgres.test.ts packages/api/tests/docker-monitoring-maintenance.postgres.test.ts packages/api/tests/ai-key-admin.postgres.test.ts packages/api/tests/agent-convergence.service.test.ts
+        run: npx vitest run packages/api/tests/docker-migration-009.postgres.test.ts packages/api/tests/docker-migration-013.postgres.test.ts packages/api/tests/docker-migration-014.postgres.test.ts packages/api/tests/docker-monitoring-repository.postgres.test.ts packages/api/tests/docker-monitoring-maintenance.postgres.test.ts packages/api/tests/ai-key-admin.postgres.test.ts
 
   docker-monitoring-postgres16:
     name: Docker monitoring PostgreSQL 16
@@ -790,7 +759,7 @@ jobs:
       - name: Run Docker monitoring PostgreSQL 16 tests
         env:
           VPS_MANAGER_TEST_POSTGRES_URL: postgres://vps_manager:vps_manager@localhost:5432/vps_manager
-        run: npx vitest run packages/api/tests/docker-migration-009.postgres.test.ts packages/api/tests/docker-migration-013.postgres.test.ts packages/api/tests/docker-migration-014.postgres.test.ts packages/api/tests/docker-monitoring-repository.postgres.test.ts packages/api/tests/docker-monitoring-maintenance.postgres.test.ts packages/api/tests/ai-key-admin.postgres.test.ts packages/api/tests/agent-convergence.service.test.ts
+        run: npx vitest run packages/api/tests/docker-migration-009.postgres.test.ts packages/api/tests/docker-migration-013.postgres.test.ts packages/api/tests/docker-migration-014.postgres.test.ts packages/api/tests/docker-monitoring-repository.postgres.test.ts packages/api/tests/docker-monitoring-maintenance.postgres.test.ts packages/api/tests/ai-key-admin.postgres.test.ts
 
   deploy:
     name: Deploy over SSH
@@ -1268,27 +1237,4 @@ jobs:
           fi
           $SSH "cd '$DEPLOY_PATH' && docker compose ps"
           $SSH "for i in \$(seq 1 30); do curl -fsS http://127.0.0.1:3000/api/health && exit 0; sleep 2; done; docker compose -f '$DEPLOY_PATH/docker-compose.yml' logs --tail=80; exit 1"
-          # Refresh or bootstrap local updater on the host using the shared helper from deployed API image
-          echo "Updating host local-updater using shared preparation helper..."
-          # Reuse the authenticated SSH connection; scp uses -P, not ssh's -p.
-          tar -C scripts/install -cf - prepare-agent-updater.sh install-updater.sh installer-lib.sh flexserverctl.py bootstrap-ssh-keyring.sh | "${SSH_BASE[@]}" "tar -xf - -C /tmp && chmod 0755 /tmp/prepare-agent-updater.sh /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py /tmp/bootstrap-ssh-keyring.sh"
-          "${SSH_BASE[@]}" "
-            set -euo pipefail
-            SUDO=\"\"
-            if [ \"\$(id -u)\" -ne 0 ]; then
-              if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-                SUDO=\"sudo -n\"
-              elif command -v sudo >/dev/null 2>&1; then
-                SUDO=\"sudo\"
-              fi
-            fi
-
-            echo 'Running shared host updater preparation...'
-            if ! \$SUDO /tmp/prepare-agent-updater.sh --compose-file '$DEPLOY_PATH/docker-compose.yml' --image '$API_IMAGE'; then
-              echo 'Warning: Host updater preparation encountered an issue; dashboard deployment remains healthy.' >&2
-            else
-              echo 'Host local-updater successfully prepared.'
-            fi
-            rm -f /tmp/prepare-agent-updater.sh /tmp/install-updater.sh /tmp/installer-lib.sh /tmp/flexserverctl.py /tmp/bootstrap-ssh-keyring.sh
-          "
-          echo "Host local-updater refresh completed."
+          echo "Host agent/AI binaries are not installed by this container-only deploy; run sudo scripts/install/install.sh on the host."

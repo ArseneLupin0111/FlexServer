@@ -53,7 +53,6 @@ import { DockerStorageOverview } from "../components/dashboard/docker/DockerStor
 import { DockerContainerInvestigationPanel } from "../components/dashboard/docker/DockerContainerInvestigationPanel";
 import { DockerWorkloads } from "../components/dashboard/docker/DockerWorkloads";
 import { ComposeApplicationsPanel } from "../components/dashboard/docker/applications/ComposeApplicationsPanel";
-import { LocalAgentUpdate } from "../components/dashboard/servers/LocalAgentUpdate";
 
 // ── Context type ────────────────────────────────────────────────────
 
@@ -946,7 +945,7 @@ export function VpsWorkspaceSettingsPage() {
       <h2 className="text-lg font-semibold tracking-tight text-text">
         Settings for {vpsDisplayName(vps)}
       </h2>
-      <SettingsPanel overview={overview} vpsId={vps.id}>
+      <SettingsPanel overview={overview} vpsId={vps.id} />
       <SftpSettingsCard vps={vps} />
       <section aria-label="Docker management" className="mb-4 space-y-3 border border-line bg-panel p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -964,8 +963,6 @@ export function VpsWorkspaceSettingsPage() {
         <p className="text-xs text-dim">Enabling Compose management is a separate consent from Docker management. Compose agent access is root-equivalent, and deployments can interrupt services.</p>
         {composeManagementError ? <p role="alert" className="text-xs text-crit">{composeManagementError}</p> : null}
       </section>
-        <LocalAgentUpdate vps={vps} variant="workspace" jobs={overview.jobs} />
-      </SettingsPanel>
     </div>
   );
 }

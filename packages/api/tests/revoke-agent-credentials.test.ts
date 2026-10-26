@@ -28,84 +28,34 @@ async function statusOf(id: string) {
 }
 
 describe("resolveRevokeScope", () => {
-  it("defaults to agent so updater credentials are never collateral damage", () => {
+  it("defaults to agent", () => {
     expect(resolveRevokeScope(undefined)).toBe("agent");
     expect(resolveRevokeScope("")).toBe("agent");
   });
 
   it("accepts known scopes and rejects everything else", () => {
     expect(resolveRevokeScope("agent")).toBe("agent");
-    expect(resolveRevokeScope("local-updater")).toBe("local-updater");
     expect(() => resolveRevokeScope("root")).toThrow(/Invalid --scope/);
     expect(() => resolveRevokeScope("ALL")).toThrow(/Invalid --scope/);
   });
 });
 
 describe("revokeScopedAgentCredentials", () => {
-  it("agent scope: revokes old agent credentials and never the local-updater credential", async () => {
-    const oldAgent = await repo.createCredential({
-      vpsId: VPS_ID,
-      secretHash: "old-agent-hash",
-      status: "active",
-    });
-    const keepAgent = await repo.createCredential({
-      vpsId: VPS_ID,
-      secretHash: "new-agent-hash",
-      status: "active",
-    });
-    const updater = await repo.createCredential({
-      vpsId: VPS_ID,
-      secretHash: "updater-hash",
-      status: "active",
-      scope: "local-updater",
-    });
+  it("revokes old agent credentials only after confirming the active replacement", async () => {
+    const oldAgent = await repo.createCredential({ vpsId: VPS_ID, secretHash: "old", status: "active" });
+    const replacement = await repo.createCredential({ vpsId: VPS_ID, secretHash: "new", status: "active" });
 
     const result = await revokeScopedAgentCredentials(repo, {
       vpsId: VPS_ID,
       scope: "agent",
-      keepCredentialId: keepAgent.id,
+      keepCredentialId: replacement.id,
     });
 
     expect(result.revokedCredentialIds).toEqual([oldAgent.id]);
-    expect(result.untouchedOutOfScopeCredentialIds).toEqual([updater.id]);
     expect(await statusOf(oldAgent.id)).toBe("revoked");
-    expect(await statusOf(keepAgent.id)).toBe("active");
-    expect(await statusOf(updater.id)).toBe("active");
+    expect(await statusOf(replacement.id)).toBe("active");
   });
 
-  it("local-updater scope: revokes old updater credentials and never agent credentials", async () => {
-    const oldUpdater = await repo.createCredential({
-      vpsId: VPS_ID,
-      secretHash: "old-updater-hash",
-      status: "active",
-      scope: "local-updater",
-    });
-    const keepUpdater = await repo.createCredential({
-      vpsId: VPS_ID,
-      secretHash: "new-updater-hash",
-      status: "active",
-      scope: "local-updater",
-    });
-    const agentCredential = await repo.createCredential({
-      vpsId: VPS_ID,
-      secretHash: "agent-hash",
-      status: "active",
-    });
-
-    const result = await revokeScopedAgentCredentials(repo, {
-      vpsId: VPS_ID,
-      scope: "local-updater",
-      keepCredentialId: keepUpdater.id,
-    });
-
-    expect(result.revokedCredentialIds).toEqual([oldUpdater.id]);
-    expect(result.untouchedOutOfScopeCredentialIds).toEqual([
-      agentCredential.id,
-    ]);
-    expect(await statusOf(oldUpdater.id)).toBe("revoked");
-    expect(await statusOf(keepUpdater.id)).toBe("active");
-    expect(await statusOf(agentCredential.id)).toBe("active");
-  });
 
   it("refuses to revoke anything when the keep credential id does not exist", async () => {
     const onlyAgent = await repo.createCredential({
@@ -124,30 +74,6 @@ describe("revokeScopedAgentCredentials", () => {
     expect(await statusOf(onlyAgent.id)).toBe("active");
   });
 
-  it("refuses to cross the scope boundary when the keep credential belongs to another scope", async () => {
-    const agentCredential = await repo.createCredential({
-      vpsId: VPS_ID,
-      secretHash: "agent-hash",
-      status: "active",
-    });
-    const updater = await repo.createCredential({
-      vpsId: VPS_ID,
-      secretHash: "updater-hash",
-      status: "active",
-      scope: "local-updater",
-    });
-
-    // An agent rotation passing the updater's id must not revoke agent creds.
-    await expect(
-      revokeScopedAgentCredentials(repo, {
-        vpsId: VPS_ID,
-        scope: "agent",
-        keepCredentialId: updater.id,
-      }),
-    ).rejects.toThrow(/scope "local-updater"/);
-    expect(await statusOf(agentCredential.id)).toBe("active");
-    expect(await statusOf(updater.id)).toBe("active");
-  });
 
   it("refuses when the keep credential is no longer active", async () => {
     const dead = await repo.createCredential({

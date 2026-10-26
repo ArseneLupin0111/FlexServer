@@ -14,11 +14,6 @@ on:
         description: Release supports rollback without irreversible migration
         required: true
         type: boolean
-        default: true
-      min_updater_version:
-        description: Minimum compatible updater version
-        required: true
-        type: string
       upgrade_from:
         description: Optional comma-separated compatible source build IDs
         required: false
@@ -42,12 +37,11 @@ jobs:
         id: source
         env:
           VERSION: ${{ inputs.version }}
-          MIN_UPDATER: ${{ inputs.min_updater_version }}
         run: |
           set -euo pipefail
           git fetch origin main
           git merge-base --is-ancestor HEAD origin/main
-          node -e 'for (const v of [process.env.VERSION,process.env.MIN_UPDATER]) if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(v)) process.exit(1)'
+          node -e 'if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(process.env.VERSION)) process.exit(1)'
           # A source commit must change the shipped host code or runtime inputs.
           test -n "$(git diff-tree --root -m --no-commit-id --name-only -r HEAD -- packages/agent scripts/agent scripts/install scripts/release)"
           echo "build_id=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -100,7 +94,7 @@ jobs:
           BUILD_ID="$(git rev-parse HEAD)"
           mkdir -p fleet-dist
           for arch in amd64 arm64; do
-            for item in 'agent:vps-agent' 'updater:vps-updater' 'ai-executor:ai-executor' 'ai-host-helper:ai-host-helper'; do
+            for item in 'agent:vps-agent' 'ai-executor:ai-executor' 'ai-host-helper:ai-host-helper'; do
               component="${item%%:*}"; command="${item#*:}"
               (cd packages/agent && GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags "-X github.com/vps-manager/agent/internal/version.Value=$RELEASE_VERSION -X github.com/vps-manager/agent/internal/version.Build=$BUILD_ID" -o "../../fleet-dist/${component}-linux-${arch}" "./cmd/$command")
             done
@@ -120,7 +114,6 @@ jobs:
           FLEET_SIGNING_KEY: ${{ secrets.FLEET_RELEASE_SIGNING_KEY }}
           FLEET_KEY_ID: ${{ vars.FLEET_RELEASE_KEY_ID }}
           RELEASE_VERSION: ${{ inputs.version }}
-          MIN_UPDATER: ${{ inputs.min_updater_version }}
           ROLLBACK_SAFE: ${{ inputs.rollback_safe }}
           UPGRADE_FROM: ${{ inputs.upgrade_from }}
           REPOSITORY: ${{ github.repository }}
@@ -148,7 +141,7 @@ jobs:
           if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
             echo 'This build was already published; use a new release identity.' >&2; exit 1
           fi
-          gh release create "$TAG" --repo "$REPOSITORY" --target "$BUILD_ID" --title "Agent $RELEASE_VERSION" --notes 'Signed fleet agent/runtime release.' fleet-dist/agent-linux-* fleet-dist/updater-linux-* fleet-dist/ai-executor-linux-* fleet-dist/ai-host-helper-linux-* fleet-dist/ai-rootfs-bundle-linux-*.tar.gz fleet-dist/ai-profiles-linux-*.tar.gz fleet-dist/stable.json
+          gh release create "$TAG" --repo "$REPOSITORY" --target "$BUILD_ID" --title "Agent $RELEASE_VERSION" --notes 'Signed fleet agent/runtime release.' fleet-dist/agent-linux-* fleet-dist/ai-executor-linux-* fleet-dist/ai-host-helper-linux-* fleet-dist/ai-rootfs-bundle-linux-*.tar.gz fleet-dist/ai-profiles-linux-*.tar.gz fleet-dist/stable.json
           if ! gh release view agent-stable --repo "$REPOSITORY" >/dev/null 2>&1; then
             gh release create agent-stable --repo "$REPOSITORY" --target "$BUILD_ID" --title 'Agent stable channel' --notes 'Mutable pointer to a signed immutable release.'
           fi

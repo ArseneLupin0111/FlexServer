@@ -7,8 +7,7 @@
  *
  * Revocation is scope-aware: only credentials whose scope matches `--scope`
  * (default `agent`) are revoked, so rotating the agent credential never
- * silently revokes the local-updater credential (and vice versa when
- * `--scope local-updater` is used to close a staged rotation overlap).
+ * silently revokes a differently scoped credential.
  */
 
 import type { AgentCredentialScope } from "../agents/agent.models.js";
@@ -28,15 +27,13 @@ function argValue(name: string): string | undefined {
 
 function usage(exitCode = 0): never {
   const output = exitCode === 0 ? console.log : console.error;
-  output(`Usage: node dist/scripts/revoke-agent-credentials.js --keep-credential-id <id> [--vps-id <id>] [--scope <agent|local-updater>]
-
+  output(`Usage: node dist/scripts/revoke-agent-credentials.js --keep-credential-id <id> [--vps-id <id>] [--scope <agent>]
 Options:
   --keep-credential-id <id>  Active credential id to keep. Must belong to the
                              targeted scope, otherwise nothing is revoked.
   --vps-id <id>              VPS/host id (default: vps_local_host).
   --scope <scope>            Credential scope to revoke (default: agent).
-                             "agent" = metrics/agent credentials,
-                             "local-updater" = updater credentials.
+                             "agent" = metrics/agent credentials.
   --help                     Show this help.
 `);
   process.exit(exitCode);
@@ -48,10 +45,8 @@ Options:
  */
 export function resolveRevokeScope(raw: string | undefined): AgentCredentialScope {
   if (raw === undefined || raw === "") return DEFAULT_SCOPE;
-  if (raw === "agent" || raw === "local-updater") return raw;
-  throw new Error(
-    `Invalid --scope "${raw}"; expected "agent" or "local-updater".`,
-  );
+  if (raw === "agent") return raw;
+  throw new Error(`Invalid --scope "${raw}"; expected "agent".`);
 }
 
 /** Repository surface needed for scoped revocation. */

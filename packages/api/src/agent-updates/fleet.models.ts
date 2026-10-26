@@ -16,7 +16,6 @@ export interface FleetPolicy {
 }
 
 export type FleetHostStatus =
-  | "needs_setup"
   | "idle"
   | "queued"
   | "updating"
@@ -24,10 +23,9 @@ export type FleetHostStatus =
   | "succeeded"
   | "failed"
   | "rolled_back"
-  | "waiting_verification"
   | "offline"
-  | "busy"
-  | "pinned";
+  | "ai_stale"
+  | "ai_unhealthy";
 
 export interface FleetHost {
   vpsId: string;
@@ -40,22 +38,6 @@ export interface FleetHost {
   setupRequired: boolean;
   status: FleetHostStatus;
   lastSeenAt: string | null;
-  platform?: {
-    os: string;
-    arch: string;
-  };
-  updaterVersion?: string | null;
-  installedAi?: string[];
-  /** Mirrors UpdaterHeartbeat.aiHealth (the helper's live AI health report). */
-  aiHealth?: {
-    status: string;
-    healthy: boolean;
-    installed?: boolean;
-    version?: string;
-    detail?: string;
-    components?: string[];
-    regression?: boolean;
-  };
 }
 
 export interface FleetGroup {
@@ -131,7 +113,6 @@ export interface FleetNotification {
 
 export type FleetArtifactComponent =
   | "agent"
-  | "updater"
   | "ai-executor"
   | "ai-host-helper"
   | "ai-rootfs"
@@ -155,7 +136,7 @@ export interface FleetManifestPayload {
   publishedAt: string;
   channel: "stable";
   rollbackSafe: boolean;
-  minUpdaterVersion: string;
+  minUpdaterVersion?: string;
   upgradeFrom?: string[];
   artifacts: FleetArtifact[];
   ai?: {

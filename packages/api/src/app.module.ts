@@ -39,17 +39,13 @@ import { SshService } from "./ssh/ssh.service.js";
 import { HostKeyPinService } from "./ssh/host-key-pin.service.js";
 import type { HostKeyPinRepository } from "./ssh/host-key-pin.repository.js";
 import { AgentInstallerService } from "./agents/agent-installer.service.js";
+import { BundledAgentService } from "./local-upgrade/bundled-agent.service.js";
 import { AgentUninstallerService } from "./agents/agent-uninstaller.service.js";
 import { AgentLifecycleCoordinator } from "./agents/agent-lifecycle-coordinator.js";
 import { AgentRestartService } from "./agents/agent-restart.service.js";
 import { AgentRotationService } from "./agents/agent-rotation.service.js";
 import { LocalAgentRotationHelper } from "./agents/local-agent-rotation-helper.service.js";
 import { AgentService } from "./agents/agent.service.js";
-import { LocalUpgradeController } from "./local-upgrade/local-upgrade.controller.js";
-import { LocalUpgradeService } from "./local-upgrade/local-upgrade.service.js";
-import { AgentConvergenceService } from "./local-upgrade/agent-convergence.service.js";
-import { LocalUpdaterController } from "./local-upgrade/local-updater.controller.js";
-import { BundledAgentService } from "./local-upgrade/bundled-agent.service.js";
 import { JobActivityService } from "./jobs/job-activity.service.js";
 import { VpsService } from "./vps/vps.service.js";
 import type { VpsRepository } from "./persistence/repositories/vps.repository.js";
@@ -65,7 +61,6 @@ import { DockerMonitoringMaintenanceService } from "./docker/docker-monitoring-m
 import { DockerActivityService } from "./docker/docker-activity.service.js";
 import type { DockerMonitoringRepository } from "./persistence/repositories/docker-monitoring.repository.js";
 import type { DockerManagementRepository } from "./persistence/repositories/docker-management.repository.js";
-import type { LocalUpgradeRepository } from "./persistence/repositories/local-upgrade.repository.js";
 import { DashboardSettingsService } from "./dashboard/dashboard-settings.service.js";
 import { LocalTerminalService } from "./terminal/local-terminal.service.js";
 import { FilesController } from "./files/files.controller.js";
@@ -90,7 +85,6 @@ import {
   HOST_KEY_PIN_REPOSITORY,
   JOB_REPOSITORY,
   KEY_SERVICE,
-  LOCAL_UPGRADE_REPOSITORY,
   METRIC_REPOSITORY,
   SESSION_REPOSITORY,
   VPS_REPOSITORY,
@@ -118,13 +112,10 @@ import { AiReadToolsService } from "./ai/ai-read-tools.service.js";
 import { AiRetentionService } from "./ai/ai-retention.service.js";
 import { AiBundleService } from "./ai/ai-bundle.service.js";
 import { AiBundleOrchestrationService, SshAiBundleInstallTransport } from "./ai/ai-bundle-install.service.js";
-import { AiLocalInstallService } from "./ai/ai-local-install.service.js";
-import { FLEET_REPOSITORY, FLEET_SERVICE, AI_INSTALL_CONFIRMER } from "./tokens.js";
+import { FLEET_REPOSITORY, FLEET_SERVICE } from "./tokens.js";
 import type { FleetRepository } from "./persistence/repositories/fleet.repository.js";
 import { FleetService } from "./agent-updates/fleet.service.js";
 import { AgentUpdatesController } from "./agent-updates/agent-updates.controller.js";
-import { FleetProvisioningService } from "./agents/fleet-provisioning.service.js";
-import { FLEET_PROVISIONING_SERVICE } from "./tokens.js";
 export {
   ADMIN_CREDENTIAL_REPOSITORY,
   AGENT_REPOSITORY,
@@ -137,12 +128,10 @@ export {
   HOST_KEY_PIN_REPOSITORY,
   JOB_REPOSITORY,
   KEY_SERVICE,
-  LOCAL_UPGRADE_REPOSITORY,
   METRIC_REPOSITORY,
   SESSION_REPOSITORY,
   VPS_REPOSITORY,
   SETTINGS_REPOSITORY,
-  FLEET_PROVISIONING_SERVICE,
 };
 
 const DATABASE_POOL_OWNS = Symbol("DATABASE_POOL_OWNS");
@@ -160,7 +149,6 @@ export type AppDependencies = {
   hostKeyPins?: HostKeyPinRepository;
   dockerMonitoring?: DockerMonitoringRepository;
   dockerManagement?: DockerManagementRepository;
-  localUpgrades?: LocalUpgradeRepository;
   settings?: SettingsRepository;
   applicationsInventory?: ApplicationsInventoryRepository;
   ai?: AiRepository;
@@ -201,8 +189,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
     !deps.adminCredential ||
     !deps.hostKeyPins ||
     !deps.dockerMonitoring ||
-    !deps.dockerManagement ||
-    !deps.localUpgrades;
+    !deps.dockerManagement;
   const repositories = needsRepositories
     ? createRepositories(config, deps.pool)
     : undefined;
@@ -226,8 +213,6 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       AuthController,
       DockerMonitoringController,
       DockerManagementController,
-      LocalUpgradeController,
-      LocalUpdaterController,
       FilesController,
       ApplicationsInventoryAgentController,
       AgentApplicationsController,
@@ -362,6 +347,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       DashboardSessionGuard,
       OriginGuard,
       AgentLifecycleCoordinator,
+      BundledAgentService,
       AgentInstallerService,
       AgentUninstallerService,
       AgentRestartService,
@@ -444,13 +430,6 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
         provide: DOCKER_MANAGEMENT_REPOSITORY,
         useValue: deps.dockerManagement ?? repositories!.dockerManagement,
       },
-      {
-        provide: LOCAL_UPGRADE_REPOSITORY,
-        useValue: deps.localUpgrades ?? repositories!.localUpgrades,
-      },
-      BundledAgentService,
-      LocalUpgradeService,
-      AgentConvergenceService,
       // AI bundle install orchestration (execmode plan slice 3b): default
       // SSH transport over SshService + saved keys, overridable via the
       // AI_BUNDLE_TRANSPORT token for tests.
@@ -458,11 +437,6 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       { provide: AI_BUNDLE_TRANSPORT, useExisting: SshAiBundleInstallTransport },
       AiBundleService,
       AiBundleOrchestrationService,
-      // Local/system host AI first-install (pull updater channel): the
-      // service doubles as the AI_INSTALL_CONFIRMER evidence confirmer for
-      // LocalUpgradeService (which it depends on via forwardRef).
-      AiLocalInstallService,
-      { provide: AI_INSTALL_CONFIRMER, useExisting: AiLocalInstallService },
       {
         provide: FLEET_REPOSITORY,
         useValue: deps.fleet ?? repositories!.fleet,
@@ -474,12 +448,8 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           FLEET_REPOSITORY,
           VPS_REPOSITORY,
           AGENT_REPOSITORY,
-          LOCAL_UPGRADE_REPOSITORY,
-          LocalUpgradeService,
           METRIC_REPOSITORY,
-          AuditService,
-          SshService,
-          KEY_SERVICE,
+          AI_REPOSITORY,
           DATABASE_POOL,
         ],
         useFactory: (
@@ -487,12 +457,8 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           fleetRepo: FleetRepository,
           vpsRepo: VpsRepository,
           agentRepo: AgentRepository,
-          localUpgradeRepo: LocalUpgradeRepository,
-          localUpgradeService: LocalUpgradeService,
           metricRepo: MetricRepository,
-          audit: AuditService,
-          ssh: SshService,
-          keys: KeyService,
+          aiRepo: AiRepository,
           pool?: Pool,
         ) =>
           new FleetService({
@@ -500,55 +466,14 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
             fleetRepository: fleetRepo,
             vpsRepository: vpsRepo,
             agentRepository: agentRepo,
-            localUpgradeRepository: localUpgradeRepo,
-            localUpgradeService,
+            aiRepository: aiRepo,
             metricRepository: metricRepo,
-            auditService: audit,
-            sshService: ssh,
-            keyService: keys,
             pool,
           }),
       },
       {
         provide: FLEET_SERVICE,
         useExisting: FleetService,
-      },
-      {
-        provide: FleetProvisioningService,
-        inject: [
-          APP_CONFIG,
-          VPS_REPOSITORY,
-          KEY_SERVICE,
-          AGENT_REPOSITORY,
-          AgentService,
-          SshService,
-          AuditService,
-          FLEET_REPOSITORY,
-        ],
-        useFactory: (
-          config: AppConfig,
-          vpsRepo: VpsRepository,
-          keys: KeyService,
-          agentRepo: AgentRepository,
-          agentService: AgentService,
-          ssh: SshService,
-          audit: AuditService,
-          fleetRepo?: FleetRepository,
-        ) =>
-          new FleetProvisioningService(
-            config,
-            vpsRepo,
-            keys,
-            agentRepo,
-            agentService,
-            ssh,
-            audit,
-            fleetRepo,
-          ),
-      },
-      {
-        provide: FLEET_PROVISIONING_SERVICE,
-        useExisting: FleetProvisioningService,
       },
        DockerActivityService,
        DockerMonitoringService,
@@ -571,13 +496,12 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
            AgentRestartService,
            DockerMonitoringService,
           JOB_REPOSITORY, METRIC_REPOSITORY, DOCKER_MONITORING_REPOSITORY,
-          DOCKER_MANAGEMENT_REPOSITORY, LOCAL_UPGRADE_REPOSITORY,
+          DOCKER_MANAGEMENT_REPOSITORY,
           HOST_KEY_PIN_REPOSITORY, TerminalSessionService, DockerLogsService,
           AgentLifecycleCoordinator,
           FilesService,
           ApplicationsService,
           FLEET_REPOSITORY,
-          FleetProvisioningService,
         ],
         useFactory: (
           store: VpsRepository,
@@ -592,13 +516,12 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
           restarter: AgentRestartService,
           dockerMonitoringService: DockerMonitoringService,
           jobs: JobRepository, metrics: MetricRepository, docker: DockerMonitoringRepository,
-          management: DockerManagementRepository, upgrades: LocalUpgradeRepository,
+          management: DockerManagementRepository,
           pins: HostKeyPinRepository, terminal: TerminalSessionService, logs: DockerLogsService,
           lifecycle: AgentLifecycleCoordinator,
           filesService: FilesService,
           applications: ApplicationsService,
           fleet: FleetRepository,
-          fleetProvisioning: FleetProvisioningService,
         ) =>
           new VpsService(
             store,
@@ -612,10 +535,9 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
              hostKeyPin,
              restarter,
              dockerMonitoringService,
-             createVpsCleanup(agentRepo, jobs, metrics, docker, management, upgrades, pins, terminal, logs, applications, fleet),
+             createVpsCleanup(agentRepo, jobs, metrics, docker, management, pins, terminal, logs, applications, fleet),
              lifecycle,
              filesService,
-             fleetProvisioning,
            ),
       },
     ],

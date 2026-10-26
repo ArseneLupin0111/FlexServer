@@ -51,11 +51,6 @@ import {
   type DockerManagementRepository,
 } from "./docker-management.repository.js";
 import {
-  createJsonLocalUpgradeRepository,
-  type LocalUpgradeRepository,
-} from "./local-upgrade.repository.js";
-import { createPostgresLocalUpgradeRepository } from "./local-upgrade.postgres.repository.js";
-import {
   createJsonSettingsRepository,
   type SettingsRepository,
 } from "./settings.repository.js";
@@ -86,7 +81,6 @@ export type RepositorySet = {
   hostKeyPins: HostKeyPinRepository;
   dockerMonitoring: DockerMonitoringRepository;
   dockerManagement: DockerManagementRepository;
-  localUpgrades: LocalUpgradeRepository;
   settings: SettingsRepository;
   applicationsInventory: ApplicationsInventoryRepository;
   ai?: AiRepository;
@@ -118,7 +112,6 @@ export function createRepositories(
       hostKeyPins: createPostgresHostKeyPinRepository(pool),
       dockerMonitoring: createPostgresDockerMonitoringRepository(pool),
       dockerManagement: createPostgresDockerManagementRepository(pool),
-      localUpgrades: createPostgresLocalUpgradeRepository(pool),
       settings: createPostgresSettingsRepository(pool),
       applicationsInventory: createPostgresApplicationsInventoryRepository(pool),
       ai: createPostgresAiRepository(pool),
@@ -148,9 +141,6 @@ export function createRepositories(
      ),
     dockerManagement: createJsonDockerManagementRepository(
       join(config.dataDir, "docker-management.json"),
-    ),
-    localUpgrades: createJsonLocalUpgradeRepository(
-      join(config.dataDir, "local-upgrades.json"),
     ),
     settings: createJsonSettingsRepository(
       join(config.dataDir, "settings.json"),

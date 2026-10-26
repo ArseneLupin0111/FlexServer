@@ -17,8 +17,8 @@
 //   manifest.tampered.json   signed document with one artifact sha256 altered
 //                            (valid JSON, signature must fail)
 //   manifest.multicomponent.json  signed document with BOTH release
-//                            components (agent + updater), mirroring what
-//                            release-agent.yml publishes
+//                            components, mirroring what fleet-release.yml
+//                            publishes
 
 import { createHash, createPrivateKey, createPublicKey, sign } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -85,22 +85,13 @@ const tamperedText = canonicalJson({
   signature,
 });
 
-// Signed agent+updater manifest — the layout release-agent.yml publishes
-// (see the workflow's Compose unsigned manifest step).
-const SHA256_C =
-  "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe";
+// Signed multi-component manifest — the layout fleet-release.yml publishes
+// (see the workflow's Sign and verify stable manifest step).
 const multicomponentDocument = {
   ...unsignedDocument,
   artifacts: [
     unsignedDocument.artifacts[0],
-    {
-      component: "updater",
-      os: "linux",
-      arch: "amd64",
-      size: 8_123_456,
-      sha256: SHA256_C,
-      url: `https://github.com/example-org/vps-manager-nodejs/releases/download/agent-${FIXTURE_SHA}/vps-updater-linux-amd64`,
-    },
+    unsignedDocument.artifacts[1],
   ],
 };
 const multicomponentCanonical = canonicalizeManifest(multicomponentDocument);

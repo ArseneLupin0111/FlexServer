@@ -51,7 +51,7 @@ function createHarness(options: HarnessOptions) {
     deleteByVps: async () => { calls.push("jobs purged"); },
   };
   const cleanup = createVpsCleanup(...([agent, jobs, { deleteByVps: async () => {} },
-    { cleanupForVps: async () => {} }, { deleteByVps: async () => {} }, { deleteByVps: async () => {} },
+    { cleanupForVps: async () => {} }, { deleteByVps: async () => {} },
     { deleteByVpsId: async () => {} }, { closeByVps: async () => {} }, { closeByVps: () => {} }
   ] as unknown as Parameters<typeof createVpsCleanup>));
   const ssh = { execCommand: async (_v: unknown, cmd: string) => {

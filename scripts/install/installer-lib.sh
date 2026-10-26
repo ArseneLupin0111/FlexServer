@@ -3,9 +3,8 @@
 #
 # installer-lib.sh — Shared helpers for the VPS Manager installers.
 #
-# Sourced by scripts/install/install.sh, install-local-agent.sh and
-# install-updater.sh. Keeping this in one place means the three entry points
-# share identical semantics for:
+# Sourced by scripts/install/install.sh and install-local-agent.sh. Keeping
+# the helpers in one place means both installers share identical semantics for:
 #
 #   1. Backend URL policy — parsed with Python's urllib (the same parser
 #      family the Node runtime uses via `new URL()`), not shell globs, so

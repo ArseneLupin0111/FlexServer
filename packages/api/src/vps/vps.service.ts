@@ -23,8 +23,7 @@ import {
 import { AgentInstallerService } from "../agents/agent-installer.service.js";
 import { AgentUninstallerService } from "../agents/agent-uninstaller.service.js";
 import { AgentRestartService } from "../agents/agent-restart.service.js";
-import { AGENT_REPOSITORY, FLEET_PROVISIONING_SERVICE } from "../tokens.js";
-import { FleetProvisioningService } from "../agents/fleet-provisioning.service.js";
+import { AGENT_REPOSITORY } from "../tokens.js";
 import type { AgentRepository } from "../persistence/repositories/agent.repository.js";
 import { HostKeyPinService } from "../ssh/host-key-pin.service.js";
 import { applyAgentState, type VpsRecord } from "./vps.models.js";
@@ -53,9 +52,6 @@ export class VpsService {
     private readonly removalCleanup?: VpsCleanup,
     private readonly lifecycle?: AgentLifecycleCoordinator,
     private readonly filesService?: VpsFilesCanceller,
-    @Optional()
-    @Inject(FLEET_PROVISIONING_SERVICE)
-    private readonly fleetProvisioning?: FleetProvisioningService,
   ) {}
 
   async list() {

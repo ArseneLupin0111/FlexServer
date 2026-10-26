@@ -40,9 +40,6 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -trimpath -buildvcs=false \
     -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${BUILD_ID}" \
-    -o /out/vps-updater-linux-amd64 ./cmd/vps-updater && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -trimpath -buildvcs=false \
     -o /out/host-pty-linux-amd64 ./cmd/host-pty && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -trimpath -buildvcs=false \
@@ -65,8 +62,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -o /out/vps-agent-linux-arm64 ./cmd/vps-agent && \
     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
     -trimpath -buildvcs=false \
-    -ldflags "-X github.com/vps-manager/agent/internal/version.Value=${AGENT_VERSION} -X github.com/vps-manager/agent/internal/version.Build=${BUILD_ID}" \
-    -o /out/vps-updater-linux-arm64 ./cmd/vps-updater && \
+    -o /out/host-pty-linux-arm64 ./cmd/host-pty && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+    -trimpath -buildvcs=false \
+    -o /out/local-agent-rotator-linux-arm64 ./cmd/local-agent-rotator && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+    -trimpath -buildvcs=false \
+    -o /out/host-files-linux-arm64 ./cmd/host-files && \
     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
     -trimpath -buildvcs=false \
     -o /out/ai-executor-linux-arm64 ./cmd/ai-executor && \
@@ -103,16 +105,15 @@ COPY --from=api-build --chown=app:app /app/package.json ./package.json
 COPY --from=api-build --chown=app:app /app/dist ./dist
 COPY --from=api-build --chown=app:app /app/packages/api/db ./db
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-agent-linux-amd64 /app/agent/vps-agent-linux-amd64
-COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-updater-linux-amd64 /app/agent/vps-updater-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-agent-linux-arm64 /app/agent/vps-agent-linux-arm64
-COPY --from=agent-builder --chown=app:app --chmod=0755 /out/vps-updater-linux-arm64 /app/agent/vps-updater-linux-arm64
 COPY --from=agent-builder --chown=app:app --chmod=0644 /out/vps-agent-linux-amd64.json /app/agent/vps-agent-linux-amd64.json
 COPY --from=agent-builder --chown=app:app --chmod=0644 /out/vps-agent-linux-arm64.json /app/agent/vps-agent-linux-arm64.json
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-pty-linux-amd64 /app/agent/host-pty-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/local-agent-rotator-linux-amd64 /app/agent/local-agent-rotator-linux-amd64
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-pty-linux-arm64 /app/agent/host-pty-linux-arm64
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/local-agent-rotator-linux-arm64 /app/agent/local-agent-rotator-linux-arm64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-files-linux-amd64 /app/agent/host-files-linux-amd64
-# AI bundle (install/update orchestration): binaries built in agent-builder,
-# rootfs tarballs + manifests produced by CI via scripts/agent/build-rootfs.mjs,
+COPY --from=agent-builder --chown=app:app --chmod=0755 /out/host-files-linux-arm64 /app/agent/host-files-linux-arm64
 # committed service profiles and the AI installer from the repo.
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-executor-linux-amd64 /app/agent/ai/ai-executor-linux-amd64
 COPY --from=agent-builder --chown=app:app --chmod=0755 /out/ai-executor-linux-arm64 /app/agent/ai/ai-executor-linux-arm64
@@ -125,8 +126,8 @@ COPY --chown=app:app --chmod=0644 packages/agent/dist/ai-rootfs-linux-arm64.mani
 COPY --chown=app:app packages/agent/profiles/ /app/agent/ai/profiles/
 COPY --chown=app:app --chmod=0755 scripts/install/install-local-agent.sh /app/agent/ai/install-local-agent.sh
 COPY scripts/install/install-host-files.sh /app/scripts/install-host-files.sh
-COPY --chown=app:app --chmod=0755 scripts/install/install-fleet-updater.sh /app/scripts/install/install-fleet-updater.sh
-COPY scripts/install/install-updater.sh /app/scripts/install/install-updater.sh
+# The API container itself runs on amd64; in-container rotator links always
+# point at the amd64 binary regardless of which host arch the installer runs on.
 RUN ln -s /app/agent/local-agent-rotator-linux-amd64 /usr/local/bin/local-agent-rotation-client && \
     ln -s /app/agent/local-agent-rotator-linux-amd64 /usr/local/bin/flexserver-local-agent-rotator
 RUN mkdir -p /app/data /app/private && chown -R app:app /app/data /app/private

@@ -180,24 +180,18 @@ describe("GET /api/vps/:id/ai/bundle", () => {
       lastInstalledBundleId: null,
       lastJob: null,
       capability: { supported: false, privilegedSupported: false },
-      installChannel: "ssh",
       installSupported: true,
-      localJob: null,
-      localRelease: null,
     });
   });
 
   it("flags local/system hosts as not install-supported with actionable guidance", async () => {
     await vpsRepo.ensureLocalHost({ id: vpsId, name: "Local host", host: "127.0.0.1", port: 22, username: "root", kind: "local", managedBy: "system" });
-    const view = (await routes.bundle(request, vpsId)) as AiBundleView;
-    expect(view.available).toBe(true);
-    expect(view.installSupported).toBe(false);
-    expect(view.installReason).toBe(AI_BUNDLE_LOCAL_HOST_INSTALL_REASON);
-    // No updater channel wired in this fixture: no channel field, no job.
-    expect(view.installChannel).toBeUndefined();
-    expect(view.localJob).toBeNull();
-    expect(view.localRelease).toBeNull();
+    const local = (await routes.bundle(request, vpsId)) as AiBundleView;
+    expect(local.available).toBe(true);
+    expect(local.installSupported).toBe(false);
+    expect(local.installReason).toBe(AI_BUNDLE_LOCAL_HOST_INSTALL_REASON);
   });
+
 
   it("reflects installed state, lastInstalledBundleId and the last job record", async () => {
     const bundle = new AiBundleService(config).getBundle();
@@ -321,7 +315,7 @@ describe("POST /api/vps/:id/ai/bundle/install idempotency", () => {
     await vpsRepo.ensureLocalHost({ id: vpsId, name: "Local host", host: "127.0.0.1", port: 22, username: "root", kind: "local", managedBy: "system" });
     const error = await routes.installBundle(request, vpsId).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(BadRequestException);
-    expect((error as Error).message).toContain("scripts/install/install.sh --enable-ai");
+    expect((error as Error).message).toContain("sudo bash scripts/install/install.sh");
     expect(await aiRepo.getAiBundleJob(vpsId)).toBeUndefined();
     expect(hangAuthCalls).toHaveLength(0);
   });

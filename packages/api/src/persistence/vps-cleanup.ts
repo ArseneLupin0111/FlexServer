@@ -3,7 +3,6 @@ import type { JobRepository } from "./repositories/job.repository.js";
 import type { MetricRepository } from "./repositories/metric.repository.js";
 import type { DockerMonitoringRepository } from "./repositories/docker-monitoring.repository.js";
 import type { DockerManagementRepository } from "./repositories/docker-management.repository.js";
-import type { LocalUpgradeRepository } from "./repositories/local-upgrade.repository.js";
 import type { HostKeyPinRepository } from "../ssh/host-key-pin.repository.js";
 import type { TerminalSessionService } from "../terminal/terminal-session.service.js";
 import type { DockerLogsService } from "../docker/docker-logs.service.js";
@@ -18,7 +17,7 @@ export type VpsCleanup = {
 export function createVpsCleanup(
   agent: AgentRepository, jobs: JobRepository, metrics: MetricRepository,
   docker: DockerMonitoringRepository, management: DockerManagementRepository,
-  upgrades: LocalUpgradeRepository, pins: HostKeyPinRepository,
+  pins: HostKeyPinRepository,
   terminal: TerminalSessionService, logs: DockerLogsService,
   applications?: ApplicationsService,
   fleet?: FleetRepository,
@@ -39,7 +38,6 @@ export function createVpsCleanup(
       await metrics.deleteByVps(id);
       await docker.cleanupForVps({ vpsId: id, reason: "vps_deleted" });
       await management.deleteByVps(id);
-      await upgrades.deleteByVps(id);
       await pins.deleteByVpsId(id);
       await agent.deleteVpsData(id);
       await fleet?.deleteByVps(id);

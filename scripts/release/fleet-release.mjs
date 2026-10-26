@@ -1,9 +1,8 @@
-#!/usr/bin/env node
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { readFile, writeFile, stat } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
-const components = new Set(['agent', 'updater', 'ai-executor', 'ai-host-helper', 'ai-rootfs', 'ai-profiles']);
+const components = new Set(['agent', 'ai-executor', 'ai-host-helper', 'ai-rootfs', 'ai-profiles']);
 const sha = /^[a-f0-9]{64}$/;
 const build = /^[a-f0-9]{40}$/;
 const version = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -11,7 +10,8 @@ function requireValue(condition, message) { if (!condition) throw new Error(mess
 export function validateFleetPayload(payload) {
   requireValue(payload && payload.schemaVersion === 1 && payload.channel === 'stable', 'Unsupported fleet release schema/channel');
   requireValue(typeof payload.releaseId === 'string' && build.test(payload.releaseId) && build.test(payload.buildId) && payload.releaseId === payload.buildId, 'Release identity must match a canonical commit build ID');
-  requireValue(version.test(payload.version) && version.test(payload.minUpdaterVersion), 'Invalid release/updater semantic version');
+  requireValue(version.test(payload.version), 'Invalid release semantic version');
+  requireValue(!payload.minUpdaterVersion || version.test(payload.minUpdaterVersion), 'Invalid updater semantic version');
   requireValue(typeof payload.rollbackSafe === 'boolean' && Number.isFinite(Date.parse(payload.publishedAt)), 'Missing rollback policy or publication time');
   requireValue(!payload.upgradeFrom || (Array.isArray(payload.upgradeFrom) && payload.upgradeFrom.every(x => typeof x === 'string' && build.test(x))), 'Invalid intermediate upgrade identities');
   requireValue(Array.isArray(payload.artifacts) && payload.artifacts.length > 0 && payload.artifacts.length <= 32, 'Missing or excessive release artifacts');
@@ -27,14 +27,11 @@ export function validateFleetPayload(payload) {
   for (const arch of ['amd64', 'arm64']) {
     const has = component => seen.has(`${component}/linux/${arch}`);
     if (payload.artifacts.some(a => a.arch === arch)) {
-      if (has('agent') || has('updater')) {
-        requireValue(has('agent') && has('updater'), `Missing agent/updater pair for ${arch}`);
-      }
       const ai = ['ai-executor', 'ai-host-helper', 'ai-rootfs', 'ai-profiles'];
       if (ai.some(has)) {
         requireValue(ai.every(has), `Incomplete AI runtime for ${arch}`);
       }
-      requireValue((has('agent') && has('updater')) || ai.every(has), `Missing required component set for ${arch}`);
+      requireValue(has('agent') || ai.every(has), `Missing required component set for ${arch}`);
     }
   }
   if (payload.ai) requireValue(version.test(payload.ai.version) && Array.isArray(payload.ai.components) && ['ai-executor', 'ai-host-helper', 'ai-rootfs', 'ai-profiles'].every(c => payload.ai.components.includes(c)), 'Invalid AI compatibility metadata');

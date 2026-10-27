@@ -17,7 +17,6 @@ import {
   getAiBundle,
   getVpsAiCapability,
   getVpsAiPolicy,
-  installAiBundle,
   patchVpsAiPolicy,
   type AiBundleStatus,
   type AiExecMode,
@@ -29,20 +28,8 @@ import { cn } from "../../../lib/utils";
 import { freshnessLabel } from "../../../lib/dashboard-formatters";
 
 /**
- * Per-host "Agent" card in the VPS Settings page (execmode plan, Web slice).
- *
- * Owns the AI policy surface that moved out of the Assistant settings modal:
- * AI on/off, shell on/off, sandbox/privileged execution mode (first switch to
- * privileged requires a one-time risk acknowledgment), a compact agent
- * version row, and the AI bundle install/update row with the real sandbox
- * capability diagnosis. Data loads lazily when the card mounts; runtime rows
- * refresh on window focus and poll while an install job is active. Every
- * section fails independently so a missing endpoint never blocks the page.
- *
- * Install state is unified: `lastJob` carries the scheduled/running job for
- * all hosts (states only; no percentage is ever estimated), and the button
- * gates on server readiness only (installSupported=false disables, absent
- * stays enabled). Nothing is fabricated when the field is missing.
+ * Per-host AI policy, agent version, bundle status, and capability diagnosis.
+ * Runtime rows load on mount and focus; active install jobs are polled.
  */
 
 const BUNDLE_JOB_POLL_MS = 5_000;
@@ -172,16 +159,9 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
     reason?: string;
     agentVersion?: string;
   } | null>(null);
-  const [installPending, setInstallPending] = useState(false);
-  const [installError, setInstallError] = useState<string | null>(null);
 
   const ackReasonId = useId();
-  const installReasonId = useId();
-  // Monotonic sequence for runtime loads: a response may only update state
-  // while it is still the newest issued request. Guards against a GET /bundle
-  // that began before an install POST resolving afterwards with a pre-job
-  // lastJob snapshot and clobbering the fresh job view (which would stop the
-  // poll and re-enable Install mid-job).
+  // A stale focus response must not replace a newer install job snapshot.
   const runtimeSeqRef = useRef(0);
 
   const loadPolicy = useCallback(
@@ -208,9 +188,6 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
         getAiBundle(vpsId, signal),
         getVpsAiCapability(vpsId, signal),
       ]);
-      // Drop superseded responses: aborted by unmount, a newer runtime load,
-      // or a completed install POST (which invalidates in-flight GETs so a
-      // pre-job bundle snapshot can never overwrite the fresh job view).
       if (signal?.aborted || seq !== runtimeSeqRef.current) return;
       if (bundleRes.status === "fulfilled") {
         setBundle(bundleRes.value);
@@ -253,20 +230,10 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
     return () => window.removeEventListener("focus", onFocus);
   }, [loadPolicy, loadRuntime]);
 
-  // Unified install job:
-  // Unified install job: `lastJob` carries the scheduled/running job for all
-  // hosts (AiBundleJob is state-only, so the progress bar stays
-  // indeterminate and never estimates).
+  // The server reports install jobs started by deployment or policy changes.
   const jobState = bundle?.lastJob?.state ?? null;
   const jobActive = jobState === "pending" || jobState === "running";
-  // True from the Install click (POST in flight, fresh job view not yet
-  // applied) until the polled job reaches a terminal state.
-  const installInProgress = installPending || jobActive;
-  const stateLabel = installPending
-    ? "Starting install…"
-    : jobState === "pending"
-      ? "Install queued…"
-      : "Installing AI bundle…";
+  const stateLabel = jobState === "pending" ? "Install queued…" : "Installing AI bundle…";
 
   useEffect(() => {
     if (!jobActive) return;
@@ -338,68 +305,17 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
     }
   };
 
-  const installBundle = async () => {
-    if (installPending || jobActive || bundle?.available !== true) {
-      return;
-    }
-    // Mirrors the button gate — server readiness only, no optimistic
-    // inference: false disables, absent stays enabled (legacy rule).
-    if (bundle.installSupported === false) {
-      return;
-    }
-    setInstallPending(true);
-    setInstallError(null);
-    try {
-      // The POST resolves with the fresh FULL bundle view (same shape as
-      // GET /bundle); its lastJob carries the scheduled job. Replace the
-      // whole view so installed/bundleId/lastJob update together and the
-      // 5s job poll engages. Invalidate the sequence only once the response
-      // is in hand: every runtime GET issued before this POST completed is
-      // a pre-job snapshot and must not overwrite the fresh job view when
-      // it resolves later.
-      const view = await installAiBundle(vpsId);
-      runtimeSeqRef.current += 1;
-      setBundle(view);
-    } catch (err) {
-      setInstallError(
-        errorMessage(err, "Failed to start the AI bundle install."),
-      );
-    } finally {
-      setInstallPending(false);
-    }
-  };
 
   const capView = capabilityView(bundle, standaloneCapability);
 
-  // Server readiness only, no optimistic inference: false disables (with
-  // the server's installReason), absent stays enabled (legacy rule).
-  const installGateOk = bundle?.installSupported !== false;
-
-  const installEnabled =
-    bundle !== null &&
-    bundle.available === true &&
-    installGateOk &&
-    !jobActive;
-  // A bundle load error is already rendered on the bundle line; only the
-  // actionable disabled reasons need a separate hint.
-  const installDisabledReason = bundleError
-    ? null
-    : bundle === null
-      ? "Checking AI bundle status…"
-      : !bundle.available
-        ? (bundle.reason ?? "AI bundle artifacts are not included in this deployment.")
-        : !installGateOk
-          ? (bundle.installReason ??
-            "AI bundle install is not supported on this host.")
-          : jobActive
-            ? "An install or update job is already running."
-            : null;
 
   const bundleLine = bundleError
     ? bundleError
     : bundle === null
       ? "Checking AI bundle…"
-      : [
+      : !bundle.available
+        ? (bundle.reason ?? "AI bundle artifacts are not included in this deployment.")
+        : [
           bundle.installed ? "Installed" : "Not installed",
           bundle.installed && bundle.bundleId
             ? `bundle ${shortId(bundle.bundleId)}`
@@ -573,9 +489,7 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
                 </span>
                 {/* Terminal job outcome; while a job is in flight the live
                     progress block below is the single status surface. */}
-                {!installInProgress &&
-                (jobState === "succeeded" ||
-                  jobState === "failed") ? (
+                {!jobActive && (jobState === "succeeded" || jobState === "failed") ? (
                   <span
                     role="status"
                     data-testid="ai-bundle-job-state"
@@ -606,43 +520,8 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
                 ) : null}
               </p>
             </div>
-            <Button
-              type="button"
-              size="sm"
-              variant={installEnabled ? "default" : "outline"}
-              disabled={!installEnabled || installPending}
-              aria-describedby={
-                installDisabledReason ? installReasonId : undefined
-              }
-              data-testid="ai-bundle-install"
-              onClick={() => void installBundle()}
-              className="h-8 gap-1.5 text-xs"
-            >
-              {installPending ? (
-                <LoaderCircle
-                  size={13}
-                  className="animate-spin"
-                  aria-hidden="true"
-                />
-              ) : null}
-              {bundle?.installed ? "Update AI bundle" : "Install AI bundle"}
-            </Button>
           </div>
-          {installDisabledReason && !installEnabled ? (
-            <p id={installReasonId} className="text-[11px] text-dim">
-              {installDisabledReason}
-            </p>
-          ) : null}
-          {installError ? (
-            <div
-              role="alert"
-              className="flex items-start gap-2 border border-crit/40 bg-crit/10 p-2.5 text-xs text-crit"
-            >
-              <AlertCircle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
-              <span>{installError}</span>
-            </div>
-          ) : null}
-          {installInProgress ? (
+          {jobActive ? (
             <div
               className="space-y-2 border border-line bg-raised/30 p-3"
               aria-live="polite"
@@ -677,7 +556,7 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
               </div>
             </div>
           ) : null}
-          {!installInProgress &&
+          {!jobActive &&
           jobState === "failed" &&
           bundle?.lastJob?.error ? (
             <div

@@ -190,7 +190,7 @@ export type AiCapabilityUpsertInput = AiCapability & { now?: string };
 export type AiBundleJobStartInput = {
   vpsId: string;
   bundleId: string;
-  trigger?: AiBundleJobTrigger;
+  trigger: AiBundleJobTrigger;
   /** Explicit job id (tests / resumption); a fresh UUID otherwise. */
   jobId?: string;
   now?: string;
@@ -294,6 +294,7 @@ export interface AiRepository {
   // ─── outbox (durable delivery) ───────────────────────────────────
   enqueueCommands(entries: { entry: AiOutboxEntry; expect: AiOutboxCommandExpect }[]): Promise<void>;
   claimCommands(agentInstanceId: string, vpsId: string, limit: number, now?: string): Promise<AiHostCommand[]>;
+  getOutboxEntry(commandId: string): Promise<AiOutboxEntry | undefined>;
   markCommandDispatched(commandId: string, now?: string): Promise<boolean>;
   markCommandAcknowledged(commandId: string, agentInstanceId: string, now?: string): Promise<boolean>;
   replayPendingCommands(vpsId: string, limit?: number): Promise<AiOutboxEntry[]>;

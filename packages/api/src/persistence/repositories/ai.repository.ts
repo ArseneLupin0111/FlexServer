@@ -972,6 +972,11 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
       });
     },
 
+    async getOutboxEntry(commandId) {
+      const state = await exec((s) => s);
+      return state.outbox.find((entry) => entry.commandId === commandId);
+    },
+
     async markCommandDispatched(commandId, now) {
       const at = isoNow(now);
       return exec((state) => {
@@ -1153,7 +1158,7 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
           jobId: input.jobId ?? randomUUID(),
           state: "pending",
           bundleId: input.bundleId,
-          trigger: input.trigger ?? "manual",
+          trigger: input.trigger,
           startedAt: now,
           lastInstalledBundleId: existing?.lastInstalledBundleId,
         };

@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { parseAppConfig, type AppConfig } from "../src/config/app-config.js";
 import { createJsonAiRepository } from "../src/persistence/repositories/ai.repository.js";
 import { createVpsStore } from "../src/persistence/store/vpsStore.js";
@@ -12,7 +11,6 @@ import type { VpsRepository } from "../src/persistence/repositories/vps.reposito
 import type { AgentRepository } from "../src/persistence/repositories/agent.repository.js";
 import { AiBundleService } from "../src/ai/ai-bundle.service.js";
 import {
-  AI_BUNDLE_LOCAL_HOST_INSTALL_REASON,
   AiBundleOrchestrationService,
   type AiBundleInstallTransport,
   type AiBundleSshAuth,
@@ -149,7 +147,7 @@ describe("AI bundle install runner", () => {
   async function startJob(jobId: string): Promise<void> {
     const bundle = bundleService.getBundle();
     if (!bundle.available) throw new Error("fixture bundle unavailable");
-    await aiRepo.startAiBundleJob({ vpsId, bundleId: bundle.bundleId, trigger: "manual", jobId });
+    await aiRepo.startAiBundleJob({ vpsId, bundleId: bundle.bundleId, trigger: "deliberate", jobId });
   }
 
   it("uploads per-arch artifacts, verifies sha256 on-host, runs the installer and confirms via a fresh capability claim", async () => {
@@ -341,7 +339,7 @@ describe("AI bundle install runner", () => {
       );
       const bundle = amdBundleService.getBundle();
       if (!bundle.available) throw new Error("fixture bundle unavailable");
-      await aiRepo.startAiBundleJob({ vpsId, bundleId: bundle.bundleId, trigger: "manual", jobId: "job-arch-1" });
+      await aiRepo.startAiBundleJob({ vpsId, bundleId: bundle.bundleId, trigger: "deliberate", jobId: "job-arch-1" });
       await runner.runJob(vpsId, "job-arch-1");
       const job = await aiRepo.getAiBundleJob(vpsId);
       expect(job?.state).toBe("failed");
@@ -368,85 +366,10 @@ describe("AI bundle install runner", () => {
     expect(transport.mkdirs).toHaveLength(0);
   });
 
-  // ── host eligibility: local/system hosts never install from the dashboard ──
+  // Local/system hosts never install through remote SSH orchestration.
 
   const toLocalHost = () =>
     vpsRepo.ensureLocalHost({ id: vpsId, name: "Local host", host: "127.0.0.1", port: 22, username: "root", kind: "local", managedBy: "system" });
-
-  it("reports installSupported per host kind in the bundle view", async () => {
-    const remote = await orchestration.getBundleView(vpsId);
-    expect(remote.installSupported).toBe(true);
-    expect(remote.installReason).toBeUndefined();
-
-    await toLocalHost();
-    const local = await orchestration.getBundleView(vpsId);
-    expect(local.installSupported).toBe(false);
-    expect(local.installReason).toBe(AI_BUNDLE_LOCAL_HOST_INSTALL_REASON);
-  });
-
-  it("reports an actionable unresolved-host reason (not local guidance) when the VPS record is missing or unreadable", async () => {
-    const view = await orchestration.getBundleView("vps_does_not_exist");
-    expect(view.installSupported).toBe(false);
-    expect(view.installReason).toBe(
-      "VPS record not found or unreadable — refresh the dashboard and retry; AI install support cannot be determined.",
-    );
-    // Must not leak the local-host guidance for an unresolvable host.
-    expect(view.installReason).not.toContain("install.sh");
-  });
-
-  it("manual installBundle rejects local/system hosts with 400 before job creation or SSH", async () => {
-    await toLocalHost();
-    const transport = makeFakeTransport({ auth: { privateKey: "k" } });
-    let authCalls = 0;
-    const innerResolve = transport.resolveAuth;
-    transport.resolveAuth = async (id) => {
-      authCalls += 1;
-      return innerResolve(id);
-    };
-    const runner = new AiBundleOrchestrationService(
-      config, aiRepo, vpsRepo, makeAgentRepo("x86_64"), bundleService,
-      undefined, transport,
-      { confirmDeadlineMs: 100, confirmPollIntervalMs: 5, installerTimeoutMs: 10_000 },
-    );
-    const error = await runner.installBundle(vpsId, "manual").catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(BadRequestException);
-    expect((error as Error).message).toContain("sudo bash scripts/install/install.sh");
-    expect(await aiRepo.getAiBundleJob(vpsId)).toBeUndefined();
-    expect(authCalls).toBe(0);
-    expect(transport.mkdirs).toHaveLength(0);
-    expect(transport.uploads).toHaveLength(0);
-    expect(transport.commands).toHaveLength(0);
-  });
-
-  it("manual installBundle rejects an unresolvable VPS with 404 and no local-guidance message", async () => {
-    const transport = makeFakeTransport({ auth: { privateKey: "k" } });
-    const runner = new AiBundleOrchestrationService(
-      config, aiRepo, vpsRepo, makeAgentRepo("x86_64"), bundleService,
-      undefined, transport,
-      { confirmDeadlineMs: 100, confirmPollIntervalMs: 5, installerTimeoutMs: 10_000 },
-    );
-    const error = await runner.installBundle("vps_does_not_exist", "manual").catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(NotFoundException);
-    expect((error as Error).message).toBe("VPS not found");
-    expect(await aiRepo.getAiBundleJob("vps_does_not_exist")).toBeUndefined();
-    expect(transport.mkdirs).toHaveLength(0);
-    expect(transport.commands).toHaveLength(0);
-  });
-
-  it("manual installBundle still schedules for remote hosts (remote flow preserved)", async () => {
-    // Hanging auth keeps the freshly scheduled job pending deterministically.
-    const transport = makeFakeTransport({ hangAuth: true });
-    const runner = new AiBundleOrchestrationService(
-      config, aiRepo, vpsRepo, makeAgentRepo("x86_64"), bundleService,
-      undefined, transport,
-      { confirmDeadlineMs: 100, confirmPollIntervalMs: 5, installerTimeoutMs: 10_000 },
-    );
-    const view = await runner.installBundle(vpsId, "manual");
-    expect(view.installSupported).toBe(true);
-    expect(view.lastJob?.state).toBe("pending");
-    expect((await aiRepo.getAiBundleJob(vpsId))?.trigger).toBe("manual");
-    expect(transport.mkdirs).toHaveLength(0);
-  });
 
   it("deliberate-action trigger skips local/system hosts (no job, no SSH)", async () => {
     await toLocalHost();

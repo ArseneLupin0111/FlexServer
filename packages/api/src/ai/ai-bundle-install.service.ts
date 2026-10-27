@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, Logger, NotFoundException, Optional, ServiceUnavailableException } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { readFileSync } from "node:fs";
 import { AI_REPOSITORY, AGENT_REPOSITORY, AI_BUNDLE_TRANSPORT, APP_CONFIG, KEY_SERVICE, VPS_REPOSITORY } from "../tokens.js";
 import type { AppConfig } from "../config/app-config.js";
@@ -94,8 +94,7 @@ export type AiBundleCapabilityView = {
   privilegedSupported: boolean;
 };
 
-/** GET /api/vps/:id/ai/bundle response shape — the web client shares this
- * contract with the POST install response. */
+/** GET /api/vps/:id/ai/bundle response shape. */
 export type AiBundleView = {
   available: boolean;
   /** Present only when available=false. */
@@ -112,28 +111,7 @@ export type AiBundleView = {
     finishedAt: string | null;
   } | null;
   capability: AiBundleCapabilityView;
-  /** Dashboard install (POST /install + deliberate/convergence triggers) is
-   * only possible on remote SSH-managed hosts; false for local/system hosts
-   * and when the host record cannot be resolved. */
-  installSupported?: boolean;
-  /** Present only when installSupported=false: actionable guidance. */
-  installReason?: string;
 };
-
-/** Local/system hosts have no SSH transport; the install stays fail-closed
- * with this guidance. */
-export const AI_BUNDLE_LOCAL_HOST_INSTALL_REASON =
-  "Local host AI install is unavailable through the dashboard in this deployment; run sudo bash scripts/install/install.sh on the host. Remote hosts install over saved SSH.";
-
-/** Actionable reason when the VPS record cannot be resolved (not found or
- * store read failure): install support is unknown, NOT a local-host case. */
-export const AI_BUNDLE_HOST_UNRESOLVED_INSTALL_REASON =
-  "VPS record not found or unreadable — refresh the dashboard and retry; AI install support cannot be determined.";
-
-/** Dashboard installs require a remote user-managed host with saved SSH. */
-function isLocalOrSystemHost(vps: VpsRecord | undefined): boolean {
-  return vps === undefined || vps.kind === "local" || vps.managedBy === "system";
-}
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
@@ -198,22 +176,17 @@ export class AiBundleOrchestrationService {
 
   async getBundleView(vpsId: string): Promise<AiBundleView> {
     const bundle = this.bundles.getBundle();
-    const [capability, job, vps] = await Promise.all([
+    const [capability, job] = await Promise.all([
       this.repository.getAiCapability(vpsId).catch(() => undefined),
       this.repository.getAiBundleJob(vpsId).catch(() => undefined),
-      this.vps.get(vpsId).catch(() => undefined),
     ]);
-    const view = this.buildView(bundle, capability, job, vps);
-    return view;
+    return this.buildView(bundle, capability, job);
   }
   private buildView(
     bundle: ReturnType<AiBundleService["getBundle"]>,
     capability: Awaited<ReturnType<AiRepository["getAiCapability"]>>,
     job: AiBundleJobRecord | undefined,
-    vps: VpsRecord | undefined,
   ): AiBundleView {
-    const hostMissing = vps === undefined;
-    const localOrSystem = !hostMissing && isLocalOrSystemHost(vps);
     return {
       available: bundle.available,
       ...(bundle.available ? {} : { reason: bundle.reason }),
@@ -234,53 +207,18 @@ export class AiBundleOrchestrationService {
         ...(capability?.agentVersion ? { agentVersion: capability.agentVersion } : {}),
         privilegedSupported: capability?.privilegedSupported === true,
       },
-      installSupported: !hostMissing && !localOrSystem,
-      ...(hostMissing
-        ? { installReason: AI_BUNDLE_HOST_UNRESOLVED_INSTALL_REASON }
-        : localOrSystem
-          ? { installReason: AI_BUNDLE_LOCAL_HOST_INSTALL_REASON }
-          : {}),
     };
   }
 
   // ─── scheduling ─────────────────────────────────────────────────────
 
-  /** POST route: schedule (or join) an install; 503 when the bundle is
-   * unavailable or installs are disabled; 404 for an unresolvable VPS record.
-   * Remote hosts take the SSH path (idempotent per pending/running job). */
-  async installBundle(
-    vpsId: string,
-    trigger: AiBundleJobTrigger = "manual",
-    idempotencyKey?: string,
-  ): Promise<AiBundleView> {
-    if (this.config.mode === "demo") {
-      throw new ServiceUnavailableException("AI bundle install is disabled in demo mode");
-    }
-    const vps = await this.vps.get(vpsId).catch(() => undefined);
-    if (!vps) throw new NotFoundException("VPS not found");
-    if (isLocalOrSystemHost(vps)) {
-      // Local/system hosts have no SSH transport: install on the host via
-      // scripts/install/install.sh, never through the dashboard.
-      throw new BadRequestException(AI_BUNDLE_LOCAL_HOST_INSTALL_REASON);
-    }
-    const scheduled = await this.scheduleInstall(vpsId, trigger);
-    if (!scheduled) {
-      const bundle = this.bundles.getBundle();
-      throw new ServiceUnavailableException(
-        bundle.available
-          ? "AI bundle install could not be scheduled"
-          : `AI bundle unavailable: ${bundle.reason}`,
-      );
-    }
-    return this.getBundleView(vpsId);
-  }
 
   /** Idempotent scheduling: while a pending/running job exists the current
    * job is returned untouched; a terminal (or absent) job is replaced by a
    * fresh pending one. Returns null when the bundle is unavailable/demo. */
   async scheduleInstall(
     vpsId: string,
-    trigger: AiBundleJobTrigger = "manual",
+    trigger: AiBundleJobTrigger,
   ): Promise<AiBundleJobRecord | null> {
     if (this.config.mode === "demo") return null;
     const bundle = this.bundles.getBundle();
@@ -295,9 +233,7 @@ export class AiBundleOrchestrationService {
       this.launch(vpsId, job);
       return job;
     }
-    // Adopt an orphaned pending/running job left by a previous process so a
-    // crash cannot wedge the VPS forever; while this process owns the job
-    // (in-flight) POST is a pure no-op (idempotent).
+    // Adopt an orphaned pending/running job left by a previous process.
     if (
       (job.state === "pending" || job.state === "running") &&
       !this.inFlight.has(vpsId)
@@ -325,7 +261,7 @@ export class AiBundleOrchestrationService {
     const bundle = this.bundles.getBundle();
     if (!bundle.available) return;
     const vps = await this.vps.get(vpsId).catch(() => undefined);
-    if (isLocalOrSystemHost(vps)) return;
+    if (!vps || vps.kind === "local" || vps.managedBy === "system") return;
     const [capability, job] = await Promise.all([
       this.repository.getAiCapability(vpsId).catch(() => undefined),
       this.repository.getAiBundleJob(vpsId).catch(() => undefined),

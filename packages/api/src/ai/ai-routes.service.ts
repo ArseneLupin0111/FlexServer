@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional, ServiceUnavailableException, UnauthorizedException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional, UnauthorizedException } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type { Request } from "express";
 import { APP_CONFIG, AI_REPOSITORY, VPS_REPOSITORY } from "../tokens.js";
@@ -34,15 +34,6 @@ const publicProviderProfile = (profile: AiProviderProfileInternal): AiProviderPr
   updatedAt: profile.updatedAt,
 });
 
-/** Idempotency-Key header as a single trimmed string; blank/absent →
- * undefined (the install path is idempotent per pending/running job and
- * ignores the key). */
-function requestIdempotencyKey(request: Request): string | undefined {
-  const raw = request.headers?.["idempotency-key"];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  const trimmed = typeof value === "string" ? value.trim() : "";
-  return trimmed.length > 0 ? trimmed : undefined;
-}
 
 @Injectable()
 export class AiRoutesService {
@@ -307,8 +298,6 @@ export class AiRoutesService {
         lastInstalledBundleId: null,
         lastJob: null,
         capability: { supported: false, privilegedSupported: false },
-        installSupported: false,
-        installReason: "AI bundle orchestration is not available in this deployment",
         localJob: null,
         localRelease: null,
       };
@@ -316,22 +305,6 @@ export class AiRoutesService {
     return this.bundleOrchestrator.getBundleView(vpsId);
   }
 
-  /** POST /api/vps/:id/ai/bundle/install — deliberate "Install/Update AI
-   * bundle" action; idempotent while a job is pending/running, 503 when the
-   * bundle is unavailable. Idempotent per pending/running job; an
-   * Idempotency-Key header is accepted but ignored. */
-  async installBundle(request: Request, vpsId: string) {
-    this.authorize(request);
-    if (!await this.vps.get(vpsId)) throw new NotFoundException("VPS not found");
-    if (!this.bundleOrchestrator) {
-      throw new ServiceUnavailableException("AI bundle orchestration is not available in this deployment");
-    }
-    return this.bundleOrchestrator.installBundle(
-      vpsId,
-      "manual",
-      requestIdempotencyKey(request),
-    );
-  }
 
   async updatePolicy(request: Request, vpsId: string, body: unknown) {
     const current = await this.policy(request, vpsId);

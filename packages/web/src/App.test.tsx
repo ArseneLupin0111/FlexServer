@@ -1883,7 +1883,7 @@ describe("React dashboard", () => {
 
     // Fetch server for the settings route: emulates the policy PATCH CAS
     // (server-side revision bump + privileged acknowledgment recording) and
-    // the AI bundle endpoints. `bundle === null` simulates an older API
+    // the AI bundle status endpoints. `bundle === null` simulates an older API
     // without the bundle route (404) so the card must degrade gracefully.
     function mockSettingsAiServer(options: {
       policy: typeof agentPolicyFixture;
@@ -1891,13 +1891,6 @@ describe("React dashboard", () => {
     }) {
       const state = { ...options.policy };
       const patchBodies: Record<string, unknown>[] = [];
-      // The POST returns the fresh FULL bundle view (same shape as GET
-      // /bundle) with a fresh pending job — mirrors the pinned AiBundleView
-      // contract of POST /ai/bundle/install.
-      const bundleView = (): typeof aiBundleFixture =>
-        options.bundle === null || options.bundle === undefined
-          ? aiBundleFixture
-          : options.bundle;
       fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
         if (url === "/api/auth/me") return authOk();
         if (url === "/api/vps/vps-1/ai/policy" && init?.method === "PATCH") {
@@ -1927,17 +1920,6 @@ describe("React dashboard", () => {
             };
           }
           return aiOk(options.bundle ?? aiBundleFixture);
-        }
-        if (url === "/api/vps/vps-1/ai/bundle/install" && init?.method === "POST") {
-          return aiOk({
-            ...bundleView(),
-            lastJob: {
-              state: "pending",
-              error: null,
-              startedAt: "2026-10-25T10:00:00.000Z",
-              finishedAt: null,
-            },
-          });
         }
         if (url === "/api/vps/vps-1/ai/capability") return aiOk(aiCapabilityFixture);
         const data =
@@ -2060,55 +2042,7 @@ describe("React dashboard", () => {
       });
       expect(patchBodies).toHaveLength(3);
     });
-
-    it("starts an AI bundle install, disables the button while a job runs, and shows the failed error", async () => {
-      const { patchBodies } = mockSettingsAiServer({
-        policy: agentPolicyFixture,
-        bundle: { ...aiBundleFixture, installed: false, lastInstalledBundleId: null },
-      });
-
-      renderApp(["/vps/vps-1/settings"]);
-
-      const install = await screen.findByTestId("ai-bundle-install");
-      await waitFor(() => expect(install).toBeEnabled());
-      expect(install).toHaveTextContent("Install AI bundle");
-
-      fireEvent.click(install);
-
-      // The POST resolves with the full bundle view whose lastJob is pending;
-      // the live progress block appears immediately with the queued state.
-      await waitFor(() => {
-        expect(screen.getByTestId("ai-bundle-install-progress")).toBeInTheDocument();
-      });
-      expect(screen.getByTestId("ai-bundle-install-state")).toHaveTextContent(
-        "Install queued…",
-      );
-      const progress = screen.getByRole("progressbar", {
-        name: "AI bundle install progress",
-      });
-      // Indeterminate: no aria-valuenow, since the job carries no numeric progress.
-      expect(progress).not.toHaveAttribute("aria-valuenow");
-      // The live region announces queued → running transitions.
-      expect(screen.getByTestId("ai-bundle-install-progress")).toHaveAttribute(
-        "aria-live",
-        "polite",
-      );
-      // The install went through the dedicated bundle route, not the policy.
-      expect(
-        fetchMock.mock.calls.some(
-          ([url, init]) =>
-            url === "/api/vps/vps-1/ai/bundle/install" && init?.method === "POST",
-        ),
-      ).toBe(true);
-      expect(patchBodies).toHaveLength(0);
-      // Active job disables the button and explains why.
-      expect(install).toBeDisabled();
-      expect(
-        screen.getByText("An install or update job is already running."),
-      ).toBeInTheDocument();
-    });
-
-    it("shows the failed bundle job error and keeps the install retry available", async () => {
+    it("shows the failed bundle job error", async () => {
       mockSettingsAiServer({
         policy: agentPolicyFixture,
         bundle: {
@@ -2127,7 +2061,6 @@ describe("React dashboard", () => {
       expect(
         await screen.findByTestId("ai-bundle-job-error"),
       ).toHaveTextContent("ssh: checksum mismatch for ai-executor");
-      expect(screen.getByTestId("ai-bundle-install")).toBeEnabled();
     });
 
     it("degrades gracefully when the bundle endpoint is missing and falls back to the capability diagnosis", async () => {
@@ -2139,7 +2072,6 @@ describe("React dashboard", () => {
       expect(bundleLine).toHaveTextContent(
         "AI bundle status is unavailable on this API.",
       );
-      expect(screen.getByTestId("ai-bundle-install")).toBeDisabled();
       expect(
         screen.getByTestId("ai-capability-reason"),
       ).toHaveTextContent("legacy capability reason");
@@ -2162,7 +2094,6 @@ describe("React dashboard", () => {
       expect(
         await screen.findByText("AI bundle directory is empty: /app/agent/ai"),
       ).toBeInTheDocument();
-      expect(screen.getByTestId("ai-bundle-install")).toBeDisabled();
     });
 
   });

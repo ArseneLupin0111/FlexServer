@@ -492,10 +492,9 @@ export function getVpsAiCapability(
   });
 }
 
-// ── AI bundle (install/update orchestration) ─────────────────────────
+// ── AI bundle status ──────────────────────────────────────────────────
 
-/** Terminal-ish job states reported by the bundle installer; pending/running
- * are active and disable the install button (plan Q8). */
+/** Job states reported by the bundle installer. */
 export type AiBundleJobState = "pending" | "running" | "succeeded" | "failed";
 
 export type AiBundleJob = {
@@ -513,10 +512,7 @@ export type AiBundleCapability = {
   privilegedSupported: boolean;
 };
 
-/** GET /api/vps/:id/ai/bundle and POST …/bundle/install response — install
- * state plus the capability diagnosis (surfaces the real
- * `sandbox_unavailable` reason on the Agent card). Mirrors the pinned API
- * `AiBundleView`. */
+/** GET /api/vps/:id/ai/bundle response: install state and capability diagnosis. */
 export type AiBundleStatus = {
   /** False when this deployment ships no AI bundle artifacts. */
   available: boolean;
@@ -527,13 +523,6 @@ export type AiBundleStatus = {
   lastInstalledBundleId: string | null;
   lastJob: AiBundleJob | null;
   capability: AiBundleCapability;
-  /** Host eligibility for a manual install from the dashboard. The UI gates
-   * the button on server readiness only: false disables the button (with
-   * `installReason` guidance), absent stays enabled (legacy rule). */
-  installSupported?: boolean;
-  /** Why the manual install is unsupported; present when installSupported
-   * is false. */
-  installReason?: string;
 };
 
 export function getAiBundle(
@@ -546,18 +535,6 @@ export function getAiBundle(
   });
 }
 
-/** POST /api/vps/:id/ai/bundle/install — idempotent per running job;
- * resolves with the fresh FULL bundle view (same shape as GET /bundle);
- * `lastJob` carries the scheduled/running install job. */
-export function installAiBundle(
-  vpsId: string,
-  signal?: AbortSignal,
-): Promise<AiBundleStatus> {
-  return request<AiBundleStatus>(`${vpsAiRoot(vpsId)}/bundle/install`, {
-    method: "POST",
-    signal,
-  });
-}
 
 // ── Tasks APIs ────────────────────────────────────────────────────────
 

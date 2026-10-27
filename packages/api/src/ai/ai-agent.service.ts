@@ -705,6 +705,27 @@ export class AiAgentService {
     return returnedCommand;
   }
 
+  private async requireReportedCommand(
+    vpsId: string,
+    input: { taskId: string; commandId: string; agentInstanceId: string },
+  ): Promise<AiOutboxEntry> {
+    const entry = await this.repository.getOutboxEntry(input.commandId);
+    if (
+      !entry ||
+      (entry.status !== "dispatched" && entry.status !== "acknowledged") ||
+      entry.vpsId !== vpsId ||
+      entry.taskId !== input.taskId ||
+      entry.agentInstanceId !== input.agentInstanceId ||
+      entry.command.vpsId !== vpsId ||
+      entry.command.taskId !== input.taskId ||
+      entry.command.commandId !== input.commandId ||
+      entry.command.agentInstanceId !== input.agentInstanceId
+    ) {
+      throw new ConflictException("Command is not dispatched to this agent for this task");
+    }
+    return entry;
+  }
+
   async heartbeat(
     vpsId: string,
     input: z.infer<typeof hostHeartbeatSchema>,
@@ -713,6 +734,7 @@ export class AiAgentService {
     if (!task) {
       return { ok: false, cancelRequested: true };
     }
+    await this.requireReportedCommand(vpsId, input);
 
     let cancelRequested =
       task.state === "cancel_requested" || task.state === "cancelled";
@@ -737,6 +759,7 @@ export class AiAgentService {
     if (!task) {
       throw new NotFoundException("Task not found");
     }
+    await this.requireReportedCommand(vpsId, input);
 
     const redactedChunk = redactSensitive(input.chunk);
     const chunkData: BoundedOutputChunk = {
@@ -761,6 +784,15 @@ export class AiAgentService {
     const task = await this.repository.getTask(vpsId, input.taskId);
     if (!task) {
       throw new NotFoundException("Task not found");
+    }
+    const entry = await this.requireReportedCommand(vpsId, input);
+    if (
+      entry.stepId !== input.stepId ||
+      entry.command.stepId !== input.stepId ||
+      entry.command.planVersion !== input.planVersion ||
+      entry.command.planDigest !== input.planDigest
+    ) {
+      throw new ConflictException("Result does not match the dispatched command");
     }
     const isAutoAuthorizedRead = input.planVersion === 0;
 
@@ -913,6 +945,7 @@ export class AiAgentService {
     if (!task) {
       return { ok: true };
     }
+    await this.requireReportedCommand(vpsId, input);
 
     if (task.state === "cancel_requested") {
       const receipts = await this.repository.listReceiptsByTask(input.taskId);

@@ -213,9 +213,8 @@ export type AiCapability = {
 
 export type AiBundleJobState = "pending" | "running" | "succeeded" | "failed";
 
-/** What asked for the install: an explicit button/toggle action (Q8), or the
- * convergence tick comparing the bundled bundleId (Q7). */
-export type AiBundleJobTrigger = "manual" | "deliberate" | "convergence";
+/** Why the install started: a policy action or a bundle convergence tick. */
+export type AiBundleJobTrigger = "deliberate" | "convergence";
 
 /** Latest AI bundle install job for one VPS (one record per VPS; the record
  * survives job replacement so lastInstalledBundleId is durable). */

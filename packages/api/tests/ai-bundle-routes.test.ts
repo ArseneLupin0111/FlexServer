@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Request } from "express";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { BadRequestException, ServiceUnavailableException } from "@nestjs/common";
 import { parseAppConfig, type AppConfig } from "../src/config/app-config.js";
 import { createJsonAiRepository } from "../src/persistence/repositories/ai.repository.js";
 import { createVpsStore } from "../src/persistence/store/vpsStore.js";
@@ -12,7 +11,6 @@ import type { VpsRepository } from "../src/persistence/repositories/vps.reposito
 import type { AiCodexOauthService } from "../src/ai/ai-codex-oauth.service.js";
 import { AiBundleService } from "../src/ai/ai-bundle.service.js";
 import {
-  AI_BUNDLE_LOCAL_HOST_INSTALL_REASON,
   AiBundleOrchestrationService,
   type AiBundleInstallTransport,
   type AiBundleSshAuth,
@@ -180,17 +178,9 @@ describe("GET /api/vps/:id/ai/bundle", () => {
       lastInstalledBundleId: null,
       lastJob: null,
       capability: { supported: false, privilegedSupported: false },
-      installSupported: true,
     });
   });
 
-  it("flags local/system hosts as not install-supported with actionable guidance", async () => {
-    await vpsRepo.ensureLocalHost({ id: vpsId, name: "Local host", host: "127.0.0.1", port: 22, username: "root", kind: "local", managedBy: "system" });
-    const local = (await routes.bundle(request, vpsId)) as AiBundleView;
-    expect(local.available).toBe(true);
-    expect(local.installSupported).toBe(false);
-    expect(local.installReason).toBe(AI_BUNDLE_LOCAL_HOST_INSTALL_REASON);
-  });
 
 
   it("reflects installed state, lastInstalledBundleId and the last job record", async () => {
@@ -201,7 +191,7 @@ describe("GET /api/vps/:id/ai/bundle", () => {
       cgroupV2Available: true, namespacesAvailable: true, seccompAvailable: true,
       privilegedSupported: false, profiles: [], reason: "cgroup", agentVersion: "9.9.9",
     });
-    const started = await aiRepo.startAiBundleJob({ vpsId, bundleId: bundle.bundleId, trigger: "manual" });
+    const started = await aiRepo.startAiBundleJob({ vpsId, bundleId: bundle.bundleId, trigger: "deliberate" });
     await aiRepo.finishAiBundleJob({ vpsId, jobId: started.job.jobId, outcome: "failed", error: "installer boom token=abc123" });
 
     const view = (await routes.bundle(request, vpsId)) as AiBundleView;
@@ -237,89 +227,6 @@ describe("GET /api/vps/:id/ai/bundle", () => {
   });
 });
 
-describe("POST /api/vps/:id/ai/bundle/install idempotency", () => {
-  let dir: string;
-  let fixture: BundleFixture;
-  let aiRepo: AiRepository;
-  let vpsRepo: VpsRepository;
-  let agentRepo: AgentRepository;
-  let vpsId: string;
-  let config: AppConfig;
-  let transport: ReturnType<typeof fakeTransport>;
-  let hangAuthCalls: string[];
-  let routes: AiRoutesService;
-
-  beforeEach(async () => {
-    fixture = await writeBundleFixture("ai-bundle-post");
-    dir = await mkdtemp(join(tmpdir(), "ai-bundle-post-state-"));
-    aiRepo = createJsonAiRepository(join(dir, "ai.json"));
-    vpsRepo = createVpsStore(join(dir, "vps.json"));
-    agentRepo = {} as unknown as AgentRepository;
-    const created = await vpsRepo.create({ name: "VPS", host: "127.0.0.1", port: 22, username: "root" });
-    vpsId = created.id;
-    const parsed = parseAppConfig({
-      APP_MODE: "local",
-      DASHBOARD_SESSION_SECRET: "ai-bundle-post-test-secret-0123456789",
-      APP_AI_BUNDLE_DIR: fixture.dir,
-    });
-    config = { ...parsed, ai: { ...parsed.ai, enabled: true } };
-    // A transport whose auth resolution never resolves holds the job in
-    // pending (in-flight) so idempotency can be observed deterministically.
-    hangAuthCalls = [];
-    transport = fakeTransport({
-      resolveAuth: async (vpsId) => {
-        hangAuthCalls.push(vpsId);
-        return new Promise(() => {});
-      },
-    });
-    const orchestration = new AiBundleOrchestrationService(
-      config, aiRepo, vpsRepo, agentRepo, new AiBundleService(config),
-      undefined, transport,
-    );
-    routes = new AiRoutesService(config, aiRepo, vpsRepo, {} as unknown as AiCodexOauthService, orchestration);
-  });
-
-  afterEach(async () => {
-    await rm(fixture.dir, { recursive: true, force: true });
-    await rm(dir, { recursive: true, force: true });
-  });
-
-  it("returns the already-running job without duplicating it", async () => {
-    const expectedBundleId = new AiBundleService(config).getBundle();
-    if (!expectedBundleId.available) throw new Error("fixture bundle unavailable");
-    const first = (await routes.installBundle(request, vpsId)) as AiBundleView;
-    expect(first.lastJob?.state).toBe("pending");
-    const second = (await routes.installBundle(request, vpsId)) as AiBundleView;
-    expect(second.lastJob).toEqual(first.lastJob);
-    expect(hangAuthCalls).toHaveLength(1);
-    const job = await aiRepo.getAiBundleJob(vpsId);
-    expect(job?.bundleId).toBe(expectedBundleId.bundleId);
-  });
-
-  it("rejects with 503 and a clear reason when the bundle is unavailable", async () => {
-    const parsed = parseAppConfig({
-      APP_MODE: "local",
-      DASHBOARD_SESSION_SECRET: "ai-bundle-post-test-secret-0123456789",
-      APP_AI_BUNDLE_DIR: join(tmpdir(), "ai-bundle-absent-xyz"),
-    });
-    const degradedConfig: AppConfig = { ...parsed, ai: { ...parsed.ai, enabled: true } };
-    const orchestration = new AiBundleOrchestrationService(
-      degradedConfig, aiRepo, vpsRepo, agentRepo, new AiBundleService(degradedConfig),
-      undefined, transport,
-    );
-    const degradedRoutes = new AiRoutesService(degradedConfig, aiRepo, vpsRepo, {} as unknown as AiCodexOauthService, orchestration);
-    await expect(degradedRoutes.installBundle(request, vpsId)).rejects.toBeInstanceOf(ServiceUnavailableException);
-  });
-
-  it("rejects local/system hosts with 400 before creating a job or touching SSH", async () => {
-    await vpsRepo.ensureLocalHost({ id: vpsId, name: "Local host", host: "127.0.0.1", port: 22, username: "root", kind: "local", managedBy: "system" });
-    const error = await routes.installBundle(request, vpsId).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(BadRequestException);
-    expect((error as Error).message).toContain("sudo bash scripts/install/install.sh");
-    expect(await aiRepo.getAiBundleJob(vpsId)).toBeUndefined();
-    expect(hangAuthCalls).toHaveLength(0);
-  });
-});
 
 describe("updatePolicy deliberate-action triggers (Q8)", () => {
   let dir: string;

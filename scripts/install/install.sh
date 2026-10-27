@@ -283,14 +283,16 @@ fi
 
 # ── Env file ──────────────────────────────────────────────────────────────
 
-# Preserve existing dashboard session secret if env file exists.
+# Preserve existing dashboard session secret, public URL, and keyring paths.
 CURRENT_DASHBOARD_SECRET=""
 CURRENT_AGENT_PUBLIC_BASE_URL=""
 CURRENT_SSH_KEY_ENCRYPTION_KEY_FILE=""
+CURRENT_COMPOSE_KEYRING_FILE=""
 if [[ -f "$ENV_FILE" ]]; then
   CURRENT_DASHBOARD_SECRET=$(grep -E '^DASHBOARD_SESSION_SECRET=' "$ENV_FILE" | cut -d= -f2- || true)
   CURRENT_AGENT_PUBLIC_BASE_URL=$(grep -E '^AGENT_PUBLIC_BASE_URL=' "$ENV_FILE" | cut -d= -f2- || true)
   CURRENT_SSH_KEY_ENCRYPTION_KEY_FILE=$(grep -E '^SSH_KEY_ENCRYPTION_KEY_FILE=' "$ENV_FILE" | cut -d= -f2- || true)
+  CURRENT_COMPOSE_KEYRING_FILE=$(grep -E '^COMPOSE_KEYRING_FILE=' "$ENV_FILE" | cut -d= -f2- || true)
 fi
 
 if [[ -n "$CURRENT_SSH_KEY_ENCRYPTION_KEY_FILE" ]]; then
@@ -299,6 +301,14 @@ if [[ -n "$CURRENT_SSH_KEY_ENCRYPTION_KEY_FILE" ]]; then
 else
   KEYRING_DIR="/etc/flexserver"
   KEYRING_FILE="${KEYRING_DIR}/ssh-keyring.json"
+fi
+
+if [[ -n "$CURRENT_COMPOSE_KEYRING_FILE" ]]; then
+  COMPOSE_KEYRING_FILE="$CURRENT_COMPOSE_KEYRING_FILE"
+  COMPOSE_KEYRING_DIR="$(dirname "$COMPOSE_KEYRING_FILE")"
+else
+  COMPOSE_KEYRING_DIR="$KEYRING_DIR"
+  COMPOSE_KEYRING_FILE="${COMPOSE_KEYRING_DIR}/compose-keyring.json"
 fi
 
 if [[ -z "$CURRENT_DASHBOARD_SECRET" ]]; then
@@ -431,7 +441,7 @@ SSH_HOST_KEY_POLICY=strict
 SSH_KEY_ENCRYPTION_KEY_FILE=${KEYRING_FILE}
 AI_KEYRING_FILE=${AI_KEYRING_FILE}
 APP_AI_ENABLED=true
-COMPOSE_KEYRING_FILE=/etc/flexserver/compose-keyring.json
+COMPOSE_KEYRING_FILE=${COMPOSE_KEYRING_FILE}
 COMPOSE_CLAIM_LEASE_SECONDS=120
 COMPOSE_INVENTORY_MAX_BYTES=524288
 COMPOSE_PREVIEW_TTL_SECONDS=300
@@ -454,6 +464,11 @@ fi
 
 # ── Compose file ──────────────────────────────────────────────────────────
 
+COMPOSE_KEYRING_VOLUME_LINE=""
+if [[ "$COMPOSE_KEYRING_DIR" != "$KEYRING_DIR" ]]; then
+  COMPOSE_KEYRING_VOLUME_LINE="      - ${COMPOSE_KEYRING_DIR}:${COMPOSE_KEYRING_DIR}:ro"
+fi
+
 TERMINAL_VOLUME_LINE=""
 TERMINAL_ENV_LINE=""
 if [[ "$ENABLE_LOCAL_TERMINAL" == "true" ]]; then
@@ -472,6 +487,7 @@ services:
       - ./data:/app/data
       - ./private:/app/private
       - ${KEYRING_DIR}:${KEYRING_DIR}:ro
+${COMPOSE_KEYRING_VOLUME_LINE}
 ${TERMINAL_VOLUME_LINE}
     env_file: .env
     environment:
@@ -535,6 +551,7 @@ fi
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "[DRY-RUN] Would set ${DATA_DIR} and ${PRIVATE_DIR} ownership to the API container user"
   echo "[DRY-RUN] Would prepare ${KEYRING_DIR} (chmod 0750) and initialize/migrate ${KEYRING_FILE} plus AI keyring ${AI_KEYRING_FILE}"
+  echo "[DRY-RUN] Would preserve existing Compose keyring ${COMPOSE_KEYRING_FILE}, or stop API writers and run manage-compose-keys init before starting"
 else
   API_UID_GID="$(docker run --rm --entrypoint sh "$API_IMAGE" -lc 'printf "%s:%s" "$(id -u)" "$(id -g)"')"
   if [[ ! "$API_UID_GID" =~ ^[0-9]+:[0-9]+$ ]]; then
@@ -588,6 +605,27 @@ else
       api node dist/scripts/manage-ai-keys.js init
     chown "$API_UID_GID" "$AI_KEYRING_FILE"
     chmod 0600 "$AI_KEYRING_FILE"
+  fi
+  # Compose key administration uses an exclusive writer lock; stop writers
+  # before initializing a missing keyring and never remove a live lock.
+  if [[ "$COMPOSE_KEYRING_DIR" != "$KEYRING_DIR" && "$COMPOSE_KEYRING_DIR" != "$AI_KEYRING_DIR" ]]; then
+    mkdir -p "$COMPOSE_KEYRING_DIR"
+    chown "$API_UID_GID" "$COMPOSE_KEYRING_DIR"
+    chmod 0750 "$COMPOSE_KEYRING_DIR"
+  fi
+  if test -f "$COMPOSE_KEYRING_FILE"; then
+    echo "[Setup] Preserving existing Compose keyring at ${COMPOSE_KEYRING_FILE}."
+    chown "$API_UID_GID" "$COMPOSE_KEYRING_FILE"
+    chmod 0600 "$COMPOSE_KEYRING_FILE"
+  else
+    echo "[Setup] Initializing Compose key encryption keyring..."
+    docker compose -f "$COMPOSE_FILE" stop api >/dev/null 2>&1 || true
+    docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
+      -v "${COMPOSE_KEYRING_DIR}:/run/flexserver-compose-admin:rw" \
+      -e COMPOSE_KEYRING_FILE="/run/flexserver-compose-admin/$(basename "$COMPOSE_KEYRING_FILE")" \
+      api node dist/scripts/manage-compose-keys.js init
+    chown "$API_UID_GID" "$COMPOSE_KEYRING_FILE"
+    chmod 0600 "$COMPOSE_KEYRING_FILE"
   fi
 fi
 

@@ -245,6 +245,10 @@ jobs:
         if: needs.changes.outputs.full == 'true' || needs.changes.outputs.installer == 'true'
         run: bash scripts/tests/test-installer-docker-access.sh
 
+      - name: Verify Compose keyring provisioning
+        if: needs.changes.outputs.full == 'true' || needs.changes.outputs.installer == 'true'
+        run: sudo bash scripts/tests/test-installer-compose-keyring.sh
+
       - name: Setup Go
         # Pinned so the agent race/vet tests share one cached toolchain instead
         # of the runner's preinstalled Go.

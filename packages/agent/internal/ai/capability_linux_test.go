@@ -23,6 +23,9 @@ func TestDetectCapabilitiesRecognizesFilesystemOwnership(t *testing.T) {
 }
 
 func TestCheckRootfsFileIgnoresSymlinkPermissionBits(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root ownership check requires root")
+	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "busybox"), []byte("x"), 0755); err != nil {
 		t.Fatal(err)

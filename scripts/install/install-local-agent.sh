@@ -169,7 +169,9 @@ AI_EXECUTOR_DEST="/usr/local/sbin/ai-executor"
 AI_RUN_DIR="/run/flexserver-ai"
 AI_HELPER_SOCKET="${AI_RUN_DIR}/helper.sock"
 AI_STATE_DIR="/var/lib/flexserver-ai"
-AI_STATE_FILE="${AI_STATE_DIR}/ai-state.json"
+# Worker state belongs to the agent's durable StateDirectory; helper backups
+# remain in the separately preserved flexserver-ai host state tree.
+AI_AGENT_STATE_DIR="${STATE_DIR}/ai"
 AI_SCRATCH_DIR="${AI_STATE_DIR}/scratch"
 AI_PROFILES_DIR="/etc/flexserver-ai/profiles"
 AI_ROOTFS_DIR="${AI_ROOTFS_DIR:-/usr/local/share/flexserver-ai/rootfs}"
@@ -1424,6 +1426,7 @@ if [[ "$INSTALL_AI" == "true" ]]; then
 
     # Rootfs dirs are root-owned; the helper read-executes them via its own
     # privileges, the AI user never needs write access.
+    install -d -o root -g root -m 0755 "$(dirname "$AI_PROFILES_DIR")"
     mkdir -p "$AI_PROFILES_DIR"
     chown root:root "$AI_PROFILES_DIR"
     chmod 0755 "$AI_PROFILES_DIR"
@@ -1491,7 +1494,7 @@ User=root
 Group=${AI_GROUP}
 RuntimeDirectory=flexserver-ai
 RuntimeDirectoryMode=0770
-ExecStart=${AI_HELPER_DEST} --socket ${AI_HELPER_SOCKET} --socket-mode 0660 --socket-uid 0 --socket-gid %G --profiles-dir ${AI_PROFILES_DIR} --execution-uid ${AI_UID_NUM} --execution-gid ${AI_GID_NUM} --executor-binary ${AI_EXECUTOR_DEST} --rootfs-dir ${AI_ROOTFS_DIR} --backups-dir ${AI_STATE_DIR}/backups
+ExecStart=${AI_HELPER_DEST} --socket ${AI_HELPER_SOCKET} --socket-mode 0660 --socket-uid 0 --socket-gid ${AI_GID_NUM} --agent-uid ${SERVICE_UID} --profiles-dir ${AI_PROFILES_DIR} --execution-uid ${AI_UID_NUM} --execution-gid ${AI_GID_NUM} --executor-binary ${AI_EXECUTOR_DEST} --rootfs-dir ${AI_ROOTFS_DIR} --backups-dir ${AI_STATE_DIR}/backups
 Restart=on-failure
 RestartSec=2
 # CAP_CHOWN is required for the helper to take ownership of the runtime
@@ -1524,7 +1527,7 @@ EOF_HELPER
     # Update config.json with the AI block. python3 is guaranteed by the
     # preflight prerequisite gate; a failure here means the verifier lost
     # python3 mid-run, so fail closed instead of shipping a broken config.
-    if ! python3 - "$CONFIG_FILE" "$AI_UID_NUM" "$AI_GID_NUM" "$AI_HELPER_SOCKET" "$AI_EXECUTOR_DEST" "$AI_SCRATCH_DIR" "$AI_STATE_FILE" "$AI_ROOTFS_DIR" "$AI_ROOTFS_MANIFEST" "$AI_PROFILES_DIR" <<'PY_EOF_AI_CFG'
+    if ! python3 - "$CONFIG_FILE" "$AI_UID_NUM" "$AI_GID_NUM" "$AI_HELPER_SOCKET" "$AI_EXECUTOR_DEST" "$AI_SCRATCH_DIR" "$AI_AGENT_STATE_DIR" "$AI_ROOTFS_DIR" "$AI_ROOTFS_MANIFEST" "$AI_PROFILES_DIR" <<'PY_EOF_AI_CFG'
 import json, sys
 cfg_path = sys.argv[1]
 uid, gid = int(sys.argv[2]), int(sys.argv[3])

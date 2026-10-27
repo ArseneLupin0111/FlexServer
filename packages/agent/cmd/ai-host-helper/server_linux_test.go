@@ -85,6 +85,71 @@ func testServerConfig(t *testing.T) ServerConfig {
 	}
 }
 
+func TestHandleConnPeerAuthorization(t *testing.T) {
+	peerUID := os.Geteuid()
+
+	t.Run("pinned agent UID is accepted", func(t *testing.T) {
+		client := startTestHelper(t, func(sc net.Conn) {
+			handleConn(context.Background(), sc, nil, ServerConfig{AgentUID: peerUID})
+		})
+		_, err := client.Write([]byte(`{"op":"not-a-real-operation"}` + "\n"))
+		if err != nil {
+			t.Fatalf("writing request: %v", err)
+		}
+		var resp ai.HelperResponse
+		if err := json.NewDecoder(client).Decode(&resp); err != nil {
+			t.Fatalf("reading authorized response: %v", err)
+		}
+		if resp.Error == "unauthorized peer credentials" || strings.HasPrefix(resp.Error, "unauthorized peer credentials ") {
+			t.Fatalf("pinned agent UID was rejected: %q", resp.Error)
+		}
+		if !strings.Contains(resp.Error, "unknown operation") {
+			t.Fatalf("expected request to reach operation dispatch, got %q", resp.Error)
+		}
+	})
+
+	t.Run("mismatched non-root UID is rejected", func(t *testing.T) {
+		if peerUID == 0 {
+			t.Skip("the test process is root; SO_PEERCRED cannot provide a mismatched UID")
+		}
+		client := startTestHelper(t, func(sc net.Conn) {
+			handleConn(context.Background(), sc, nil, ServerConfig{AgentUID: peerUID + 1})
+		})
+		_, err := client.Write([]byte(`{"op":"not-a-real-operation"}` + "\n"))
+		if err != nil {
+			t.Fatalf("writing request: %v", err)
+		}
+		var resp ai.HelperResponse
+		if err := json.NewDecoder(client).Decode(&resp); err != nil {
+			t.Fatalf("reading unauthorized response: %v", err)
+		}
+		if resp.Ok || !strings.Contains(resp.Error, "unauthorized peer credentials") {
+			t.Fatalf("expected unauthorized response, got %+v", resp)
+		}
+	})
+}
+
+func TestAuthorizedPeer(t *testing.T) {
+	tests := []struct {
+		name     string
+		peerUID  int
+		agentUID int
+		want     bool
+	}{
+		{name: "root", peerUID: 0, agentUID: 1234, want: true},
+		{name: "pinned agent", peerUID: 1234, agentUID: 1234, want: true},
+		{name: "other UID", peerUID: 1235, agentUID: 1234, want: false},
+		{name: "unset agent", peerUID: 1234, agentUID: -1, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := authorizedPeer(tt.peerUID, tt.agentUID); got != tt.want {
+				t.Fatalf("authorizedPeer(%d, %d) = %t, want %t", tt.peerUID, tt.agentUID, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPrivilegedProbeHandler(t *testing.T) {
 	client := startTestHelper(t, func(sc net.Conn) {
 		handlePrivilegedProbe(sc)

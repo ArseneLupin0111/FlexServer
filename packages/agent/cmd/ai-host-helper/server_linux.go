@@ -24,6 +24,7 @@ import (
 	"github.com/vps-manager/agent/internal/applications"
 	"golang.org/x/sys/unix"
 )
+
 func run(cfg ServerConfig) error {
 	if cfg.SocketPath == "" {
 		return errors.New("socket path cannot be empty")
@@ -129,23 +130,7 @@ func handleConn(ctx context.Context, conn net.Conn, profiles *ai.ProfileRegistry
 		return
 	}
 
-	authorized := false
-	if int(ucred.Uid) == 0 || int(ucred.Uid) == os.Geteuid() {
-		authorized = true
-	}
-	if cfg.SocketUID >= 0 && int(ucred.Uid) == cfg.SocketUID {
-		authorized = true
-	}
-	if cfg.SocketGID >= 0 && int(ucred.Gid) == cfg.SocketGID {
-		authorized = true
-	}
-	if cfg.ExecutionUID > 0 && int(ucred.Uid) == cfg.ExecutionUID {
-		authorized = true
-	}
-	if cfg.ExecutionGID > 0 && int(ucred.Gid) == cfg.ExecutionGID {
-		authorized = true
-	}
-	if !authorized {
+	if !authorizedPeer(int(ucred.Uid), cfg.AgentUID) {
 		sendResp(conn, false, fmt.Sprintf("unauthorized peer credentials uid=%d gid=%d", ucred.Uid, ucred.Gid), nil)
 		return
 	}
@@ -188,6 +173,10 @@ func handleConn(ctx context.Context, conn net.Conn, profiles *ai.ProfileRegistry
 	default:
 		sendResp(conn, false, fmt.Sprintf("unknown operation %q", req.Op), nil)
 	}
+}
+
+func authorizedPeer(peerUID, agentUID int) bool {
+	return peerUID == 0 || (agentUID > 0 && peerUID == agentUID)
 }
 
 func sendResp(conn net.Conn, ok bool, errStr string, data any) {
@@ -880,7 +869,7 @@ func handleTaskExecute(ctx context.Context, conn net.Conn, params json.RawMessag
 		}
 	}()
 
-	_ = os.WriteFile(filepath.Join(taskCgroup, "memory.max"), []byte("268435456\n"), 0644) // 256 MiB
+	_ = os.WriteFile(filepath.Join(taskCgroup, "memory.max"), []byte("268435456\n"), 0644)  // 256 MiB
 	_ = os.WriteFile(filepath.Join(taskCgroup, "pids.max"), []byte("64\n"), 0644)           // 64 PIDs
 	_ = os.WriteFile(filepath.Join(taskCgroup, "cpu.max"), []byte("100000 100000\n"), 0644) // 1 CPU
 

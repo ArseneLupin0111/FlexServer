@@ -15,6 +15,7 @@ type ServerConfig struct {
 	SocketUID      int
 	SocketGID      int
 	ProfilesDir    string
+	AgentUID       int
 	ExecutionUID   int
 	ExecutionGID   int
 	ExecutorBinary string
@@ -31,6 +32,7 @@ func main() {
 	gid := flag.Int("socket-gid", -1, "Socket owner GID")
 	profilesDir := flag.String("profiles-dir", "/etc/vps-manager/ai-profiles.d", "Root-owned profiles directory")
 	executionUID := flag.Int("execution-uid", -1, "Pinned target execution UID for confined tasks")
+	agentUID := flag.Int("agent-uid", -1, "Pinned agent UID authorized to use the helper")
 	executionGID := flag.Int("execution-gid", -1, "Pinned target execution GID for confined tasks")
 	executorBinary := flag.String("executor-binary", "/usr/local/sbin/ai-executor", "Pinned path to ai-executor binary")
 	rootfsDir := flag.String("rootfs-dir", "/usr/local/share/flexserver-ai/rootfs", "Pinned minimal rootfs directory")
@@ -52,6 +54,7 @@ func main() {
 			SocketUID:      *uid,
 			SocketGID:      *gid,
 			ProfilesDir:    *profilesDir,
+			AgentUID:       *agentUID,
 			ExecutionUID:   *executionUID,
 			ExecutionGID:   *executionGID,
 			ExecutorBinary: *executorBinary,

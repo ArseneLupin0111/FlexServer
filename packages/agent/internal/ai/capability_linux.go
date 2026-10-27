@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -84,7 +85,7 @@ func DetectCapabilities(rootfsDir, rootfsManifest, profilesDir string) HostCapab
 			reasons = append(reasons, fmt.Sprintf("rootfs directory %s inaccessible: %v", rootfsDir, err))
 		} else {
 			// Verify rootfs directory root ownership and no world/group writable bits
-			if sysStat, ok := rfStat.Sys().(*unix.Stat_t); ok {
+			if sysStat, ok := rfStat.Sys().(*syscall.Stat_t); ok {
 				if sysStat.Uid != 0 || sysStat.Gid != 0 {
 					reasons = append(reasons, fmt.Sprintf("rootfs directory %s is not root-owned (UID=%d, GID=%d)", rootfsDir, sysStat.Uid, sysStat.Gid))
 				} else if rfStat.Mode().Perm()&0022 != 0 {
@@ -94,7 +95,9 @@ func DetectCapabilities(rootfsDir, rootfsManifest, profilesDir string) HostCapab
 					mStat, err := os.Stat(rootfsManifest)
 					if err != nil {
 						reasons = append(reasons, fmt.Sprintf("rootfs manifest %s inaccessible: %v", rootfsManifest, err))
-					} else if mSys, ok := mStat.Sys().(*unix.Stat_t); ok && (mSys.Uid != 0 || mSys.Gid != 0) {
+					} else if mSys, ok := mStat.Sys().(*syscall.Stat_t); !ok {
+						reasons = append(reasons, "unable to determine rootfs manifest ownership")
+					} else if mSys.Uid != 0 || mSys.Gid != 0 {
 						reasons = append(reasons, fmt.Sprintf("rootfs manifest %s is not root-owned", rootfsManifest))
 					} else {
 						manifestDigest, err := CalculateManifestDigest(rootfsManifest)
@@ -127,7 +130,7 @@ func DetectCapabilities(rootfsDir, rootfsManifest, profilesDir string) HostCapab
 		if err != nil {
 			reasons = append(reasons, fmt.Sprintf("profiles directory %s inaccessible: %v", profilesDir, err))
 		} else {
-			if sysStat, ok := pStat.Sys().(*unix.Stat_t); ok {
+			if sysStat, ok := pStat.Sys().(*syscall.Stat_t); ok {
 				if sysStat.Uid != 0 || sysStat.Gid != 0 {
 					reasons = append(reasons, fmt.Sprintf("profiles directory %s is not root-owned (UID=%d, GID=%d)", profilesDir, sysStat.Uid, sysStat.Gid))
 				} else if pStat.Mode().Perm()&0002 != 0 {
@@ -195,14 +198,17 @@ func checkRootfsFile(rootfsDir, relPath, expectedDigest string) error {
 	}
 
 	// Must be root-owned
-	if sys, ok := st.Sys().(*unix.Stat_t); ok {
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok {
 		if sys.Uid != 0 || sys.Gid != 0 {
 			return fmt.Errorf("rootfs file %s is not root-owned (UID=%d, GID=%d)", cleanRel, sys.Uid, sys.Gid)
 		}
+	} else {
+		return fmt.Errorf("unable to determine rootfs file %s ownership", cleanRel)
 	}
 
-	// Must not be group/world writable
-	if st.Mode().Perm()&0022 != 0 {
+	// Symlink permission bits are ignored by Linux; validate writable bits only
+	// for filesystem objects whose mode controls access.
+	if st.Mode()&os.ModeSymlink == 0 && st.Mode().Perm()&0022 != 0 {
 		return fmt.Errorf("rootfs file %s is writable (mode=0%o)", cleanRel, st.Mode().Perm())
 	}
 

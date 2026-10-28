@@ -114,8 +114,8 @@ afterEach(() => {
 });
 
 describe("host health freshness", () => {
-  it("marks a host unreachable when its last observation reaches the shared threshold", () => {
-    // Objective positive case: a valid but stale observation must derive an unreachable host.
+  it("marks a host unknown when its last observation reaches the shared threshold", () => {
+    // Objective positive case: a valid but stale observation must derive an unknown host.
     // Arrange
     const now = Date.parse("2026-09-14T12:00:00.000Z");
     const lastSeenAt = new Date(
@@ -126,7 +126,7 @@ describe("host health freshness", () => {
     const status = deriveHostStatus("healthy", lastSeenAt, now);
 
     // Assert
-    expect(status).toBe("unreachable");
+    expect(status).toBe("unknown");
   });
 
   it("does not overwrite an explicit warning when its observation is stale", () => {
@@ -143,6 +143,39 @@ describe("host health freshness", () => {
     // Assert
     expect(status).toBe("warning");
   });
+
+  it("does not overwrite an explicit unreachable when its observation is stale", () => {
+    const now = Date.parse("2026-09-14T12:00:00.000Z");
+    const lastSeenAt = new Date(
+      now - HOST_FRESHNESS_THRESHOLD_MS - 1,
+    ).toISOString();
+
+    const status = deriveHostStatus("unreachable", lastSeenAt, now);
+
+    expect(status).toBe("unreachable");
+  });
+
+  it("preserves explicit unknown when its observation is stale", () => {
+    const now = Date.parse("2026-09-14T12:00:00.000Z");
+    const lastSeenAt = new Date(
+      now - HOST_FRESHNESS_THRESHOLD_MS - 1,
+    ).toISOString();
+
+    const status = deriveHostStatus("unknown", lastSeenAt, now);
+
+    expect(status).toBe("unknown");
+  });
+
+  it.each([undefined, "not-a-timestamp"])(
+    "preserves status when lastSeenAt is %s",
+    (lastSeenAt) => {
+      const now = Date.parse("2026-09-14T12:00:00.000Z");
+      expect(deriveHostStatus("healthy", lastSeenAt, now)).toBe("healthy");
+      expect(deriveHostStatus("warning", lastSeenAt, now)).toBe("warning");
+      expect(deriveHostStatus("unreachable", lastSeenAt, now)).toBe("unreachable");
+      expect(deriveHostStatus("unknown", lastSeenAt, now)).toBe("unknown");
+    },
+  );
 });
 
 describe("agent freshness", () => {
@@ -185,7 +218,7 @@ describe("agent freshness", () => {
 });
 
 describe("VPS read health", () => {
-  it("derives stale healthy records as unreachable in both list and get without persisting changes", async () => {
+  it("derives stale healthy records as unknown in both list and get without persisting changes", async () => {
     // Objective positive case: both VPS read paths expose derived health while leaving storage immutable.
     // Arrange
     vi.useFakeTimers();
@@ -206,10 +239,30 @@ describe("VPS read health", () => {
     const fetched = await service.get(stored.id);
 
     // Assert
-    expect(listed[0]?.status).toBe("unreachable");
-    expect(fetched.status).toBe("unreachable");
+    expect(listed[0]?.status).toBe("unknown");
+    expect(fetched.status).toBe("unknown");
     expect(stored.status).toBe("healthy");
     expect(store).not.toHaveProperty("update");
+  });
+
+  it("preserves an explicit unreachable record in both list and get", async () => {
+    // Stale timestamps must not downgrade a recorded unreachable host to unknown.
+    const stored: VpsRecord = { ...staleRecord, status: "unreachable" };
+    const store = {
+      list: vi.fn().mockResolvedValue([stored]),
+      get: vi.fn().mockResolvedValue(stored),
+    };
+    const agentRepository = {
+      listStates: vi.fn().mockResolvedValue([]),
+      getState: vi.fn().mockResolvedValue(undefined),
+    };
+    const service = createVpsService(store, agentRepository);
+
+    const listed = await service.list();
+    const fetched = await service.get(stored.id);
+
+    expect(listed[0]?.status).toBe("unreachable");
+    expect(fetched.status).toBe("unreachable");
   });
 
   it("keeps an online agent host unknown when no host observation exists and derives agent offline", async () => {
@@ -253,8 +306,8 @@ describe("VPS read health", () => {
 });
 
 describe("dashboard host health", () => {
-  it("returns a stale server as unreachable and counts it in the summary without mutating its repository record", async () => {
-    // Objective positive case: dashboard server and aggregate views share derived unreachable health.
+  it("returns a stale server as unknown and counts it in the summary without mutating its repository record", async () => {
+    // Objective positive case: dashboard server and aggregate views share derived unknown health.
     // Arrange
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-14T12:00:00.000Z"));
@@ -275,11 +328,11 @@ describe("dashboard host health", () => {
     const overview = await dashboard.overview();
 
     // Assert
-    expect(overview.servers[0]?.status).toBe("unreachable");
+    expect(overview.servers[0]?.status).toBe("unknown");
     expect(overview.summary).toMatchObject({
       totalServers: 1,
       healthyServers: 0,
-      unreachableServers: 1,
+      unreachableServers: 0,
     });
     expect(stored.status).toBe("healthy");
   });

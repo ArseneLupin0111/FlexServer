@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1158,8 +1158,7 @@ describe("React dashboard", () => {
       expect(screen.getByRole("article", { name: "Server Local Server" })).toBeInTheDocument();
       expect(screen.getByRole("article", { name: "Server Friendly production" })).toBeInTheDocument();
       expect(screen.getAllByLabelText("Host status: Healthy")[0]).toHaveTextContent("Healthy");
-      expect(screen.getByLabelText("Host status: Unknown")).toHaveAttribute("title", "Host status: Unknown");
-      expect(screen.getAllByText("Unknown").length).toBeGreaterThan(0);
+      expect(within(screen.getByRole("article", { name: "Server unknown-host" })).queryByLabelText("Host status: Unknown")).not.toBeInTheDocument();
       expect(screen.getAllByText("Agent online").length).toBeGreaterThan(0);
       expect(screen.getAllByText("Key ready").length).toBeGreaterThan(0);
 
@@ -1168,7 +1167,7 @@ describe("React dashboard", () => {
       expect(screen.getAllByText("Agent").length).toBeGreaterThan(0);
       expect(screen.getAllByText("Access").length).toBeGreaterThan(0);
       expect(screen.getByRole("link", { name: "Local Server" })).toHaveAttribute("title", "Host ID: 3e6f37c57a5f");
-      expect(screen.getByLabelText("Host status: Unknown")).toBeInTheDocument();
+      expect(within(screen.getByRole("row", { name: "Server unknown-host" })).queryByLabelText("Host status: Unknown")).not.toBeInTheDocument();
     });
 
     it("renders an API-reported offline agent as Offline and preserves last-seen context", async () => {
@@ -1199,6 +1198,70 @@ describe("React dashboard", () => {
       expect(within(row).queryByLabelText("Agent status: Online")).not.toBeInTheDocument();
       expect(within(row).getByTitle(`Last seen: ${new Date(lastSeenAt).toLocaleString()}`)).not.toHaveTextContent("Never");
     });
+    it("distinguishes stale heartbeat from explicit unreachable without false power or down claims", async () => {
+      const staleServer = {
+        ...twoServerRecords[0],
+        id: "vps-stale",
+        name: "stale-host",
+        displayName: "Stale Telemetry Host",
+        status: "unknown" as const,
+        agentStatus: "offline" as const,
+        lastSeenAt: "2026-01-01T00:00:00.000Z",
+      };
+      const unreachableServer = {
+        ...twoServerRecords[1],
+        id: "vps-unreachable",
+        name: "unreachable-host",
+        displayName: "Unreachable Host",
+        status: "unreachable" as const,
+        agentStatus: "offline" as const,
+      };
+
+      fetchMock
+        .mockResolvedValueOnce(authOk())
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: twoServersDashboard }) })
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [staleServer, unreachableServer] }) })
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) });
+
+      renderApp(["/vps"]);
+
+      const staleCard = await screen.findByRole("article", { name: "Server Stale Telemetry Host" });
+      const unreachableCard = screen.getByRole("article", { name: "Server Unreachable Host" });
+
+      // A stale heartbeat is already conveyed by the agent label, not a second host badge.
+      expect(within(staleCard).getByText("Agent offline")).toBeInTheDocument();
+      expect(within(staleCard).queryByLabelText("Host status: Unknown")).not.toBeInTheDocument();
+      expect(within(staleCard).queryByText("Down")).not.toBeInTheDocument();
+      expect(within(staleCard).queryByText("Unreachable")).not.toBeInTheDocument();
+      expect(within(staleCard).queryByText(/check power/i)).not.toBeInTheDocument();
+      expect(within(staleCard).queryByText(/no heartbeat/i)).not.toBeInTheDocument();
+
+      // Explicit unreachable host is labelled Unreachable, not Down, without generic heartbeat/power banner
+      expect(within(unreachableCard).getByText("Unreachable")).toBeInTheDocument();
+      expect(within(unreachableCard).getByLabelText("Host status: Unreachable")).toBeInTheDocument();
+      expect(within(unreachableCard).queryByText("Down")).not.toBeInTheDocument();
+      expect(within(unreachableCard).getByText(/host is unreachable/i)).toBeInTheDocument();
+      expect(within(unreachableCard).queryByText(/check power/i)).not.toBeInTheDocument();
+
+      // Fleet counter shows reporting semantics
+      expect(screen.getAllByText("0/2 REPORTING").length).toBeGreaterThan(0);
+      expect(screen.queryByText(/HOSTS ONLINE/i)).not.toBeInTheDocument();
+
+      // The table retains explicit host evidence without duplicating unknown agent state.
+      await userEvent.click(screen.getByRole("button", { name: "Table view" }));
+      const staleRow = screen.getByRole("row", { name: "Server Stale Telemetry Host" });
+      const unreachableRow = screen.getByRole("row", { name: "Server Unreachable Host" });
+
+      expect(within(staleRow).queryByText("Unknown")).not.toBeInTheDocument();
+      expect(within(staleRow).getByText("Offline")).toBeInTheDocument();
+      expect(within(staleRow).queryByText("Down")).not.toBeInTheDocument();
+
+      expect(within(unreachableRow).getByText("Unreachable")).toBeInTheDocument();
+      expect(within(unreachableRow).queryByText("Down")).not.toBeInTheDocument();
+    });
+
 
     it("keeps the API's removed-agent state after a past successful install job", async () => {
       const removedRecord = {
@@ -1362,6 +1425,72 @@ describe("React dashboard", () => {
       expect(await screen.findByText("Uploading agent")).toBeInTheDocument();
       expect(screen.getByRole("progressbar", { name: /Agent install: Uploading agent/i })).toHaveAttribute("aria-valuenow", "30");
       expect(fetchMock).toHaveBeenCalledTimes(6);
+    });
+
+    it("updates agent availability when an install job succeeds without a page refresh", async () => {
+      const installing = { ...twoServerRecords[0], agentStatus: "installing" as const, lastAgentInstallJobId: "agent-job-1" };
+      const installed = { ...installing, agentStatus: "online" as const };
+      const ok = (data: unknown) => ({ ok: true, status: 200, json: async () => ({ data }) });
+      fetchMock
+        .mockResolvedValueOnce(authOk())
+        .mockResolvedValueOnce(ok(twoServersDashboard))
+        .mockResolvedValueOnce(ok([installing]))
+        .mockResolvedValueOnce(ok([]))
+        .mockResolvedValueOnce(ok([]))
+        .mockResolvedValueOnce(ok([]))
+        .mockResolvedValueOnce(ok(twoServersDashboard))
+        .mockResolvedValueOnce(ok([installed]))
+        .mockResolvedValueOnce(ok([]))
+        .mockResolvedValueOnce(ok([]))
+        .mockResolvedValueOnce(ok([]));
+
+      renderApp(["/vps"]);
+      const card = await screen.findByRole("article", { name: "Server web-01" });
+      mockEventSourceInstance?.dispatchEvent("jobs.updated", makeEnvelope("jobs.updated", {
+        jobs: [{ id: "agent-job-1", vpsId: "vps-1", type: "install-agent", status: "running", progress: 90 }],
+      }));
+      expect(await within(card).findByRole("progressbar")).toBeInTheDocument();
+
+      mockEventSourceInstance?.dispatchEvent("jobs.updated", makeEnvelope("jobs.updated", {
+        jobs: [{ id: "agent-job-1", vpsId: "vps-1", type: "install-agent", status: "succeeded", progress: 100 }],
+      }));
+      expect(await within(card).findByText("Agent online")).toBeInTheDocument();
+      expect(within(card).queryByText("Agent not installed")).not.toBeInTheDocument();
+    });
+
+    it("does not let an older dashboard response undo a completed agent install", async () => {
+      const installing = { ...twoServerRecords[0], agentStatus: "installing" as const, lastAgentInstallJobId: "agent-job-1" };
+      const installed = { ...installing, agentStatus: "online" as const };
+      const ok = (data: unknown) => ({ ok: true, status: 200, json: async () => ({ data }) });
+      let resolveOldJobs!: (value: ReturnType<typeof ok>) => void;
+      fetchMock
+        .mockResolvedValueOnce(authOk())
+        .mockResolvedValueOnce(ok(twoServersDashboard))
+        .mockResolvedValueOnce(ok([installing]))
+        .mockResolvedValueOnce(ok([]))
+        .mockResolvedValueOnce(ok([]))
+        .mockResolvedValueOnce(ok([]))
+        .mockResolvedValueOnce(ok(twoServersDashboard))
+        .mockResolvedValueOnce(ok([installing]))
+        .mockImplementationOnce(() => new Promise((resolve) => { resolveOldJobs = resolve; }))
+        .mockResolvedValueOnce(ok([]))
+        .mockResolvedValueOnce(ok([]))
+        .mockResolvedValueOnce(ok(twoServersDashboard))
+        .mockResolvedValueOnce(ok([installed]))
+        .mockResolvedValueOnce(ok([]))
+        .mockResolvedValueOnce(ok([]))
+        .mockResolvedValueOnce(ok([]));
+
+      renderApp(["/vps"]);
+      const card = await screen.findByRole("article", { name: "Server web-01" });
+      await userEvent.click(screen.getByRole("button", { name: "Refresh dashboard" }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(11));
+      mockEventSourceInstance?.dispatchEvent("jobs.updated", makeEnvelope("jobs.updated", {
+        jobs: [{ id: "agent-job-1", vpsId: "vps-1", type: "install-agent", status: "succeeded", progress: 100 }],
+      }));
+      expect(await within(card).findByText("Agent online")).toBeInTheDocument();
+      await act(async () => { resolveOldJobs(ok([])); });
+      expect(within(card).getByText("Agent online")).toBeInTheDocument();
     });
 
     it("keeps card actions out of the fleet list", async () => {

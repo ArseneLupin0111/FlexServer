@@ -74,7 +74,8 @@ export function ServersPanel(props: ServersPanelProps) {
           <option value="all">All states</option>
           <option value="healthy">Healthy</option>
           <option value="warning">Warning</option>
-          <option value="unreachable">Down</option>
+          <option value="unreachable">Unreachable</option>
+          <option value="unknown">Unknown</option>
           <option value="ready">Key ready</option>
           <option value="pending">Needs password</option>
         </select>

@@ -29,7 +29,8 @@ export function vpsHostId(vps: VpsRecord): string | undefined {
 export function serverStatusLabel(status?: VpsRecord["status"]) {
   if (status === "healthy") return "Healthy";
   if (status === "warning") return "Warning";
-  if (status === "unreachable") return "Down";
+  // `unreachable` is only persisted explicitly; a stale heartbeat reads `unknown`.
+  if (status === "unreachable") return "Unreachable";
   return "Unknown";
 }
 

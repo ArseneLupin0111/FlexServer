@@ -107,6 +107,7 @@ export function ServerTable({
                 vps.agentStatus === "online" ? "Online"
                 : vps.agentStatus === "offline" ? "Offline"
                 : vps.agentStatus === "failed" ? "Failed"
+                : vps.agentStatus === "installing" ? agentJob?.status === "succeeded" ? "Checking status" : "Installing"
                 : !isLocal ? "Not installed"
                 : localAgentLabel(vps.lastSeenAt);
               const agentTone =
@@ -139,7 +140,9 @@ export function ServerTable({
                     </span>
                   </td>
                   <td className="px-4 py-3">
-                    <TableStatus kind="host" label={serverStatusLabel(vps.status)} tone={vps.status === "healthy" ? "green" : vps.status === "warning" ? "amber" : vps.status === "unreachable" ? "red" : "neutral"} />
+                    {vps.status === "unknown" && vps.agentStatus
+                      ? <span className="text-dim" aria-label="Host status unavailable">—</span>
+                      : <TableStatus kind="host" label={serverStatusLabel(vps.status)} tone={vps.status === "healthy" ? "green" : vps.status === "warning" ? "amber" : vps.status === "unreachable" ? "red" : "neutral"} />}
                   </td>
                   <td className="px-4 py-3">
                     {agentActionRunning ? <AgentLifecycleStatus vps={vps} jobs={serverJobs} compact /> : <TableStatus kind="agent" label={agentLabel} tone={agentTone} />}

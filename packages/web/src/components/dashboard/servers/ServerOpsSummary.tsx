@@ -101,10 +101,16 @@ export function ServerOpsSummary({ records, metrics, dockerMetrics, onSelect }: 
 }) {
   const summary = calculateServerOpsSummary(records, metrics, dockerMetrics);
   const attentionTone: Tone = summary.attention === 0 ? "default" : records.some((server) => server.status === "unreachable" || server.agentStatus === "failed") ? "red" : "amber";
+  const attentionTarget = records.some((s) => s.status === "unreachable")
+    ? "unreachable"
+    : records.some((s) => s.status === "warning")
+      ? "warning"
+      : records.some((s) => s.status === "unknown")
+        ? "unknown"
+        : "all";
   const pressureTone: Tone = summary.pressure && summary.pressure.percent >= 90 ? "red" : summary.pressure && summary.pressure.percent >= 75 ? "amber" : "default";
   const containerTone: Tone = summary.containers.problems ? (summary.containers.unhealthy ? "red" : "amber") : "default";
   const monitoringTone: Tone = summary.agentGaps ? (summary.liveAgents === 0 ? "red" : "amber") : "default";
-
   return (
     <section
       className="grid grid-cols-4 gap-3 max-[1000px]:grid-cols-2 max-[560px]:grid-cols-1"
@@ -123,7 +129,7 @@ export function ServerOpsSummary({ records, metrics, dockerMetrics, onSelect }: 
               .map((server) => vpsDisplayName(server))[0] ?? "All clear"
           : "All servers nominal"}
         tone={attentionTone}
-        onClick={onSelect ? () => onSelect("unreachable") : undefined}
+        onClick={onSelect ? () => onSelect(attentionTarget) : undefined}
       />
       <StatCard
         label="Resource pressure"

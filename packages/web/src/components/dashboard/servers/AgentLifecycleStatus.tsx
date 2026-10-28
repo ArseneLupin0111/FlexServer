@@ -85,6 +85,7 @@ export function AgentLifecycleStatus({ vps, jobs, compact = false }: {
   if (status === "online") return <span className="inline-flex items-center gap-1.5 text-xs text-signal" role="status"><CheckCircle2 size={13} aria-hidden="true" />Agent online</span>;
   if (status === "offline") return <span className="inline-flex items-center gap-1.5 text-xs text-warn" role="status"><Radio size={13} aria-hidden="true" />Agent offline</span>;
   if (status === "failed") return <span className="inline-flex items-center gap-1.5 text-xs text-crit" role="alert" title={job?.errorMessage || vps.agentLastError}><AlertCircle size={13} aria-hidden="true" />{job?.errorMessage || vps.agentLastError || "Agent action failed"}</span>;
+  if (status === "installing") return <span className="text-xs text-dim" role="status">{job?.status === "succeeded" ? "Checking agent status" : "Agent installing"}</span>;
   if (vps.kind === "local" || vps.managedBy === "system") {
     // Local host: the persisted lifecycle row can be missing while the local
     // process keeps reporting (the supervisor marks the record seen on every

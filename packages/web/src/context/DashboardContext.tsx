@@ -228,6 +228,7 @@ export function DashboardProvider({
     useState<PendingHostKeyTrust | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const recordsRef = useRef(records);
+  const loadSequenceRef = useRef(0);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [refreshToastVisible, setRefreshToastVisible] = useState(false);
   const refreshToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -242,6 +243,7 @@ export function DashboardProvider({
   // ── Data loading ───────────────────────────────────────────────────
 
   async function loadVps(message?: string) {
+    const sequence = ++loadSequenceRef.current;
     const [dashboard, servers, jobs, metrics, auditEvents] = await Promise.all([
       getDashboardOverview(),
       listVps(),
@@ -249,6 +251,7 @@ export function DashboardProvider({
       listMetrics(),
       listAuditEvents(),
     ]);
+    if (sequence !== loadSequenceRef.current) return;
     const mergedJobs = mergeJobs(dashboard.jobs ?? [], jobs);
     setOverview({
       ...dashboard,
@@ -393,6 +396,14 @@ export function DashboardProvider({
           jobs: mergeJobs(prev.jobs, payload.jobs),
         }));
         // Lifecycle status comes from the API; jobs only provide progress.
+        if (payload.jobs.some((job) =>
+          (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") &&
+          (job.type === "install-agent" || job.type === "uninstall-agent" || job.type === "upgrade-agent" || job.type === "restart-agent" || job.type === "rotate-agent")
+        )) {
+          void loadVps().catch(() => {
+            setStatus({ message: "Failed to refresh agent status.", kind: "destructive" });
+          });
+        }
       },
       onDockerEventsAvailable: (payload) => {
         if (!payload || (payload.vpsId && !recordsRef.current.some((vps) => vps.id === payload.vpsId))) return;

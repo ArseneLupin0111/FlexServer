@@ -27,7 +27,7 @@ export function FleetSidebar({
 }: FleetSidebarProps) {
   const [filter, setFilter] = useState("");
   const metricById = new Map(metrics.map((metric) => [metric.vpsId, metric]));
-  const onlineCount = hosts.filter((host) => host.status === "healthy").length;
+  const reportingCount = hosts.filter((host) => host.status === "healthy").length;
 
   const filteredHosts = hosts.filter((host) => {
     if (!filter.trim()) return true;
@@ -53,7 +53,7 @@ export function FleetSidebar({
           <span className="text-lg font-bold tracking-tight">FlexServer</span>
         </Link>
         <div className="tnum mt-1 text-[11px] text-dim">
-          {onlineCount}/{hosts.length} HOSTS ONLINE
+          {reportingCount}/{hosts.length} REPORTING
         </div>
       </div>
       {hosts.length > 3 ? (

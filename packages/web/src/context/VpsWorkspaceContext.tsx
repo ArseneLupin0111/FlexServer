@@ -300,7 +300,9 @@ export function VpsWorkspaceLayout() {
                 <h1 className="truncate text-xl font-bold tracking-tight text-text sm:text-2xl">
                   {displayName}
                 </h1>
-                <WorkspaceStatusBadge status={vps.status} />
+                {(!vps.status || vps.status === "unknown") && vps.agentStatus ? null : (
+                  <WorkspaceStatusBadge status={vps.status} />
+                )}
                 {vps.agentStatus ? (
                   <span
                     className={cn(

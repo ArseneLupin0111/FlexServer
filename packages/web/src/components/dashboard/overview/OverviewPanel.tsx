@@ -286,11 +286,15 @@ export function OverviewPanel({ overview }: { overview: DashboardOverview }) {
           label="Host"
           value={server ? serverStatusLabel(server.status) : "n/a"}
           sub={
-            metric?.uptime
-              ? `Uptime ${formatUptime(metric.uptime)}`
-              : metric?.collectedAt
+            server?.status === "unknown" || metric?.freshness === "stale"
+              ? metric?.collectedAt
                 ? `Last seen ${freshnessLabel(metric.collectedAt)}`
                 : "No telemetry reported"
+              : metric?.uptime
+                ? `Uptime ${formatUptime(metric.uptime)}`
+                : metric?.collectedAt
+                  ? `Last seen ${freshnessLabel(metric.collectedAt)}`
+                  : "No telemetry reported"
           }
           tone={
             server?.status === "healthy"

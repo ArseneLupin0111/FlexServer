@@ -47,6 +47,17 @@ describe("local agent lifecycle labels follow the observed heartbeat", () => {
   });
 });
 
+describe("agent install completion awaiting host state", () => {
+  const installing = { ...base, agentStatus: "installing" as const, lastAgentInstallJobId: "install-1" };
+  const completed = [{ id: "install-1", vpsId: base.id, type: "install-agent", status: "succeeded" as const, progress: 100 }];
+
+  it("does not call a successful install not installed while host state refreshes", () => {
+    render(<AgentLifecycleStatus vps={installing} jobs={completed} />);
+    expect(screen.getByText("Checking agent status")).toBeInTheDocument();
+    expect(screen.queryByText("Agent not installed")).not.toBeInTheDocument();
+  });
+});
+
 describe("localAgentLabel freshness mapping", () => {
   const now = Date.parse("2026-06-01T12:00:00Z");
   it("mirrors the API freshness window", () => {

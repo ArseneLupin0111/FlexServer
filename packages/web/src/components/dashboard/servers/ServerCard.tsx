@@ -18,7 +18,7 @@ export function ServerCard({ vps, metric, systemInfo, jobs }: {
 }) {
   const isLocalHost = vps.kind === "local" || vps.managedBy === "system";
   const isReady = isLocalHost || Boolean(vps.keyProvisionedAt);
-  const isDown = vps.status === "unreachable";
+  const isUnreachable = vps.status === "unreachable";
   const displayName = vpsDisplayName(vps);
   const osLabel =
     systemInfo?.os?.prettyName ||
@@ -32,7 +32,7 @@ export function ServerCard({ vps, metric, systemInfo, jobs }: {
   return (
     <article
       aria-label={`Server ${displayName}`}
-      className={`min-w-0 overflow-hidden border bg-panel transition-colors duration-160 ease-out hover:bg-raised/10 ${isDown ? "border-crit/40" : "border-line hover:border-dim/60"}`}
+      className={`min-w-0 overflow-hidden border bg-panel transition-colors duration-160 ease-out hover:bg-raised/10 ${isUnreachable ? "border-crit/40" : "border-line hover:border-dim/60"}`}
     >
       <div className="grid min-w-0 gap-5 p-5">
         <div className="min-w-0">
@@ -51,7 +51,7 @@ export function ServerCard({ vps, metric, systemInfo, jobs }: {
               ) : null}
               <span className="min-w-0 break-words">{displayName}</span>
             </h3>
-            <ServerHealthStatus status={vps.status} />
+            {vps.status === "unknown" && vps.agentStatus ? null : <ServerHealthStatus status={vps.status} />}
           </div>
           <p className="mt-2 break-words text-sm text-dim" title={osLabel}>{osLabel}</p>
         </div>
@@ -82,10 +82,10 @@ export function ServerCard({ vps, metric, systemInfo, jobs }: {
           </div>
         </div>
       </div>
-      {isDown ? (
+      {isUnreachable ? (
         <div className="flex items-center gap-2 border-t border-crit/30 bg-crit/5 px-5 py-2 text-[12px] text-crit">
           <AlertTriangle size={14} aria-hidden="true" />
-          <span className="min-w-0">No heartbeat since {formatDate(vps.lastSeenAt)} ({freshnessLabel(metric?.collectedAt ?? vps.lastSeenAt)}). Check power, firewall and SSH key.</span>
+          <span className="min-w-0">Host is unreachable. Check network connectivity and host configuration.</span>
         </div>
       ) : null}
     </article>
@@ -93,14 +93,14 @@ export function ServerCard({ vps, metric, systemInfo, jobs }: {
 }
 
 function ServerHealthStatus({ status }: { status?: VpsRecord["status"] }) {
-  const isDown = status === "unreachable";
+  const isUnreachable = status === "unreachable";
   const label = serverStatusLabel(status);
   const tone =
     status === "healthy"
       ? "border-signal/40 bg-signal/10 text-signal"
       : status === "warning"
         ? "border-warn/40 bg-warn/10 text-warn"
-        : isDown
+        : isUnreachable
           ? "border-crit/40 bg-crit/10 text-crit"
           : "border-line bg-raised text-dim";
 

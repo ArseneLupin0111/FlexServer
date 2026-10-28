@@ -24,7 +24,7 @@ export function FleetDrawer({
 }: FleetDrawerProps) {
   const [filter, setFilter] = useState("");
   const metricById = new Map(metrics.map((metric) => [metric.vpsId, metric]));
-  const onlineCount = hosts.filter((host) => host.status === "healthy").length;
+  const reportingCount = hosts.filter((host) => host.status === "healthy").length;
 
   const filteredHosts = hosts.filter((host) => {
     if (!filter.trim()) return true;
@@ -55,7 +55,7 @@ export function FleetDrawer({
             </Link>
           </SheetTitle>
           <div className="tnum mt-1 flex items-center justify-between text-[11px] text-dim">
-            <span>{onlineCount}/{hosts.length} HOSTS ONLINE</span>
+            <span>{reportingCount}/{hosts.length} REPORTING</span>
             <span className="flex items-center gap-1">
               <Server size={12} aria-hidden="true" />
               <span>Fleet drawer</span>

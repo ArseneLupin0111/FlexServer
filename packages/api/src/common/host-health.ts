@@ -17,9 +17,9 @@ export function deriveHostStatus(
   now = Date.now(),
 ): "unknown" | "healthy" | "warning" | "unreachable" {
   const storedStatus = status ?? "unknown";
-  if (storedStatus === "warning") return storedStatus;
+  if (storedStatus !== "healthy") return storedStatus;
   if (!lastSeenAt) return storedStatus;
   const seen = new Date(lastSeenAt).getTime();
   if (!Number.isFinite(seen)) return storedStatus;
-  return now - seen >= HOST_FRESHNESS_THRESHOLD_MS ? "unreachable" : storedStatus;
+  return now - seen >= HOST_FRESHNESS_THRESHOLD_MS ? "unknown" : storedStatus;
 }

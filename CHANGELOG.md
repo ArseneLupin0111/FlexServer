@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — Agent installation status
+
+- Refresh the authoritative host and agent state when a lifecycle job finishes, so a successful install replaces the progress bar with the observed agent status without a manual page refresh. Ignore older in-flight dashboard responses that would overwrite the completed state; show a checking state instead of incorrectly saying Not installed while the host observation is pending.
+
+## Unreleased — Host status and agent heartbeat
+
+- Stop labelling a host Down merely because agent metrics stopped for two minutes: previously healthy host status becomes Unknown while the independent agent status becomes Offline. Where agent state is already shown, omit the redundant Unknown host badge; retain explicit warnings/unreachable states and stale telemetry without presenting them as a fresh VM power check.
+
 ## Unreleased — Updater removal and bundled agent+AI delivery
 
 - Remove the separate AI bundle install/update action from VPS Settings and its manual API route. The Agent card continues to show bundle status, job outcomes, and capability; agent installation still bundles the AI runtime by default, and deliberate AI policy changes can trigger a first remote install.

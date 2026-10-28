@@ -46,9 +46,17 @@ function createService(
 ) {
   const agentRepository = {
     getCredential: vi.fn().mockResolvedValue(credential),
-    updateCredential: vi.fn().mockResolvedValue(credential),
-    getState: vi.fn().mockResolvedValue(undefined),
-    upsertState: vi.fn().mockResolvedValue(undefined),
+    // Repository contract: undefined means the heartbeat was not admitted.
+    acceptHeartbeat: vi.fn(
+      async (input: { lastUsedAt: string; lastUsedIp?: string }) => ({
+        ...credential,
+        status: "active",
+        lastUsedAt: input.lastUsedAt,
+        ...(input.lastUsedIp !== undefined
+          ? { lastUsedIp: input.lastUsedIp }
+          : {}),
+      }),
+    ),
   };
   const metricRepository = { append };
   const vpsRepository = {
@@ -293,16 +301,23 @@ describe("agent ingestion host health", () => {
     // Act
     const result = await service.ingestMetric(credential, validPayload());
 
-    // Assert
     expect(result.sample.vpsId).toBe("vps-1");
     expect(calls).toEqual(["append", "markSeen"]);
+    expect(append).toHaveBeenCalledWith(
+      expect.objectContaining({ vpsId: "vps-1", source: "agent", cpu: 10 }),
+      120,
+    );
     expect(markSeen).toHaveBeenCalledWith(
       "vps-1",
       "healthy",
       result.sample.receivedAt,
     );
-    expect(agentRepository.upsertState).toHaveBeenCalledWith(
-      expect.objectContaining({ vpsId: "vps-1", status: "online" }),
+    expect(agentRepository.acceptHeartbeat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        credentialId: "credential-1",
+        vpsId: "vps-1",
+        lastSeenAt: result.sample.receivedAt,
+      }),
     );
   });
 
@@ -312,13 +327,15 @@ describe("agent ingestion host health", () => {
     const appendError = new Error("metric persistence failed");
     const append = vi.fn().mockRejectedValue(appendError);
     const markSeen = vi.fn();
-    const { service } = createService(append, markSeen);
+    const { agentRepository, service } = createService(append, markSeen);
 
     // Act
     const ingestion = service.ingestMetric(credential, validPayload());
 
     // Assert
     await expect(ingestion).rejects.toThrow("metric persistence failed");
+    expect(agentRepository.acceptHeartbeat).toHaveBeenCalled();
+    expect(append).toHaveBeenCalledTimes(1);
     expect(markSeen).not.toHaveBeenCalled();
   });
 

@@ -299,7 +299,7 @@ describe("Docker management without monitoring", () => {
     const inventory = vi.spyOn(api, "listVpsDockerCurrentContainers").mockResolvedValue([target] as api.DockerCurrentContainer[]);
     vi.spyOn(api, "getVpsDockerManagementCapability").mockResolvedValue({ supported: false, actions: [], logsSupported: false, maxLogLines: 200, targets: [target] });
     const onEdit = vi.fn().mockResolvedValue(undefined);
-    const dashboard = { busy: false, mode: "local", onEdit, onToggleDockerMetrics: vi.fn() } as unknown as DashboardCtx;
+    const dashboard = { records: [localVps, remoteVps], jobs: [], busy: false, mode: "local", onEdit, onToggleDockerMetrics: vi.fn() } as unknown as DashboardCtx;
     const view = (record: VpsRecord) => <MemoryRouter><DashboardContext.Provider value={dashboard}><VpsWorkspaceContext.Provider value={{ vps: record, overview: baseOverview }}><VpsWorkspaceDockerPage /></VpsWorkspaceContext.Provider></DashboardContext.Provider></MemoryRouter>;
     const settings = (record: VpsRecord) => <MemoryRouter><DashboardContext.Provider value={dashboard}><VpsWorkspaceContext.Provider value={{ vps: record, overview: baseOverview }}><VpsWorkspaceSettingsPage /></VpsWorkspaceContext.Provider></DashboardContext.Provider></MemoryRouter>;
     const { rerender } = render(settings(vps));
@@ -319,7 +319,7 @@ describe("Docker management without monitoring", () => {
 
   it("preserves consent on a failed update", async () => {
     vi.spyOn(api, "listVpsDockerCurrentContainers").mockResolvedValue([]);
-    const dashboard = { busy: false, mode: "local", onEdit: vi.fn().mockRejectedValue(new Error("Permission denied")), onToggleDockerMetrics: vi.fn() } as unknown as DashboardCtx;
+    const dashboard = { records: [localVps], jobs: [], busy: false, mode: "local", onEdit: vi.fn().mockRejectedValue(new Error("Permission denied")), onToggleDockerMetrics: vi.fn() } as unknown as DashboardCtx;
     render(<MemoryRouter><DashboardContext.Provider value={dashboard}><VpsWorkspaceContext.Provider value={{ vps: localVps, overview: baseOverview }}><VpsWorkspaceSettingsPage /></VpsWorkspaceContext.Provider></DashboardContext.Provider></MemoryRouter>);
     fireEvent.click(screen.getByRole("switch", { name: "Enable Docker management" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Permission denied");

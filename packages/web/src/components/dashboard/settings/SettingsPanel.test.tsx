@@ -1,5 +1,5 @@
 import "../../../test/setup";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SettingsPanel } from "./SettingsPanel";
@@ -7,7 +7,7 @@ import {
   DashboardContext,
   type DashboardCtx,
 } from "../../../context/DashboardContext";
-import type { DashboardOverview } from "../../../lib/api";
+import type { DashboardOverview, VpsRecord } from "../../../lib/api";
 
 const mockOverview: DashboardOverview = {
   mode: "local",
@@ -238,5 +238,91 @@ describe("SettingsPanel", () => {
     await waitFor(() => {
       expect(screen.getByRole("alert")).toHaveTextContent("Database write failed");
     });
+  });
+});
+
+const remoteHost = (overrides: Partial<VpsRecord> = {}): VpsRecord => ({
+  id: "vps-1", name: "edge-1", displayName: "Edge 1", host: "203.0.113.10", port: 22,
+  username: "root", createdAt: "2026-10-25T00:00:00.000Z", updatedAt: "2026-10-25T00:00:00.000Z",
+  kind: "remote", managedBy: "user", ...overrides,
+});
+
+function renderHostControls(host: VpsRecord, overrides: Partial<DashboardCtx> = {}) {
+  const overview = { ...mockOverview, servers: [host] };
+  return render(
+    <DashboardContext.Provider value={{
+      overview,
+      records: [host],
+      jobs: [],
+      mode: "local",
+      busy: false,
+      provisionPasswords: {},
+      systemInfo: [],
+      ...overrides,
+    } as unknown as DashboardCtx}>
+      <SettingsPanel overview={overview} vpsId={host.id} />
+    </DashboardContext.Provider>,
+  );
+}
+
+describe("SettingsPanel host agent controls", () => {
+  it("requires confirmation before provisioning a missing SSH key", () => {
+    const host = remoteHost();
+    const onProvision = vi.fn();
+    renderHostControls(host, { provisionPasswords: { [host.id]: "one-time-password" }, onProvision, onPasswordChange: vi.fn() });
+    fireEvent.click(screen.getByTestId("install-ssh-key"));
+    expect(screen.getByRole("alertdialog")).toHaveTextContent("Install SSH key?");
+    expect(onProvision).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Install key" }));
+    expect(onProvision).toHaveBeenCalledWith(host);
+  });
+
+  it.each([
+    ["not_installed", "Install agent"], ["failed", "Retry install"],
+  ] as const)("offers %s agent installation", (agentStatus, label) => {
+    const host = remoteHost({ keyProvisionedAt: "2026-10-25T00:00:00.000Z", agentStatus });
+    const onInstallAgent = vi.fn();
+    renderHostControls(host, { onInstallAgent });
+    fireEvent.click(screen.getByTestId("install-agent"));
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: label }));
+    expect(onInstallAgent).toHaveBeenCalledWith(host);
+  });
+
+  it("confirms uninstall and restart for an offline agent", () => {
+    const host = remoteHost({ keyProvisionedAt: "2026-10-25T00:00:00.000Z", agentStatus: "offline" });
+    const onUninstallAgent = vi.fn();
+    const onRestartAgent = vi.fn();
+    renderHostControls(host, { onUninstallAgent, onRestartAgent });
+    fireEvent.click(screen.getByTestId("restart-agent"));
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Restart agent" }));
+    expect(onRestartAgent).toHaveBeenCalledWith(host);
+    fireEvent.click(screen.getByTestId("uninstall-agent"));
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Uninstall agent" }));
+    expect(onUninstallAgent).toHaveBeenCalledWith(host);
+  });
+
+  it("disables actions while the dashboard is busy or a lifecycle job is active", () => {
+    const host = remoteHost({ keyProvisionedAt: "2026-10-25T00:00:00.000Z", agentStatus: "not_installed" });
+    const { unmount } = renderHostControls(host, { busy: true });
+    expect(screen.getByTestId("install-agent")).toBeDisabled();
+    unmount();
+
+    renderHostControls(host, {
+      jobs: [{
+        id: "job-1", vpsId: host.id, type: "install-agent", status: "running", progress: 40, step: "uploading-binary",
+      }],
+    });
+    expect(screen.getByTestId("install-agent")).toBeDisabled();
+    expect(screen.getByRole("progressbar", { name: "Agent install: Uploading agent" })).toBeInTheDocument();
+  });
+
+  it("leaves local agent lifecycle to the dashboard", () => {
+    const host = remoteHost({ kind: "local", managedBy: "system", agentStatus: "online" });
+    renderHostControls(host);
+    expect(screen.queryByTestId("install-agent")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("uninstall-agent")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("restart-agent")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("install-ssh-key")).not.toBeInTheDocument();
+    expect(screen.getByText("The local agent is managed by the dashboard.")).toBeInTheDocument();
   });
 });

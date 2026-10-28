@@ -151,18 +151,6 @@ export function ServersPanel(props: ServersPanelProps) {
               metric={metricById.get(vps.id)}
               systemInfo={systemInfoById.get(vps.id)}
               jobs={props.jobs.filter((job) => job.vpsId === vps.id)}
-              busy={props.busy}
-              password={props.provisionPasswords[vps.id] || ""}
-              onPasswordChange={props.onPasswordChange}
-              onProvision={props.onProvision}
-              onVerify={props.onVerify}
-              onInstallAgent={props.onInstallAgent}
-              onUninstallAgent={props.onUninstallAgent}
-              onRestartAgent={props.onRestartAgent}
-              onRotateAgent={props.onRotateAgent}
-              onDelete={props.onDelete}
-              mode={props.mode}
-              onEdit={setEditTarget}
             />
           ))}
         </div>

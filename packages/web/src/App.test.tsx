@@ -1231,36 +1231,21 @@ describe("React dashboard", () => {
       expect(within(card).queryByText("Agent online")).not.toBeInTheDocument();
     });
 
-    it("confirms and submits one restart for an eligible offline agent", async () => {
-      const offlineRecord = { ...twoServerRecords[0], displayName: "Offline worker", agentStatus: "offline", keyProvisionedAt: "2026-01-01T00:00:00.000Z" };
-      const onlineRecord = { ...twoServerRecords[1], id: "online-worker", displayName: "Online worker", agentStatus: "online", keyProvisionedAt: "2026-01-01T00:00:00.000Z" };
-      let resolveRestart!: (value: unknown) => void;
-      const restartResponse = new Promise((resolve) => { resolveRestart = resolve; });
+    it("keeps fleet cards focused on navigation", async () => {
+      const onlineRecord = { ...twoServerRecords[0], displayName: "Online worker", agentStatus: "online", keyProvisionedAt: "2026-01-01T00:00:00.000Z" };
       fetchMock
         .mockResolvedValueOnce(authOk())
         .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: twoServersDashboard }) })
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [offlineRecord, onlineRecord] }) })
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [onlineRecord] }) })
         .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
         .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
-        .mockImplementationOnce(() => restartResponse);
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) });
 
       renderApp(["/vps"]);
-      const offlineCard = await screen.findByRole("article", { name: "Server Offline worker" });
-      await userEvent.click(within(offlineCard).getByRole("button", { name: "More actions for Offline worker" }));
-      await userEvent.click(screen.getByRole("menuitem", { name: "Restart agent" }));
-      expect(screen.getByRole("heading", { name: "Restart agent on Offline worker?" })).toBeInTheDocument();
-      expect(screen.getByText("This restarts the monitoring agent only. It does not reboot the VPS.")).toBeInTheDocument();
-
-      const confirm = screen.getByRole("button", { name: "Restart agent" });
-      await userEvent.click(confirm);
-      expect(fetchMock.mock.calls.filter(([url, init]) => url === "/api/vps/vps-1/restart-agent" && init?.method === "POST")).toHaveLength(1);
-      expect(screen.queryByRole("heading", { name: "Restart agent on Offline worker?" })).not.toBeInTheDocument();
-
-      const onlineCard = screen.getByRole("article", { name: "Server Online worker" });
-      await userEvent.click(within(onlineCard).getByRole("button", { name: "More actions for Online worker" }));
-      expect(screen.queryByRole("menuitem", { name: "Restart agent" })).not.toBeInTheDocument();
-      resolveRestart({ ok: true, status: 200, json: async () => ({ data: { jobId: "restart-1", state: { status: "queued" } } }) });
+      const card = await screen.findByRole("article", { name: "Server Online worker" });
+      expect(within(card).getByRole("link", { name: "Manage Online worker" })).toBeInTheDocument();
+      expect(within(card).queryByRole("button", { name: "Verify access" })).not.toBeInTheDocument();
+      expect(within(card).queryByRole("button", { name: "More actions for Online worker" })).not.toBeInTheDocument();
     });
 
     it("shows 404 page for unknown routes", async () => {
@@ -1379,32 +1364,7 @@ describe("React dashboard", () => {
       expect(fetchMock).toHaveBeenCalledTimes(6);
     });
 
-    it("shows the card action hierarchy and ordered overflow menu when the agent is online", async () => {
-      const onlineRecords = [{ ...twoServerRecords[0], agentStatus: "online" }];
-      fetchMock
-        .mockResolvedValueOnce(authOk())
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: twoServersDashboard }) })
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: onlineRecords }) })
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) });
-
-      const user = userEvent.setup();
-      renderApp(["/vps"]);
-      expect((await screen.findAllByText("Agent online")).length).toBeGreaterThan(0);
-      expect(screen.queryByRole("button", { name: "Install agent" })).not.toBeInTheDocument();
-      expect(screen.getByRole("link", { name: "Manage web-01" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Verify access" })).toBeInTheDocument();
-
-      await user.click(screen.getByRole("button", { name: "More actions for web-01" }));
-      expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual([
-        "Reinstall SSH key",
-        "Edit server",
-        "Remove server",
-      ]);
-    });
-
-    it("does not offer agent upgrade in overflow menu for an eligible remote installed agent", async () => {
+    it("keeps card actions out of the fleet list", async () => {
       const onlineRecords = [{ ...twoServerRecords[0], agentStatus: "online" as const }];
       fetchMock
         .mockResolvedValueOnce(authOk())
@@ -1414,10 +1374,11 @@ describe("React dashboard", () => {
         .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
         .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) });
 
-      const user = userEvent.setup();
       renderApp(["/vps"]);
-      await user.click(await screen.findByRole("button", { name: "More actions for web-01" }));
-      expect(screen.queryByRole("menuitem", { name: "Upgrade agent" })).not.toBeInTheDocument();
+      const card = await screen.findByRole("article", { name: "Server web-01" });
+      expect(within(card).getByRole("link", { name: "Manage web-01" })).toBeInTheDocument();
+      expect(within(card).queryByRole("button", { name: "Verify access" })).not.toBeInTheDocument();
+      expect(within(card).queryByRole("button", { name: "More actions for web-01" })).not.toBeInTheDocument();
     });
 
     it("shows login gate after logout when auth is required", async () => {
@@ -2516,9 +2477,8 @@ describe("React dashboard", () => {
     }
 
     async function openEditMenu(user: ReturnType<typeof userEvent.setup>) {
-      await user.click(
-        screen.getByRole("button", { name: "More actions for Production API" }),
-      );
+      await user.click(screen.getByRole("button", { name: "Table view" }));
+      await user.click(screen.getByRole("button", { name: "More actions for Production API" }));
     }
 
     it("saves trimmed editable fields, refreshes the fleet, and closes the dialog", async () => {
@@ -2590,7 +2550,7 @@ describe("React dashboard", () => {
           }),
         ),
       );
-      expect(await screen.findByRole("heading", { name: "Production API East" })).toBeInTheDocument();
+      expect(await screen.findByRole("link", { name: "Production API East" })).toBeInTheDocument();
       expect(screen.queryByRole("heading", { name: "Edit server" })).not.toBeInTheDocument();
       expect(screen.getByText("Updated Production API East.")).toBeInTheDocument();
     });

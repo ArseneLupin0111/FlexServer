@@ -12,7 +12,7 @@ import { Switch } from "../../ui/switch";
 import type { DashboardOverview } from "../../../lib/api";
 import { useDashboard } from "../../../context/DashboardContext";
 import { AgentSettingsCard } from "./AgentSettingsCard";
-
+import { HostAgentControls } from "./HostAgentControls";
 /**
  * Global terminal settings in the workspace Settings tab.
  *
@@ -251,7 +251,12 @@ export function SettingsPanel({
 
       {/* Per-host Agent card (AI policy, execution mode, bundle). Loads its
           own data lazily so the rest of the page never waits on it. */}
-      {vpsId ? <AgentSettingsCard vpsId={vpsId} /> : null}
+      {vpsId ? (
+        <>
+          <HostAgentControls vpsId={vpsId} />
+          <AgentSettingsCard vpsId={vpsId} />
+        </>
+      ) : null}
     </div>
   );
 }

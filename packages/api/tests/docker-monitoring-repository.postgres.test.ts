@@ -668,6 +668,8 @@ describe("docker monitoring repository (PostgreSQL, I1)", () => {
       let alerts = (await repo!.listAlerts({ vpsId })).data;
       expect(alerts).toHaveLength(1);
       expect(alerts[0]?.state).toBe("open");
+      expect(alerts[0]?.agentInstanceId).toBeUndefined();
+      expect(alerts[0]?.containerKey).toBeUndefined();
 
       // Unauthenticated cross-instance is rejected
       await expect(

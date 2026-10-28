@@ -1215,7 +1215,7 @@ export function createPostgresDockerMonitoringRepository(
               [
                 `${unit.vpsId}:${DOCKER_UNAVAILABLE_RULE_KIND}`,
                 unit.vpsId,
-                unit.agentInstanceId,
+                null,
                 DOCKER_UNAVAILABLE_RULE_KIND,
                 active.state,
                 fingerprint,

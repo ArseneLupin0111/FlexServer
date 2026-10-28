@@ -1187,7 +1187,6 @@ export function createJsonDockerMonitoringRepository(
             const alert: DockerAlert = {
               id: `${unit.vpsId}:${DOCKER_UNAVAILABLE_RULE_KIND}`,
               vpsId: unit.vpsId,
-              agentInstanceId: unit.agentInstanceId,
               ruleKind: DOCKER_UNAVAILABLE_RULE_KIND,
               state: active.state,
               fingerprint,

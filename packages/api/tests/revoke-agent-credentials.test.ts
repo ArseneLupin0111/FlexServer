@@ -97,3 +97,42 @@ describe("revokeScopedAgentCredentials", () => {
     expect(await statusOf(liveAgent.id)).toBe("active");
   });
 });
+
+describe("AgentRepository.revokeOtherActiveAgentCredentials", () => {
+  it("atomically revokes older active agent-scoped credentials and preserves keep credential", async () => {
+    const oldAgent1 = await repo.createCredential({ vpsId: VPS_ID, secretHash: "old-1", status: "active", scope: "agent" });
+    const oldAgent2 = await repo.createCredential({ vpsId: VPS_ID, secretHash: "old-2", status: "active" }); // default scope agent
+    const updater = await repo.createCredential({ vpsId: VPS_ID, secretHash: "updater", status: "active", scope: "local-updater" });
+    const otherVps = await repo.createCredential({ vpsId: "vps_other", secretHash: "other", status: "active", scope: "agent" });
+    const replacement = await repo.createCredential({ vpsId: VPS_ID, secretHash: "new", status: "active", scope: "agent" });
+
+    const revoked = await repo.revokeOtherActiveAgentCredentials(VPS_ID, replacement.id);
+
+    expect(revoked.sort()).toEqual([oldAgent1.id, oldAgent2.id].sort());
+    expect(await statusOf(oldAgent1.id)).toBe("revoked");
+    expect(await statusOf(oldAgent2.id)).toBe("revoked");
+    expect(await statusOf(replacement.id)).toBe("active");
+    expect(await statusOf(updater.id)).toBe("active");
+    expect(await statusOf(otherVps.id)).toBe("active");
+  });
+
+  it("refuses to revoke anything when keepCredentialId does not exist", async () => {
+    const agent = await repo.createCredential({ vpsId: VPS_ID, secretHash: "hash", status: "active" });
+    await expect(repo.revokeOtherActiveAgentCredentials(VPS_ID, "cred_missing")).rejects.toThrow(/not found/);
+    expect(await statusOf(agent.id)).toBe("active");
+  });
+
+  it("refuses to revoke anything when keepCredentialId is not active", async () => {
+    const dead = await repo.createCredential({ vpsId: VPS_ID, secretHash: "dead", status: "revoked" });
+    const live = await repo.createCredential({ vpsId: VPS_ID, secretHash: "live", status: "active" });
+    await expect(repo.revokeOtherActiveAgentCredentials(VPS_ID, dead.id)).rejects.toThrow(/not active/);
+    expect(await statusOf(live.id)).toBe("active");
+  });
+
+  it("refuses to revoke anything when keepCredentialId has local-updater scope", async () => {
+    const updater = await repo.createCredential({ vpsId: VPS_ID, secretHash: "up", status: "active", scope: "local-updater" });
+    const agent = await repo.createCredential({ vpsId: VPS_ID, secretHash: "ag", status: "active", scope: "agent" });
+    await expect(repo.revokeOtherActiveAgentCredentials(VPS_ID, updater.id)).rejects.toThrow(/expected "agent"/);
+    expect(await statusOf(agent.id)).toBe("active");
+  });
+});

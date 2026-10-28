@@ -24,11 +24,12 @@ function sample(
   id: string,
   vpsId: string,
   effectiveAt: string,
+  agentInstanceId = "inst1",
 ): DockerHostSample {
   return {
     id,
     vpsId,
-    agentInstanceId: "inst1",
+    agentInstanceId,
     snapshotId: `snap_${id}`,
     collectedAt: effectiveAt,
     receivedAt: effectiveAt,
@@ -640,5 +641,129 @@ describe("docker monitoring repository (PostgreSQL, I1)", () => {
       { agentInstanceId: "inst-new", containerKey: "ck1", collectedAt: "2026-09-15T12:00:03.000Z", details },
     ]);
   });
+  it.skipIf(!databaseUrl)(
+    "commits low sequence on authenticated instance reset, locks out retired instance, and resolves active alerts with identity_reset_orphaned while preserving history",
+    async () => {
+      const vpsId = "vps-reset-test";
+      await ensureVps(vpsId);
+      const receivedAt = "2026-09-01T00:00:00.000Z";
+      for (const sequence of ["2147156", "2147157", "2147158"]) {
+        await repo!.ingestUnit({
+          vpsId,
+          agentInstanceId: "ogwBx0Au",
+          snapshotId: `snap-orig-${sequence}`,
+          batchId: `batch-orig-${sequence}`,
+          requestDigest: `digest-orig-${sequence}`,
+          requestDigestVersion: 1,
+          receivedAt,
+          sourceSequence: sequence,
+          hostSample: sample(`hs-orig-${sequence}`, vpsId, receivedAt, "ogwBx0Au"),
+          monitoring: {
+            effectiveCadenceSeconds: 15,
+            availability: "unavailable" as const,
+            state: "enabled" as const,
+          },
+        });
+      }
+      let alerts = (await repo!.listAlerts({ vpsId })).data;
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]?.state).toBe("open");
+
+      // Unauthenticated cross-instance is rejected
+      await expect(
+        repo!.ingestUnit({
+          vpsId,
+          agentInstanceId: "gyJ-AxZs",
+          snapshotId: "snap-new-unauth",
+          batchId: "batch-new-unauth",
+          requestDigest: "digest-new-unauth",
+          requestDigestVersion: 1,
+          receivedAt,
+          sourceSequence: "295",
+          hostSample: sample("hs-new-unauth", vpsId, receivedAt, "gyJ-AxZs"),
+        }),
+      ).rejects.toMatchObject({ code: "active_instance_conflict" });
+
+      // Authenticated instance transition with low sequence 295 commits
+      const committed = await repo!.ingestUnit({
+        vpsId,
+        agentInstanceId: "gyJ-AxZs",
+        snapshotId: "snap-new-1",
+        batchId: "batch-new-1",
+        requestDigest: "digest-new-1",
+        requestDigestVersion: 1,
+        receivedAt,
+        sourceSequence: "295",
+        hostSample: sample("hs-new-1", vpsId, receivedAt, "gyJ-AxZs"),
+        monitoring: {
+          effectiveCadenceSeconds: 15,
+          availability: "unavailable" as const,
+          state: "enabled" as const,
+        },
+        auth: {
+          credentialId: "cred-azure-new",
+          credentialCreatedAt: "2026-10-29T10:00:00.000Z",
+          isCurrentGeneration: true,
+        },
+      });
+      expect(committed.ingestStatus).toBe("committed");
+
+      // Authoritative latest is now the new instance with low sequence
+      const latest = await repo!.getAuthoritativeLatest(vpsId);
+      expect(latest).toMatchObject({
+        activeInstanceId: "gyJ-AxZs",
+        sourceSequence: "295",
+        credentialId: "cred-azure-new",
+      });
+
+      // Prior active alerts resolved with identity_reset_orphaned
+      alerts = (await repo!.listAlerts({ vpsId })).data;
+      expect(alerts[0]?.state).toBe("resolved");
+      expect(alerts[0]?.resolutionReason).toBe("identity_reset_orphaned");
+
+      // Historical samples preserved
+      const samples = (await repo!.listHostSamples({ vpsId })).data;
+      expect(samples.map((s) => s.agentInstanceId).sort()).toEqual([
+        "gyJ-AxZs",
+        "ogwBx0Au",
+        "ogwBx0Au",
+        "ogwBx0Au",
+      ]);
+      // Retired instance is permanently locked out even with higher sequence
+      await expect(
+        repo!.ingestUnit({
+          vpsId,
+          agentInstanceId: "ogwBx0Au",
+          snapshotId: "snap-orig-retry",
+          batchId: "batch-orig-retry",
+          requestDigest: "digest-orig-retry",
+          requestDigestVersion: 1,
+          receivedAt,
+          sourceSequence: "2147159",
+          hostSample: sample("hs-orig-retry", vpsId, receivedAt, "ogwBx0Au"),
+          auth: { isCurrentGeneration: true },
+        }),
+      ).rejects.toMatchObject({ code: "active_instance_conflict" });
+
+      // Replay of committed snapshot returns already_committed
+      expect(
+        await repo!.ingestUnit({
+          vpsId,
+          agentInstanceId: "gyJ-AxZs",
+          snapshotId: "snap-new-1",
+          batchId: "batch-new-1",
+          requestDigest: "digest-new-1",
+          requestDigestVersion: 1,
+          receivedAt,
+          sourceSequence: "295",
+          hostSample: sample("hs-new-1", vpsId, receivedAt, "gyJ-AxZs"),
+        }),
+      ).toMatchObject({
+        ingestStatus: "already_committed",
+      });
+      // Clean up test data
+      await repo!.cleanupForVps({ vpsId, reason: "vps_deleted" });
+    },
+  );
 
 });

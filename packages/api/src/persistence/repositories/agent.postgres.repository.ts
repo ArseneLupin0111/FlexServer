@@ -194,6 +194,45 @@ export function createPostgresAgentRepository(
         revokedAt: new Date().toISOString(),
       });
     },
+    async revokeOtherActiveAgentCredentials(vpsId, keepCredentialId) {
+      return withTransaction(pool, async (client) => {
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+          [`agent:${vpsId}`],
+        );
+        const keepResult = await client.query<AgentCredentialRow>(
+          "SELECT * FROM agent_credentials WHERE id = $1 AND vps_id = $2 FOR UPDATE",
+          [keepCredentialId, vpsId],
+        );
+        const keepRow = keepResult.rows[0];
+        if (!keepRow) {
+          throw new Error(
+            `Credential "${keepCredentialId}" not found for VPS "${vpsId}"; refusing to revoke anything.`,
+          );
+        }
+        if (keepRow.status !== "active") {
+          throw new Error(
+            `Credential "${keepCredentialId}" is "${keepRow.status}", not active; refusing to revoke anything.`,
+          );
+        }
+        if ((keepRow.scope ?? "agent") !== "agent") {
+          throw new Error(
+            `Credential "${keepCredentialId}" has scope "${keepRow.scope}", expected "agent"; refusing to revoke anything.`,
+          );
+        }
+        const revokedResult = await client.query<{ id: string }>(
+          `UPDATE agent_credentials
+           SET status = 'revoked', revoked_at = NOW()
+           WHERE vps_id = $1
+             AND id <> $2
+             AND status = 'active'
+             AND COALESCE(scope, 'agent') = 'agent'
+           RETURNING id`,
+          [vpsId, keepCredentialId],
+        );
+        return revokedResult.rows.map((r) => r.id);
+      });
+    },
     async getState(vpsId) {
       const result = await pool.query<AgentStateRow>(
         "SELECT * FROM agent_states WHERE vps_id = $1",

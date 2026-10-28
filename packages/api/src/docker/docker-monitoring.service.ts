@@ -13,6 +13,7 @@ import {
   DockerIngestCapacityRefused,
   DockerIngestConflict,
   type DockerAlertResolutionReason,
+  type DockerIngestAuth,
   type DockerIngestUnit,
 } from "./docker-monitoring.models.js";
 import {
@@ -101,6 +102,7 @@ export class DockerMonitoringService {
     vpsId: string,
     input: AgentDockerMetricsInput,
     receivedAt: string,
+    auth?: DockerIngestAuth,
   ) {
     await this.verify(vpsId);
     const stable = (value: unknown) =>
@@ -251,6 +253,7 @@ export class DockerMonitoringService {
       ...(input.monitoring === undefined ? {} : { monitoring: input.monitoring }),
     };
     const unit: DockerIngestUnit = {
+      ...(auth !== undefined ? { auth } : {}),
       vpsId,
       agentInstanceId: input.agentInstanceId,
       snapshotId: input.snapshotId,

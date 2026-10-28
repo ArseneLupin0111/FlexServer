@@ -39,7 +39,8 @@ async function installScenario(mode: "new" | "none" | "old") {
       },
     },
     { getState: async () => state, upsertState: async (s: AgentState) => (state = s),
-      getCredential: async () => credential, revokeCredential: async () => { credential.status = "revoked"; } },
+      getCredential: async () => credential, revokeCredential: async () => { credential.status = "revoked"; },
+      revokeOtherActiveAgentCredentials: async () => [] },
     { get: async () => ({ id: "audit", host: "203.0.113.1", port: 22, username: "audit", keyProvisionedAt: "now" }) },
     { readPrivateKey: async () => "key" }, { record: async () => {} },
     { start: (_job: unknown, fn: typeof task) => { task = fn; } },
@@ -123,7 +124,8 @@ it("uploads the arm64 binary bytes for an arm64 host, not the amd64 artifact", a
       },
     },
     { getState: async () => state, upsertState: async (s: AgentState) => (state = s),
-      getCredential: async () => credential, revokeCredential: async () => { credential.status = "revoked"; } },
+      getCredential: async () => credential, revokeCredential: async () => { credential.status = "revoked"; },
+      revokeOtherActiveAgentCredentials: async () => [] },
     { get: async () => ({ id: "audit", host: "203.0.113.1", port: 22, username: "audit", keyProvisionedAt: "now" }) },
     { readPrivateKey: async () => "key" }, { record: async () => {} },
     { start: (_job: unknown, fn: typeof task) => { task = fn; } },
@@ -145,4 +147,217 @@ it("uploads the arm64 binary bytes for an arm64 host, not the amd64 artifact", a
   // amd64 bytes were on disk in the same fixture dir and would have been
   // uploaded had the installer blindly reused the configured amd64 path.
   expect(Buffer.compare(amd64Bytes, arm64Bytes)).not.toBe(0);
+});
+
+it("retires prior agent-scope credentials only after successful fresh observation cutover", async () => {
+  let state: AgentState | undefined;
+  const credential = { id: "new-cred-123", status: "pending", scope: "agent" } as AgentCredential;
+  let task!: (ctx: unknown) => Promise<void>;
+  let revokedWithKeep: string | undefined;
+  let auditRecord: { metadata?: { revokedCredentialIds?: string[] } } | undefined;
+  const binDir = mkdtempSync(join(tmpdir(), "readiness-revoke-"));
+  const amd64Path = join(binDir, "vps-agent-linux-amd64");
+  writeFileSync(amd64Path, buildElf("c".repeat(40), "1.2.3", "amd64"));
+  const ssh = {
+    makeDirectory: async () => {}, uploadFile: async () => {},
+    execCommand: async (_v: unknown, command: string) => ({
+      stdout: command === "echo $HOME" ? "/home/audit" :
+        command.includes("uname -m") ? "x86_64" :
+        command.startsWith("if mkdir") ? "acquired" :
+        command.includes("owned:") ? "none" : "",
+    }),
+  };
+  const service = new AgentInstallerService(...([
+    { agentPublicBaseUrl: "https://unreachable.invalid", agentInstallIntervalSeconds: 15 },
+    ssh,
+    new BundledAgentService({ agentBinaryPath: amd64Path } as unknown as AppConfig),
+    {
+      createCredential: async () => ({ credential, token: "probe" }),
+      createInstallCredential: async () => {
+        state = { vpsId: "audit", status: "installing", lastInstallJobId: "job" };
+        return { credential, token: "probe", state };
+      },
+    },
+    {
+      getState: async () => state,
+      upsertState: async (s: AgentState) => (state = s),
+      getCredential: async () => credential,
+      revokeCredential: async () => { credential.status = "revoked"; },
+      revokeOtherActiveAgentCredentials: async (_vpsId: string, keepId: string) => {
+        revokedWithKeep = keepId;
+        return ["old-cred-1", "old-cred-2"];
+      },
+    },
+    { get: async () => ({ id: "audit", host: "203.0.113.1", port: 22, username: "audit", keyProvisionedAt: "now" }) },
+    { readPrivateKey: async () => "key" },
+    { record: async (r: unknown) => { auditRecord = r; } },
+    { start: (_job: unknown, fn: typeof task) => { task = fn; } },
+    { create: async () => ({ id: "job" }), update: async () => ({}) },
+    new AgentLifecycleCoordinator(),
+    { intervalMs: 1, timeoutMs: 3, sleep: async () => {
+      const now = new Date().toISOString();
+      credential.status = "active";
+      credential.lastUsedAt = now;
+      state = { vpsId: "audit", status: "online", version: "1.2.3", buildId: "c".repeat(40), lastSeenAt: now };
+    } },
+  ] as unknown as ConstructorParameters<typeof AgentInstallerService>));
+  try {
+    await service.install("audit", undefined, undefined);
+    await task({ update: async () => {}, succeed: async () => {} });
+  } finally {
+    rmSync(binDir, { recursive: true, force: true });
+  }
+  expect(revokedWithKeep).toBe(credential.id);
+  expect(state?.status).toBe("online");
+  expect(auditRecord?.metadata?.revokedCredentialIds).toEqual([
+    "old-cred-1",
+    "old-cred-2",
+  ]);
+});
+
+it("rolls back old binary and config if revokeOtherActiveAgentCredentials fails before cutover commits", async () => {
+  let state: AgentState | undefined;
+  const credential = { id: "new-cred-fail", status: "pending", scope: "agent" } as AgentCredential;
+  let task!: (ctx: unknown) => Promise<void>;
+  let rolledBack = false;
+  const binDir = mkdtempSync(join(tmpdir(), "readiness-rollback-"));
+  const amd64Path = join(binDir, "vps-agent-linux-amd64");
+  writeFileSync(amd64Path, buildElf("d".repeat(40), "1.2.3", "amd64"));
+  const ssh = {
+    makeDirectory: async () => {}, uploadFile: async () => {},
+    execCommand: async (_v: unknown, command: string) => {
+      if (command.includes("mv -f --")) rolledBack = true;
+      return {
+        stdout: command === "echo $HOME" ? "/home/audit" :
+          command.includes("uname -m") ? "x86_64" :
+          command.startsWith("if mkdir") ? "acquired" :
+          command.includes("owned:") ? "none" :
+          command.includes("printf binary") ? "binaryconfig" : "",
+      };
+    },
+  };
+  const service = new AgentInstallerService(...([
+    { agentPublicBaseUrl: "https://unreachable.invalid", agentInstallIntervalSeconds: 15 },
+    ssh,
+    new BundledAgentService({ agentBinaryPath: amd64Path } as unknown as AppConfig),
+    {
+      createCredential: async () => ({ credential, token: "probe" }),
+      createInstallCredential: async () => {
+        state = { vpsId: "audit", status: "installing", lastInstallJobId: "job" };
+        return { credential, token: "probe", state };
+      },
+    },
+    {
+      getState: async () => state,
+      upsertState: async (s: AgentState) => (state = s),
+      getCredential: async () => credential,
+      revokeCredential: async () => { credential.status = "revoked"; },
+      revokeOtherActiveAgentCredentials: async () => {
+        throw new Error("DB connection failure during atomic revoke");
+      },
+    },
+    { get: async () => ({ id: "audit", host: "203.0.113.1", port: 22, username: "audit", keyProvisionedAt: "now" }) },
+    { readPrivateKey: async () => "key" },
+    { record: async () => {} },
+    { start: (_job: unknown, fn: typeof task) => { task = fn; } },
+    { create: async () => ({ id: "job" }), update: async () => ({}) },
+    new AgentLifecycleCoordinator(),
+    { intervalMs: 1, timeoutMs: 3, sleep: async () => {
+      const now = new Date().toISOString();
+      credential.status = "active";
+      credential.lastUsedAt = now;
+      state = { vpsId: "audit", status: "online", version: "1.2.3", buildId: "d".repeat(40), lastSeenAt: now };
+    } },
+  ] as unknown as ConstructorParameters<typeof AgentInstallerService>));
+  let error: unknown;
+  try {
+    await service.install("audit", undefined, undefined);
+    await task({ update: async () => {}, succeed: async () => {} });
+  } catch (e) {
+    error = e;
+  } finally {
+    rmSync(binDir, { recursive: true, force: true });
+  }
+  expect(String(error)).toContain("DB connection failure during atomic revoke");
+  expect(rolledBack).toBe(true);
+  expect(credential.status).toBe("revoked");
+  expect(state?.status).toBe("failed");
+});
+
+it("treats cutover as irreversible once revokeOtherActiveAgentCredentials succeeds, never restoring old config", async () => {
+  let state: AgentState | undefined;
+  const credential = { id: "new-cred-irreversible", status: "pending", scope: "agent" } as AgentCredential;
+  let task!: (ctx: unknown) => Promise<void>;
+  let rolledBack = false;
+  const binDir = mkdtempSync(join(tmpdir(), "readiness-irreversible-"));
+  const amd64Path = join(binDir, "vps-agent-linux-amd64");
+  writeFileSync(amd64Path, buildElf("e".repeat(40), "1.2.3", "amd64"));
+  const ssh = {
+    makeDirectory: async () => {}, uploadFile: async () => {},
+    execCommand: async (_v: unknown, command: string) => {
+      if (command.includes("mv -f --")) rolledBack = true;
+      return {
+        stdout: command === "echo $HOME" ? "/home/audit" :
+          command.includes("uname -m") ? "x86_64" :
+          command.startsWith("if mkdir") ? "acquired" :
+          command.includes("owned:") ? "none" :
+          command.includes("printf binary") ? "binaryconfig" : "",
+      };
+    },
+  };
+  let revokeCalled = false;
+  const service = new AgentInstallerService(...([
+    { agentPublicBaseUrl: "https://unreachable.invalid", agentInstallIntervalSeconds: 15 },
+    ssh,
+    new BundledAgentService({ agentBinaryPath: amd64Path } as unknown as AppConfig),
+    {
+      createCredential: async () => ({ credential, token: "probe" }),
+      createInstallCredential: async () => {
+        state = { vpsId: "audit", status: "installing", lastInstallJobId: "job" };
+        return { credential, token: "probe", state };
+      },
+    },
+    {
+      getState: async () => state,
+      upsertState: async (s: AgentState) => (state = s),
+      getCredential: async () => credential,
+      revokeCredential: async () => { credential.status = "revoked"; },
+      revokeOtherActiveAgentCredentials: async () => {
+        revokeCalled = true;
+        return ["old-1"];
+      },
+    },
+    { get: async () => ({ id: "audit", host: "203.0.113.1", port: 22, username: "audit", keyProvisionedAt: "now" }) },
+    { readPrivateKey: async () => "key" },
+    { record: async (r: { action?: string }) => {
+      // Audit record fails after cutover
+      if (r.action === "agent.install.success") throw new Error("Audit storage down post-cutover");
+    } },
+    { start: (_job: unknown, fn: typeof task) => { task = fn; } },
+    { create: async () => ({ id: "job" }), update: async () => ({}) },
+    new AgentLifecycleCoordinator(),
+    { intervalMs: 1, timeoutMs: 3, sleep: async () => {
+      const now = new Date().toISOString();
+      credential.status = "active";
+      credential.lastUsedAt = now;
+      state = { vpsId: "audit", status: "online", version: "1.2.3", buildId: "e".repeat(40), lastSeenAt: now };
+    } },
+  ] as unknown as ConstructorParameters<typeof AgentInstallerService>));
+  let error: unknown;
+  try {
+    await service.install("audit", undefined, undefined);
+    await task({ update: async () => {}, succeed: async () => {} });
+  } catch (e) {
+    error = e;
+  } finally {
+    rmSync(binDir, { recursive: true, force: true });
+  }
+  expect(String(error)).toContain("Audit storage down post-cutover");
+  expect(revokeCalled).toBe(true);
+  // Crucial: cutover is irreversible, so old config is NOT restored
+  expect(rolledBack).toBe(false);
+  // The new credential is NOT revoked
+  expect(credential.status).toBe("active");
+  // The new agent remains online
+  expect(state?.status).toBe("online");
 });

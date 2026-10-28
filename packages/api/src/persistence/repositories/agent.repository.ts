@@ -24,6 +24,10 @@ export type AgentRepository = {
     patch: Partial<AgentCredential>,
   ): Promise<AgentCredential | undefined>;
   revokeCredential(id: string): Promise<AgentCredential | undefined>;
+  revokeOtherActiveAgentCredentials(
+    vpsId: string,
+    keepCredentialId: string,
+  ): Promise<string[]>;
   acceptHeartbeat(input: {
     credentialId: string;
     vpsId: string;
@@ -199,6 +203,50 @@ export function createJsonAgentRepository(
         status: "revoked",
         revokedAt: new Date().toISOString(),
       });
+    },
+
+    async revokeOtherActiveAgentCredentials(vpsId, keepCredentialId) {
+      let revokedIds: string[] = [];
+      await readModifyWriteJsonFile<AgentFile>(
+        filePath,
+        { credentials: [], states: {} },
+        (data) => {
+          const keep = data.credentials.find(
+            (c) => c.id === keepCredentialId && c.vpsId === vpsId,
+          );
+          if (!keep) {
+            throw new Error(
+              `Credential "${keepCredentialId}" not found for VPS "${vpsId}"; refusing to revoke anything.`,
+            );
+          }
+          if (keep.status !== "active") {
+            throw new Error(
+              `Credential "${keepCredentialId}" is "${keep.status}", not active; refusing to revoke anything.`,
+            );
+          }
+          if ((keep.scope ?? "agent") !== "agent") {
+            throw new Error(
+              `Credential "${keepCredentialId}" has scope "${keep.scope}", expected "agent"; refusing to revoke anything.`,
+            );
+          }
+          const now = new Date().toISOString();
+          revokedIds = [];
+          for (const c of data.credentials) {
+            if (
+              c.vpsId === vpsId &&
+              c.id !== keepCredentialId &&
+              c.status === "active" &&
+              (c.scope ?? "agent") === "agent"
+            ) {
+              c.status = "revoked";
+              c.revokedAt = now;
+              revokedIds.push(c.id);
+            }
+          }
+          return data;
+        },
+      );
+      return revokedIds;
     },
 
     async getState(vpsId) {

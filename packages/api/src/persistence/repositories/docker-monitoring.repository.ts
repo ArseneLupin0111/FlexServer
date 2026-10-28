@@ -258,6 +258,7 @@ function emptyStore(): DockerMonitoringStore {
     batches: [],
     alerts: [],
     alertRuleStates: {},
+    retiredInstancesByVps: {},
   };
 }
 
@@ -294,6 +295,10 @@ function normalizeStore(raw: unknown): DockerMonitoringStore {
               DockerUnavailableRuleState
             >),
           }
+        : {},
+    retiredInstancesByVps:
+      base.retiredInstancesByVps && typeof base.retiredInstancesByVps === "object"
+        ? { ...base.retiredInstancesByVps }
         : {},
   };
 }
@@ -1006,16 +1011,22 @@ export function createJsonDockerMonitoringRepository(
         }
         const prior = store.latestByVps[unit.vpsId];
         const sourceSequence = unit.sourceSequence;
-        if (
-          prior &&
-          prior.activeInstanceId !== unit.agentInstanceId &&
-          compareDockerSourceSequence(
-            sourceSequence,
-            prior.sourceSequence,
-          ) <= 0
-        )
-          throw new DockerIngestConflict("active_instance_conflict");
-        if (
+        const isInstanceTransition =
+          prior !== undefined && prior.activeInstanceId !== unit.agentInstanceId;
+        if (isInstanceTransition) {
+          if (!unit.auth || unit.auth.isCurrentGeneration !== true) {
+            throw new DockerIngestConflict("active_instance_conflict");
+          }
+          const retiredList = store.retiredInstancesByVps?.[unit.vpsId] ?? [];
+          const isRetired =
+            retiredList.includes(unit.agentInstanceId) ||
+            store.snapshots.some(
+              (s) => s.vpsId === unit.vpsId && s.agentInstanceId === unit.agentInstanceId,
+            );
+          if (isRetired) {
+            throw new DockerIngestConflict("active_instance_conflict");
+          }
+        } else if (
           prior &&
           prior.activeInstanceId === unit.agentInstanceId &&
           compareDockerSourceSequence(
@@ -1101,6 +1112,34 @@ export function createJsonDockerMonitoringRepository(
           };
           return store;
         }
+        if (isInstanceTransition) {
+          const retiredList = store.retiredInstancesByVps?.[unit.vpsId] ?? [];
+          const currentRetired = new Set(retiredList);
+          currentRetired.add(prior.activeInstanceId);
+          if (currentRetired.size > 1000) {
+            throw new DockerIngestConflict("active_instance_conflict");
+          }
+          if (!store.retiredInstancesByVps) store.retiredInstancesByVps = {};
+          store.retiredInstancesByVps[unit.vpsId] = Array.from(currentRetired);
+          for (const key of Object.keys(store.alertRuleStates)) {
+            if (store.alertRuleStates[key]?.vpsId === unit.vpsId) {
+              delete store.alertRuleStates[key];
+            }
+          }
+          store.alerts = store.alerts.map((alert) => {
+            if (
+              alert.vpsId !== unit.vpsId ||
+              (alert.state !== "open" && alert.state !== "acknowledged")
+            )
+              return alert;
+            return {
+              ...alert,
+              state: "resolved",
+              resolvedAt: unit.receivedAt,
+              resolutionReason: "identity_reset_orphaned",
+            };
+          });
+        }
         store.events.push(...(unit.events ?? []));
         if (unit.eventProtocol) {
           const wi = store.watermarks.findIndex(
@@ -1117,11 +1156,11 @@ export function createJsonDockerMonitoringRepository(
           unit.storageLatest &&
           (!store.latestStorage[unit.vpsId] ||
             !store.latestByVps[unit.vpsId] ||
+            isInstanceTransition ||
             compareDockerSourceSequence(
               unit.sourceSequence,
               store.latestByVps[unit.vpsId]!.sourceSequence,
-            ) >= 0)
-        )
+            ) >= 0))
           store.latestStorage[unit.vpsId] = unit.storageLatest;
         if (unit.monitoring) {
           const key = `${unit.vpsId}\0${DOCKER_UNAVAILABLE_RULE_KIND}`;
@@ -1347,6 +1386,8 @@ export function createJsonDockerMonitoringRepository(
           activeInstanceId: unit.agentInstanceId,
           snapshotId: unit.snapshotId,
           sourceSequence,
+          ...(unit.auth?.credentialId ? { credentialId: unit.auth.credentialId } : {}),
+          ...(unit.auth?.credentialCreatedAt ? { credentialCreatedAt: unit.auth.credentialCreatedAt } : {}),
           ...(unit.available === undefined ? {} : { available: unit.available }),
           ...(unit.errorCode === undefined ? {} : { errorCode: unit.errorCode }),
           ...(unit.engineVersion === undefined
@@ -1478,6 +1519,7 @@ export function createJsonDockerMonitoringRepository(
         store.batches = store.batches.filter((x) => x.vpsId !== v);
         delete store.latestStorage[v];
         delete store.latestByVps[v];
+        if (store.retiredInstancesByVps) delete store.retiredInstancesByVps[v];
         for (const key of Object.keys(store.alertRuleStates)) {
           if (store.alertRuleStates[key]?.vpsId === v)
             delete store.alertRuleStates[key];

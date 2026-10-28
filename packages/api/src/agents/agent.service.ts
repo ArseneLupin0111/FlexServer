@@ -357,10 +357,30 @@ export class AgentService {
       // 8. Canonical Docker observations use the durable monitoring ingest path.
       let docker: IngestMetricResult["docker"];
       if (parsed.docker && dockerMetricsEnabled) {
+        const credentials = await this.agentRepository.listCredentialsByVps(
+          credential.vpsId,
+        );
+        const activeOrPending = credentials.filter(
+          (c) => c.status !== "revoked" && (c.scope ?? "agent") === "agent",
+        );
+        activeOrPending.sort((a, b) => {
+          const timeA = Date.parse(a.createdAt) || 0;
+          const timeB = Date.parse(b.createdAt) || 0;
+          if (timeB !== timeA) return timeB - timeA;
+          return b.id.localeCompare(a.id);
+        });
+        const authoritativeId = activeOrPending[0]?.id;
+        const isCurrentGeneration = credential.id === authoritativeId;
+
         const result = await this.dockerMonitoringService.ingest(
           credential.vpsId,
           parsed.docker,
           now,
+          {
+            credentialId: credential.id,
+            credentialCreatedAt: credential.createdAt,
+            isCurrentGeneration,
+          },
         );
         docker = {
           ingestStatus: result.ingestStatus,

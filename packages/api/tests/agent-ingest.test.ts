@@ -16,6 +16,7 @@ import { createJsonMetricRepository } from "../src/persistence/repositories/metr
 import { createKeyService } from "../src/ssh/keyService.js";
 import { createVpsStore } from "../src/persistence/store/vpsStore.js";
 import { AgentService } from "../src/agents/agent.service.js";
+import { DockerMonitoringService } from "../src/docker/docker-monitoring.service.js";
 import { agentMetricPayloadSchema } from "../src/agents/agent.schemas.js";
 import { AgentLifecycleCoordinator } from "../src/agents/agent-lifecycle-coordinator.js";
 import { isFreshTimestamp } from "../src/monitoring/monitoring.service.js";
@@ -90,6 +91,32 @@ function makeService(
     dockerMonitoringService as never,
   );
   return { agentRepo, metricRepo, service };
+}
+
+function makeRealService() {
+  const agentRepo = createJsonAgentRepository(
+    join(tempDir, "data", "agents.json"),
+  );
+  const metricRepo = createJsonMetricRepository(
+    join(tempDir, "data", "metrics.json"),
+  );
+  const dockerRepo = createJsonDockerMonitoringRepository(
+    join(tempDir, "data", "docker-monitoring.json"),
+  );
+  const dockerMonitoringService = new DockerMonitoringService(
+    dockerRepo,
+    vpsRepo,
+    demoConfig,
+  );
+  const service = new AgentService(
+    agentRepo,
+    metricRepo,
+    vpsRepo,
+    demoConfig,
+    new AgentLifecycleCoordinator(),
+    dockerMonitoringService,
+  );
+  return { agentRepo, metricRepo, dockerRepo, dockerMonitoringService, service };
 }
 
 function app(overrides?: Partial<AppConfig>) {
@@ -1376,6 +1403,219 @@ describe("Docker ingest via AgentService", () => {
     },
   );
 
+
+  it("allows new credential low-sequence instance takeover and locks out retired instance", async () => {
+    const vpsId = await createVps();
+    await vpsRepo.update(vpsId, { dockerMetricsEnabled: true });
+    const { agentRepo, dockerRepo, service } = makeRealService();
+
+    const credOld = await agentRepo.createCredential({
+      vpsId,
+      secretHash: "old-secret-hash",
+      status: "active",
+      scope: "agent",
+    });
+    await agentRepo.updateCredential(credOld.id, {
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const freshCredOld = (await agentRepo.getCredential(credOld.id))!;
+
+    const first = await service.ingestMetric(
+      freshCredOld,
+      validPayload({
+        docker: validStructuredDockerPayload({
+          agentInstanceId: "inst_old",
+          sourceSequence: "2147158",
+        }),
+      }),
+    );
+    expect(first.docker?.ingestStatus).toBe("committed");
+
+    const credNew = await agentRepo.createCredential({
+      vpsId,
+      secretHash: "new-secret-hash",
+      status: "active",
+      scope: "agent",
+    });
+    await agentRepo.updateCredential(credNew.id, {
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+    const freshCredNew = (await agentRepo.getCredential(credNew.id))!;
+
+    const takeover = await service.ingestMetric(
+      freshCredNew,
+      validPayload({
+        docker: validStructuredDockerPayload({
+          agentInstanceId: "inst_new",
+          snapshotId: "snap_takeover_new",
+          sourceSequence: "1",
+        }),
+      }),
+    );
+    expect(takeover.docker?.ingestStatus).toBe("committed");
+    expect(takeover.docker?.agentInstanceId).toBe("inst_new");
+
+    const latest = await dockerRepo.getAuthoritativeLatest(vpsId);
+    expect(latest?.activeInstanceId).toBe("inst_new");
+    expect(latest?.sourceSequence).toBe("1");
+
+    await expect(
+      service.ingestMetric(
+        freshCredOld,
+        validPayload({
+          docker: validStructuredDockerPayload({
+            agentInstanceId: "inst_old",
+            snapshotId: "snap_retired_retry",
+            sourceSequence: "2147159",
+          }),
+        }),
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: {
+        error: expect.objectContaining({ code: "active_instance_conflict" }),
+      },
+    });
+  });
+
+  it("rejects fabricated unknown instance ID pushed by old superseded credential", async () => {
+    const vpsId = await createVps();
+    await vpsRepo.update(vpsId, { dockerMetricsEnabled: true });
+    const { agentRepo, service } = makeRealService();
+
+    const credOld = await agentRepo.createCredential({
+      vpsId,
+      secretHash: "old-secret-hash",
+      status: "active",
+      scope: "agent",
+    });
+    await agentRepo.updateCredential(credOld.id, {
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const freshCredOld = (await agentRepo.getCredential(credOld.id))!;
+
+    const initial = await service.ingestMetric(
+      freshCredOld,
+      validPayload({
+        docker: validStructuredDockerPayload({
+          agentInstanceId: "inst_legit",
+          sourceSequence: "50",
+        }),
+      }),
+    );
+    expect(initial.docker?.ingestStatus).toBe("committed");
+
+    const credNew = await agentRepo.createCredential({
+      vpsId,
+      secretHash: "new-secret-hash",
+      status: "active",
+      scope: "agent",
+    });
+    await agentRepo.updateCredential(credNew.id, {
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+
+    await expect(
+      service.ingestMetric(
+        freshCredOld,
+        validPayload({
+          docker: validStructuredDockerPayload({
+            agentInstanceId: "inst_fabricated",
+            snapshotId: "snap_fabricated",
+            sourceSequence: "1",
+          }),
+        }),
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: {
+        error: expect.objectContaining({ code: "active_instance_conflict" }),
+      },
+    });
+  });
+
+  it("does not block old same-instance sequence progress when a newer pending credential exists", async () => {
+    const vpsId = await createVps();
+    await vpsRepo.update(vpsId, { dockerMetricsEnabled: true });
+    const { agentRepo, dockerRepo, service } = makeRealService();
+
+    const credOld = await agentRepo.createCredential({
+      vpsId,
+      secretHash: "old-secret-hash",
+      status: "active",
+      scope: "agent",
+    });
+    await agentRepo.updateCredential(credOld.id, {
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const freshCredOld = (await agentRepo.getCredential(credOld.id))!;
+
+    const first = await service.ingestMetric(
+      freshCredOld,
+      validPayload({
+        docker: validStructuredDockerPayload({
+          agentInstanceId: "inst_running",
+          sourceSequence: "10",
+        }),
+      }),
+    );
+    expect(first.docker?.ingestStatus).toBe("committed");
+
+    const credPending = await agentRepo.createCredential({
+      vpsId,
+      secretHash: "pending-secret-hash",
+      status: "pending",
+      scope: "agent",
+    });
+    await agentRepo.updateCredential(credPending.id, {
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+
+    const next = await service.ingestMetric(
+      freshCredOld,
+      validPayload({
+        docker: validStructuredDockerPayload({
+          agentInstanceId: "inst_running",
+          snapshotId: "snap_running_next",
+          sourceSequence: "11",
+        }),
+      }),
+    );
+    expect(next.docker?.ingestStatus).toBe("committed");
+
+    const latest = await dockerRepo.getAuthoritativeLatest(vpsId);
+    expect(latest?.activeInstanceId).toBe("inst_running");
+    expect(latest?.sourceSequence).toBe("11");
+  });
+
+  it("fails closed when credential authority lookup encounters an error", async () => {
+    const vpsId = await createVps();
+    await vpsRepo.update(vpsId, { dockerMetricsEnabled: true });
+    const { agentRepo, service } = makeRealService();
+
+    const cred = await agentRepo.createCredential({
+      vpsId,
+      secretHash: "secret-hash",
+      status: "active",
+      scope: "agent",
+    });
+
+    vi.spyOn(agentRepo, "listCredentialsByVps").mockRejectedValue(
+      new Error("Database connection lost"),
+    );
+
+    await expect(
+      service.ingestMetric(
+        cred,
+        validPayload({
+          docker: validStructuredDockerPayload({
+            agentInstanceId: "inst_1",
+            sourceSequence: "1",
+          }),
+        }),
+      ),
+    ).rejects.toThrow("Database connection lost");
+  });
   it("propagates a conflict without a legacy write", async () => {
     const vpsId = await createVps();
     await vpsRepo.update(vpsId, { dockerMetricsEnabled: true });

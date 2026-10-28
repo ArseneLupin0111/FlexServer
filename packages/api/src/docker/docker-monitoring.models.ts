@@ -145,6 +145,11 @@ export type DockerMonitoringMetadata = {
   availability: "available" | "unavailable" | "unknown";
   state: "enabled" | "disabled" | "unknown";
 };
+export type DockerIngestAuth = {
+  credentialId?: string;
+  credentialCreatedAt?: string;
+  isCurrentGeneration?: boolean;
+};
 export type DockerIngestUnit = {
   vpsId: string;
   agentInstanceId: string;
@@ -166,6 +171,7 @@ export type DockerIngestUnit = {
   errorCode?: string;
   engineVersion?: string;
   apiVersion?: string;
+  auth?: DockerIngestAuth;
 };
 export type DockerIngestBatchResult = {
   status: "committed" | "already_committed" | "replay_ignored";
@@ -238,6 +244,8 @@ export type DockerAuthoritativeLatest = {
   errorCode?: string;
   engineVersion?: string;
   apiVersion?: string;
+  credentialId?: string;
+  credentialCreatedAt?: string;
 };
 export type DockerUnavailableRuleState = {
   vpsId: string;
@@ -286,6 +294,7 @@ export type DockerMonitoringStore = {
     string,
     DockerUnavailableRuleState | DockerTypedAlertState
   >;
+  retiredInstancesByVps?: Record<string, string[]>;
 };
 
 export type DockerListScope =

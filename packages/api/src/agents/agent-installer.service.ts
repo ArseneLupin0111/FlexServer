@@ -207,6 +207,7 @@ export class AgentInstallerService {
       this.jobRunner.start(job, async (ctx) => {
         const nonce = randomBytes(12).toString("hex");
         let swapped = false;
+        let priorCredentialsRevoked = false;
         let remoteLock = "";
         let lockAcquired = false;
         let hadBinary = false;
@@ -434,6 +435,14 @@ export class AgentInstallerService {
             baselineCredentialLastUsedAt,
             baselineStateLastSeenAt,
           );
+          // Revoke older agent credentials atomically only after the new
+          // credential has produced a fresh heartbeat; updater scope is untouched.
+          const revokedCredentialIds =
+            await this.agentRepository.revokeOtherActiveAgentCredentials(
+              vpsId,
+              credential!.id,
+            );
+          priorCredentialsRevoked = true;
           // Preserve the identity published by the real ingest (version,
           // buildId, lastSeenAt) — never synthesize lastSeenAt. Re-read so a
           // heartbeat that landed after the wait is not overwritten either.
@@ -453,7 +462,12 @@ export class AgentInstallerService {
             resourceType: "vps",
             resourceId: vpsId,
             result: "success",
-            metadata: { jobId: job!.id },
+            metadata: {
+              jobId: job!.id,
+              ...(revokedCredentialIds.length > 0
+                ? { revokedCredentialIds }
+                : {}),
+            },
           });
 
           await ctx.succeed("complete");
@@ -482,9 +496,10 @@ export class AgentInstallerService {
                 .catch(() => undefined);
             }
             await this.recordInstallFailure(vpsId, job!.id, priorState, error);
-          } else {
-            // Post-cutover: restore old binary/config and restart the old
-            // agent so the failed reinstall does not leave the host dark.
+          } else if (!priorCredentialsRevoked) {
+            // Post-cutover, pre-revocation failure: old credentials still valid.
+            // Restore old binary/config and restart the old agent so the failed
+            // reinstall does not leave the host dark.
             // Rollback artifacts stay discoverable if this leg fails.
             try {
               await ctx.update("rolling-back", 90);
@@ -516,6 +531,20 @@ export class AgentInstallerService {
                 .catch(() => undefined);
             }
             await this.recordInstallFailure(vpsId, job!.id, priorState, error);
+          } else {
+            // Post-cutover, post-revocation failure: prior credentials were
+            // revoked atomically, so old binary/config cannot be restored
+            // (their token is dead). The new agent is running and verified
+            // online; clean up staged and backup files, keep the new credential
+            // active, and leave state intact.
+            await this.ssh
+              .execCommand(
+                vps,
+                `rm -f -- ${shellQuote(backupBinary)} ${shellQuote(backupConfig)} ${shellQuote(stagedBinary)} ${shellQuote(stagedConfig)}`,
+                sshAuth,
+                10_000,
+              )
+              .catch(() => undefined);
           }
 
           await this.audit.record({

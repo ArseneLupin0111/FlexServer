@@ -582,8 +582,13 @@ export function createPostgresDockerMonitoringRepository(
         received_at: Date | string;
         updated_at: Date | string;
         revision: string;
+        compatibility: {
+          latest?: boolean;
+          credentialId?: string;
+          credentialCreatedAt?: string;
+        } | null;
       }>(
-        `SELECT active_instance_id,active_snapshot_id,source_sequence,available,error_code,engine_version,api_version,received_at,updated_at,revision FROM docker_ingest_latest WHERE vps_id = $1`,
+        `SELECT active_instance_id,active_snapshot_id,source_sequence,available,error_code,engine_version,api_version,received_at,updated_at,revision,compatibility FROM docker_ingest_latest WHERE vps_id = $1`,
         [vpsId],
       );
       const row = result.rows[0];
@@ -601,6 +606,12 @@ export function createPostgresDockerMonitoringRepository(
         receivedAt: requiredIsoString(row.received_at),
         updatedAt: requiredIsoString(row.updated_at),
         revision: Number(row.revision),
+        ...(row.compatibility?.credentialId
+          ? { credentialId: row.compatibility.credentialId }
+          : {}),
+        ...(row.compatibility?.credentialCreatedAt
+          ? { credentialCreatedAt: row.compatibility.credentialCreatedAt }
+          : {}),
       };
     },
 
@@ -1065,10 +1076,17 @@ export function createPostgresDockerMonitoringRepository(
         const latest = (
           await client.query<{
             active_instance_id: string;
+            active_snapshot_id: string;
             source_sequence: string;
             revision: string;
+            compatibility: {
+              latest?: boolean;
+              credentialId?: string;
+              credentialCreatedAt?: string;
+              retiredInstances?: string[];
+            } | null;
           }>(
-            "SELECT active_instance_id,source_sequence,revision FROM docker_ingest_latest WHERE vps_id=$1 FOR UPDATE",
+            "SELECT active_instance_id,active_snapshot_id,source_sequence,revision,compatibility FROM docker_ingest_latest WHERE vps_id=$1 FOR UPDATE",
             [unit.vpsId],
           )
         ).rows[0];
@@ -1093,12 +1111,31 @@ export function createPostgresDockerMonitoringRepository(
           };
           return result;
         }
-        if (
-          latest &&
-          latest.active_instance_id !== unit.agentInstanceId &&
-          seq <= BigInt(latest.source_sequence)
-        )
-          throw new DockerIngestConflict("active_instance_conflict");
+        if (latest && latest.active_instance_id !== unit.agentInstanceId) {
+          if (!unit.auth || unit.auth.isCurrentGeneration !== true) {
+            throw new DockerIngestConflict("active_instance_conflict");
+          }
+          const inLedger = await client.query(
+            "SELECT 1 FROM docker_snapshot_ledger WHERE vps_id=$1 AND agent_instance_id=$2 LIMIT 1",
+            [unit.vpsId, unit.agentInstanceId],
+          );
+          const inRetiredList = latest.compatibility?.retiredInstances?.includes(
+            unit.agentInstanceId,
+          );
+          if ((inLedger.rowCount ?? 0) > 0 || inRetiredList) {
+            throw new DockerIngestConflict("active_instance_conflict");
+          }
+          await client.query(
+            `UPDATE docker_alerts
+                SET state = 'resolved', resolved_at = $2, resolution_reason = 'identity_reset_orphaned'
+              WHERE vps_id = $1 AND state IN ('open', 'acknowledged')`,
+            [unit.vpsId, new Date(unit.receivedAt)],
+          );
+          await client.query(
+            "DELETE FROM docker_alert_rule_states WHERE vps_id=$1",
+            [unit.vpsId],
+          );
+        }
         if (unit.eventProtocol) {
           const watermark = (
             await client.query<WatermarkRow>(
@@ -1436,8 +1473,27 @@ export function createPostgresDockerMonitoringRepository(
               event.oomKilled ?? null,
             ],
           );
-        // docker_ingest_latest.compatibility is NOT NULL jsonb object (migration
-        // 014); the domain no longer threads it, so write the constant marker.
+        const priorRetired = Array.isArray(latest?.compatibility?.retiredInstances)
+          ? latest.compatibility.retiredInstances
+          : [];
+        const retiredSet = new Set(priorRetired);
+        if (latest && latest.active_instance_id !== unit.agentInstanceId) {
+          retiredSet.add(latest.active_instance_id);
+        }
+        if (retiredSet.size > 1000) {
+          throw new DockerIngestConflict("active_instance_conflict");
+        }
+        const retiredInstances = Array.from(retiredSet);
+        const compatibility = {
+          latest: true,
+          ...(unit.auth?.credentialId
+            ? { credentialId: unit.auth.credentialId }
+            : {}),
+          ...(unit.auth?.credentialCreatedAt
+            ? { credentialCreatedAt: unit.auth.credentialCreatedAt }
+            : {}),
+          retiredInstances,
+        };
         await client.query(
           "INSERT INTO docker_ingest_latest (vps_id,active_instance_id,active_snapshot_id,source_sequence,available,error_code,engine_version,api_version,received_at,updated_at,revision,compatibility) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,$11) ON CONFLICT (vps_id) DO UPDATE SET active_instance_id=EXCLUDED.active_instance_id,active_snapshot_id=EXCLUDED.active_snapshot_id,source_sequence=EXCLUDED.source_sequence,available=EXCLUDED.available,error_code=EXCLUDED.error_code,engine_version=EXCLUDED.engine_version,api_version=EXCLUDED.api_version,received_at=EXCLUDED.received_at,updated_at=EXCLUDED.updated_at,revision=EXCLUDED.revision,compatibility=EXCLUDED.compatibility",
           [
@@ -1451,7 +1507,7 @@ export function createPostgresDockerMonitoringRepository(
             unit.apiVersion ?? null,
             received,
             revision,
-            { latest: true },
+            compatibility,
           ],
         );
         const result: DockerIngestResult = {

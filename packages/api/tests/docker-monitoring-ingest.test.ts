@@ -25,7 +25,7 @@ function unit(n: string, o: Partial<DockerIngestUnit> = {}): DockerIngestUnit {
     hostSample: {
       id: `h${n}`,
       vpsId: "v",
-      agentInstanceId: "i",
+      agentInstanceId: o.agentInstanceId ?? "i",
       snapshotId: `s${n}`,
       collectedAt: receivedAt,
       receivedAt,
@@ -230,12 +230,108 @@ describe("Docker JSON I3 ingest", () => {
     await expect(
       repo.ingestUnit(unit("9", { agentInstanceId: "old" })),
     ).rejects.toMatchObject({ code: "active_instance_conflict" });
-    await repo.ingestUnit(unit("11", { agentInstanceId: "new" }));
+    await expect(
+      repo.ingestUnit(unit("1", { agentInstanceId: "new" })),
+    ).rejects.toMatchObject({ code: "active_instance_conflict" });
+    await repo.ingestUnit(
+      unit("1", {
+        agentInstanceId: "new",
+        auth: { isCurrentGeneration: true, credentialId: "cred-new" },
+      }),
+    );
     await expect(
       repo
         .ingestUnit(unit("10", { agentInstanceId: "i" }))
         .then((x) => x.ingestStatus),
     ).resolves.toBe("already_committed");
+    await expect(
+      repo.ingestUnit(
+        unit("999", {
+          agentInstanceId: "i",
+          auth: { isCurrentGeneration: true },
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "active_instance_conflict" });
+  });
+  it("commits low sequence on authenticated instance reset, locks out retired instance, and resolves active alerts with identity_reset_orphaned while preserving history", async () => {
+    // Three unavailable observations open the alert before the reset.
+    for (const sequence of ["2147156", "2147157", "2147158"]) {
+      await repo.ingestUnit(
+        unit(sequence, {
+          agentInstanceId: "ogwBx0Au",
+          monitoring: {
+            effectiveCadenceSeconds: 15,
+            availability: "unavailable",
+            state: "enabled",
+          },
+        }),
+      );
+    }
+    let alerts = (await repo.listAlerts({ vpsId: "v" })).data;
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.state).toBe("open");
+
+    // Azure reinstall scenario: new instance starts with sequence 295
+    const result = await repo.ingestUnit(
+      unit("295", {
+        agentInstanceId: "gyJ-AxZs",
+        auth: {
+          credentialId: "cred-azure-new",
+          credentialCreatedAt: "2026-10-29T10:00:00Z",
+          isCurrentGeneration: true,
+        },
+      }),
+    );
+    expect(result.ingestStatus).toBe("committed");
+
+    // Authoritative latest is now the new instance with low sequence
+    const latest = await repo.getAuthoritativeLatest("v");
+    expect(latest).toMatchObject({
+      activeInstanceId: "gyJ-AxZs",
+      sourceSequence: "295",
+      credentialId: "cred-azure-new",
+    });
+
+    // Prior open alerts resolved with identity_reset_orphaned
+    alerts = (await repo.listAlerts({ vpsId: "v" })).data;
+    expect(alerts[0]?.state).toBe("resolved");
+    expect(alerts[0]?.resolutionReason).toBe("identity_reset_orphaned");
+
+    // Historical samples from original instance are preserved
+    const samples = (await repo.listHostSamples({ vpsId: "v" })).data;
+    expect(samples.map((s) => s.agentInstanceId).sort()).toEqual([
+      "gyJ-AxZs",
+      "ogwBx0Au",
+      "ogwBx0Au",
+      "ogwBx0Au",
+    ]);
+
+    // Old instance can NEVER retake latest, even with sequence > 2147158
+    await expect(
+      repo.ingestUnit(
+        unit("2147159", {
+          agentInstanceId: "ogwBx0Au",
+          auth: { isCurrentGeneration: true },
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "active_instance_conflict" });
+
+  });
+  it("rejects oversized first new-instance batch without mutating prior latest or retiring active instance", async () => {
+    await repo.ingestUnit(unit("10", { agentInstanceId: "orig" }));
+    const capped = createJsonDockerMonitoringRepository(join(dir, "store.json"), { maxBytes: 3000 });
+    const oversizedBatch = unit("1", {
+      agentInstanceId: "new-inst",
+      auth: { isCurrentGeneration: true },
+      events: [{ ...event("oversized", "1"), agentInstanceId: "new-inst", eventDigest: "x".repeat(4000) }],
+    });
+    const result = await capped.ingestUnit(oversizedBatch);
+    expect(result.status).toBe("history_capacity_refused");
+    const latest = await repo.getAuthoritativeLatest("v");
+    expect(latest?.activeInstanceId).toBe("orig");
+    await expect(repo.ingestUnit(unit("11", { agentInstanceId: "orig" }))).resolves.toMatchObject({
+      ingestStatus: "committed",
+    });
   });
   it("serializes concurrent commits and supports restart replay and cleanup", async () => {
     const a = unit("20");

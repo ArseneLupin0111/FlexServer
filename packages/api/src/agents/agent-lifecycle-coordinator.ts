@@ -1,7 +1,14 @@
 import { ConflictException, Injectable } from "@nestjs/common";
+type ActivityKind = "job" | "terminal";
 export type LifecycleOperation =
-  "install" | "uninstall" | "upgrade" | "restart" | "rotate" | "update" | "provision";
-export type ActivityKind = "job" | "terminal";
+  | "install"
+  | "uninstall"
+  | "upgrade"
+  | "restart"
+  | "rotate"
+  | "update"
+  | "provision"
+  | "reconcile";
 
 type Slot = {
   lifecycle?: LifecycleOperation;
@@ -39,8 +46,11 @@ export class AgentLifecycleCoordinator {
         "An agent lifecycle operation is already in progress for this VPS",
       );
     s.lifecycle = operation;
-    if (operation === "uninstall" && s.ingests)
-      await new Promise<void>((resolve) => s.waiters.push(resolve));
+    if ((operation === "uninstall" || operation === "reconcile") && s.ingests) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      s.waiters.push(resolve);
+      await promise;
+    }
     let released = false;
     return () => {
       if (released) return;
@@ -62,7 +72,7 @@ export class AgentLifecycleCoordinator {
   }
   async beginIngest(vpsId: string): Promise<() => void> {
     const s = this.slot(vpsId);
-    if (s.lifecycle === "uninstall")
+    if (s.lifecycle === "uninstall" || s.lifecycle === "reconcile")
       throw new ConflictException("Agent lifecycle operation in progress");
     s.ingests++;
     let released = false;

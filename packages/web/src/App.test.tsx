@@ -1200,6 +1200,37 @@ describe("React dashboard", () => {
       expect(within(row).getByTitle(`Last seen: ${new Date(lastSeenAt).toLocaleString()}`)).not.toHaveTextContent("Never");
     });
 
+    it("keeps the API's removed-agent state after a past successful install job", async () => {
+      const removedRecord = {
+        ...twoServerRecords[0],
+        displayName: "Removed agent host",
+        agentStatus: "not_installed" as const,
+        lastAgentInstallJobId: "install-1",
+      };
+      const priorInstall = {
+        id: "install-1", vpsId: removedRecord.id, type: "install-agent", status: "succeeded",
+        step: "complete", progress: 100, startedAt: "2026-01-01T00:00:00.000Z",
+        finishedAt: "2026-01-01T00:01:00.000Z",
+      };
+      fetchMock
+        .mockResolvedValueOnce(authOk())
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: twoServersDashboard }) })
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [{ ...removedRecord, agentStatus: "offline" }] }) })
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [priorInstall] }) })
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) })
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) });
+
+      renderApp(["/vps"]);
+      const card = await screen.findByRole("article", { name: "Server Removed agent host" });
+      expect(within(card).getByText("Agent offline")).toBeInTheDocument();
+
+      mockEventSourceInstance?.dispatchEvent("metrics.updated", makeEnvelope("metrics.updated", {
+        metrics: [], servers: [removedRecord],
+      }));
+      expect(await within(card).findByText("Agent not installed")).toBeInTheDocument();
+      expect(within(card).queryByText("Agent online")).not.toBeInTheDocument();
+    });
+
     it("confirms and submits one restart for an eligible offline agent", async () => {
       const offlineRecord = { ...twoServerRecords[0], displayName: "Offline worker", agentStatus: "offline", keyProvisionedAt: "2026-01-01T00:00:00.000Z" };
       const onlineRecord = { ...twoServerRecords[1], id: "online-worker", displayName: "Online worker", agentStatus: "online", keyProvisionedAt: "2026-01-01T00:00:00.000Z" };

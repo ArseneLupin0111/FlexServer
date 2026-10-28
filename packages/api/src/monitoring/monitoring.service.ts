@@ -50,6 +50,7 @@ type MetricsUpdatedPayload = {
   metrics: DashboardMetricSample[];
   systemInfo?: DashboardOverview["systemInfo"];
   dockerMetrics?: DashboardDockerMetrics[];
+  servers?: VpsRecord[];
 };
 type JobsUpdatedPayload = {
   jobs: DashboardJob[];
@@ -489,6 +490,7 @@ export class MonitoringService {
     // volume so a present/changed snapshot (including []) is still emitted
     // when ordinary host metrics are empty.
     let lastDockerJson: string | undefined;
+    let lastAgentStatusJson: string | undefined;
     let isFirstTick = true;
     let inFlight = false;
     const interval = setInterval(async () => {
@@ -514,16 +516,19 @@ export class MonitoringService {
         const overview = await this.dashboardService.overview();
         const dockerMetrics = overview.dockerMetrics ?? [];
         const dockerJson = JSON.stringify(dockerMetrics);
+        const agentStatusJson = JSON.stringify(overview.servers.map((server) => [server.id, server.agentStatus, server.lastAgentInstallJobId, server.agentLastError]));
+        const agentStatusChanged = agentStatusJson !== lastAgentStatusJson;
         const dockerChanged = dockerJson !== lastDockerJson;
-        if (updatedMetrics.length > 0 || isFirstTick || dockerChanged) {
+        if (updatedMetrics.length > 0 || isFirstTick || dockerChanged || agentStatusChanged) {
           sendEvent(res, "metrics.updated", {
             metrics: updatedMetrics,
             systemInfo: overview.systemInfo,
             dockerMetrics,
+            ...(agentStatusChanged ? { servers: overview.servers } : {}),
           });
           lastDockerJson = dockerJson;
+          lastAgentStatusJson = agentStatusJson;
         }
-        isFirstTick = false;
 
         sendEvent(res, "monitoring.heartbeat", {});
       } catch {

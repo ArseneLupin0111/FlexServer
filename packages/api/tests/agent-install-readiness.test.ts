@@ -31,13 +31,19 @@ async function installScenario(mode: "new" | "none" | "old") {
     { agentPublicBaseUrl: "https://unreachable.invalid", agentInstallIntervalSeconds: 15 },
     ssh,
     new BundledAgentService({ agentBinaryPath: amd64Path } as unknown as AppConfig),
-    { createCredential: async () => ({ credential, token: "probe" }) },
+    {
+      createCredential: async () => ({ credential, token: "probe" }),
+      createInstallCredential: async () => {
+        state = { vpsId: "audit", status: "installing", lastInstallJobId: "job" };
+        return { credential, token: "probe", state };
+      },
+    },
     { getState: async () => state, upsertState: async (s: AgentState) => (state = s),
       getCredential: async () => credential, revokeCredential: async () => { credential.status = "revoked"; } },
     { get: async () => ({ id: "audit", host: "203.0.113.1", port: 22, username: "audit", keyProvisionedAt: "now" }) },
     { readPrivateKey: async () => "key" }, { record: async () => {} },
     { start: (_job: unknown, fn: typeof task) => { task = fn; } },
-    { create: async () => ({ id: "job" }) }, new AgentLifecycleCoordinator(),
+    { create: async () => ({ id: "job" }), update: async () => ({}) }, new AgentLifecycleCoordinator(),
     { intervalMs: 1, timeoutMs: 3, sleep: async () => {
       if (mode === "none") return;
       const now = new Date().toISOString();
@@ -109,13 +115,19 @@ it("uploads the arm64 binary bytes for an arm64 host, not the amd64 artifact", a
     { agentPublicBaseUrl: "https://unreachable.invalid", agentInstallIntervalSeconds: 15 },
     ssh,
     bundled,
-    { createCredential: async () => ({ credential, token: "probe" }) },
+    {
+      createCredential: async () => ({ credential, token: "probe" }),
+      createInstallCredential: async () => {
+        state = { vpsId: "audit", status: "installing", lastInstallJobId: "job" };
+        return { credential, token: "probe", state };
+      },
+    },
     { getState: async () => state, upsertState: async (s: AgentState) => (state = s),
       getCredential: async () => credential, revokeCredential: async () => { credential.status = "revoked"; } },
     { get: async () => ({ id: "audit", host: "203.0.113.1", port: 22, username: "audit", keyProvisionedAt: "now" }) },
     { readPrivateKey: async () => "key" }, { record: async () => {} },
     { start: (_job: unknown, fn: typeof task) => { task = fn; } },
-    { create: async () => ({ id: "job" }) }, new AgentLifecycleCoordinator(),
+    { create: async () => ({ id: "job" }), update: async () => ({}) }, new AgentLifecycleCoordinator(),
     { intervalMs: 1, timeoutMs: 3, sleep: async () => {
       credential.status = "active"; credential.lastUsedAt = new Date().toISOString();
       state = { vpsId: "audit", status: "online", version: "1.2.3", buildId, lastSeenAt: new Date().toISOString() };

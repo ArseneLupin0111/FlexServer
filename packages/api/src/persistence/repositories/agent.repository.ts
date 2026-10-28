@@ -24,12 +24,33 @@ export type AgentRepository = {
     patch: Partial<AgentCredential>,
   ): Promise<AgentCredential | undefined>;
   revokeCredential(id: string): Promise<AgentCredential | undefined>;
-
+  acceptHeartbeat(input: {
+    credentialId: string;
+    vpsId: string;
+    lastUsedAt: string;
+    lastUsedIp?: string;
+    version?: string;
+    buildId?: string;
+    lastSeenAt: string;
+  }): Promise<AgentCredential | undefined>;
+  createInstallCredential(
+    input: Omit<AgentCredential, "id" | "createdAt"> & { id?: string },
+    state: AgentState,
+  ): Promise<AgentCredential>;
   getState(vpsId: string): Promise<AgentState | undefined>;
   upsertState(state: AgentState): Promise<AgentState>;
   /** Only synthesize local state while no real agent owns the heartbeat. */
   upsertSyntheticLocalState(state: AgentState): Promise<AgentState | undefined>;
   listStates(): Promise<AgentState[]>;
+  /**
+   * Atomically move a still-`online` state to `not_installed` and revoke every
+   * credential of that VPS. Only applies if `lastSeenAt` still equals
+   * `expectedLastSeenAt` (a newer heartbeat wins). Returns true when applied.
+   */
+  markAgentAbsent(
+    vpsId: string,
+    expectedLastSeenAt: string,
+  ): Promise<boolean>;
   /** Delete persisted lifecycle state for a VPS. Returns true if anything was removed. */
   deleteState(vpsId: string): Promise<boolean>;
   /**
@@ -115,6 +136,63 @@ export function createJsonAgentRepository(
         return data.credentials[index];
       });
     },
+    async acceptHeartbeat(input) {
+      let accepted: AgentCredential | undefined;
+      await readModifyWriteJsonFile<AgentFile>(
+        filePath,
+        { credentials: [], states: {} },
+        (data) => {
+          const index = data.credentials.findIndex((credential) =>
+            credential.id === input.credentialId &&
+            credential.vpsId === input.vpsId &&
+            credential.status !== "revoked",
+          );
+          if (index < 0) return data;
+          const current = data.credentials[index]!;
+          const next: AgentCredential = {
+            ...current,
+            status: "active",
+            activatedAt: current.activatedAt ?? input.lastUsedAt,
+            lastUsedAt: input.lastUsedAt,
+            ...(input.lastUsedIp !== undefined ? { lastUsedIp: input.lastUsedIp } : {}),
+          };
+          data.credentials[index] = next;
+          const previous = data.states[input.vpsId];
+          data.states[input.vpsId] = {
+            vpsId: input.vpsId,
+            status: "online",
+            version: input.version,
+            buildId: input.buildId,
+            installedAt: previous?.installedAt,
+            lastSeenAt: input.lastSeenAt,
+            lastError: undefined,
+            lastInstallJobId: previous?.lastInstallJobId,
+          };
+          accepted = next;
+          return data;
+        },
+      );
+      return accepted;
+    },
+    async createInstallCredential(input, state) {
+      let created: AgentCredential | undefined;
+      await readModifyWriteJsonFile<AgentFile>(
+        filePath,
+        { credentials: [], states: {} },
+        (data) => {
+          created = {
+            ...input,
+            id: input.id ?? `cred_${nanoid(12)}`,
+            createdAt: new Date().toISOString(),
+          };
+          data.credentials.push(created);
+          data.states[state.vpsId] = state;
+          return data;
+        },
+      );
+      if (!created) throw new Error("Failed to create install credential");
+      return created;
+    },
 
     async revokeCredential(id) {
       return this.updateCredential(id, {
@@ -159,6 +237,28 @@ export function createJsonAgentRepository(
         },
       );
       return stored;
+    },
+
+    async markAgentAbsent(vpsId, expectedLastSeenAt) {
+      let applied = false;
+      await readModifyWriteJsonFile<AgentFile>(
+        filePath,
+        { credentials: [], states: {} },
+        (data) => {
+          const current = data.states[vpsId];
+          if (!current || current.status !== "online" || current.lastSeenAt !== expectedLastSeenAt) return data;
+          data.states[vpsId] = { vpsId, status: "not_installed" };
+          const revokedAt = new Date().toISOString();
+          data.credentials = data.credentials.map((credential) =>
+            credential.vpsId === vpsId && credential.status !== "revoked"
+              ? { ...credential, status: "revoked", revokedAt }
+              : credential,
+          );
+          applied = true;
+          return data;
+        },
+      );
+      return applied;
     },
 
     async listStates() {

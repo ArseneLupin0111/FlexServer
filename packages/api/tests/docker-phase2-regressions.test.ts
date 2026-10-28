@@ -693,6 +693,31 @@ describe("monitoring SSE dockerMetrics contract", () => {
     }
   });
 
+  it("streams a confirmed agent removal to an already-open dashboard", async () => {
+    const callbacks: Array<() => unknown> = [];
+    const timer = vi.spyOn(globalThis, "setInterval").mockImplementation(((cb: () => unknown) => {
+      callbacks.push(cb);
+      return 0 as never;
+    }) as never);
+    try {
+      const fixture = overviewFixture([]);
+      fixture.metrics = [];
+      fixture.servers[0]!.agentStatus = "offline";
+      const { service } = arrangeMonitoring(fixture);
+      const res = createFakeSseResponse();
+      await service.stream(res);
+      await callbacks[0]!();
+
+      fixture.servers[0]!.agentStatus = "not_installed";
+      await callbacks[0]!();
+
+      const updates = parseSse(res.text()).filter((event) => event.envelope.type === "metrics.updated");
+      expect(updates[updates.length - 1]!.envelope.payload.servers[0].agentStatus).toBe("not_installed");
+    } finally {
+      timer.mockRestore();
+    }
+  });
+
   it("scoped snapshot and scoped update include only the requested VPS and never leak another", async () => {
     // Arrange
     const timer = vi.spyOn(globalThis, "setInterval").mockReturnValue(0 as never);

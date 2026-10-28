@@ -12,6 +12,7 @@ import type {
   AgentCredentialScope,
   AgentCredentialStatus,
   AgentMetricPayload,
+  AgentState,
 } from "./agent.models.js";
 import type { MetricSample } from "../metrics/metrics.models.js";
 import type { AgentRepository } from "../persistence/repositories/agent.repository.js";
@@ -135,6 +136,26 @@ export class AgentService {
 
     const token = `${TOKEN_PREFIX}${credential.id}_${secret}`;
     return { credential, token };
+  }
+
+  async createInstallCredential(
+    vpsId: string,
+    jobId: string,
+  ): Promise<{ credential: AgentCredential; token: string; state: AgentState }> {
+    const vps = await this.vpsRepository.get(vpsId);
+    if (!vps) throw new VpsNotFoundError();
+    const secret = randomBytes(32).toString("hex");
+    const credential = await this.agentRepository.createInstallCredential(
+      {
+        vpsId,
+        secretHash: hashSecret(secret),
+        status: "pending",
+      },
+      { vpsId, status: "installing", lastInstallJobId: jobId },
+    );
+    const state = await this.agentRepository.getState(vpsId);
+    if (!state) throw new Error("Failed to persist installing agent state");
+    return { credential, token: `${TOKEN_PREFIX}${credential.id}_${secret}`, state };
   }
 
   /**
@@ -303,34 +324,24 @@ export class AgentService {
 
       const now = new Date().toISOString();
 
-      // 4. Auto-activate pending credentials
-      if (credential.status === "pending") {
-        await this.agentRepository.updateCredential(credential.id, {
-          status: "active",
-          activatedAt: now,
-        });
-      }
-
-      // 5. Update credential usage (fire-and-forget style via Promise)
-      await this.agentRepository.updateCredential(credential.id, {
-        lastUsedAt: now,
-        lastUsedIp: ip,
-      });
-
-      // 6. Upsert agent state
-      const existingState = await this.agentRepository.getState(
-        credential.vpsId,
-      );
-      await this.agentRepository.upsertState({
+      // Credential admission, usage, and online state share the repository's
+      // per-VPS transaction fence. A stale ingest therefore cannot resurrect a
+      // state after reconciliation revoked its credential.
+      const accepted = await this.agentRepository.acceptHeartbeat({
+        credentialId: credential.id,
         vpsId: credential.vpsId,
-        status: "online",
+        lastUsedAt: now,
+        ...(ip !== undefined ? { lastUsedIp: ip } : {}),
         version: parsed.agentVersion,
         buildId: parsed.buildId,
-        installedAt: existingState?.installedAt,
         lastSeenAt: now,
-        lastError: undefined,
-        lastInstallJobId: existingState?.lastInstallJobId,
       });
+      if (!accepted) {
+        throw new UnauthorizedException({
+          error: { message: "Token has been revoked" },
+        });
+      }
+      credential = accepted;
 
       // 7. If system info provided, upsert it (before metric append)
       if (parsed.system) {

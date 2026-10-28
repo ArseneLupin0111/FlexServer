@@ -23,6 +23,8 @@ export type AppConfig = {
   agentPublicBaseUrl?: string;
   agentBinaryPath?: string;
   agentInstallIntervalSeconds: number;
+  agentPresenceReconcileEnabled?: boolean;
+  agentPresenceReconcileIntervalSeconds?: number;
   allowInsecureAgentHttp: boolean;
   localAgentEnabled?: boolean;
   storageDriver: StorageDriver;
@@ -126,6 +128,8 @@ const envSchema = z.object({
     z.string().trim().optional(),
   ),
   AGENT_INSTALL_INTERVAL_SECONDS: z.coerce.number().int().min(1).default(1),
+  AGENT_PRESENCE_RECONCILE_ENABLED: booleanSchema.default("true"),
+  AGENT_PRESENCE_RECONCILE_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(60),
   ALLOW_INSECURE_AGENT_HTTP: booleanSchema.default("false"),
   LOCAL_AGENT_ENABLED: booleanSchema.default("true"),
   STORAGE_DRIVER: z.enum(["json", "postgres"]).default("json"),
@@ -409,6 +413,8 @@ export function parseAppConfig(
     agentPublicBaseUrl: parsed.AGENT_PUBLIC_BASE_URL,
     agentBinaryPath: parsed.AGENT_BINARY_PATH,
     agentInstallIntervalSeconds: parsed.AGENT_INSTALL_INTERVAL_SECONDS,
+    agentPresenceReconcileEnabled: parsed.AGENT_PRESENCE_RECONCILE_ENABLED,
+    agentPresenceReconcileIntervalSeconds: parsed.AGENT_PRESENCE_RECONCILE_INTERVAL_SECONDS,
     allowInsecureAgentHttp: parsed.ALLOW_INSECURE_AGENT_HTTP,
     localAgentEnabled: parsed.LOCAL_AGENT_ENABLED,
     storageDriver: parsed.STORAGE_DRIVER,

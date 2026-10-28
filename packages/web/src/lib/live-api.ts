@@ -27,6 +27,7 @@ export type MetricsUpdatedPayload = {
   metrics: DashboardOverview["metrics"];
   systemInfo?: DashboardOverview["systemInfo"];
   dockerMetrics?: DashboardOverview["dockerMetrics"];
+  servers?: DashboardOverview["servers"];
 };
 
 export type JobsUpdatedPayload = {

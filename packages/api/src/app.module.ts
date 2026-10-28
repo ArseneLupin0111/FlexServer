@@ -39,6 +39,7 @@ import { SshService } from "./ssh/ssh.service.js";
 import { HostKeyPinService } from "./ssh/host-key-pin.service.js";
 import type { HostKeyPinRepository } from "./ssh/host-key-pin.repository.js";
 import { AgentInstallerService } from "./agents/agent-installer.service.js";
+import { AgentPresenceReconcilerService } from "./agents/agent-presence-reconciler.service.js";
 import { BundledAgentService } from "./local-upgrade/bundled-agent.service.js";
 import { AgentUninstallerService } from "./agents/agent-uninstaller.service.js";
 import { AgentLifecycleCoordinator } from "./agents/agent-lifecycle-coordinator.js";
@@ -351,6 +352,7 @@ export function createAppModule(deps: AppDependencies = {}): DynamicModule {
       AgentInstallerService,
       AgentUninstallerService,
       AgentRestartService,
+      AgentPresenceReconcilerService,
       LocalAgentRotationHelper,
       AgentRotationService,
       LocalAgentSupervisorService,

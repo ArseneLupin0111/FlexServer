@@ -41,6 +41,35 @@ export function getAgentTmpfilesPath(vpsId: string): string {
   return `/etc/tmpfiles.d/vps-agent-${hash}.conf`;
 }
 
+/**
+ * Read-only probe for every artifact the installer manages. Prints exactly
+ * `present`, `absent`, or `unknown`; only `absent` may trigger reconciliation,
+ * so any inspection the shell cannot complete must fail closed as `unknown`.
+ * The managed unit name is derived from vpsId, so a process still running from
+ * another install directory is still detected (MainPID / `pgrep -x`).
+ */
+export function buildAgentPresenceProbeCommand(vpsId: string): string {
+  assertNoNewlines(vpsId, "vpsId");
+  const service = shellQuote(getAgentServiceName(vpsId));
+  const unit = shellQuote(getAgentServiceUnitPath(vpsId));
+  const tmpfiles = shellQuote(getAgentTmpfilesPath(vpsId));
+  return [
+    `_d="$HOME/.vps-manager-agent"; _found=0;`,
+    `if [ -z "$HOME" ] || [ ! -d "$HOME" ] || [ ! -x "$HOME" ]; then echo unknown; exit 0; fi;`,
+    `for _dir in /etc /etc/systemd /etc/systemd/system /etc/tmpfiles.d; do if { [ -e "$_dir" ] || [ -L "$_dir" ]; } && { [ ! -d "$_dir" ] || [ ! -x "$_dir" ]; }; then echo unknown; exit 0; fi; done;`,
+    `if { [ -e "$_d" ] || [ -L "$_d" ]; } && { [ ! -d "$_d" ] || [ ! -x "$_d" ]; }; then echo unknown; exit 0; fi;`,
+    `for _f in "$_d/vps-agent" "$_d/config.json" "$_d/vps-agent.pid" "$_d/lifecycle.lock" "$_d"/vps-agent.backup-* "$_d"/config.backup-* "$_d"/vps-agent.stage-* "$_d"/config.stage-* ${unit} ${tmpfiles}; do if [ -e "$_f" ] || [ -L "$_f" ]; then _found=1; fi; done;`,
+    `if command -v pgrep >/dev/null 2>&1; then pgrep -x vps-agent >/dev/null 2>&1; _rc=$?; if [ "$_rc" = 0 ]; then _found=1; elif [ "$_rc" -ge 2 ]; then echo unknown; exit 0; fi; else echo unknown; exit 0; fi;`,
+    `test "$_found" = 1 && echo present || echo absent`,
+  ].join(" ");
+}
+
+export function classifyAgentPresence(
+  stdout: string,
+): "present" | "absent" | "unknown" {
+  const value = stdout.trim();
+  return value === "present" || value === "absent" ? value : "unknown";
+}
 function assertNoNewlines(value: string, fieldName = "value"): void {
   if (/[\r\n]/.test(value)) {
     throw new Error(`${fieldName} must not contain newline characters`);

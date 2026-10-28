@@ -172,15 +172,8 @@ export class AgentInstallerService {
       // 5. Resolve SSH auth
       const sshAuth = await resolveSshAuth(vps, password, this.keys);
 
-      // 6. Create pending credential (token never returned to caller)
-      const created = await this.agentService.createCredential(
-        vpsId,
-        "pending",
-      );
-      credential = created.credential;
-      const token = created.token;
-
-      // 7. Create job
+      // Create the job before the credential so a setup failure cannot leave a
+      // pending token without an installing lifecycle checkpoint.
       const now = new Date().toISOString();
       job = await this.jobs.create({
         vpsId,
@@ -191,12 +184,12 @@ export class AgentInstallerService {
         startedAt: now,
       });
 
-      // 8. Mark state as installing
-      state = await this.agentRepository.upsertState({
-        vpsId,
-        status: "installing",
-        lastInstallJobId: job!.id,
-      });
+      // Credential creation and the installing state are one repository
+      // transaction. Reconciliation cannot revoke a token between them.
+      const created = await this.agentService.createInstallCredential(vpsId, job.id);
+      credential = created.credential;
+      const token = created.token;
+      state = created.state;
 
       // 9. Audit: install started
       await this.audit

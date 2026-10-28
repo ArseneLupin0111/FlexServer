@@ -162,60 +162,6 @@ function mergeJobs(
   return [...byId.values()];
 }
 
-function applyAgentJobState(
-  records: VpsRecord[],
-  jobs: DashboardOverview["jobs"],
-) {
-  return records.map((vps) => {
-    const lifecycleJobs = jobs.filter(
-      (candidate) =>
-        candidate.vpsId === vps.id &&
-        (candidate.type === "install-agent" ||
-          candidate.type === "uninstall-agent" ||
-          candidate.type === "upgrade-agent" ||
-          candidate.type === "restart-agent" ||
-          candidate.type === "rotate-agent"),
-    );
-    const job = lifecycleJobs.sort((a, b) => {
-      const aTime = Date.parse(a.finishedAt || a.startedAt || "") || 0;
-      const bTime = Date.parse(b.finishedAt || b.startedAt || "") || 0;
-      return bTime - aTime || b.id.localeCompare(a.id);
-    })[0];
-    if (!job) return vps;
-    const isUninstall = job.type === "uninstall-agent";
-    const isRestart = job.type === "restart-agent";
-    const isRotate = job.type === "rotate-agent";
-    if (job.status === "queued" || job.status === "running") {
-      return {
-        ...vps,
-        agentStatus: isRestart || isRotate ? vps.agentStatus : ("installing" as const),
-        lastAgentInstallJobId: job.id,
-      };
-    }
-    if (job.status === "succeeded") {
-      return {
-        ...vps,
-        agentStatus: (isRestart || isRotate
-          ? vps.agentStatus
-          : isUninstall
-            ? "not_installed"
-            : "online") as VpsRecord["agentStatus"],
-        lastAgentInstallJobId: job.id,
-        agentLastError: undefined,
-      };
-    }
-    if (job.status === "failed" || job.status === "cancelled") {
-      return {
-        ...vps,
-        agentStatus: "failed" as const,
-        lastAgentInstallJobId: job.id,
-        agentLastError: job.errorMessage || vps.agentLastError,
-      };
-    }
-    return vps;
-  });
-}
-
 function isLocalHost(vps: VpsRecord): boolean {
   return vps.kind === "local" || vps.managedBy === "system";
 }
@@ -322,7 +268,7 @@ export function DashboardProvider({
         runningJobs: mergedJobs.filter((j) => j.status === "running").length,
       },
     });
-    setRecords(applyAgentJobState(servers, mergedJobs));
+    setRecords(servers);
     if (message) setStatus({ message, kind: "success" });
   }
 
@@ -436,15 +382,17 @@ export function DashboardProvider({
             metrics: updatedMetrics,
             dockerMetrics,
             systemInfo: payload.systemInfo ?? prev.systemInfo,
+            servers: payload.servers ?? prev.servers,
           };
         });
+        if (payload.servers) setRecords(payload.servers);
       },
       onJobsUpdated: (payload) => {
         setOverview((prev) => ({
           ...prev,
           jobs: mergeJobs(prev.jobs, payload.jobs),
         }));
-        setRecords((prev) => applyAgentJobState(prev, payload.jobs));
+        // Lifecycle status comes from the API; jobs only provide progress.
       },
       onDockerEventsAvailable: (payload) => {
         if (!payload || (payload.vpsId && !recordsRef.current.some((vps) => vps.id === payload.vpsId))) return;

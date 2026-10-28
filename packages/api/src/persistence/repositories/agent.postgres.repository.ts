@@ -115,6 +115,79 @@ export function createPostgresAgentRepository(
         return result.rows[0] ? rowToCredential(result.rows[0]) : undefined;
       });
     },
+    async acceptHeartbeat(input) {
+      return withTransaction(pool, async (client) => {
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+          [`agent:${input.vpsId}`],
+        );
+        const credentialResult = await client.query<AgentCredentialRow>(
+          "SELECT * FROM agent_credentials WHERE id=$1 AND vps_id=$2 FOR UPDATE",
+          [input.credentialId, input.vpsId],
+        );
+        const current = credentialResult.rows[0]
+          ? rowToCredential(credentialResult.rows[0])
+          : undefined;
+        if (!current || current.status === "revoked") return undefined;
+        const activatedAt = current.activatedAt ?? input.lastUsedAt;
+        const updatedCredential = await client.query<AgentCredentialRow>(
+          `UPDATE agent_credentials
+           SET status='active', activated_at=$2, last_used_at=$3, last_used_ip=$4
+           WHERE id=$1 RETURNING *`,
+          [input.credentialId, toDateOrNull(activatedAt), toDateOrNull(input.lastUsedAt), input.lastUsedIp ?? null],
+        );
+        const previousState = await client.query<AgentStateRow>(
+          "SELECT * FROM agent_states WHERE vps_id=$1",
+          [input.vpsId],
+        );
+        const previous = previousState.rows[0]
+          ? rowToState(previousState.rows[0])
+          : undefined;
+        await client.query(
+          `INSERT INTO agent_states (vps_id, status, version, build_id, installed_at, last_seen_at, last_error, last_install_job_id)
+           VALUES ($1,'online',$2,$3,$4,$5,NULL,$6)
+           ON CONFLICT (vps_id) DO UPDATE SET
+             status='online', version=EXCLUDED.version, build_id=EXCLUDED.build_id,
+             installed_at=EXCLUDED.installed_at, last_seen_at=EXCLUDED.last_seen_at,
+             last_error=NULL, last_install_job_id=EXCLUDED.last_install_job_id`,
+          [input.vpsId, input.version ?? null, input.buildId ?? null,
+            toDateOrNull(previous?.installedAt), toDateOrNull(input.lastSeenAt), previous?.lastInstallJobId ?? null],
+        );
+        return updatedCredential.rows[0]
+          ? rowToCredential(updatedCredential.rows[0])
+          : undefined;
+      });
+    },
+    async createInstallCredential(input, state) {
+      return withTransaction(pool, async (client) => {
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+          [`agent:${state.vpsId}`],
+        );
+        const credential: AgentCredential = {
+          ...input,
+          id: input.id ?? `cred_${nanoid(12)}`,
+          createdAt: new Date().toISOString(),
+        };
+        const result = await client.query<AgentCredentialRow>(
+          `INSERT INTO agent_credentials (id, vps_id, secret_hash, status, scope, created_at, activated_at, revoked_at, last_used_at, last_used_ip)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+          credentialToValues(credential),
+        );
+        await client.query(
+          `INSERT INTO agent_states (vps_id, status, version, build_id, installed_at, last_seen_at, last_error, last_install_job_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           ON CONFLICT (vps_id) DO UPDATE SET
+             status=EXCLUDED.status, version=EXCLUDED.version, build_id=EXCLUDED.build_id,
+             installed_at=EXCLUDED.installed_at, last_seen_at=EXCLUDED.last_seen_at,
+             last_error=EXCLUDED.last_error, last_install_job_id=EXCLUDED.last_install_job_id`,
+          [state.vpsId, state.status, state.version ?? null, state.buildId ?? null,
+            toDateOrNull(state.installedAt), toDateOrNull(state.lastSeenAt), state.lastError ?? null,
+            state.lastInstallJobId ?? null],
+        );
+        return rowToCredential(result.rows[0]!);
+      });
+    },
     async revokeCredential(id) {
       return this.updateCredential(id, {
         status: "revoked",
@@ -133,6 +206,30 @@ export function createPostgresAgentRepository(
         "SELECT * FROM agent_states",
       );
       return result.rows.map(rowToState);
+    },
+
+    async markAgentAbsent(vpsId, expectedLastSeenAt) {
+      return withTransaction(pool, async (client) => {
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+          [`agent:${vpsId}`],
+        );
+        const stateResult = await client.query<AgentStateRow>(
+          "SELECT * FROM agent_states WHERE vps_id=$1 FOR UPDATE",
+          [vpsId],
+        );
+        const current = stateResult.rows[0];
+        if (!current || current.status !== "online" || optionalIsoString(current.last_seen_at) !== expectedLastSeenAt) return false;
+        await client.query(
+          "UPDATE agent_credentials SET status='revoked', revoked_at=COALESCE(revoked_at, NOW()) WHERE vps_id=$1 AND status <> 'revoked'",
+          [vpsId],
+        );
+        await client.query(
+          "UPDATE agent_states SET status='not_installed', version=NULL, build_id=NULL, installed_at=NULL, last_seen_at=NULL, last_error=NULL, last_install_job_id=NULL WHERE vps_id=$1",
+          [vpsId],
+        );
+        return true;
+      });
     },
     async upsertState(state) {
       const result = await pool.query<AgentStateRow>(

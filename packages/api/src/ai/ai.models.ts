@@ -181,6 +181,10 @@ export type AiPolicy = {
    * ack. */
   privilegedAcknowledgedAt: string | null;
   privilegedAcknowledgedBy: string | null;
+  /** Server-side automatic approval of proposed plans on this VPS.
+   * Defaults to false (fail-closed). When true, newly proposed plans
+   * are immediately dispatched through standard verification CAS. */
+  autoApprove: boolean;
   fileReadScopes: string[];
   fileWriteScopes: string[];
   serviceProfileIds: string[];

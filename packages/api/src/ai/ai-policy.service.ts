@@ -38,7 +38,6 @@ export const AI_ACTIVE_TASK_STATES: readonly AiTaskState[] = [
   "executing",
   "verifying",
   "cancel_requested",
-  "uncertain",
 ];
 
 export interface AiProviderReady {

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import {
+  AlertTriangle,
   CheckCircle2,
   ChevronDown,
   Cpu,
@@ -169,6 +170,7 @@ export function AssistantSettingsModal({
   const [composeEnabled, setComposeEnabled] = useState(false);
   const [sendLogs, setSendLogs] = useState(false);
   const [sendFiles, setSendFiles] = useState(false);
+  const [autoApprove, setAutoApprove] = useState(false);
   const [readScopesText, setReadScopesText] = useState("");
   const [writeScopesText, setWriteScopesText] = useState("");
   const [profilesText, setProfilesText] = useState("");
@@ -206,6 +208,7 @@ export function AssistantSettingsModal({
       setComposeEnabled(policy.composeActionsEnabled === true);
       setSendLogs(policy.sendLogsToProvider === true);
       setSendFiles(policy.sendFilesToProvider === true);
+      setAutoApprove(policy.autoApprove === true);
       setReadScopesText((policy.fileReadScopes || []).join("\n"));
       setWriteScopesText((policy.fileWriteScopes || []).join("\n"));
       setProfilesText((policy.serviceProfileIds || []).join("\n"));
@@ -527,6 +530,7 @@ export function AssistantSettingsModal({
         readEnabled,
         dockerActionsEnabled: dockerEnabled,
         composeActionsEnabled: composeEnabled,
+        autoApprove,
         sendLogsToProvider: sendLogs,
         sendFilesToProvider: sendFiles,
         fileReadScopes: readScopes,
@@ -1253,10 +1257,42 @@ export function AssistantSettingsModal({
                 </div>
 
                 <p className="text-[11px] text-dim">
-                  Docker and Compose actions run only after you approve the
-                  exact plan. Shell execution is controlled by the Agent card in
-                  the host Settings.
+                  {autoApprove
+                    ? "Docker and Compose actions auto-execute under YOLO mode. Shell execution is controlled by the Agent card in the host Settings."
+                    : "Docker and Compose actions run only after you approve the exact plan. Shell execution is controlled by the Agent card in the host Settings."}
                 </p>
+
+                <h3 className="pt-2 text-xs font-semibold uppercase tracking-wider text-dim">
+                  Plan execution
+                </h3>
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between border border-line bg-panel p-2.5">
+                    <div>
+                      <div className="font-semibold text-text">Auto-approve plans (YOLO)</div>
+                      <div className="text-[11px] text-dim">
+                        Autoexecutes allowed changes on this VPS without waiting for manual confirmation. Default off.
+                      </div>
+                    </div>
+                    <Switch
+                      checked={autoApprove}
+                      onCheckedChange={setAutoApprove}
+                      aria-label="Auto-approve plans on this VPS"
+                    />
+                  </div>
+
+                  {autoApprove ? (
+                    <div
+                      data-testid="yolo-policy-warning"
+                      className="flex items-start gap-2 border border-warn/40 bg-warn/10 p-2.5 text-xs text-warn"
+                    >
+                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" />
+                      <span>
+                        Warning: Autoexecutes allowed changes on this VPS without waiting for manual confirmation. Scope limits, capability checks, and uncertain-outcome fences remain active.
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
 
                 <h3 className="pt-2 text-xs font-semibold uppercase tracking-wider text-dim">
                   Data egress

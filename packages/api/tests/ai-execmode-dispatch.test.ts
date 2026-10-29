@@ -67,7 +67,17 @@ describe("AI shell execMode dispatch", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    service.onModuleDestroy();
+    vi.restoreAllMocks();
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await rm(dir, { recursive: true, force: true });
+        break;
+      } catch {
+        if (attempt === 4) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
   });
 
   function makeService(): AiTaskService {

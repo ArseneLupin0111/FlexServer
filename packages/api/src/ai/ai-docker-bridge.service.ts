@@ -381,7 +381,7 @@ export class AiDockerBridgeService {
           ...(sourceDigest ? { sourceDigest } : {}),
         },
         description: `${parsed.data.action.toUpperCase()} Compose app ${app.displayName ?? app.projectName}`,
-        timeoutSeconds: app.readinessSeconds ?? 300,
+        timeoutSeconds: (app.readinessSeconds ?? 300) + 60,
         ...(encryptedBlobId ? { encryptedBlobId } : {}),
       };
 
@@ -544,7 +544,7 @@ export class AiDockerBridgeService {
           previewDigest: previewDigest,
         },
         description: `Deploy preview ${parsed.data.previewId} for Compose app ${app.displayName ?? app.projectName}`,
-        timeoutSeconds: app.readinessSeconds ?? 300,
+        timeoutSeconds: 660 + (app.readinessSeconds ?? 300),
         ...(encryptedBlobId ? { encryptedBlobId } : {}),
       };
 
@@ -563,6 +563,7 @@ export class AiDockerBridgeService {
     step: AiPlanStep,
     plan: AiPlan,
     request?: Request,
+    onBeforeMutate?: () => Promise<void>,
   ): Promise<{ ok: boolean; result: unknown }> {
     if (plan.expiresAt && Date.parse(plan.expiresAt) <= Date.now()) {
       throw new AiAssistantError("approval_expired", "Plan approval has expired");
@@ -628,6 +629,7 @@ export class AiDockerBridgeService {
         throw new AiAssistantError("protected_target", "Target container is protected");
       }
 
+      await onBeforeMutate?.();
       const idempotencyKey = `ai-step-${step.stepId}`;
       let operation: DockerManagementOperation;
       try {
@@ -687,6 +689,7 @@ export class AiDockerBridgeService {
       const kind = `lifecycle_${action}`;
       const idempotencyKey = `ai-step-${step.stepId}`;
       let workOp: { id: string };
+      await onBeforeMutate?.();
       try {
         workOp = await this.applications.work(vpsId, appId, kind, {
           confirmation: { confirmed: true },
@@ -711,8 +714,8 @@ export class AiDockerBridgeService {
         }
         throw err;
       }
-
-      const timeoutMs = (step.timeoutSeconds ? Math.min(step.timeoutSeconds, 300) : 300) * 1000;
+      // Polling deadline matches apps.work lifecycle operation deadline: readiness + 60s stop grace (max 3660s)
+      const timeoutMs = (step.timeoutSeconds ? Math.min(step.timeoutSeconds, 3660) : 360) * 1000;
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         const current = await this.applications.operation(vpsId, appId, workOp.id);
@@ -772,6 +775,7 @@ export class AiDockerBridgeService {
       const previewDigest = previewRaw && typeof previewRaw === "object" && "digest" in previewRaw && typeof previewRaw.digest === "string" ? previewRaw.digest : "";
       const idempotencyKey = `ai-step-${step.stepId}`;
 
+      await onBeforeMutate?.();
       let deployOp: { id: string };
       try {
         deployOp = await this.applications.confirmPreview(vpsId, appId, previewId, {
@@ -795,8 +799,8 @@ export class AiDockerBridgeService {
         if (err instanceof ForbiddenException) throw new AiAssistantError("policy_denied", err.message);
         throw err;
       }
-
-      const timeoutMs = (step.timeoutSeconds ? Math.min(step.timeoutSeconds, 300) : 300) * 1000;
+      // Polling deadline matches apps.work deploy deadline: 600s pull + 60s stop grace + readiness (max 4260s)
+      const timeoutMs = (step.timeoutSeconds ? Math.min(step.timeoutSeconds, 4260) : 960) * 1000;
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         const current = await this.applications.operation(vpsId, appId, deployOp.id);

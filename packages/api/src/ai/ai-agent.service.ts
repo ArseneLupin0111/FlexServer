@@ -748,6 +748,26 @@ export class AiAgentService {
       cancelRequested = true;
     }
 
+    // A live agent heartbeat is authoritative proof the executor is still
+    // running: extend the lease so retention never expires it into
+    // 'uncertain' while the command is genuinely in flight.
+    if (!cancelRequested && (task.state === "executing" || task.state === "verifying")) {
+      try {
+        await this.repository.updateTask({
+          id: task.id,
+          expectedRevision: task.revision,
+          ownerLease: {
+            ownerInstanceId: task.ownerInstanceId ?? input.agentInstanceId,
+            leaseSeconds: 180,
+          },
+        });
+      } catch (error) {
+        // Revision moved on (e.g. cancel/terminal transition): never fail the
+        // heartbeat, and never resurrect a task that already settled.
+        if (!(error instanceof AiPersistenceConflictError)) throw error;
+      }
+    }
+
     return { ok: true, cancelRequested };
   }
 
@@ -918,18 +938,10 @@ export class AiAgentService {
       };
     }
 
-    // Idempotent duplicate: receipt already committed
-    if (created === 0) {
-      return {
-        ok: true,
-        commandId: input.commandId,
-        agentInstanceId: input.agentInstanceId,
-      };
-    }
-
-    // Transition task based on receipts across all steps
-    await this.transitionTaskOnReceipt(task, durableReceipt, input.executed);
-
+    // Transition task based on receipts across all steps. Even on duplicate result
+    // delivery (created === 0), do not drop terminalization if a prior CAS raced
+    // with a heartbeat lease renewal.
+    await this.transitionTaskOnReceipt(vpsId, input.taskId, durableReceipt, input.executed);
     return {
       ok: true,
       commandId: input.commandId,
@@ -1036,75 +1048,107 @@ export class AiAgentService {
   }
 
   private async transitionTaskOnReceipt(
-    task: AiTask,
+    vpsId: string,
+    taskId: string,
     receipt: AiExecutionReceipt,
     executed: boolean,
   ): Promise<void> {
-    const receipts = await this.repository.listReceiptsByTask(task.id);
-    const plan = task.plan;
-    const allStepsCompleted = plan
-      ? plan.steps.every((s) => receipts.some((r) => r.stepId === s.stepId))
-      : true;
+    const maxAttempts = 3;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const task = await this.repository.getTask(vpsId, taskId);
+      if (!task) return;
 
-    let finalOutcome: AiTaskState | null = null;
+      // Never resurrect or overwrite an already terminal task or settled cancellation
+      if (
+        task.state === "succeeded" ||
+        task.state === "failed" ||
+        task.state === "cancelled" ||
+        task.state === "expired" ||
+        task.state === "uncertain"
+      ) {
+        return;
+      }
 
-    if (receipt.status === "uncertain" || (receipt.status === "cancelled" && executed)) {
-      finalOutcome = "uncertain";
-    } else if (receipt.status === "cancelled" && !executed) {
-      finalOutcome = "cancelled";
-    } else if (receipt.status === "failed") {
-      finalOutcome = "failed";
-    } else if (allStepsCompleted) {
-      if (receipts.some((r) => r.status === "uncertain")) {
+      if (
+        task.state !== "executing" &&
+        task.state !== "verifying" &&
+        task.state !== "cancel_requested"
+      ) {
+        return;
+      }
+
+      const receipts = await this.repository.listReceiptsByTask(task.id);
+      const plan = task.plan;
+      const allStepsCompleted = plan
+        ? plan.steps.every((s) => receipts.some((r) => r.stepId === s.stepId))
+        : true;
+
+      let finalOutcome: AiTaskState | null = null;
+
+      if (receipt.status === "uncertain" || (receipt.status === "cancelled" && executed)) {
         finalOutcome = "uncertain";
-      } else if (receipts.some((r) => r.status === "failed")) {
+      } else if (receipt.status === "cancelled" && !executed) {
+        finalOutcome = "cancelled";
+      } else if (receipt.status === "failed") {
         finalOutcome = "failed";
-      } else if (receipts.some((r) => r.status === "cancelled")) {
-        finalOutcome = "uncertain";
-      } else if (receipts.every((r) => r.status === "succeeded")) {
-        finalOutcome = "succeeded";
+      } else if (allStepsCompleted) {
+        if (receipts.some((r) => r.status === "uncertain")) {
+          finalOutcome = "uncertain";
+        } else if (receipts.some((r) => r.status === "failed")) {
+          finalOutcome = "failed";
+        } else if (receipts.some((r) => r.status === "cancelled")) {
+          finalOutcome = "uncertain";
+        } else if (receipts.every((r) => r.status === "succeeded")) {
+          finalOutcome = "succeeded";
+        }
       }
-    }
 
-    if (!finalOutcome) {
-      return;
-    }
-
-    try {
-      if (task.state === "executing") {
-        const verifyingTask = await this.repository.updateTask({
-          id: task.id,
-          expectedRevision: task.revision,
-          state: "verifying",
-        });
-        await this.repository.updateTask({
-          id: task.id,
-          expectedRevision: verifyingTask.revision,
-          state: finalOutcome,
-          error:
-            finalOutcome === "failed"
-              ? receipt.error ?? {
-                  code: "execution_failed",
-                  message: "Execution step failed",
-                }
-              : undefined,
-        });
-      } else if (task.state === "verifying" || task.state === "cancel_requested") {
-        await this.repository.updateTask({
-          id: task.id,
-          expectedRevision: task.revision,
-          state: finalOutcome,
-          error:
-            finalOutcome === "failed"
-              ? receipt.error ?? {
-                  code: "execution_failed",
-                  message: "Execution step failed",
-                }
-              : undefined,
-        });
+      if (!finalOutcome) {
+        return;
       }
-    } catch {
-      // Ignored on CAS collision; durable receipt remains authoritative
+
+      try {
+        if (task.state === "executing") {
+          const verifyingTask = await this.repository.updateTask({
+            id: task.id,
+            expectedRevision: task.revision,
+            state: "verifying",
+          });
+          await this.repository.updateTask({
+            id: task.id,
+            expectedRevision: verifyingTask.revision,
+            state: finalOutcome,
+            error:
+              finalOutcome === "failed"
+                ? receipt.error ?? {
+                    code: "execution_failed",
+                    message: "Execution step failed",
+                  }
+                : undefined,
+          });
+          return;
+        } else if (task.state === "verifying" || task.state === "cancel_requested") {
+          await this.repository.updateTask({
+            id: task.id,
+            expectedRevision: task.revision,
+            state: finalOutcome,
+            error:
+              finalOutcome === "failed"
+                ? receipt.error ?? {
+                    code: "execution_failed",
+                    message: "Execution step failed",
+                  }
+                : undefined,
+          });
+          return;
+        }
+      } catch (err) {
+        if (err instanceof AiPersistenceConflictError) {
+          // Heartbeat or lease renewal bumped revision in flight; retry with fresh task
+          continue;
+        }
+        throw err;
+      }
     }
   }
 }

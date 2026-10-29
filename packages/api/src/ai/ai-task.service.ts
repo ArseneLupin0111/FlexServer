@@ -432,8 +432,9 @@ export class AiTaskService implements OnModuleDestroy {
               status: "pending",
             };
             plan.planDigest = sha256(JSON.stringify(plan));
-            if (evidence.length) await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: "Historical observations used while preparing this plan; execution still requires explicit approval.", evidence: evidence.slice(0, 12), providerId: task.providerId, model: task.model, ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
+            if (evidence.length) await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: "Historical observations used while preparing this plan; execution follows configured approval policy.", evidence: evidence.slice(0, 12), providerId: task.providerId, model: task.model, ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
             await this.repository.updateTask({ id: task.id, expectedRevision: task.revision, state: "awaiting_approval", plan });
+            await this.maybeAutoApprove(task, plan, sessionId);
             return;
           }
 
@@ -482,8 +483,9 @@ export class AiTaskService implements OnModuleDestroy {
               status: "pending",
             };
             plan.planDigest = sha256(JSON.stringify(plan));
-            if (evidence.length) await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: "Historical observations used while preparing this plan; execution still requires explicit approval.", evidence: evidence.slice(0, 12), providerId: task.providerId, model: task.model, ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
+            if (evidence.length) await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: "Historical observations used while preparing this plan; execution follows configured approval policy.", evidence: evidence.slice(0, 12), providerId: task.providerId, model: task.model, ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
             await this.repository.updateTask({ id: task.id, expectedRevision: task.revision, state: "awaiting_approval", plan });
+            await this.maybeAutoApprove(task, plan, sessionId);
             return;
           }
 
@@ -542,7 +544,24 @@ export class AiTaskService implements OnModuleDestroy {
       throw new AiAssistantError("budget_exhausted");
     } catch (error) {
       const current = await this.repository.getTask(task.vpsId, task.id);
-      if (!current || terminal.has(current.state)) return;
+      if (!current || terminal.has(current.state) || current.state === "uncertain") return;
+      if (["executing", "verifying", "cancel_requested"].includes(current.state)) {
+        try {
+          await this.repository.updateTask({
+            id: current.id,
+            expectedRevision: current.revision,
+            state: "uncertain",
+            summary: redactString(error instanceof Error ? error.message : "Execution outcome ambiguous during auto-dispatch"),
+            error: {
+              code: "uncertain_outcome",
+              message: "Execution outcome ambiguous during auto-dispatch; preserved uncertain fence",
+            },
+          });
+        } catch {
+          // Fail closed without resetting uncertain state
+        }
+        return;
+      }
       const cancelled = controller.signal.aborted;
       const code = cancelled ? "cancelled" : snapshotFailureCode(error);
       await this.repository.updateTask({
@@ -555,6 +574,18 @@ export class AiTaskService implements OnModuleDestroy {
         },
       });
     }
+  }
+  private async maybeAutoApprove(task: AiTask, plan: AiPlan, sessionId: string): Promise<void> {
+    const currentPolicy = await this.policy.getPolicy(task.vpsId);
+    if (!currentPolicy?.autoApprove) return;
+    if (!await this.sessions.authenticateById(sessionId)) throw new AiAssistantError("policy_denied");
+    await this.approve(
+      { dashboardSessionId: sessionId } as unknown as Request,
+      task.vpsId,
+      task.id,
+      { planVersion: plan.planVersion, planDigest: plan.planDigest },
+      { autoApprove: true },
+    );
   }
   async submitInput(request: Request, vpsId: string, taskId: string, body: unknown) {
     this.authorize(request);
@@ -615,7 +646,7 @@ export class AiTaskService implements OnModuleDestroy {
       steps,
     };
   }
-  async approve(request: Request, vpsId: string, taskId: string, body: unknown) {
+  async approve(request: Request, vpsId: string, taskId: string, body: unknown, options?: { autoApprove?: boolean }) {
     this.authorize(request);
     const rawTask = await this.repository.getTask(vpsId, taskId);
     if (!rawTask) throw new NotFoundException("AI task not found");
@@ -630,6 +661,11 @@ export class AiTaskService implements OnModuleDestroy {
     if (task.state !== "awaiting_approval" || !plan || plan.status !== "pending" || plan.planVersion !== input.data.planVersion || plan.planDigest !== input.data.planDigest) throw new AiAssistantError("stale_plan");
     if (Date.parse(plan.expiresAt) <= Date.now()) throw new AiAssistantError("approval_expired");
     await this.policy.revalidateForDispatch(vpsId, plan);
+    if (options?.autoApprove) {
+      const pol = await this.policy.getPolicy(vpsId);
+      if (!pol?.autoApprove) return publicTask(task);
+      if (!await this.sessions.authenticateById(request.dashboardSessionId!)) throw new AiAssistantError("policy_denied");
+    }
 
     const isBridgePlan = plan.steps.some(step => bridgeTools.some(bt => bt.function.name === step.tool));
     const activePolicy = await this.policy.authorizeTaskAdmission(vpsId, true);
@@ -644,16 +680,47 @@ export class AiTaskService implements OnModuleDestroy {
           if (sha256(payload) !== step.inputDigests.payload) throw new AiAssistantError("stale_plan");
         }
       }
-      await this.repository.approve({ taskId, ...input.data, approvedSessionId: request.dashboardSessionId! });
+      try {
+        await this.repository.approve({ taskId, ...input.data, approvedSessionId: request.dashboardSessionId! });
+      } catch (err) {
+        if (err instanceof AiPersistenceConflictError && err.code === "uncertain_outcome") {
+          throw new AiAssistantError("uncertain_outcome", err.message);
+        }
+        throw err;
+      }
       const consumed = await this.repository.getTask(vpsId, taskId);
       if (!consumed) throw new AiAssistantError("stale_plan");
       const executing = await this.repository.updateTask({ id: taskId, expectedRevision: consumed.revision, state: "executing", ownerLease: { ownerInstanceId: `api-${process.pid}`, leaseSeconds: 180 } });
       const approvedPlan = executing.plan;
       if (!approvedPlan || approvedPlan.planDigest !== plan.planDigest) throw new AiAssistantError("stale_plan");
-
+      let currentTask = executing;
       try {
         for (const step of approvedPlan.steps) {
-          const outcome = await this.dockerBridge.execute(vpsId, step, approvedPlan, request);
+          const maxStepSec = step.tool === "compose_deploy" ? 4260 : step.tool.startsWith("compose") ? 3660 : 120;
+          const defaultStepSec = step.tool === "compose_deploy" ? 960 : step.tool === "compose_action" ? 360 : 120;
+          const stepTimeoutSec = step.timeoutSeconds
+            ? Math.min(step.timeoutSeconds, maxStepSec)
+            : defaultStepSec;
+          const stepLeaseSec = stepTimeoutSec + 60;
+          currentTask = await this.repository.updateTask({
+            id: taskId,
+            expectedRevision: currentTask.revision,
+            ownerLease: { ownerInstanceId: `api-${process.pid}`, leaseSeconds: stepLeaseSec },
+          });
+          const onBeforeMutate = async () => {
+            try {
+              await this.policy.revalidateForDispatch(vpsId, approvedPlan);
+            } catch {
+              throw new AiAssistantError("uncertain_outcome", "Policy changed during bridge dispatch");
+            }
+            if (options?.autoApprove) {
+              const pol = await this.policy.getPolicy(vpsId);
+              if (!pol?.autoApprove || !await this.sessions.authenticateById(request.dashboardSessionId!)) {
+                throw new AiAssistantError("uncertain_outcome", "AutoApprove disabled or session revoked during bridge dispatch");
+              }
+            }
+          };
+          const outcome = await this.dockerBridge.execute(vpsId, step, approvedPlan, request, onBeforeMutate);
           if (!outcome.ok) {
             let errorMsg = "Docker operation failed";
             if (outcome.result && typeof outcome.result === "object" && "message" in outcome.result && typeof outcome.result.message === "string") {
@@ -661,7 +728,7 @@ export class AiTaskService implements OnModuleDestroy {
             }
             const failed = await this.repository.updateTask({
               id: taskId,
-              expectedRevision: executing.revision,
+              expectedRevision: currentTask.revision,
               state: "failed",
               summary: redactString(errorMsg),
             });
@@ -680,28 +747,36 @@ export class AiTaskService implements OnModuleDestroy {
         });
         const succeeded = await this.repository.updateTask({
           id: taskId,
-          expectedRevision: executing.revision,
+          expectedRevision: currentTask.revision,
           state: "succeeded",
           summary: summaryText,
         });
         return publicTask(succeeded);
       } catch (err) {
-        if (err instanceof AiAssistantError && err.code === "uncertain_outcome") {
-          const uncertain = await this.repository.updateTask({
+        try {
+          if (err instanceof AiAssistantError && err.code === "uncertain_outcome") {
+            const uncertain = await this.repository.updateTask({
+              id: taskId,
+              expectedRevision: currentTask.revision,
+              state: "uncertain",
+              summary: redactString(err.message),
+            });
+            return publicTask(uncertain);
+          }
+          const failed = await this.repository.updateTask({
             id: taskId,
-            expectedRevision: executing.revision,
-            state: "uncertain",
-            summary: redactString(err.message),
+            expectedRevision: currentTask.revision,
+            state: "failed",
+            summary: redactString(err instanceof Error ? err.message : "Execution failed"),
           });
-          return publicTask(uncertain);
+          return publicTask(failed);
+        } catch (updateErr) {
+          if (updateErr instanceof AiPersistenceConflictError) {
+            const existing = await this.repository.getTask(vpsId, taskId);
+            if (existing) return publicTask(existing);
+          }
+          throw updateErr;
         }
-        const failed = await this.repository.updateTask({
-          id: taskId,
-          expectedRevision: executing.revision,
-          state: "failed",
-          summary: redactString(err instanceof Error ? err.message : "Execution failed"),
-        });
-        return publicTask(failed);
       }
     } else {
       const capability = await this.policy.getCapability(vpsId);
@@ -723,14 +798,39 @@ export class AiTaskService implements OnModuleDestroy {
         if (sha256(payload) !== step.inputDigests.payload) throw new AiAssistantError("stale_plan");
         this.hostPlans.authorize(step.tool.slice(5) as AiHostCommandKind, JSON.parse(payload), activePolicy);
       }
-      await this.repository.approve({ taskId, ...input.data, approvedSessionId: request.dashboardSessionId! });
+      try {
+        await this.repository.approve({ taskId, ...input.data, approvedSessionId: request.dashboardSessionId! });
+      } catch (err) {
+        if (err instanceof AiPersistenceConflictError && err.code === "uncertain_outcome") {
+          throw new AiAssistantError("uncertain_outcome", err.message);
+        }
+        throw err;
+      }
       const consumed = await this.repository.getTask(vpsId, taskId);
       if (!consumed) throw new AiAssistantError("stale_plan");
       const executing = await this.repository.updateTask({ id: taskId, expectedRevision: consumed.revision, state: "executing", ownerLease: { ownerInstanceId: `api-${process.pid}`, leaseSeconds: 180 } });
-      await this.repository.enqueueCommands(plan.steps.map(step => {
-        const commandId = randomUUID();
-        return { entry: { id: randomUUID(), taskId, stepId: step.stepId, commandId, vpsId, agentInstanceId: plan.agentInstanceId!, command: { version: 1 as const, taskId, stepId: step.stepId, commandId, vpsId, agentInstanceId: plan.agentInstanceId!, planVersion: plan.planVersion, planDigest: plan.planDigest, policyRevision: plan.policyRevision, deadlineAt: plan.expiresAt, kind: step.tool.slice(5) as AiHostCommandKind, payload: { encryptedBlobId: step.encryptedBlobId } }, status: "pending" as const, createdAt: new Date().toISOString() }, expect: { taskId, taskIdRevision: executing.revision, planDigest: plan.planDigest, commandId } };
-      }));
+      try {
+        try {
+          await this.policy.revalidateForDispatch(vpsId, plan);
+        } catch {
+          throw new AiAssistantError("uncertain_outcome", "Policy changed during host enqueue");
+        }
+        if (options?.autoApprove) {
+          const pol = await this.policy.getPolicy(vpsId);
+          if (!pol?.autoApprove || !await this.sessions.authenticateById(request.dashboardSessionId!)) {
+            throw new AiAssistantError("uncertain_outcome", "AutoApprove disabled or session revoked during host enqueue");
+          }
+        }
+        await this.repository.enqueueCommands(plan.steps.map(step => {
+          const commandId = randomUUID();
+          return { entry: { id: randomUUID(), taskId, stepId: step.stepId, commandId, vpsId, agentInstanceId: plan.agentInstanceId!, command: { version: 1 as const, taskId, stepId: step.stepId, commandId, vpsId, agentInstanceId: plan.agentInstanceId!, planVersion: plan.planVersion, planDigest: plan.planDigest, policyRevision: plan.policyRevision, deadlineAt: plan.expiresAt, kind: step.tool.slice(5) as AiHostCommandKind, payload: { encryptedBlobId: step.encryptedBlobId } }, status: "pending" as const, createdAt: new Date().toISOString() }, expect: { taskId, taskIdRevision: executing.revision, planDigest: plan.planDigest, commandId } };
+        }));
+      } catch (err) {
+        if (err instanceof AiPersistenceConflictError && err.code === "uncertain_outcome") {
+          throw new AiAssistantError("uncertain_outcome", err.message);
+        }
+        throw err;
+      }
       return publicTask(executing);
     }
   }

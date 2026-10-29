@@ -109,6 +109,12 @@ To prevent duplicate concurrent instances from contending on metrics ingest or c
 
 ## AI Assistant Operational Safety, Retention, and Lifecycle Supervision
 
+Assistant mutation plans are reviewed inline in the task inspector, including decrypted execution previews, target, risk, and expiry. `Approve` submits the exact plan version and digest; `Reject` denies the plan. No approval modal or confirmation checkbox is required; preview validation and one-time server-side approval consumption remain enforced.
+
+Assistant Settings → Permissions also exposes **Auto-approve plans (YOLO)**, persisted per VPS as `AiPolicy.autoApprove` and disabled by default, including for legacy policies. When enabled, newly proposed plans use the existing server-side approval path with the initiating dashboard session; keeping a browser tab open is not required. Enabling it does not approve plans already waiting for review. Disabling it restores manual approval for new plans; it does not undo commands already dispatched.
+
+YOLO removes the manual review pause, not permission boundaries: policy revisions, target/capability validation, payload digests, session validity, one-time plan consumption, and unresolved-outcome mutation fences still apply. With privileged execution enabled, allowed root commands can execute without interactive review. The Assistant displays an enabled warning while YOLO is active.
+
 ### Retention and State Fencing
 
 1. **Dual-rate retention scheduler:** `AiRetentionService` runs on application bootstrap and on a periodic schedule with a 5-second session/lease reconciliation loop and a 300-second 30-day retention pruning pass. It executes maintenance covering terminal tasks and execution blobs without blocking HTTP request paths.
@@ -121,7 +127,7 @@ To prevent duplicate concurrent instances from contending on metrics ingest or c
 
 1. **Active task reconciliation:** At startup and during periodic maintenance, active tasks across all VPS instances are evaluated.
 2. **Awaiting task expiration:** Tasks remaining in `awaiting_approval`, `awaiting_input`, or `planning` past their `expiresAt` deadline are transitioned to `expired` with wire code `approval_expired`.
-3. **Owner lease expiration:** Tasks in `executing` or `verifying` whose runtime owner lease expires without fresh heartbeat/receipt are transitioned to `uncertain` with wire code `uncertain_outcome`, preventing duplicate execution while maintaining the active-slot fence.
+3. **Owner lease expiration and mutation fencing:** Tasks in `executing` or `verifying` whose runtime owner lease expires without fresh heartbeat/receipt are transitioned to `uncertain` with wire code `uncertain_outcome`. Active agent heartbeats renew the owner lease on live tasks to prevent premature expiry. The active conversation slot (`planning`, `awaiting_input`, `awaiting_approval`, `executing`, `verifying`, `cancel_requested`) allows new conversational planning tasks to proceed, while a strict mutation fence prevents plan approval and outbox dispatch whenever an unresolved `uncertain` task or receipt exists on the VPS, avoiding duplicate execution while unblocking continued conversation. Bridge step timeouts and the API owner lease are sized from the `apps.work` operation deadline (Compose deploy: 600s pull + 60s stop grace + app readiness, default 300s, max 3600s; lifecycle action: readiness + 60s stop grace), so a genuinely running operation is never observed past its own deadline and falsely reported uncertain.
 4. **Session logout and revocation:** If the initiating dashboard session or the approving session is revoked, logged out, or expired in `DashboardSessionService`:
    - Pending tasks (`planning`, `awaiting_approval`, `awaiting_input`) are expired immediately (`session_revoked`).
    - Executing or verifying tasks are transitioned to `cancel_requested` so the agent terminates execution on the next heartbeat, rather than running detached after logout.

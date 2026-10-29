@@ -74,6 +74,7 @@ function policy(vpsId: string, overrides: Partial<AiPolicy> = {}): AiPolicy {
     execMode: "sandbox",
     privilegedAcknowledgedAt: null,
     privilegedAcknowledgedBy: null,
+    autoApprove: false,
     fileReadScopes: [],
     fileWriteScopes: [],
     serviceProfileIds: [],
@@ -102,7 +103,7 @@ describe("AiDockerBridgeService", () => {
   let vpsId: string;
   let bridge: AiDockerBridgeService;
   let mgmtRepo: ReturnType<typeof createJsonDockerManagementRepository>;
-
+  let appService: ApplicationsService;
   function sample(s: SampleInput) {
     const scope = s.scope ?? "container";
     return {
@@ -155,7 +156,7 @@ const createdPre = undefined
     vpsId = created.id;
     await vpsRepo.update(vpsId, { dockerManagementEnabled: true, composeManagementEnabled: true });
     const monitoringService = new DockerMonitoringService(monitoringRepo, vpsRepo, config);
-    const appService = new ApplicationsService(config, vpsRepo, agentRepo, appRepo, appInvRepo);
+    appService = new ApplicationsService(config, vpsRepo, agentRepo, appRepo, appInvRepo);
     const mgmtService = new DockerManagementService(vpsRepo, mgmtRepo, monitoringRepo, config, appService);
     bridge = new AiDockerBridgeService(
       aiRepo,
@@ -439,6 +440,122 @@ const createdPre = undefined
     const result = await task;
     await settle;
     expect(result.ok).toBe(false);
+  });
+  it("proposes compose action and deploy with timeouts aligned to apps.work deadlines", async () => {
+    vi.spyOn(appService, "detail").mockImplementation(async (_vpsId, appId) => ({
+      id: appId,
+      projectName: "my-app",
+      displayName: "My App",
+      generation: 1,
+      daemonEpoch: "epoch-1",
+      agentInstanceId: "agent-inst-1",
+      mode: "managed",
+      source: { verified: true, digest: "d".repeat(64) },
+      readinessSeconds: appId === "app-custom" ? 400 : undefined,
+    } as never));
+
+    vi.spyOn(appService, "previewDetail").mockResolvedValue({
+      id: "prev-1",
+      status: "ready",
+      digest: "p".repeat(64),
+    } as never);
+
+    // 1. compose_action with default readiness -> 300 + 60 = 360s
+    const actionDefault = await bridge.propose(
+      vpsId,
+      "compose_action",
+      { appId: "app-default", action: "restart" },
+      policy(vpsId),
+    );
+    expect(actionDefault.step.timeoutSeconds).toBe(360);
+
+    // 2. compose_action with custom readiness (400) -> 400 + 60 = 460s
+    const actionCustom = await bridge.propose(
+      vpsId,
+      "compose_action",
+      { appId: "app-custom", action: "restart" },
+      policy(vpsId),
+    );
+    expect(actionCustom.step.timeoutSeconds).toBe(460);
+
+    // 3. compose_deploy with default readiness -> 600 pull + 60 stop + 300 = 960s
+    const deployDefault = await bridge.propose(
+      vpsId,
+      "compose_deploy",
+      { appId: "app-default", previewId: "prev-1" },
+      policy(vpsId),
+    );
+    expect(deployDefault.step.timeoutSeconds).toBe(960);
+
+    // 4. compose_deploy with custom readiness (400) -> 600 pull + 60 stop + 400 = 1060s
+    const deployCustom = await bridge.propose(
+      vpsId,
+      "compose_deploy",
+      { appId: "app-custom", previewId: "prev-1" },
+      policy(vpsId),
+    );
+    expect(deployCustom.step.timeoutSeconds).toBe(1060);
+  });
+
+  it("observes long-running compose deployment past previous 300s clamp using bounded virtual time", async () => {
+    vi.spyOn(appService, "detail").mockResolvedValue({
+      id: "app-deploy",
+      projectName: "my-app",
+      displayName: "My App",
+      generation: 1,
+      daemonEpoch: "epoch-1",
+      agentInstanceId: "agent-inst-1",
+      mode: "managed",
+      source: { verified: true, digest: "d".repeat(64) },
+      readinessSeconds: 300,
+    } as never);
+
+    vi.spyOn(appService, "previewDetail").mockResolvedValue({
+      id: "prev-1",
+      status: "ready",
+      digest: "p".repeat(64),
+    } as never);
+
+    vi.spyOn(appService, "confirmPreview").mockResolvedValue({
+      id: "op-deploy-1",
+    } as never);
+
+    const proposal = await bridge.propose(
+      vpsId,
+      "compose_deploy",
+      { appId: "app-deploy", previewId: "prev-1" },
+      policy(vpsId),
+    );
+    expect(proposal.step.timeoutSeconds).toBe(960);
+
+    // Simulate operation running for 400s (exceeding old 300s clamp):
+    // starts at t=0, succeeds at t=400s
+    const startTime = Date.now();
+    vi.spyOn(appService, "operation").mockImplementation(async () => {
+      const elapsedMs = Date.now() - startTime;
+      if (elapsedMs >= 400_000) {
+        return { id: "op-deploy-1", status: "succeeded" } as never;
+      }
+      return { id: "op-deploy-1", status: "executing" } as never;
+    });
+
+    vi.useFakeTimers();
+    try {
+      const execPromise = bridge.execute(
+        vpsId,
+        proposal.step,
+        planFor(proposal.step, proposal.preconditions),
+        { dashboardSessionId: "sess-1" } as never,
+      );
+
+      // Advance virtual time by 410s (exceeds old 300s clamp without real wait)
+      await vi.advanceTimersByTimeAsync(410_000);
+
+      const result = await execPromise;
+      expect(result.ok).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
 });

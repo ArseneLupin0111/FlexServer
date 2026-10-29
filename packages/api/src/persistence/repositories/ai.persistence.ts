@@ -39,8 +39,8 @@ export type AiPersistenceConflictCode =
   | "policy_conflict"
   | "approval_conflict"
   | "stale_dispatch"
-  | "receipt_conflict";
-
+  | "receipt_conflict"
+  | "uncertain_outcome";
 export class AiPersistenceConflictError extends Error {
   constructor(
     readonly code: AiPersistenceConflictCode,
@@ -366,7 +366,6 @@ export const AI_ACTIVE_TASK_STATES: readonly AiTaskState[] = [
   "executing",
   "verifying",
   "cancel_requested",
-  "uncertain",
 ];
 
 /** Terminal set used for retention deletes; anything not active is terminal here */

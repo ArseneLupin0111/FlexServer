@@ -44,6 +44,7 @@ export const defaultAiPolicy = (vpsId: string): AiPolicy => ({
   vpsId, aiEnabled: true, readEnabled: true, dockerActionsEnabled: true,
   composeActionsEnabled: true, shellEnabled: false, execMode: "sandbox",
   privilegedAcknowledgedAt: null, privilegedAcknowledgedBy: null,
+  autoApprove: false,
   fileReadScopes: [], fileWriteScopes: [], serviceProfileIds: [],
   sendLogsToProvider: false, sendFilesToProvider: false, revision: 0,
   updatedAt: new Date(0).toISOString(),
@@ -56,6 +57,7 @@ const normalizePolicy = (policy: AiPolicy): AiPolicy => ({
   execMode: policy.execMode === "privileged" ? "privileged" : "sandbox",
   privilegedAcknowledgedAt: policy.privilegedAcknowledgedAt ?? null,
   privilegedAcknowledgedBy: policy.privilegedAcknowledgedBy ?? null,
+  autoApprove: policy.autoApprove === true,
 });
 const refreshPolicy = (base: AiPolicy, patch: AiPolicyUpdateInput["patch"], now: string): AiPolicy =>
   ({ ...base, ...patch, vpsId: base.vpsId, revision: bumpRevision(base.revision), updatedAt: now });
@@ -161,7 +163,6 @@ const ACTIVE_STATES = new Set<AiTaskState>([
   "executing",
   "verifying",
   "cancel_requested",
-  "uncertain",
 ]);
 
 const isTerminalState = (state: AiTaskState): boolean =>
@@ -225,6 +226,18 @@ const assertEnqueueExpectation = (
   const plan = task.plan;
   if (expect.autoAuthorized) {
     return;
+  }
+  const hasUnresolvedUncertainTask = state.tasks.some(
+    (t) => t.vpsId === task.vpsId && t.id !== task.id && t.state === "uncertain",
+  );
+  const hasUnresolvedUncertainReceipt = state.receipts.some(
+    (r) => r.vpsId === task.vpsId && r.taskId !== task.id && r.status === "uncertain",
+  );
+  if (hasUnresolvedUncertainTask || hasUnresolvedUncertainReceipt) {
+    throw new AiPersistenceConflictError(
+      "uncertain_outcome",
+      `cannot enqueue mutations on vps ${task.vpsId} while uncertain executions exist`,
+    );
   }
   if (!plan) {
     throw new AiPersistenceConflictError("stale_dispatch", `task ${expect.taskId} has no plan`);
@@ -513,7 +526,7 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
           (c) => c.id === conversationId && c.vpsId === vpsId,
         );
         if (index === -1) return undefined;
-        if (state.tasks.some((task) => task.conversationId === conversationId && ACTIVE_STATES.has(task.state))) {
+        if (state.tasks.some((task) => task.conversationId === conversationId && (ACTIVE_STATES.has(task.state) || task.state === "uncertain"))) {
           throw new AiPersistenceConflictError("conversation_conflict", "conversation has unresolved work");
         }
         const [removed] = state.conversations.splice(index, 1);
@@ -816,6 +829,11 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
             protectedTaskIds.add(receipt.taskId);
           }
         }
+        for (const task of state.tasks) {
+          if (task.state === "uncertain") {
+            protectedTaskIds.add(task.id);
+          }
+        }
 
         const deletedIds = new Set<string>();
         state.tasks = state.tasks.filter((task) => {
@@ -849,6 +867,18 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
         const task = findTask(state, input.taskId);
         if (!task) {
           throw new AiPersistenceConflictError("approval_conflict", `task ${input.taskId} missing`);
+        }
+        const hasUnresolvedUncertainTask = state.tasks.some(
+          (t) => t.vpsId === task.vpsId && t.id !== task.id && t.state === "uncertain",
+        );
+        const hasUnresolvedUncertainReceipt = state.receipts.some(
+          (r) => r.vpsId === task.vpsId && r.taskId !== task.id && r.status === "uncertain",
+        );
+        if (hasUnresolvedUncertainTask || hasUnresolvedUncertainReceipt) {
+          throw new AiPersistenceConflictError(
+            "uncertain_outcome",
+            `cannot approve mutations on vps ${task.vpsId} while uncertain executions exist`,
+          );
         }
         const plan = task.plan;
         if (!plan) {
@@ -1383,7 +1413,7 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
         if (state.conversations.some((conversation) => conversation.selectedProviderId === id)) {
           throw new AiPersistenceConflictError("provider_conflict", "provider is still selected by a conversation");
         }
-        if (state.tasks.some((task) => task.providerId === id && ACTIVE_STATES.has(task.state))) {
+        if (state.tasks.some((task) => task.providerId === id && (ACTIVE_STATES.has(task.state) || task.state === "uncertain"))) {
           throw new AiPersistenceConflictError("provider_conflict", "provider is referenced by an active task");
         }
         const [removed] = providers.splice(index, 1);
@@ -1506,7 +1536,7 @@ export async function withAiAdminLock<T>(
     return action({
       async hasEncryptedFields() { return Boolean(state.settings?.encryptedApiKey || (state.providers ?? []).some((profile) => profile.encryptedApiKey || profile.encryptedOauth) || state.blobs.length); },
       async rotateEncryptedFields(options) {
-        const refusedTaskIds = state.tasks.filter((task) => ACTIVE_STATES.has(task.state)).map((task) => task.id);
+        const refusedTaskIds = state.tasks.filter((task) => ACTIVE_STATES.has(task.state) || task.state === "uncertain").map((task) => task.id);
         const envelopeAads = [
           ...(state.settings?.encryptedApiKey
             ? [{ envelope: state.settings.encryptedApiKey, aad: { vpsId: "global", taskId: "provider", field: "providerApiKey", version: 1 } as const, slot: "settings" as const }]

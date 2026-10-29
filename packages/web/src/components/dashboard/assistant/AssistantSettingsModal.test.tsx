@@ -684,6 +684,7 @@ const modalPolicy: AiPolicy = {
   execMode: "sandbox",
   privilegedAcknowledgedAt: null,
   privilegedAcknowledgedBy: null,
+  autoApprove: false,
   fileReadScopes: ["/var/log"],
   fileWriteScopes: [],
   serviceProfileIds: [],
@@ -730,5 +731,19 @@ describe("AssistantSettingsModal policy tab without the shell toggle", () => {
       dockerActionsEnabled: true,
       composeActionsEnabled: false,
     });
+  });
+
+  it("persists autoApprove toggle state in the policy patch when saving permissions", async () => {
+    const { mocks } = renderModal([makeProfile()], { policy: { ...modalPolicy, autoApprove: false } });
+
+    fireEvent.click(screen.getByRole("button", { name: /permissions/i }));
+    fireEvent.click(screen.getByRole("switch", { name: /auto-approve plans on this vps/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save permissions/i }));
+
+    await waitFor(() => {
+      expect(mocks.onSavePolicy).toHaveBeenCalledTimes(1);
+    });
+    const patch = mocks.onSavePolicy.mock.calls[0][0] as UpdateAiPolicy;
+    expect(patch.autoApprove).toBe(true);
   });
 });

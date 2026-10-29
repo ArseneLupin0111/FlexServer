@@ -9,6 +9,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Terminal,
+  Zap,
 } from "lucide-react";
 import type { VpsRecord } from "../../../lib/api";
 import {
@@ -52,7 +53,6 @@ import { useAiTaskStream } from "../../../lib/ai-stream";
 import { AssistantHeader } from "./AssistantHeader";
 import { AssistantChat } from "./AssistantChat";
 import { AssistantTaskPanel } from "./AssistantTaskPanel";
-import { AssistantApprovalDialog } from "./AssistantApprovalDialog";
 import { AssistantSettingsModal } from "./AssistantSettingsModal";
 import { AssistantHistoryColumn } from "./AssistantHistoryColumn";
 import { Button } from "../../ui/button";
@@ -150,7 +150,6 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
 
   // Dialogs
-  const [approvalDialogOpen, setApprovalDialogOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   // Conversation history: persistent column left of the chat on wide
   // screens; on narrow screens it becomes a slide-over drawer (OpenAI-style
@@ -192,10 +191,8 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         }
         return [taskSnapshot, ...prev];
       });
-      // If awaiting approval, pop the approval dialog open automatically once
-      if (taskSnapshot.state === "awaiting_approval" && taskSnapshot.plan) {
-        setApprovalDialogOpen(true);
-      }
+      // Approval renders inline in the task inspector; the sidebar auto-opens
+      // for awaiting_approval via the state effect below.
     }, []),
     onStepUpdate: useCallback((stepUpdate: AiPlanStep) => {
       setActiveTask((prev) => {
@@ -552,7 +549,6 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         planDigest,
       });
       setActiveTask(updated);
-      setApprovalDialogOpen(false);
     } catch (err) {
       setRootError(err instanceof Error ? err.message : "Failed to approve plan.");
     } finally {
@@ -568,7 +564,6 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     try {
       const updated = await denyVpsAiTask(vps.id, activeTaskId);
       setActiveTask(updated);
-      setApprovalDialogOpen(false);
     } catch (err) {
       setRootError(err instanceof Error ? err.message : "Failed to deny plan.");
     } finally {
@@ -1161,9 +1156,6 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
                 Auto-compact
               </span>
             ) : null}
-            {activeTask.state === "awaiting_approval" ? (
-              <Button size="sm" onClick={() => setApprovalDialogOpen(true)} className="text-xs">Review Plan</Button>
-            ) : null}
           </div>
           <Button type="button" variant="ghost" size="sm" aria-expanded={taskDetailsOpen} aria-controls="assistant-task-details" onClick={() => setTaskDetailsOpen((open) => !open)} className="text-xs">
             <Terminal className="mr-1.5 h-3.5 w-3.5" />{taskDetailsOpen ? "Hide task details" : "Task details"}
@@ -1228,8 +1220,20 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
                 <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
                 <span>
                   Privileged execution is on for this host: AI shell commands
-                  run as root on the host, outside the sandbox. Every command
-                  still requires manual approval.
+                  run as root on the host, outside the sandbox.{policy?.autoApprove
+                    ? " Commands auto-execute without manual approval."
+                    : " Every command still requires manual approval."}
+                </span>
+              </div>
+            ) : null}
+            {policy?.autoApprove ? (
+              <div
+                data-testid="yolo-status-banner"
+                className="flex shrink-0 items-center gap-2 border border-warn/40 bg-warn/10 px-3 py-1.5 text-xs text-warn"
+              >
+                <Zap className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span>
+                  <strong className="font-semibold">YOLO mode enabled:</strong> allowed changes autoexecute on this VPS without manual approval.
                 </span>
               </div>
             ) : null}
@@ -1280,26 +1284,17 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
               isTruncated={isTruncated}
               onClearOutput={clearOutput}
               onReconnectStream={reconnect}
-              onOpenApproval={() => setApprovalDialogOpen(true)}
+              vpsId={vps.id}
               onCancelTask={handleCancelTask}
               onReconcileTask={handleReconcileTask}
+              onApprovePlan={handleApprovePlan}
+              onDenyPlan={handleDenyPlan}
               busy={actionBusy}
             />
           </div>
         </div>
       </div>
 
-      {/* Exact Approval Dialog */}
-      <AssistantApprovalDialog
-        open={approvalDialogOpen}
-        plan={activeTask?.plan || null}
-        vpsId={vps.id}
-        taskId={activeTaskId || activeTask?.id}
-        busy={actionBusy}
-        onApprove={handleApprovePlan}
-        onDeny={handleDenyPlan}
-        onClose={() => setApprovalDialogOpen(false)}
-      />
 
       {/* Settings & Policy Modal */}
       <AssistantSettingsModal

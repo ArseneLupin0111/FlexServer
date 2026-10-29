@@ -13,6 +13,7 @@ const policy = {
   execMode: "sandbox",
   privilegedAcknowledgedAt: null,
   privilegedAcknowledgedBy: null,
+  autoApprove: false,
   fileReadScopes: [],
   fileWriteScopes: [],
   serviceProfileIds: [],

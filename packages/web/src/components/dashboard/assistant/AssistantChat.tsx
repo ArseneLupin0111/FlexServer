@@ -214,7 +214,7 @@ export function AssistantChat({
               How can the Assistant help?
             </p>
             <p className="mt-1 max-w-md text-xs leading-relaxed text-dim">
-              Ask about metrics or inventory. Changes require plan approval; shell
+              Ask about metrics or inventory. Changes follow host policy controls; shell
               and file access stay off unless explicitly enabled.
             </p>
             <div className="mt-4 flex max-w-lg flex-wrap items-center justify-center gap-2">

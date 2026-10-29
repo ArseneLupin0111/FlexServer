@@ -204,6 +204,8 @@ export type AiPolicy = {
    * Switching back to sandbox never clears it (plan Q4). */
   privilegedAcknowledgedAt: string | null;
   privilegedAcknowledgedBy: string | null;
+  /** When true, mutating plans auto-execute on this VPS without manual approval. Default false. */
+  autoApprove: boolean;
   fileReadScopes: string[];
   fileWriteScopes: string[];
   serviceProfileIds: string[];
@@ -223,6 +225,8 @@ export type UpdateAiPolicy = {
   /** Required by the server when switching to "privileged" without a retained
    * acknowledgment; re-acking refreshes the stored who/when (plan Q4). */
   acknowledgePrivileged?: boolean;
+  /** Per-VPS YOLO toggle: auto-approve mutating plans on generation. Default false. */
+  autoApprove?: boolean;
   fileReadScopes?: string[];
   fileWriteScopes?: string[];
   serviceProfileIds?: string[];

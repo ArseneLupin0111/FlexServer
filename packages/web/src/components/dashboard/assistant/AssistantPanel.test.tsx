@@ -114,6 +114,7 @@ const enabledPolicy: AiPolicy = {
   execMode: "sandbox",
   privilegedAcknowledgedAt: null,
   privilegedAcknowledgedBy: null,
+  autoApprove: false,
   fileReadScopes: [],
   fileWriteScopes: [],
   serviceProfileIds: [],
@@ -1530,34 +1531,3 @@ describe("AssistantPanel selection-pin warning", () => {
   });
 });
 
-// ── Privileged execution banner (execmode plan Q4) ───────────────────────
-
-describe("AssistantPanel privileged execution banner", () => {
-  it("shows the root no-sandbox warning while the loaded policy is privileged", async () => {
-    mockAssistantLoaded({
-      tasks: [],
-      conversationDetail: null,
-      policy: { ...enabledPolicy, execMode: "privileged" },
-    });
-
-    renderPanel();
-
-    const banner = await screen.findByTestId("privileged-exec-banner");
-    expect(banner).toHaveTextContent(/run as root on the host/i);
-    expect(banner).toHaveTextContent(/outside the sandbox/i);
-    expect(banner).toHaveTextContent(/manual approval/i);
-  });
-
-  it("shows no banner for the default sandbox policy", async () => {
-    mockAssistantLoaded({
-      tasks: [],
-      conversationDetail: null,
-      policy: { ...enabledPolicy, execMode: "sandbox" },
-    });
-
-    renderPanel();
-
-    await screen.findByRole("button", { name: /^settings$/i });
-    expect(screen.queryByTestId("privileged-exec-banner")).toBeNull();
-  });
-});

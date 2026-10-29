@@ -1,18 +1,16 @@
 import { useState, useRef, useEffect } from "react";
 import { AssistantMarkdown } from "./AssistantMarkdown";
+import { AssistantApprovalCard } from "./AssistantApprovalCard";
 import {
   Activity,
   AlertOctagon,
   AlertTriangle,
-  CheckCircle2,
   Clock,
   Code2,
   Copy,
-  Eye,
   LoaderCircle,
   RefreshCw,
   RotateCcw,
-  ShieldAlert,
   Terminal,
   Trash2,
   XCircle,
@@ -28,10 +26,12 @@ export type AssistantTaskPanelProps = {
   streamState: AiStreamState;
   hasGap: boolean;
   isTruncated: boolean;
+  vpsId: string;
   onClearOutput: () => void;
   onCancelTask: () => Promise<void>;
   onReconcileTask: () => Promise<void>;
-  onOpenApproval: () => void;
+  onApprovePlan: (planVersion: number, planDigest: string) => Promise<void>;
+  onDenyPlan: () => Promise<void>;
   onReconnectStream?: () => void;
   busy?: boolean;
 };
@@ -110,10 +110,12 @@ export function AssistantTaskPanel({
   streamState,
   hasGap,
   isTruncated,
+  vpsId,
   onClearOutput,
   onCancelTask,
   onReconcileTask,
-  onOpenApproval,
+  onApprovePlan,
+  onDenyPlan,
   onReconnectStream,
   busy = false,
 }: AssistantTaskPanelProps) {
@@ -222,35 +224,16 @@ export function AssistantTaskPanel({
             <div><dt className="text-dim">Tool calls / rounds</dt><dd className="mt-1 font-mono text-text">{task.usage.toolCalls} / {task.usage.rounds}</dd></div>
           </dl>
         ) : null}
-        {/* Awaiting Approval Action Card */}
+        {/* Awaiting approval: inline authorization, no separate dialog */}
         {isAwaitingApproval && task.plan ? (
-          <div className="border border-warn/40 bg-warn/10 p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="space-y-1">
-                <div className="flex items-center gap-2 text-sm font-semibold text-warn">
-                  <ShieldAlert className="h-4 w-4 shrink-0" />
-                  <span>Approval Required</span>
-                </div>
-                <p className="text-xs text-text">
-                  The plan contains {task.plan.steps.length} operation
-                  {task.plan.steps.length === 1 ? "" : "s"} requiring exact verification.
-                </p>
-                <div className="font-mono text-[11px] text-dim">
-                  Digest: {task.plan.planDigest.slice(0, 24)}…
-                </div>
-              </div>
-              <Button
-                type="button"
-                variant="default"
-                size="sm"
-                onClick={onOpenApproval}
-                className="shrink-0 text-xs font-semibold"
-              >
-                <Eye className="mr-1.5 h-3.5 w-3.5" />
-                Review Plan
-              </Button>
-            </div>
-          </div>
+          <AssistantApprovalCard
+            plan={task.plan}
+            vpsId={vpsId}
+            taskId={task.id}
+            busy={busy}
+            onApprove={onApprovePlan}
+            onDeny={onDenyPlan}
+          />
         ) : null}
 
         {/* Cancellation Pending Alert */}
@@ -271,8 +254,11 @@ export function AssistantTaskPanel({
               <span>Uncertain Outcome</span>
             </div>
             <p className="text-text">
-              The executor was interrupted or reported an ambiguous result.
-              State changes may be partially applied. Receipts are protected.
+              An action reported an ambiguous result or was interrupted.
+              State changes may be partially applied; receipts are protected and will never be replayed.
+            </p>
+            <p className="text-[11px] text-dim">
+              You can continue chat and read-only investigation, but further changes remain blocked until state is reconciled.
             </p>
             <Button
               type="button"

@@ -137,7 +137,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD node 
 CMD ["node", "dist/server.js"]
 
 FROM nginx:1.30.5-alpine3.24 AS web-runtime
-RUN apk upgrade --no-cache libcrypto3 libssl3 openssl
+RUN apk upgrade --no-cache libcrypto3 libssl3 openssl brotli-libs
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=web-build /app/public /usr/share/nginx/html
 EXPOSE 80

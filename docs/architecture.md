@@ -8,6 +8,8 @@ The backend starts from `packages/api/src/server.ts`, creates an Express server,
 
 `packages/api/src/app.module.ts` wires controllers and services with dependency injection. The current portfolio MVP keeps JSON persistence behind repository interfaces so SQLite can replace it later without changing controllers.
 
+The Docker web runtime upgrades OpenSSL and Brotli packages from the Alpine repositories during image builds. This includes the `brotli-libs` fix for CVE-2026-111497 (`1.2.1-r0` or newer); CI continues to reject images with fixable CRITICAL vulnerabilities rather than suppressing findings.
+
 ## Backend Modules
 
 - Config: parses `APP_MODE`, `DASHBOARD_SESSION_SECRET`, terminal flags, private-network flags, and storage directories.

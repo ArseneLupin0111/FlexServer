@@ -17,8 +17,8 @@ import type { AiPlan, AiPlanStep, AiPolicy, AiTask } from "./ai.models.js";
 import { AiAssistantError } from "./ai-failures.js";
 import { encryptAiSecret, loadAiKeyring } from "./ai-crypto.js";
 import { sha256 } from "./ai-host-plan.service.js";
+import { getEffectiveAiPolicy } from "./ai-policy.service.js";
 import type { ProviderTool } from "./ai-provider.js";
-
 function sleep(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
   setTimeout(resolve, ms);
@@ -74,7 +74,7 @@ export const bridgeTools: ProviderTool[] = [
     type: "function",
     function: {
       name: "docker_action",
-      description: "Propose a lifecycle action (start, stop, restart) on a Docker container. Requires approval.",
+      description: "Propose a lifecycle action (start, stop, restart) on a Docker container subject to configured approval policy.",
       parameters: {
         type: "object",
         properties: {
@@ -102,7 +102,7 @@ export const bridgeTools: ProviderTool[] = [
     type: "function",
     function: {
       name: "compose_action",
-      description: "Propose a lifecycle action (start, stop, restart) on a Docker Compose application. Requires approval.",
+      description: "Propose a lifecycle action (start, stop, restart) on a Docker Compose application subject to configured approval policy.",
       parameters: {
         type: "object",
         properties: {
@@ -140,7 +140,7 @@ export const bridgeTools: ProviderTool[] = [
     type: "function",
     function: {
       name: "compose_deploy",
-      description: "Propose deploying an approved preview for a Docker Compose application.",
+      description: "Propose deploying an approved preview for a Docker Compose application subject to configured approval policy.",
       parameters: {
         type: "object",
         properties: {
@@ -198,11 +198,12 @@ export class AiDockerBridgeService {
   ): Promise<AiPlanStepProposal> {
     const vpsId = typeof vpsIdOrTask === "string" ? vpsIdOrTask : vpsIdOrTask.vpsId;
     const taskId = typeof vpsIdOrTask === "string" ? explicitTaskId : vpsIdOrTask.id;
+    const effectivePolicy = getEffectiveAiPolicy(policy);
 
-    if (!policy.aiEnabled) throw new AiAssistantError("policy_denied", "AI is disabled by policy");
+    if (!effectivePolicy.aiEnabled) throw new AiAssistantError("policy_denied", "AI is disabled by policy");
 
     if (tool === "docker_action") {
-      if (!policy.dockerActionsEnabled) {
+      if (!effectivePolicy.dockerActionsEnabled) {
         throw new AiAssistantError("policy_denied", "Docker actions are disabled by policy");
       }
       const parsed = dockerActionSchema.safeParse(rawArgs);
@@ -303,7 +304,7 @@ export class AiDockerBridgeService {
     }
 
     if (tool === "compose_action") {
-      if (!policy.composeActionsEnabled) {
+      if (!effectivePolicy.composeActionsEnabled) {
         throw new AiAssistantError("policy_denied", "Compose actions are disabled by policy");
       }
       const parsed = composeActionSchema.safeParse(rawArgs);
@@ -393,7 +394,7 @@ export class AiDockerBridgeService {
     }
 
     if (tool === "compose_preview") {
-      if (!policy.composeActionsEnabled) {
+      if (!effectivePolicy.composeActionsEnabled) {
         throw new AiAssistantError("policy_denied", "Compose actions are disabled by policy");
       }
       const parsed = composePreviewSchema.safeParse(rawArgs);
@@ -468,7 +469,7 @@ export class AiDockerBridgeService {
     }
 
     if (tool === "compose_deploy") {
-      if (!policy.composeActionsEnabled) {
+      if (!effectivePolicy.composeActionsEnabled) {
         throw new AiAssistantError("policy_denied", "Compose actions are disabled by policy");
       }
       const parsed = composeDeploySchema.safeParse(rawArgs);

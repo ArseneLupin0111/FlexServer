@@ -215,3 +215,30 @@ func TestFileBroker_MissingDigestsRejected(t *testing.T) {
 		t.Fatalf("expected error for missing expectedPreImageDigest on replacement")
 	}
 }
+
+func TestFileBroker_ValidateScopeRoot(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "ai-filebroker-scope-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	broker, err := NewFileBroker(tempDir, nil)
+	if err != nil {
+		t.Fatalf("NewFileBroker failed: %v", err)
+	}
+
+	// Test both POSIX-literal paths and OS-native filepath.Clean paths (Windows and Linux)
+	for _, targetPath := range []string{"/var/log/app.log", filepath.Clean("/var/log/app.log")} {
+		if err := broker.ValidateScope(targetPath, "/"); err != nil {
+			t.Errorf("ValidateScope(%q, \"/\") failed: %v", targetPath, err)
+		}
+	}
+
+	// Protected paths even under root scope "/" must be rejected with ErrProtectedPath
+	for _, protectedPath := range []string{"/etc/shadow", filepath.Clean("/etc/shadow"), "/root/.ssh/id_rsa", filepath.Clean("/etc/sudoers")} {
+		if err := broker.ValidateScope(protectedPath, "/"); !errors.Is(err, ErrProtectedPath) {
+			t.Errorf("ValidateScope(%q, \"/\") expected ErrProtectedPath, got: %v", protectedPath, err)
+		}
+	}
+}

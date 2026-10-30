@@ -71,12 +71,107 @@ export type AiTaskError = {
   details?: unknown;
 };
 
+export type AiExecutionMode = "manual" | "yolo";
+
+export type AiTaskLoopPhase =
+  | "planning"
+  | "awaiting_approval"
+  | "executing"
+  | "verifying"
+  | "continuation_ready"
+  | "completed";
+
+export type AiCompletionKind =
+  | "verified"
+  | "unverified"
+  | "blocked"
+  | "cancelled"
+  | "expired";
+
+export type AiTaskCompletionOutcome = {
+  kind: AiCompletionKind;
+  reasonCode: string;
+  message: string;
+  evidenceReferences?: string[];
+  completedAt: string;
+};
+
+export type AiTaskObservation = {
+  id: string;
+  turn: number;
+  tool: string;
+  source: "read_tool" | "host_receipt" | "docker_bridge";
+  commandId?: string;
+  stepId?: string;
+  planVersion?: number;
+  planDigest?: string;
+  target?: string;
+  status: "succeeded" | "failed" | "uncertain" | "cancelled";
+  exitCode?: number;
+  evidence?: AiConversationMessageEvidence[];
+  restrictedSources?: AiRestrictedEvidenceSource[];
+  outputPreview?: string;
+  summary?: string;
+  createdAt: string;
+};
+
+export type AiTaskJournalEntry = {
+  journalId: string;
+  turn: number;
+  callId: string;
+  tool: string;
+  providerId?: string;
+  providerRevision?: number;
+  inputArgs?: Record<string, unknown>;
+  status: "dispatched" | "completed" | "failed" | "cancelled";
+  observationId?: string;
+  commandId?: string;
+  createdAt: string;
+  completedAt?: string;
+};
+
+export type AiTaskLoopCounters = {
+  providerCalls: number;
+  readCalls: number;
+  mutationPlans: number;
+  verificationAttempts: number;
+  toolCalls: number;
+  noProgressStreak: number;
+  noProgressFingerprint?: string;
+  deadlineAt: string;
+};
+
+export type AiTaskLoopState = {
+  contractVersion: "loop_v1";
+  mode: AiExecutionMode;
+  turn: number;
+  phase: AiTaskLoopPhase;
+  leaseToken: string;
+  turnLeaseOwnerInstanceId?: string;
+  turnLeaseExpiresAt?: string;
+  continuationReady: boolean;
+  pauseReason?: string;
+  pinnedProviderId?: string;
+  pinnedProviderRevision?: number;
+  pinnedPolicyRevision?: number;
+  pinnedCapabilityRevision?: number;
+  counters: AiTaskLoopCounters;
+  planHistory: AiPlan[];
+  observations: AiTaskObservation[];
+  journal: AiTaskJournalEntry[];
+  completion?: AiTaskCompletionOutcome;
+};
+
 export type AiTask = {
   id: string;
   conversationId: string;
   vpsId: string;
   state: AiTaskState;
   revision: number;
+  /** Task execution version: legacy missing/1 vs loop 2. */
+  executionVersion?: 1 | 2;
+  /** Stamped at admission from policy.executionMode for loop tasks */
+  executionMode?: AiExecutionMode;
   /** Provider profile + model bound at admission; revision changes to this
    * profile (only) invalidate the task (docs/ai-multi-provider-plan.md Q9). */
   providerId?: string;
@@ -97,6 +192,10 @@ export type AiTask = {
   initiatingSessionId?: string;
   ownerInstanceId?: string;
   ownerLeaseExpiresAt?: string;
+  /** Structured loop state present when executionVersion === 2 */
+  loop?: AiTaskLoopState;
+  /** Terminal outcome of multi-turn verification / execution */
+  completion?: AiTaskCompletionOutcome;
   createdAt: string;
   updatedAt: string;
   expiresAt?: string;
@@ -181,10 +280,9 @@ export type AiPolicy = {
    * ack. */
   privilegedAcknowledgedAt: string | null;
   privilegedAcknowledgedBy: string | null;
-  /** Server-side automatic approval of proposed plans on this VPS.
-   * Defaults to false (fail-closed). When true, newly proposed plans
-   * are immediately dispatched through standard verification CAS. */
-  autoApprove: boolean;
+  executionMode: AiExecutionMode;
+  yoloAcknowledgedAt: string | null;
+  yoloAcknowledgedBy: string | null;
   fileReadScopes: string[];
   fileWriteScopes: string[];
   serviceProfileIds: string[];

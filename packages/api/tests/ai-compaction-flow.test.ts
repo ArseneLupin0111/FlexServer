@@ -185,6 +185,44 @@ describe("assistant context compaction", () => {
     expect(generate).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { tool: "compose_action", source: "docker_bridge" as const, files: false, logs: true },
+    { tool: "host_command", source: "host_receipt" as const, files: true, logs: false },
+    { tool: "host_config_apply", source: "host_receipt" as const, files: false, logs: false },
+  ])("blocks sensitive replay for $tool after revoke and resume", async ({ tool, source, files, logs }) => {
+    const { repository, service, server } = await setup();
+    const conversation = await repository.createConversation(server.id, "Restricted continuation");
+    await repository.updateAiPolicy({ vpsId: server.id, expectedRevision: 0, patch: { sendFilesToProvider: true, sendLogsToProvider: true } });
+    const { task } = await repository.createTask({ id: "egress-task", vpsId: server.id, conversationId: conversation.id, state: "planning", requestSummary: "Verify execution", idempotencyKey: "egress-task", initiatingSessionId: "admin-session", model: "test-model", executionVersion: 2, loop: { mode: "manual", deadlineAt: new Date(Date.now() + 60000).toISOString(), pinnedProviderRevision: 1, pinnedPolicyRevision: 1 } });
+    await repository.updateTask({ id: task.id, expectedRevision: task.revision, state: "awaiting_input", loopPatch: {
+      appendJournal: [{ journalId: "execution-journal", turn: 1, callId: "execution-call", tool, inputArgs: { content: "DERIVED_FILE_SENTINEL_9942", candidateContent: "DERIVED_FILE_SENTINEL_9942", script: "echo DERIVED_FILE_SENTINEL_9942" }, status: "completed", observationId: "execution-observation", createdAt: new Date().toISOString() }],
+      appendObservations: [{ id: "execution-observation", turn: 1, tool, source, status: "failed", summary: "BRIDGE_ERROR_SENTINEL_5721", outputPreview: "SHELL_OUTPUT_SENTINEL_5721", restrictedSources: ["files", "logs"], createdAt: new Date().toISOString() }],
+    } });
+    await repository.updateAiPolicy({ vpsId: server.id, expectedRevision: 1, patch: { sendFilesToProvider: files, sendLogsToProvider: logs } });
+    const generate = vi.spyOn(AiProvider.prototype, "generate").mockResolvedValue({ message: { role: "assistant", content: "Evidence unavailable" }, usage: { inputTokens: 1, outputTokens: 1, estimated: false } });
+    await service.resume(request, server.id, task.id);
+    const outcome = await wait(repository, server.id, task.id);
+    if (!generate.mock.calls.length) expect(outcome.error?.code).toBe("policy_denied");
+    else expect(outcome.state, JSON.stringify(outcome.error)).toBe("succeeded");
+    const wire = JSON.stringify(generate.mock.calls.map(call => call[1]));
+    expect(wire).not.toContain("BRIDGE_ERROR_SENTINEL_5721");
+    expect(wire).not.toContain("SHELL_OUTPUT_SENTINEL_5721");
+    expect(wire).not.toContain("DERIVED_FILE_SENTINEL_9942");
+  });
+
+  it("blocks prior-task assistant content after file egress is revoked", async () => {
+    const { repository, service, server } = await setup();
+    const conversation = await repository.createConversation(server.id, "Restricted prior task");
+    await repository.updateAiPolicy({ vpsId: server.id, expectedRevision: 0, patch: { sendFilesToProvider: true } });
+    await repository.appendMessage({ id: "prior-sensitive-answer", taskId: "prior-task", vpsId: server.id, conversationId: conversation.id, role: "assistant", content: "FILE_HISTORY_SENTINEL_4389", restrictedSources: ["files"] });
+    await repository.updateAiPolicy({ vpsId: server.id, expectedRevision: 1, patch: { sendFilesToProvider: false } });
+    const generate = vi.spyOn(AiProvider.prototype, "generate").mockResolvedValue({ message: { role: "assistant", content: "Done" }, usage: { inputTokens: 1, outputTokens: 1, estimated: false } });
+    const task = await service.create(request, server.id, { conversationId: conversation.id, request: "Continue safely", idempotencyKey: "loop-revoked-prior-answer" });
+    const outcome = await wait(repository, server.id, task.id);
+    expect(outcome.error?.code).toBe("policy_denied");
+    expect(generate).not.toHaveBeenCalled();
+  });
+
   it("preserves bounded observations when a task transitions to an approval plan", async () => {
     const { repository, service, server, conversation } = await setup();
     await repository.saveConversationCheckpoint({ vpsId: server.id, conversationId: conversation.id, expectedRevision: 0, coveredMessageId: "history-59", summary: "Prior compact context", summaryModel: "test-model" });

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -83,21 +84,48 @@ func NewFileBroker(stateDir string, allowedRoots []string) (*FileBroker, error) 
 	}, nil
 }
 
+// normalizePosixPath converts a platform path (Windows or Linux) to a normalized POSIX path
+// without volume letters for secure prefix and boundary comparison against Linux target paths.
+func normalizePosixPath(p string) string {
+	slash := filepath.ToSlash(p)
+	if vol := filepath.VolumeName(p); vol != "" {
+		slash = strings.TrimPrefix(slash, filepath.ToSlash(vol))
+	}
+	if !strings.HasPrefix(slash, "/") {
+		slash = "/" + slash
+	}
+	return path.Clean(slash)
+}
+
 // IsProtectedPath checks if target path falls within forbidden system directories.
 func IsProtectedPath(cleanPath string) bool {
+	norm := normalizePosixPath(cleanPath)
 	for _, protected := range defaultProtectedPrefixes {
-		if cleanPath == protected || strings.HasPrefix(cleanPath, protected+"/") || ((protected == "/etc/shadow" || protected == "/etc/gshadow") && strings.HasPrefix(cleanPath, protected+".")) {
+		if norm == protected || strings.HasPrefix(norm, protected+"/") || ((protected == "/etc/shadow" || protected == "/etc/gshadow") && strings.HasPrefix(norm, protected+".")) {
 			return true
 		}
 	}
 	// Also protect hidden SSH directories in user homes
-	parts := strings.Split(filepath.ToSlash(strings.ReplaceAll(cleanPath, "\\", "/")), "/")
+	parts := strings.Split(norm, "/")
 	for _, p := range parts {
 		if p == ".ssh" {
 			return true
 		}
 	}
 	return false
+}
+
+func pathIsUnder(cleanPath, root string) bool {
+	normPath := normalizePosixPath(cleanPath)
+	normRoot := normalizePosixPath(root)
+	if normPath == normRoot {
+		return true
+	}
+	prefix := normRoot
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	return strings.HasPrefix(normPath, prefix)
 }
 
 func (b *FileBroker) ValidateScope(cleanPath string, requestedScope string) error {
@@ -113,7 +141,7 @@ func (b *FileBroker) ValidateScope(cleanPath string, requestedScope string) erro
 	// If requestedScope is non-empty, ensure path is inside it
 	if requestedScope != "" {
 		cleanScope := filepath.Clean(requestedScope)
-		if cleanPath != cleanScope && !strings.HasPrefix(cleanPath, cleanScope+string(filepath.Separator)) {
+		if !pathIsUnder(cleanPath, cleanScope) {
 			return fmt.Errorf("%w: path %s outside requested scope %s", ErrOutOfScope, cleanPath, requestedScope)
 		}
 	}
@@ -122,7 +150,7 @@ func (b *FileBroker) ValidateScope(cleanPath string, requestedScope string) erro
 	if len(b.allowedRoots) > 0 {
 		matched := false
 		for _, root := range b.allowedRoots {
-			if cleanPath == root || strings.HasPrefix(cleanPath, root+string(filepath.Separator)) {
+			if pathIsUnder(cleanPath, root) {
 				matched = true
 				break
 			}

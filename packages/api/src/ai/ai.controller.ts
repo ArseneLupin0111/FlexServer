@@ -59,6 +59,8 @@ export class AiPolicyController {
   task(@Req() req: Request, @Param("id") id: string, @Param("taskId") taskId: string) { return this.tasks.get(req, id, taskId); }
   @Post("tasks/:taskId/cancel")
   cancel(@Req() req: Request, @Param("id") id: string, @Param("taskId") taskId: string) { return this.tasks.cancel(req, id, taskId); }
+  @Post("tasks/:taskId/resume")
+  resume(@Req() req: Request, @Param("id") id: string, @Param("taskId") taskId: string) { return this.tasks.resume(req, id, taskId); }
   @Post("tasks/:taskId/input")
   input(@Req() req: Request, @Param("id") id: string, @Param("taskId") taskId: string, @Body() body: unknown) { return this.tasks.submitInput(req, id, taskId, body); }
   @Post("tasks/:taskId/approve")

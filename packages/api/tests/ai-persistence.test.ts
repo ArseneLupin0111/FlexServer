@@ -2141,3 +2141,674 @@ describe("compaction checkpoints, bounded history and compacting flag", () => {
     });
   });
 });
+
+describe("phase 1: multi-turn loop persistence and execution mode", () => {
+  let tempDir: string;
+  let repoPath: string;
+  let repo: AiRepository;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "ai-loop-test-"));
+    repoPath = join(tempDir, "ai-state.json");
+    repo = createJsonAiRepository(repoPath);
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("creates loop tasks with executionVersion 2, typed loop state, and preserves legacy executionVersion 1 default", async () => {
+    const vpsId = "vps-loop-1";
+    const conv = await repo.createConversation(vpsId, "Loop Conv 1");
+
+    // Legacy task (executionVersion omitted)
+    const { task: legacyTask } = await repo.createTask({
+      id: "task-legacy",
+      conversationId: conv.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "legacy task",
+      idempotencyKey: "idem-legacy",
+      initiatingSessionId: "session-1",
+    });
+    expect(legacyTask.executionVersion).toBe(1);
+    expect(legacyTask.loop).toBeUndefined();
+
+    // Transition legacy to terminal so another task can be created
+    await repo.updateTask({
+      id: legacyTask.id,
+      expectedRevision: 1,
+      state: "succeeded",
+    });
+
+    // Loop task (opt in via executionVersion: 2)
+    const { task: loopTask } = await repo.createTask({
+      id: "task-loop",
+      conversationId: conv.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "multi-turn loop task",
+      idempotencyKey: "idem-loop",
+      initiatingSessionId: "session-1",
+      executionVersion: 2,
+      executionMode: "manual",
+      loop: {
+        mode: "manual",
+        pinnedProviderId: "provider-openrouter",
+        pinnedProviderRevision: 3,
+        pinnedPolicyRevision: 2,
+        pinnedCapabilityRevision: 1,
+      },
+    });
+    expect(loopTask.executionVersion).toBe(2);
+    expect(loopTask.executionMode).toBe("manual");
+    expect(loopTask.loop).toBeDefined();
+    expect(loopTask.loop?.turn).toBe(0);
+    expect(loopTask.loop?.phase).toBe("planning");
+    expect(loopTask.loop?.contractVersion).toBe("loop_v1");
+    expect(loopTask.loop?.leaseToken).toBeTruthy();
+    expect(loopTask.loop?.continuationReady).toBe(true);
+    expect(loopTask.loop?.pinnedProviderId).toBe("provider-openrouter");
+    expect(loopTask.loop?.pinnedProviderRevision).toBe(3);
+    expect(loopTask.loop?.planHistory).toEqual([]);
+    expect(loopTask.loop?.observations).toEqual([]);
+    expect(loopTask.loop?.journal).toEqual([]);
+  });
+
+  it("fences turn lease with leaseToken: claimTurn, renewTurnLease, and conflicting claims", async () => {
+    const vpsId = "vps-loop-lease";
+    const conv = await repo.createConversation(vpsId, "Loop Conv Lease");
+    const { task } = await repo.createTask({
+      id: "task-lease",
+      conversationId: conv.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "lease test task",
+      idempotencyKey: "idem-lease",
+      initiatingSessionId: "session-1",
+      executionVersion: 2,
+    });
+
+    const initialToken = task.loop!.leaseToken;
+
+    // Claim turn 1
+    const turn1Task = await repo.claimTurn({
+      taskId: task.id,
+      vpsId,
+      expectedTurn: 0,
+      expectedLeaseToken: initialToken,
+      ownerInstanceId: "worker-A",
+      leaseSeconds: 60,
+    });
+    expect(turn1Task.loop?.turn).toBe(1);
+    expect(turn1Task.loop?.turnLeaseOwnerInstanceId).toBe("worker-A");
+    expect(turn1Task.loop?.leaseToken).not.toBe(initialToken);
+    const token1 = turn1Task.loop!.leaseToken;
+
+    // Conflicting claim with stale token fails
+    await expect(
+      repo.claimTurn({
+        taskId: task.id,
+        vpsId,
+        expectedLeaseToken: initialToken,
+        ownerInstanceId: "worker-B",
+        leaseSeconds: 60,
+      }),
+    ).rejects.toThrow(AiPersistenceConflictError);
+
+    // Another instance cannot steal active turn lease before expiry
+    await expect(
+      repo.claimTurn({
+        taskId: task.id,
+        vpsId,
+        expectedTurn: 1,
+        ownerInstanceId: "worker-B",
+        leaseSeconds: 60,
+      }),
+    ).rejects.toThrow(AiPersistenceConflictError);
+
+    // Renew turn lease
+    const renewed = await repo.renewTurnLease({
+      taskId: task.id,
+      vpsId,
+      expectedLeaseToken: token1,
+      ownerInstanceId: "worker-A",
+      leaseSeconds: 120,
+    });
+    expect(renewed.loop?.turnLeaseOwnerInstanceId).toBe("worker-A");
+
+    // Reserve provider call increments counter and estimates tokens
+    const reserved = await repo.reserveProviderCall({
+      taskId: task.id,
+      vpsId,
+      expectedRevision: renewed.revision,
+      expectedLeaseToken: token1,
+      estimatedInputTokens: 500,
+    });
+    expect(reserved.loop?.counters.providerCalls).toBe(1);
+    expect(reserved.usage.inputTokens).toBe(500);
+  });
+
+  it("records observations idempotently and flips phase on continuationReady", async () => {
+    const vpsId = "vps-loop-obs";
+    const conv = await repo.createConversation(vpsId, "Loop Obs");
+    const { task } = await repo.createTask({
+      id: "task-obs",
+      conversationId: conv.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "observation task",
+      idempotencyKey: "idem-obs",
+      initiatingSessionId: "session-1",
+      executionVersion: 2,
+    });
+
+    const leaseToken = task.loop!.leaseToken;
+
+    const obs1 = {
+      id: "obs-1",
+      turn: 1,
+      commandId: "cmd-1",
+      stepId: "step-1",
+      tool: "service_status",
+      host: "host-1",
+      source: "systemd",
+      status: "succeeded",
+      data: { active: true },
+      createdAt: new Date().toISOString(),
+    };
+
+    // First record: created: true
+    const res1 = await repo.recordObservation({
+      taskId: task.id,
+      vpsId,
+      expectedLeaseToken: leaseToken,
+      observation: obs1,
+      continuationReady: true,
+      state: "verifying",
+    });
+    expect(res1.created).toBe(true);
+    expect(res1.task.loop?.observations).toHaveLength(1);
+    expect(res1.task.loop?.continuationReady).toBe(true);
+    expect(res1.task.loop?.phase).toBe("continuation_ready");
+    expect(res1.task.state).toBe("verifying");
+
+    // Duplicate record (same commandId + stepId): created: false, no duplicate
+    const res2 = await repo.recordObservation({
+      taskId: task.id,
+      vpsId,
+      observation: { ...obs1, id: "obs-1-dup" },
+    });
+    expect(res2.created).toBe(false);
+    expect(res2.task.loop?.observations).toHaveLength(1);
+  });
+
+  it("appends journal entries idempotently with tool/provider pairing", async () => {
+    const vpsId = "vps-loop-journal";
+    const conv = await repo.createConversation(vpsId, "Loop Journal");
+    const { task } = await repo.createTask({
+      id: "task-journal",
+      conversationId: conv.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "journal task",
+      idempotencyKey: "idem-journal",
+      initiatingSessionId: "session-1",
+      executionVersion: 2,
+    });
+
+    const entry1 = {
+      journalId: "j-1",
+      turn: 1,
+      callId: "call-1",
+      tool: "file_read",
+      args: { path: "/etc/nginx/nginx.conf" },
+      providerId: "openrouter",
+      model: "anthropic/claude-3.5-sonnet",
+      status: "dispatched" as const,
+      timestamp: new Date().toISOString(),
+    };
+
+    const res1 = await repo.appendJournal({
+      taskId: task.id,
+      vpsId,
+      entries: [entry1],
+    });
+    expect(res1.appendedCount).toBe(1);
+    expect(res1.task.loop?.journal).toHaveLength(1);
+
+    // Replay same entry: appendedCount: 0
+    const res2 = await repo.appendJournal({
+      taskId: task.id,
+      vpsId,
+      entries: [entry1],
+    });
+    expect(res2.appendedCount).toBe(0);
+    expect(res2.task.loop?.journal).toHaveLength(1);
+  });
+
+  it("enforces monotonic planHistory on releaseOrCommitTurn and syncs plan consumption via approve", async () => {
+    const vpsId = "vps-loop-monotonic";
+    const conv = await repo.createConversation(vpsId, "Loop Monotonic");
+    const { task } = await repo.createTask({
+      id: "task-mono",
+      conversationId: conv.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "monotonic plan task",
+      idempotencyKey: "idem-mono",
+      initiatingSessionId: "session-1",
+      executionVersion: 2,
+    });
+
+    const plan1 = makePlan({
+      taskId: task.id,
+      vpsId,
+      planVersion: 1,
+      status: "pending",
+    });
+
+    // First claim turn so worker holds lease
+    const claimedTurn = await repo.claimTurn({
+      taskId: task.id,
+      vpsId,
+      ownerInstanceId: "worker-mono",
+      leaseSeconds: 60,
+    });
+
+    const updated = await repo.releaseOrCommitTurn({
+      taskId: task.id,
+      vpsId,
+      expectedRevision: claimedTurn.revision,
+      expectedLeaseToken: claimedTurn.loop!.leaseToken,
+      ownerInstanceId: "worker-mono",
+      plan: plan1,
+      loopPatch: {
+        phase: "awaiting_approval",
+      },
+    });
+    expect(updated.loop?.planHistory).toHaveLength(1);
+    expect(updated.loop?.planHistory[0].planVersion).toBe(1);
+
+    // Plan version must be monotonic: proposing planVersion 1 again as a new plan should reject
+    const nonMonotonicPlan = makePlan({
+      taskId: task.id,
+      vpsId,
+      planId: "new-plan-id",
+      planVersion: 1,
+      status: "pending",
+    });
+    await expect(
+      repo.releaseOrCommitTurn({
+        taskId: task.id,
+        vpsId,
+        expectedRevision: updated.revision,
+        expectedLeaseToken: updated.loop!.leaseToken,
+        ownerInstanceId: "worker-mono",
+        plan: nonMonotonicPlan,
+      }),
+    ).rejects.toThrow(AiPersistenceConflictError);
+
+    // Approving plan1 marks it consumed in both task.plan and task.loop.planHistory
+    const consumed = await repo.approve({
+      taskId: task.id,
+      planVersion: 1,
+      planDigest: plan1.planDigest,
+      approvedSessionId: "session-admin",
+    });
+    expect(consumed.status).toBe("consumed");
+
+    const latest = await repo.getTask(vpsId, task.id);
+    expect(latest?.plan?.status).toBe("consumed");
+    expect(latest?.loop?.planHistory[0].status).toBe("consumed");
+  });
+
+  it("discovers pending continuations and claims them atomically", async () => {
+    const vpsId = "vps-loop-cont";
+    const conv = await repo.createConversation(vpsId, "Loop Continuation");
+    const { task } = await repo.createTask({
+      id: "task-cont",
+      conversationId: conv.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "continuation task",
+      idempotencyKey: "idem-cont",
+      initiatingSessionId: "session-1",
+      executionVersion: 2,
+    });
+
+    // Mark task continuationReady: true
+    await repo.updateTask({
+      id: task.id,
+      expectedRevision: task.revision,
+      loopPatch: {
+        continuationReady: true,
+      },
+    });
+
+    const activeList = await repo.listActiveLoopTasks({
+      vpsId,
+      continuationReadyOnly: true,
+    });
+    expect(activeList).toHaveLength(1);
+    expect(activeList[0].id).toBe(task.id);
+
+    // Claim continuation
+    const claimed = await repo.claimPendingContinuation({
+      vpsId,
+      ownerInstanceId: "worker-loop",
+      leaseSeconds: 45,
+    });
+    expect(claimed).toBeDefined();
+    expect(claimed?.id).toBe(task.id);
+    expect(claimed?.loop?.turn).toBe(1);
+    expect(claimed?.loop?.continuationReady).toBe(false);
+    expect(claimed?.loop?.turnLeaseOwnerInstanceId).toBe("worker-loop");
+  });
+
+  it("resumes task into planning phase, invalidating pending plans and refreshing pinned revisions", async () => {
+    const vpsId = "vps-loop-resume";
+    const conv = await repo.createConversation(vpsId, "Loop Resume");
+    const { task } = await repo.createTask({
+      id: "task-res",
+      conversationId: conv.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "resume task",
+      idempotencyKey: "idem-res",
+      initiatingSessionId: "session-1",
+      executionVersion: 2,
+    });
+
+    const plan = makePlan({
+      taskId: task.id,
+      vpsId,
+      planVersion: 1,
+      status: "pending",
+    });
+
+    const withPlan = await repo.updateTask({
+      id: task.id,
+      expectedRevision: task.revision,
+      plan,
+      state: "awaiting_approval",
+    });
+
+    const resumed = await repo.resumeTask({
+      taskId: task.id,
+      vpsId,
+      expectedRevision: withPlan.revision,
+      pinnedProviderId: "openrouter",
+      pinnedProviderRevision: 5,
+      pinnedPolicyRevision: 4,
+    });
+    expect(resumed.state).toBe("planning");
+    expect(resumed.plan?.status).toBe("expired");
+    expect(resumed.loop?.phase).toBe("planning");
+    expect(resumed.loop?.continuationReady).toBe(true);
+    expect(resumed.loop?.pinnedProviderRevision).toBe(5);
+    expect(resumed.loop?.pinnedPolicyRevision).toBe(4);
+  });
+
+  it("normalizes executionMode and acknowledgment fields in default and updated policies", async () => {
+    const vpsId = "vps-policy-norm";
+
+    // Default policy
+    const policy = await repo.getAiPolicy(vpsId);
+    expect(policy.executionMode).toBe("manual");
+    expect(policy.yoloAcknowledgedAt).toBeNull();
+    expect(policy.yoloAcknowledgedBy).toBeNull();
+
+    // Update with yolo executionMode
+    const updated = await repo.updateAiPolicy({
+      vpsId,
+      patch: {
+        executionMode: "yolo",
+        yoloAcknowledgedAt: "2026-10-24T12:00:00.000Z",
+        yoloAcknowledgedBy: "admin",
+      },
+    });
+    expect(updated.executionMode).toBe("yolo");
+    expect(updated.yoloAcknowledgedAt).toBe("2026-10-24T12:00:00.000Z");
+    expect(updated.yoloAcknowledgedBy).toBe("admin");
+
+    // Reverting to manual
+    const reverted = await repo.updateAiPolicy({
+      vpsId,
+      patch: {
+        executionMode: "manual",
+      },
+    });
+    expect(reverted.executionMode).toBe("manual");
+  });
+
+  it("supports setting pauseReason and clearing it on resumeTask", async () => {
+    const vpsId = "vps-loop-pause";
+    const conv = await repo.createConversation(vpsId, "Loop Pause");
+    const { task } = await repo.createTask({
+      id: "task-pause-1",
+      conversationId: conv.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "task with pause",
+      idempotencyKey: "idem-pause",
+      initiatingSessionId: "session-1",
+      executionVersion: 2,
+    });
+
+    const paused = await repo.updateTask({
+      id: task.id,
+      expectedRevision: task.revision,
+      state: "awaiting_input",
+      loopPatch: {
+        pauseReason: "rate_limit_exceeded",
+      },
+    });
+    expect(paused.loop?.pauseReason).toBe("rate_limit_exceeded");
+
+    const resumed = await repo.resumeTask({
+      taskId: task.id,
+      vpsId,
+      expectedRevision: paused.revision,
+      pinnedCapabilityRevision: 3,
+    });
+    expect(resumed.loop?.pauseReason).toBeUndefined();
+    expect(resumed.loop?.pinnedCapabilityRevision).toBe(3);
+  });
+
+  it("normalizes legacy persisted documents with autoApprove and missing executionVersion", async () => {
+    const legacyVpsId = "vps-legacy-norm";
+    const rawLegacyState = {
+      tasks: [
+        {
+          id: "legacy-task-1",
+          conversationId: "conv-leg",
+          vpsId: legacyVpsId,
+          state: "succeeded",
+          revision: 2,
+          requestSummary: "legacy task",
+          plan: {
+            planId: "p-leg",
+            planVersion: 1,
+            taskId: "legacy-task-1",
+            vpsId: legacyVpsId,
+            execMode: "sandbox",
+            steps: [],
+            preconditions: [],
+            planDigest: "d1",
+            expiresAt: new Date(Date.now() + 60000).toISOString(),
+            status: "consumed",
+          },
+          usage: { inputTokens: 0, outputTokens: 0, estimated: false, rounds: 1, toolCalls: 0 },
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+      policies: [
+        {
+          vpsId: legacyVpsId,
+          aiEnabled: true,
+          readEnabled: true,
+          dockerActionsEnabled: true,
+          composeActionsEnabled: true,
+          shellEnabled: false,
+          execMode: "sandbox",
+          autoApprove: true,
+          fileReadScopes: [],
+          fileWriteScopes: [],
+          serviceProfileIds: [],
+          sendLogsToProvider: false,
+          sendFilesToProvider: false,
+          revision: 1,
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+    };
+
+    await writeFile(repoPath, JSON.stringify(rawLegacyState, null, 2), "utf8");
+
+    const policy = await repo.getAiPolicy(legacyVpsId);
+    expect(policy.executionMode).toBe("manual");
+    expect("autoApprove" in policy).toBe(false);
+    const task = await repo.getTask(legacyVpsId, "legacy-task-1");
+    expect(task).toBeDefined();
+    expect(task?.executionVersion).toBe(1);
+    expect(task?.plan?.planId).toBe("p-leg");
+    expect(task?.plan?.status).toBe("consumed");
+  });
+  it("enforces lease expiration thresholds, prevents expired worker commits, and allows reclamation", async () => {
+    const vpsId = "vps-loop-lease-expire";
+    const conv = await repo.createConversation(vpsId, "Lease Expire Conv");
+    const { task } = await repo.createTask({
+      id: "task-expire",
+      conversationId: conv.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "lease expire task",
+      idempotencyKey: "idem-exp",
+      initiatingSessionId: "session-1",
+      executionVersion: 2,
+    });
+
+    // Worker 1 claims turn with 10s lease at t0
+    const t0 = "2026-10-25T10:00:00.000Z";
+    const claimed = await repo.claimTurn({
+      taskId: task.id,
+      vpsId,
+      ownerInstanceId: "worker-1",
+      leaseSeconds: 10,
+      now: t0,
+    });
+    expect(claimed.loop?.turnLeaseOwnerInstanceId).toBe("worker-1");
+
+    // Worker 1 cannot renew lease if now is past expiry
+    const tPastExpiry = "2026-10-25T10:00:15.000Z";
+    await expect(
+      repo.renewTurnLease({
+        taskId: task.id,
+        vpsId,
+        expectedLeaseToken: claimed.loop!.leaseToken,
+        ownerInstanceId: "worker-1",
+        leaseSeconds: 60,
+        now: tPastExpiry,
+      }),
+    ).rejects.toThrow(AiPersistenceConflictError);
+
+    // Worker 1 cannot releaseOrCommitTurn past expiry
+    await expect(
+      repo.releaseOrCommitTurn({
+        taskId: task.id,
+        vpsId,
+        expectedRevision: claimed.revision,
+        expectedLeaseToken: claimed.loop!.leaseToken,
+        ownerInstanceId: "worker-1",
+        releaseTurnLease: true,
+        now: tPastExpiry,
+      }),
+    ).rejects.toThrow(AiPersistenceConflictError);
+
+    // Worker 2 can reclaim expired turn
+    const reclaimed = await repo.claimTurn({
+      taskId: task.id,
+      vpsId,
+      ownerInstanceId: "worker-2",
+      leaseSeconds: 60,
+      now: tPastExpiry,
+    });
+    expect(reclaimed.loop?.turnLeaseOwnerInstanceId).toBe("worker-2");
+    expect(reclaimed.loop?.turn).toBe(2);
+  });
+
+  it("preserves task deadlineAt without accidental reset across turns and updates", async () => {
+    const vpsId = "vps-loop-deadline";
+    const conv = await repo.createConversation(vpsId, "Deadline Conv");
+    const fixedDeadline = "2026-10-25T15:00:00.000Z";
+    const { task } = await repo.createTask({
+      id: "task-deadline",
+      conversationId: conv.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "deadline task",
+      idempotencyKey: "idem-dead",
+      initiatingSessionId: "session-1",
+      executionVersion: 2,
+      loop: {
+        deadlineAt: fixedDeadline,
+      },
+    });
+    expect(task.loop?.counters.deadlineAt).toBe(fixedDeadline);
+
+    // Claim turn and commit turn without deadline patch preserves original deadlineAt
+    const claimed = await repo.claimTurn({
+      taskId: task.id,
+      vpsId,
+      ownerInstanceId: "worker-dead",
+      leaseSeconds: 60,
+    });
+
+    const committed = await repo.releaseOrCommitTurn({
+      taskId: task.id,
+      vpsId,
+      expectedRevision: claimed.revision,
+      expectedLeaseToken: claimed.loop!.leaseToken,
+      ownerInstanceId: "worker-dead",
+      loopPatch: {
+        countersDelta: { providerCalls: 1 },
+      },
+    });
+    expect(committed.loop?.counters.deadlineAt).toBe(fixedDeadline);
+  });
+
+  it("clears continuationReady on cancel_requested or cancelled and fences continuation claims", async () => {
+    const vpsId = "vps-loop-cancel-fence";
+    const conv = await repo.createConversation(vpsId, "Cancel Fence Conv");
+    const { task } = await repo.createTask({
+      id: "task-cancel",
+      conversationId: conv.id,
+      vpsId,
+      state: "planning",
+      requestSummary: "cancellation fence task",
+      idempotencyKey: "idem-canc",
+      initiatingSessionId: "session-1",
+      executionVersion: 2,
+    });
+    expect(task.loop?.continuationReady).toBe(true);
+
+    // Cancel requested clears continuationReady
+    const cancelRequested = await repo.updateTask({
+      id: task.id,
+      expectedRevision: task.revision,
+      state: "cancel_requested",
+    });
+    expect(cancelRequested.state).toBe("cancel_requested");
+    expect(cancelRequested.loop?.continuationReady).toBe(false);
+
+    // claimPendingContinuation does not claim cancel_requested tasks
+    const pending = await repo.claimPendingContinuation({
+      vpsId,
+      ownerInstanceId: "worker-cancel",
+      leaseSeconds: 30,
+    });
+    expect(pending).toBeUndefined();
+  });
+});

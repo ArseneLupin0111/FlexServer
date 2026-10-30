@@ -51,6 +51,7 @@ import {
   listAiProviders,
   listVpsAiConversations,
   listVpsAiTasks,
+  resumeVpsAiTask,
 } from "../../../lib/ai-api";
 
 const streamHarness = vi.hoisted(() => ({
@@ -92,6 +93,7 @@ vi.mock("../../../lib/ai-api", async (importOriginal) => {
     checkAiProviderProfile: vi.fn(),
     authorizeAiProviderOauth: vi.fn(),
     exchangeAiProviderOauth: vi.fn(),
+    resumeVpsAiTask: vi.fn(),
   };
 });
 
@@ -114,7 +116,9 @@ const enabledPolicy: AiPolicy = {
   execMode: "sandbox",
   privilegedAcknowledgedAt: null,
   privilegedAcknowledgedBy: null,
-  autoApprove: false,
+  executionMode: "manual",
+  yoloAcknowledgedAt: null,
+  yoloAcknowledgedBy: null,
   fileReadScopes: [],
   fileWriteScopes: [],
   serviceProfileIds: [],
@@ -1528,6 +1532,78 @@ describe("AssistantPanel selection-pin warning", () => {
     });
     expect(screen.queryByText(/disabled or removed/i)).toBeNull();
     expect(screen.queryByText(/no longer available/i)).toBeNull();
+  });
+});
+
+describe("AssistantPanel YOLO mode and Resume", () => {
+  it("renders YOLO status banner when policy executionMode is yolo", async () => {
+    mockAssistantLoaded({
+      tasks: [],
+      conversationDetail: {
+        conversation: makeConversation(),
+        messages: [makeMessage()],
+      },
+      policy: {
+        ...enabledPolicy,
+        executionMode: "yolo",
+      },
+    });
+
+    renderPanel();
+    await screen.findByText("Please prune unused docker images");
+
+    expect(screen.getByTestId("yolo-status-banner")).toBeInTheDocument();
+    expect(screen.getByTestId("yolo-status-banner")).toHaveTextContent(
+      /Full YOLO mode active/i,
+    );
+  });
+
+  it("calls resumeVpsAiTask when resume button is clicked on a paused task", async () => {
+    const pausedTask = makeTask({
+      id: "task-resumable",
+      state: "planning",
+      loop: {
+        contractVersion: "loop_v1",
+        mode: "manual",
+        turn: 1,
+        phase: "planning",
+        continuationReady: false,
+        pauseReason: "policy_changed",
+        counters: {
+          providerCalls: 1,
+          readCalls: 0,
+          mutationPlans: 0,
+          verificationAttempts: 0,
+          toolCalls: 0,
+          deadlineAt: "2026-10-30T11:00:00.000Z",
+        },
+        planHistory: [],
+        observations: [],
+        journal: [],
+      },
+    });
+    mockAssistantLoaded({
+      tasks: [pausedTask],
+      conversationDetail: {
+        conversation: makeConversation(),
+        messages: [makeMessage()],
+      },
+    });
+    vi.mocked(resumeVpsAiTask).mockResolvedValue({
+      ...pausedTask,
+      state: "planning",
+    });
+    renderPanel();
+    await screen.findByText("Please prune unused docker images");
+
+    fireEvent.click(screen.getByRole("button", { name: /task details/i }));
+
+    const resumeBtns = await screen.findAllByRole("button", { name: /resume task/i });
+    fireEvent.click(resumeBtns[0]);
+
+    await waitFor(() => {
+      expect(resumeVpsAiTask).toHaveBeenCalledWith("vps-1", "task-resumable");
+    });
   });
 });
 

@@ -310,36 +310,66 @@ export class AiRoutesService {
     const current = await this.policy(request, vpsId);
     const parsed = updateAiPolicySchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException("Invalid AI policy");
-    const { execMode, acknowledgePrivileged, ...patch } = parsed.data;
+    const { execMode, acknowledgePrivileged, executionMode, acknowledgeYolo, ...patch } = parsed.data;
+
+    // Explicit root consent for YOLO execution mode (approved loop plan):
+    // Transitioning to YOLO mode grants full host root operations within the chosen VPS.
+    // Operator must explicitly acknowledge the root risk (acknowledgeYolo: true) unless already acknowledged.
+    if (executionMode === "yolo" && acknowledgeYolo !== true && current.yoloAcknowledgedAt === null) {
+      throw new BadRequestException("YOLO execution requires acknowledging the root risk first (acknowledgeYolo)");
+    }
+
+    const yoloAcknowledgmentPatch =
+      executionMode === "yolo" && acknowledgeYolo === true
+        ? {
+            yoloAcknowledgedAt: new Date().toISOString(),
+            yoloAcknowledgedBy: request.dashboardSessionId ?? null,
+          }
+        : {};
+
     // Privileged execution (execmode plan Q4) is gated by a one-time risk
     // acknowledgment: this request must carry `acknowledgePrivileged` OR the
     // policy must already hold a retained acknowledgment. Sandbox is free.
-    if (execMode === "privileged" && acknowledgePrivileged !== true && current.privilegedAcknowledgedAt === null) {
+    // User approved full root by enabling YOLO; no extra privileged toggle required.
+    if (
+      execMode === "privileged" &&
+      executionMode !== "yolo" &&
+      acknowledgePrivileged !== true &&
+      current.privilegedAcknowledgedAt === null
+    ) {
       throw new BadRequestException("Privileged execution requires acknowledging the risk first (acknowledgePrivileged)");
     }
     // A fresh acknowledgment is recorded with the authenticated admin's
     // session identity; prior ones are refreshed only on explicit re-ack and
     // never cleared (switching back to sandbox keeps them).
-    const acknowledgmentPatch =
+    const privilegedAcknowledgmentPatch =
       execMode === "privileged" && acknowledgePrivileged === true
         ? { privilegedAcknowledgedAt: new Date().toISOString(), privilegedAcknowledgedBy: request.dashboardSessionId ?? null }
         : {};
+
     const updated = await this.repository.updateAiPolicy({
       vpsId,
-      patch: { ...patch, ...(execMode ? { execMode } : {}), ...acknowledgmentPatch },
+      patch: {
+        ...patch,
+        ...(execMode ? { execMode } : {}),
+        ...(executionMode ? { executionMode } : {}),
+        ...privilegedAcknowledgmentPatch,
+        ...yoloAcknowledgmentPatch,
+      },
       expectedRevision: current.revision,
     });
     // Q8 deliberate-action trigger: AFTER a successful persist, the first AI
     // bundle install is scheduled only on an explicit enable action (AI
-    // off→on, shell off→on, or an execMode change) and only when the bundle
-    // is present but not yet installed on the host. Fire-and-forget with
-    // error containment; never scheduled from GETs; convergence (Q7) owns
-    // later version updates.
+    // off→on, shell off→on, an execMode change, or an executionMode change)
+    // and only when the bundle is present but not yet installed on the host.
+    // Fire-and-forget with error containment; never scheduled from GETs;
+    // convergence (Q7) owns later version updates.
     if (
       this.bundleOrchestrator &&
       ((!current.aiEnabled && updated.aiEnabled) ||
         (!current.shellEnabled && updated.shellEnabled) ||
-        current.execMode !== updated.execMode)
+        current.execMode !== updated.execMode ||
+        current.executionMode !== updated.executionMode)
     ) {
       void this.bundleOrchestrator
         .maybeInstallAfterDeliberateAction(vpsId)

@@ -111,11 +111,66 @@ To prevent duplicate concurrent instances from contending on metrics ingest or c
 
 ## AI Assistant Operational Safety, Retention, and Lifecycle Supervision
 
-Assistant mutation plans are reviewed inline in the task inspector, including decrypted execution previews, target, risk, and expiry. `Approve` submits the exact plan version and digest; `Reject` denies the plan. No approval modal or confirmation checkbox is required; preview validation and one-time server-side approval consumption remain enforced.
+### Execution Version 2 Durable Multi-Turn Loop
 
-Assistant Settings → Permissions also exposes **Auto-approve plans (YOLO)**, persisted per VPS as `AiPolicy.autoApprove` and disabled by default, including for legacy policies. When enabled, newly proposed plans use the existing server-side approval path with the initiating dashboard session; keeping a browser tab open is not required. Enabling it does not approve plans already waiting for review. Disabling it restores manual approval for new plans; it does not undo commands already dispatched.
+The AI Assistant executes tasks through an `executionVersion: 2` durable multi-turn continuation loop. Rather than bounding tasks to a single investigation and mutation cycle, loop tasks support multi-plan continuation across turns:
 
-YOLO removes the manual review pause, not permission boundaries: policy revisions, target/capability validation, payload digests, session validity, one-time plan consumption, and unresolved-outcome mutation fences still apply. With privileged execution enabled, allowed root commands can execute without interactive review. The Assistant displays an enabled warning while YOLO is active.
+1. **Loop State Tracking:** Tasks admitted under `executionVersion: 2` maintain durable loop state across sequential turns within an overall task deadline and per-turn lease, enabling iterative investigation, mutation, observation, and verification. Durable counters (provider calls, read/tool calls, mutation plans, verification attempts, token usage, and the absolute loop deadline) are persisted and are not reset by a resume or API restart.
+2. **Multi-Turn Execution Cycle:** The loop progresses across sequential phases:
+   - **Investigation & Planning (`planning`):** The model inspects host state via read tools and generates an immutable mutation plan.
+   - **Plan Approval (`awaiting_approval`):** Plan is reviewed and approved (manually per-plan or auto-approved in YOLO mode).
+   - **Dispatch & Execution (`executing`):** Approved plan steps are dispatched to the host agent/helper via the encrypted outbox.
+   - **Durable Observation Recording (`verifying`):** Execution receipts returned by the host worker are persisted as durable observations (`AiTaskObservation` with `tool: "host_command"`, `source: "host_receipt"`, exit code, output preview, and command identity). The task transitions to `verifying` and sets `continuationReady: true`.
+   - **Continuation Turn:** The runtime claims the next turn lease and prompts the model with full observation history. The model can propose a follow-up plan (continuing the loop), ask for operator clarification (`awaiting_input`), or conclude the task with an explicit typed completion outcome (`AiTaskCompletionOutcome` with kind `verified`, `unverified`, `blocked`, `cancelled`, or `expired`).
+3. **Turn Leasing:** Turn leases serialize execution workers and protect multi-turn loops from concurrent execution races across distributed workers.
+
+The continuation scheduler is durable rather than callback-only: `AiTaskService.onModuleInit()` awaits one immediate single-flight sweep, then schedules a five-second interval. Each sweep atomically claims at most 100 eligible `executionVersion: 2` tasks through `claimPendingContinuation({ ownerInstanceId, leaseSeconds: 60 })`; the per-service owner ID is a UUID. Eligible states are `planning`/`verifying` with continuation ready or a missing/expired turn lease, while `cancel_requested` tasks are excluded. A claimed task renews its 60-second turn lease every 15 seconds and is not claimed again by the same wake-up; valid claims call `run(..., alreadyClaimed: true)` and skip a duplicate turn claim. Claims fence concurrent API instances. A claimed task missing `initiatingSessionId` fails closed with blocked `missing_initiating_session`. Sweep errors are caught/logged; shutdown clears the timer and aborts active workers.
+
+Repeated identical tool/target/result observations increment the durable no-progress streak. At three consecutive matches (`no_progress3`), the task ends as `failed` with a typed `blocked` completion and `reasonCode: "no_progress"`; it does not continue polling or mutate again. Cancellation does not delete accounting: a receipt remains durable. A receipt for a command that completed after cancellation records the observation and terminal `cancelled_after_dispatch` outcome; an uncertain receipt, or cancellation after host execution with no determinate outcome, transitions the loop to `uncertain` and requires reconciliation.
+
+### Approval Modes: Per-Plan Manual Approval vs Explicitly Acknowledged YOLO Root
+
+Each VPS AI policy defines an `executionMode: "manual" | "yolo"` (default `"manual"`):
+
+1. **Manual Approval Mode (`executionMode: "manual"`, default):**
+   - Every proposed mutation plan across all turns requires explicit human review and approval via `POST /api/vps/:vpsId/ai/tasks/:taskId/approve` using the exact plan version and SHA-256 payload digest (`planDigest`).
+   - Preview validation, capability gates, and one-time server-side plan consumption remain enforced on every turn. Even when a task executes a sequence of plans across turns, each individual plan must be confirmed by the operator before dispatch.
+2. **Full YOLO Root Mode (`executionMode: "yolo"`):**
+   - **Autonomous Plan Approval:** Newly proposed plans are automatically approved per turn using the authenticated initiating dashboard session without an interactive review pause; keeping a browser tab open is not required.
+   - **Full Host Root Operations:** Enabling YOLO mode grants full host root execution within the chosen VPS. The effective policy automatically expands file scopes to root (`fileReadScopes: ["/"]`, `fileWriteScopes: ["/"]`), escalates shell execution to root (`execMode: "privileged"`), and enables all action categories.
+   - **Explicit Root Consent Requirement:** Switching a policy to YOLO mode over `PATCH /api/vps/:vpsId/ai/policy` strictly requires explicit operator acknowledgment of the root risk (`acknowledgeYolo: true`). The server persists `yoloAcknowledgedAt` and `yoloAcknowledgedBy` (requesting admin session). Unacknowledged requests fail with `400 Bad Request`.
+   - **In-Chat Warning:** A prominent warning banner is displayed in the assistant chat whenever YOLO mode is active on a host. Disabling YOLO immediately restores manual approval for subsequent plans; it does not undo commands already dispatched.
+
+### Strictly Independent Provider Egress
+
+Provider egress controls (`sendLogsToProvider` and `sendFilesToProvider`) are **strictly decoupled** from `executionMode` and `execMode`:
+- Entering YOLO root mode does **NOT** enable sending container/host logs or file contents to the external LLM provider.
+- Egress remains strictly opt-in per VPS. Tool metadata, command exit codes, and truncated previews are sent to the provider, but raw log streams and full file contents are omitted or redacted unless explicitly enabled by the operator.
+
+### Legacy `autoApprove` Normalization
+
+Legacy policies previously containing `autoApprove: true` are NOT grandfathered into YOLO root mode:
+- Migration 037 drops the `auto_approve` column from `ai_policies` and normalizes journaled policies by stripping `autoApprove` and setting `executionMode: "manual"`.
+- Existing legacy tasks default to `executionVersion: 1`, preserving historical plans and single-turn receipts without enabling multi-turn loop continuation.
+- Autonomous execution with root privileges requires deliberate, explicit operator re-acknowledgment (`acknowledgeYolo: true`).
+
+### Fail-Closed Uncertainty and Zero Blind Retries
+
+To prevent catastrophic duplicate mutations or corrupted host state:
+1. **Uncertainty Halting:** Whenever an execution lease expires without a receipt, a receipt status is `"uncertain"`, or execution is cancelled while already executed on the host, the task transitions to `state: "uncertain"` with error code `uncertain_outcome`.
+2. **Immediate Loop Halt:** In the `uncertain` state, the runtime immediately halts loop continuation.
+3. **No Automatic Retries:** The system strictly refuses to retry or re-dispatch an uncertain mutation step. Because the command may have already executed or mutated state on the host, automated blind retries are prohibited.
+4. **Outbox Mutation Fence:** Outbox mutation fences prevent any further plan approval or command dispatch on the VPS while an unresolved uncertain task exists.
+5. **Manual Reconciliation:** Manual operator intervention or a receipt reconciliation pass is required to inspect actual host state and resolve receipts before continuation can proceed.
+
+### Resume Constraints (`POST /api/vps/:vpsId/ai/tasks/:taskId/resume`)
+
+Resuming an active or paused loop task requires satisfying strict security and state constraints:
+1. **Initiating Session Matching:** The caller's dashboard session must match `task.initiatingSessionId`. Cross-session or unauthenticated resumes are rejected (`policy_denied`).
+2. **Version Gate:** Only `executionVersion: 2` loop tasks (with structured `loop` state) can be resumed. Legacy `executionVersion: 1` tasks fail closed with `stale_plan` ("Legacy task does not support multi-turn resume").
+3. **Uncertainty Fence:** Tasks in `state: "uncertain"` cannot be resumed (throws `uncertain_outcome`). Receipts must be reconciled before continuation.
+4. **State Checks:** Terminal tasks (`succeeded`, `failed`, `cancelled`, `expired`) return current state immediately. Tasks currently in `executing` return current state. Tasks in `awaiting_approval` with a valid, unexpired pending plan return current state.
+5. **Policy & Provider Revalidation:** The runtime re-validates VPS AI policy admission (`authorizeTaskAdmission`) and re-resolves the provider profile and model. If the provider profile is unavailable or invalid, resume fails closed with `provider_unavailable`. Upon successful revalidation, pinned revisions (`pinnedPolicyRevision`, `pinnedProviderRevision`, `pinnedProviderId`) are updated, `pauseReason` is cleared, and `wakeContinuation` claims the next turn.
 
 ### Retention and State Fencing
 
@@ -128,7 +183,7 @@ YOLO removes the manual review pause, not permission boundaries: policy revision
 ### Startup Recovery and Session Revocation
 
 1. **Active task reconciliation:** At startup and during periodic maintenance, active tasks across all VPS instances are evaluated.
-2. **Awaiting task expiration:** Tasks remaining in `awaiting_approval`, `awaiting_input`, or `planning` past their `expiresAt` deadline are transitioned to `expired` with wire code `approval_expired`.
+2. **Awaiting task expiration:** Tasks remaining in `awaiting_approval`, `awaiting_input`, or `planning` past their `expiresAt` deadline are transitioned to `expired` with wire code `approval_expired`. For `executionVersion: 2` loop tasks, active continuation prevents premature expiration, deferring to the overall loop task deadline.
 3. **Owner lease expiration and mutation fencing:** Tasks in `executing` or `verifying` whose runtime owner lease expires without fresh heartbeat/receipt are transitioned to `uncertain` with wire code `uncertain_outcome`. Active agent heartbeats renew the owner lease on live tasks to prevent premature expiry. The active conversation slot (`planning`, `awaiting_input`, `awaiting_approval`, `executing`, `verifying`, `cancel_requested`) allows new conversational planning tasks to proceed, while a strict mutation fence prevents plan approval and outbox dispatch whenever an unresolved `uncertain` task or receipt exists on the VPS, avoiding duplicate execution while unblocking continued conversation. Bridge step timeouts and the API owner lease are sized from the `apps.work` operation deadline (Compose deploy: 600s pull + 60s stop grace + app readiness, default 300s, max 3600s; lifecycle action: readiness + 60s stop grace), so a genuinely running operation is never observed past its own deadline and falsely reported uncertain.
 4. **Session logout and revocation:** If the initiating dashboard session or the approving session is revoked, logged out, or expired in `DashboardSessionService`:
    - Pending tasks (`planning`, `awaiting_approval`, `awaiting_input`) are expired immediately (`session_revoked`).
@@ -139,7 +194,8 @@ YOLO removes the manual review pause, not permission boundaries: policy revision
 1. **Shared secret redaction:** All outgoing responses and provider communications pass through `packages/api/src/common/redaction.ts`. Redaction matches private key PEM blocks, SSH keys, passwords, bearer tokens, scoped `vma_` tokens, `sk-` provider keys, generic secret assignments, and `.env` variable assignments.
 2. **ANSI escape stripping:** Terminal and subprocess output undergoes ANSI sequence stripping before pattern matching to prevent escape code fragmentation from evading secret redaction.
 3. **Chunk boundary streaming redactor:** `ChunkRedactor` buffers stream chunks across packet boundaries to detect and redact split tokens or headers that cross chunk splits.
-4. **Operational limits:** Production deployment of AI assistant host execution and multi-node confinement has NOT been verified. Passing local unit tests and simulated adapter runs does not guarantee provider reliability, billing boundaries, or safe confinement on production Linux hosts.
+- **Operational limits:** Authorized disposable-host runtime proof is now complete for the durable loop; production multi-node confinement and real-provider execution remain unverified. Passing local unit tests and simulated adapter runs alone do not guarantee provider reliability, billing boundaries, or safe confinement on production Linux hosts.
+- **Current verification evidence:** The clean acceptance artifact reports web suite coverage (290 tests), desktop/mobile fixture actions, API loop final results (166 passing, 0 failed, 0 pending across 12 files), security coverage, PostgreSQL loop coverage (12 passing), migration 037 proof, web typecheck, and startup scheduler coverage for persisted continuation recovery, concurrent single-flight initialization, exactly-once provider dispatch, and completion without manual wake. The authorized disposable-host smoke used manual task `b746e91c-f270-4c8b-925a-5e9d823df411` with exact plan approvals v1/v2, verified restart unhealthy `500` as not verified followed by repair and fresh `200` as verified, API kill/restart recovery with durable task plan/receipts and no replay, and YOLO task `a2a29902-c62b-4916-b27d-41f3af97c443` with two auto-approved plans and successful actual-host UID 0 markers. This was a scripted-orchestration proof; no real-provider API key was available, so real-provider readiness remains unverified.
 
 ## AI Host Confinement Architecture (P3/P4)
 

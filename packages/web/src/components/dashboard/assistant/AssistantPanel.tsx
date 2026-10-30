@@ -34,6 +34,7 @@ import {
   listVpsAiTasks,
   patchVpsAiPolicy,
   reconcileVpsAiTask,
+  resumeVpsAiTask,
   submitVpsAiTaskInput,
   updateAiProvider,
   type AiCapability,
@@ -595,6 +596,21 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       setActiveTask(updated);
     } catch (err) {
       setRootError(err instanceof Error ? err.message : "Failed to reconcile task.");
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  // Resume task
+  async function handleResumeTask() {
+    if (!activeTaskId || actionBusy) return;
+    setActionBusy(true);
+    setRootError(null);
+    try {
+      const updated = await resumeVpsAiTask(vps.id, activeTaskId);
+      setActiveTask(updated);
+    } catch (err) {
+      setRootError(err instanceof Error ? err.message : "Failed to resume task.");
     } finally {
       setActionBusy(false);
     }
@@ -1210,30 +1226,27 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
 
         <div className={`grid min-h-0 min-w-0 flex-1 gap-3 ${taskDetailsOpen && activeTask ? "grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,24rem)]" : "grid-cols-1"}`}>
           <div className={`flex min-h-0 min-w-0 flex-col ${taskDetailsOpen && activeTask ? "h-[32rem] xl:h-full" : "h-full"}`}>
-            {/* Privileged execution keeps running while the chat is open; the
-                warning must stay visible above the conversation (plan Q4). */}
-            {policy?.execMode === "privileged" ? (
+            {/* YOLO execution always runs as root regardless of stored execMode. */}
+            {policy?.executionMode === "yolo" ? (
+              <div
+                data-testid="yolo-status-banner"
+                className="flex shrink-0 items-start gap-2 border border-crit/40 bg-crit/10 px-3 py-2 text-xs text-crit"
+              >
+                <Zap className="h-4 w-4 shrink-0 mt-0.5 text-crit" aria-hidden="true" />
+                <span>
+                  <strong className="font-semibold">Full YOLO mode active (Root Execution):</strong>{" "}
+                  All proposed mutation plans auto-execute autonomously as root directly on the host, regardless of sandbox settings. Egress boundaries remain independently enforced.
+                </span>
+              </div>
+            ) : policy?.execMode === "privileged" ? (
               <div
                 data-testid="privileged-exec-banner"
                 className="flex shrink-0 items-start gap-2 border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn"
               >
-                <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-warn" aria-hidden="true" />
                 <span>
                   Privileged execution is on for this host: AI shell commands
-                  run as root on the host, outside the sandbox.{policy?.autoApprove
-                    ? " Commands auto-execute without manual approval."
-                    : " Every command still requires manual approval."}
-                </span>
-              </div>
-            ) : null}
-            {policy?.autoApprove ? (
-              <div
-                data-testid="yolo-status-banner"
-                className="flex shrink-0 items-center gap-2 border border-warn/40 bg-warn/10 px-3 py-1.5 text-xs text-warn"
-              >
-                <Zap className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                <span>
-                  <strong className="font-semibold">YOLO mode enabled:</strong> allowed changes autoexecute on this VPS without manual approval.
+                  run as root on the host, outside the sandbox. Every command still requires manual approval.
                 </span>
               </div>
             ) : null}
@@ -1287,6 +1300,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
               vpsId={vps.id}
               onCancelTask={handleCancelTask}
               onReconcileTask={handleReconcileTask}
+              onResumeTask={handleResumeTask}
               onApprovePlan={handleApprovePlan}
               onDenyPlan={handleDenyPlan}
               busy={actionBusy}

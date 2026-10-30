@@ -23,7 +23,9 @@ export const updateAiPolicySchema = z
     /** One-time risk acknowledgment for privileged execution; when true and
      * the policy moves to privileged, the server records who/when. */
     acknowledgePrivileged: z.boolean().optional(),
-    autoApprove: z.boolean().optional(),
+    executionMode: z.enum(["manual", "yolo"]).optional(),
+    /** Explicit root consent for YOLO execution mode (approved loop plan). */
+    acknowledgeYolo: z.boolean().optional(),
     fileReadScopes: z.array(z.string().min(1).max(1024)).max(64).optional(),
     fileWriteScopes: z.array(z.string().min(1).max(1024)).max(64).optional(),
     serviceProfileIds: z.array(z.string().min(1).max(128)).max(64).optional(),

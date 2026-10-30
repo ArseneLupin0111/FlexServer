@@ -28,6 +28,7 @@ import type {
   AiHostCommand,
   AiOutboxEntry,
   AiTask,
+  AiTaskObservation,
   AiTaskState,
 } from "./ai.models.js";
 import {
@@ -1082,6 +1083,73 @@ export class AiAgentService {
       const allStepsCompleted = plan
         ? plan.steps.every((s) => receipts.some((r) => r.stepId === s.stepId))
         : true;
+
+      const isLoop = task.executionVersion === 2 || Boolean(task.loop);
+
+      if (isLoop) {
+        if (receipt.status === "uncertain" || (receipt.status === "cancelled" && executed)) {
+          await this.repository.updateTask({
+            id: task.id,
+            expectedRevision: task.revision,
+            state: "uncertain",
+            error: {
+              code: "uncertain_outcome",
+              message: "Execution step status uncertain upon receipt",
+            },
+          });
+          return;
+        }
+        const cancelledAfterDispatch = task.state === "cancel_requested" && receipt.status === "succeeded";
+
+        const obs: AiTaskObservation = {
+          id: randomUUID(),
+          turn: task.loop?.turn ?? 1,
+          tool: "host_command",
+          source: "host_receipt",
+          commandId: receipt.commandId,
+          stepId: receipt.stepId,
+          target: vpsId,
+          status: receipt.status === "succeeded" ? "succeeded" : receipt.status === "cancelled" ? "cancelled" : "failed",
+          exitCode: receipt.result && typeof receipt.result === "object" && "exitCode" in receipt.result && typeof receipt.result.exitCode === "number"
+            ? receipt.result.exitCode
+            : "exitCode" in receipt && typeof receipt.exitCode === "number"
+            ? receipt.exitCode
+            : undefined,
+          outputPreview: receipt.outputPreview ? redactString(receipt.outputPreview) : undefined,
+          summary: receipt.outputPreview ? redactString(receipt.outputPreview.slice(0, 500)) : `Host command ${receipt.commandId} ${receipt.status}`,
+          createdAt: receipt.createdAt || new Date().toISOString(),
+        };
+
+        try {
+          const recorded = await this.repository.recordObservation({
+            taskId: task.id,
+            vpsId,
+            observation: obs,
+            continuationReady: false,
+            state: cancelledAfterDispatch ? "cancelled" : task.state === "cancel_requested" ? undefined : "verifying",
+            expectedRevision: task.revision,
+          });
+          if (cancelledAfterDispatch) {
+            await this.repository.updateTask({
+              id: task.id,
+              expectedRevision: recorded.task.revision,
+              state: "cancelled",
+              completion: {
+                kind: "cancelled",
+                reasonCode: "cancelled_after_dispatch",
+                message: "Task cancelled after command dispatch",
+                completedAt: new Date().toISOString(),
+              },
+            });
+          }
+          return;
+        } catch (err) {
+          if (err instanceof AiPersistenceConflictError) {
+            continue;
+          }
+          throw err;
+        }
+      }
 
       let finalOutcome: AiTaskState | null = null;
 

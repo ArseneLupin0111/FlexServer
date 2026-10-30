@@ -6,11 +6,13 @@ import type {
   AiBundleJobState,
   AiBundleJobTrigger,
   AiCapability,
+  AiCompletionKind,
   AiConversation,
   AiConversationCheckpoint,
   AiConversationMessage,
   AiConversationMessageEvidence,
   AiExecutionBlob,
+  AiExecutionMode,
   AiExecutionReceipt,
   AiHostCommand,
   AiOutboxEntry,
@@ -23,10 +25,16 @@ import type {
   AiProviderTokenState,
   AiRestrictedEvidenceSource,
   AiTask,
+  AiTaskCompletionOutcome,
+  AiTaskError,
+  AiTaskJournalEntry,
+  AiTaskLoopCounters,
+  AiTaskLoopPhase,
+  AiTaskLoopState,
+  AiTaskObservation,
   AiTaskState,
   AiTaskUsage,
 } from "../../ai/ai.models.js";
-import type { AiTaskError } from "../../ai/ai.models.js";
 export type { AiBundleJobRecord, AiBundleJobState, AiBundleJobTrigger };
 
 /** Error raised when a CAS/admission/identity invariant fails. */
@@ -51,6 +59,16 @@ export class AiPersistenceConflictError extends Error {
   }
 }
 
+export type AiTaskLoopInitInput = {
+  mode: AiExecutionMode;
+  deadlineAt: string;
+  pinnedProviderId?: string;
+  pinnedProviderRevision?: number;
+  pinnedPolicyRevision?: number;
+  pinnedCapabilityRevision?: number;
+  counters?: Partial<AiTaskLoopCounters>;
+};
+
 export type AiTaskCreateInput = {
   id: string;
   conversationId: string;
@@ -66,12 +84,34 @@ export type AiTaskCreateInput = {
   /** Active-slot lease at admission; JSON adapter uses absolute now derived from createdAt */
   expiresAt?: string;
   createdAt?: string;
+  /** Task execution version: legacy missing/1 vs loop 2 */
+  executionVersion?: 1 | 2;
+  executionMode?: AiExecutionMode;
+  loop?: AiTaskLoopInitInput;
+};
+
+export type AiTaskLoopPatch = {
+  phase?: AiTaskLoopPhase;
+  continuationReady?: boolean;
+  pauseReason?: string | null;
+  pinnedProviderId?: string;
+  pinnedProviderRevision?: number;
+  pinnedPolicyRevision?: number;
+  pinnedCapabilityRevision?: number;
+  appendPlan?: AiPlan;
+  appendObservations?: AiTaskObservation[];
+  appendJournal?: AiTaskJournalEntry[];
+  countersDelta?: Partial<Omit<AiTaskLoopCounters, "deadlineAt">>;
+  deadlineAt?: string;
+  completion?: AiTaskCompletionOutcome;
 };
 
 export type AiTaskTransitionInput = {
   id: string;
   /** Current revision the caller observed; required — CAS to prevent lost update */
   expectedRevision: number;
+  /** Lease CAS: if set, fails with 'task_conflict' if task.loop?.leaseToken !== expectedLeaseToken */
+  expectedLeaseToken?: string;
   state?: AiTaskState;
   summary?: string;
   clarificationPrompt?: string;
@@ -88,6 +128,99 @@ export type AiTaskTransitionInput = {
    *  undefined keeps the current flag, false clears it. Force-cleared on any
    *  transition to a terminal state. Never authorizes anything by itself. */
   compacting?: boolean;
+  initiatingSessionId?: string;
+  loopPatch?: AiTaskLoopPatch;
+  completion?: AiTaskCompletionOutcome;
+  now?: string;
+};
+
+export type AiClaimTurnInput = {
+  taskId: string;
+  vpsId: string;
+  ownerInstanceId: string;
+  leaseSeconds: number;
+  expectedTurn?: number;
+  expectedLeaseToken?: string;
+  now?: string;
+};
+
+export type AiRenewTurnLeaseInput = {
+  taskId: string;
+  vpsId: string;
+  ownerInstanceId: string;
+  leaseSeconds: number;
+  expectedLeaseToken: string;
+  now?: string;
+};
+
+export type AiReserveProviderCallInput = {
+  taskId: string;
+  vpsId: string;
+  expectedRevision: number;
+  expectedLeaseToken: string;
+  estimatedInputTokens?: number;
+  now?: string;
+};
+
+export type AiReleaseOrCommitTurnInput = {
+  taskId: string;
+  vpsId: string;
+  expectedRevision: number;
+  expectedLeaseToken: string;
+  ownerInstanceId: string;
+  state?: AiTaskState;
+  summary?: string;
+  clarificationPrompt?: string;
+  plan?: AiPlan | null;
+  usageDelta?: Partial<AiTaskUsage>;
+  error?: AiTaskError | null;
+  capabilityMetadata?: AiTask["capabilityMetadata"];
+  compacting?: boolean;
+  expiresAt?: string | null;
+  releaseTurnLease?: boolean;
+  nextTurnLeaseSeconds?: number;
+  loopPatch?: AiTaskLoopPatch;
+  completion?: AiTaskCompletionOutcome;
+  now?: string;
+};
+
+export type AiResumeTaskInput = {
+  taskId: string;
+  vpsId: string;
+  expectedRevision: number;
+  initiatingSessionId?: string;
+  pinnedProviderId?: string;
+  pinnedProviderRevision?: number;
+  pinnedPolicyRevision?: number;
+  pinnedCapabilityRevision?: number;
+  reason?: string;
+  now?: string;
+};
+
+export type AiRecordObservationInput = {
+  taskId: string;
+  vpsId?: string;
+  observation: AiTaskObservation;
+  continuationReady?: boolean;
+  state?: AiTaskState;
+  expectedRevision?: number;
+  expectedLeaseToken?: string;
+  now?: string;
+};
+
+export type AiAppendJournalInput = {
+  taskId: string;
+  vpsId?: string;
+  entries: AiTaskJournalEntry[];
+  expectedLeaseToken?: string;
+  expectedRevision?: number;
+  now?: string;
+};
+
+export type AiClaimContinuationInput = {
+  ownerInstanceId: string;
+  leaseSeconds: number;
+  vpsId?: string;
   now?: string;
 };
 
@@ -287,6 +420,17 @@ export interface AiRepository {
   updateTask(input: AiTaskTransitionInput): Promise<AiTask>;
   /** Retention — deletes terminal tasks older than cutoff that are NOT in keepStates */
   deleteTerminalTasksOlderThan(cutoffIso: string, keepStates?: AiTaskState[]): Promise<number>;
+
+  // ─── loop turns / continuation ──────────────────────────────────
+  claimTurn(input: AiClaimTurnInput): Promise<AiTask>;
+  renewTurnLease(input: AiRenewTurnLeaseInput): Promise<AiTask>;
+  reserveProviderCall(input: AiReserveProviderCallInput): Promise<AiTask>;
+  releaseOrCommitTurn(input: AiReleaseOrCommitTurnInput): Promise<AiTask>;
+  resumeTask(input: AiResumeTaskInput): Promise<AiTask>;
+  recordObservation(input: AiRecordObservationInput): Promise<{ task: AiTask; created: boolean }>;
+  appendJournal(input: AiAppendJournalInput): Promise<{ task: AiTask; appendedCount: number }>;
+  claimPendingContinuation(input: AiClaimContinuationInput): Promise<AiTask | undefined>;
+  listActiveLoopTasks(options?: { vpsId?: string; expiredTurnOnly?: boolean; continuationReadyOnly?: boolean; now?: string }): Promise<AiTask[]>;
 
   // ─── approval (CAS) ─────────────────────────────────────────────
   approve(taskReplayPlan: AiPlanApprovalInput): Promise<AiPlan>;

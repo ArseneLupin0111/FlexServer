@@ -80,6 +80,44 @@ export class AiPolicyError extends Error {
 
 export type AiPolicyGate = keyof AiPolicy;
 
+export type EffectiveAiPolicy = AiPolicy;
+
+/**
+ * Centrally compute effective execution permissions for an AiPolicy.
+ *
+ * Full YOLO permits all host operations in chosen VPS including root shell
+ * without old scope gates, while strictly preserving:
+ * - target validation and trust boundaries (protected system paths and protected services)
+ * - payload validation and execution preconditions
+ * - egress independence (sendLogsToProvider and sendFilesToProvider are NEVER elevated by YOLO)
+ *
+ * If AI is disabled on the VPS (aiEnabled === false), effective permissions remain denied.
+ */
+export function getEffectiveAiPolicy(policy: AiPolicy): AiPolicy {
+  const mode = policy.executionMode === "yolo" ? "yolo" : "manual";
+  if (mode === "yolo") {
+    return {
+      ...policy,
+      executionMode: "yolo",
+      shellEnabled: policy.aiEnabled ? true : policy.shellEnabled,
+      dockerActionsEnabled: policy.aiEnabled ? true : policy.dockerActionsEnabled,
+      composeActionsEnabled: policy.aiEnabled ? true : policy.composeActionsEnabled,
+      readEnabled: policy.aiEnabled ? true : policy.readEnabled,
+      execMode: "privileged",
+      privilegedAcknowledgedAt: policy.privilegedAcknowledgedAt ?? policy.yoloAcknowledgedAt,
+      privilegedAcknowledgedBy: policy.privilegedAcknowledgedBy ?? policy.yoloAcknowledgedBy,
+      fileReadScopes: ["/"],
+      fileWriteScopes: ["/"],
+      // Egress remains strictly independent of executionMode (explicit opt-in only)
+      sendLogsToProvider: policy.sendLogsToProvider === true,
+      sendFilesToProvider: policy.sendFilesToProvider === true,
+    };
+  }
+  return {
+    ...policy,
+    executionMode: "manual",
+  };
+}
 @Injectable()
 export class AiPolicyService {
   private readonly logger = new Logger(AiPolicyService.name);
@@ -131,7 +169,18 @@ export class AiPolicyService {
 
   /** Read (upsert-on-read) effective VPS policy for gate evaluation. */
   async getPolicy(vpsId: string): Promise<AiPolicy | undefined> {
+    const policy = await this.repository.getAiPolicy(vpsId);
+    return policy ? getEffectiveAiPolicy(policy) : undefined;
+  }
+
+  /** Read raw stored VPS policy without effective elevation. */
+  async getRawPolicy(vpsId: string): Promise<AiPolicy | undefined> {
     return this.repository.getAiPolicy(vpsId);
+  }
+
+  /** Expose effective policy computation centrally. */
+  getEffectiveAiPolicy(policy: AiPolicy): AiPolicy {
+    return getEffectiveAiPolicy(policy);
   }
 
   /** Strict gate for any AI task admission on a VPS. */
@@ -149,7 +198,7 @@ export class AiPolicyService {
     if (!sessionActive) {
       throw new AiPolicyError("ai_disabled", 403, { scope: "session" });
     }
-    return policy;
+    return getEffectiveAiPolicy(policy);
   }
 
   /** Tool-level authorization: read-only auto-allowed within budget when
@@ -159,7 +208,8 @@ export class AiPolicyService {
     if (!this.config.ai.enabled) {
       throw new AiPolicyError("ai_disabled", 403);
     }
-    if (gate !== "aiEnabled" && policy[gate] !== true) {
+    const effective = getEffectiveAiPolicy(policy);
+    if (gate !== "aiEnabled" && effective[gate] !== true) {
       throw new AiPolicyError("policy_denied", 403, { gate });
     }
   }

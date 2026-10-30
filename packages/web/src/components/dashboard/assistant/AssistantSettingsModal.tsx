@@ -18,14 +18,17 @@ import {
   ShieldCheck,
   X,
   XCircle,
+  Zap,
 } from "lucide-react";
 import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
 import { Switch } from "../../ui/switch";
+import { cn } from "../../../lib/utils";
 import type {
   AiCapability,
+  AiExecutionMode,
   AiPolicy,
   AiProviderAuthKind,
   AiProviderProfile,
@@ -170,7 +173,10 @@ export function AssistantSettingsModal({
   const [composeEnabled, setComposeEnabled] = useState(false);
   const [sendLogs, setSendLogs] = useState(false);
   const [sendFiles, setSendFiles] = useState(false);
-  const [autoApprove, setAutoApprove] = useState(false);
+  const [executionMode, setExecutionMode] = useState<AiExecutionMode>("manual");
+  const [yoloModalOpen, setYoloModalOpen] = useState(false);
+  const [yoloAckChecked, setYoloAckChecked] = useState(false);
+  const [acknowledgeYolo, setAcknowledgeYolo] = useState(false);
   const [readScopesText, setReadScopesText] = useState("");
   const [writeScopesText, setWriteScopesText] = useState("");
   const [profilesText, setProfilesText] = useState("");
@@ -208,7 +214,10 @@ export function AssistantSettingsModal({
       setComposeEnabled(policy.composeActionsEnabled === true);
       setSendLogs(policy.sendLogsToProvider === true);
       setSendFiles(policy.sendFilesToProvider === true);
-      setAutoApprove(policy.autoApprove === true);
+      setExecutionMode(policy.executionMode === "yolo" ? "yolo" : "manual");
+      setAcknowledgeYolo(false);
+      setYoloAckChecked(false);
+      setYoloModalOpen(false);
       setReadScopesText((policy.fileReadScopes || []).join("\n"));
       setWriteScopesText((policy.fileWriteScopes || []).join("\n"));
       setProfilesText((policy.serviceProfileIds || []).join("\n"));
@@ -530,7 +539,8 @@ export function AssistantSettingsModal({
         readEnabled,
         dockerActionsEnabled: dockerEnabled,
         composeActionsEnabled: composeEnabled,
-        autoApprove,
+        executionMode,
+        ...(executionMode === "yolo" ? { acknowledgeYolo: true } : {}),
         sendLogsToProvider: sendLogs,
         sendFilesToProvider: sendFiles,
         fileReadScopes: readScopes,
@@ -551,10 +561,11 @@ export function AssistantSettingsModal({
   const editorModels = parseModelLines(modelsText);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/80 p-4">
-      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col border border-line bg-panel text-text shadow-none">
+    <>
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/80 p-4">
+      <div className="flex max-h-[90vh] min-h-0 w-full max-w-2xl flex-col border border-line bg-panel text-text shadow-none">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-line p-4">
+        <div className="flex shrink-0 items-center justify-between border-b border-line p-4">
           <div className="flex items-center gap-2">
             <Shield className="h-5 w-5 text-signal" />
             <h2 className="text-base font-semibold text-text">
@@ -573,7 +584,7 @@ export function AssistantSettingsModal({
         </div>
 
         {/* Tab switcher */}
-        <div className="flex border-b border-line bg-ink/40 text-xs">
+        <div className="flex shrink-0 border-b border-line bg-ink/40 text-xs">
           <button
             type="button"
             onClick={() => setActiveTab("provider")}
@@ -615,7 +626,7 @@ export function AssistantSettingsModal({
         </div>
 
         {/* Content Area */}
-        <div className="flex-1 overflow-y-auto p-5 text-xs [scrollbar-width:thin]">
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 text-xs [scrollbar-width:thin]">
           {/* TAB 1: PROVIDER PROFILES */}
           {activeTab === "provider" ? (
             <div className="space-y-4">
@@ -1257,42 +1268,90 @@ export function AssistantSettingsModal({
                 </div>
 
                 <p className="text-[11px] text-dim">
-                  {autoApprove
-                    ? "Docker and Compose actions auto-execute under YOLO mode. Shell execution is controlled by the Agent card in the host Settings."
-                    : "Docker and Compose actions run only after you approve the exact plan. Shell execution is controlled by the Agent card in the host Settings."}
+                  {executionMode === "yolo"
+                    ? "In Full YOLO mode, Docker and Compose mutations execute autonomously without manual plan approval. Shell commands execute as root directly on the host. Egress remains separately controlled by file and log toggles."
+                    : "Docker and Compose actions run only after you approve the exact plan version. Shell execution is controlled by the Agent card in host Settings (manual approval required)."}
                 </p>
 
                 <h3 className="pt-2 text-xs font-semibold uppercase tracking-wider text-dim">
-                  Plan execution
+                  Execution mode
                 </h3>
 
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between border border-line bg-panel p-2.5">
-                    <div>
-                      <div className="font-semibold text-text">Auto-approve plans (YOLO)</div>
-                      <div className="text-[11px] text-dim">
-                        Autoexecutes allowed changes on this VPS without waiting for manual confirmation. Default off.
-                      </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Plan execution mode">
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={executionMode === "manual"}
+                    aria-label="Manual approval"
+                    onClick={() => {
+                      setExecutionMode("manual");
+                      setAcknowledgeYolo(false);
+                    }}
+                    className={cn(
+                      "flex flex-col text-left p-3 border transition-colors",
+                      executionMode === "manual"
+                        ? "border-signal bg-signal/5"
+                        : "border-line bg-panel hover:border-line/80"
+                    )}
+                  >
+                    <div className="flex items-center justify-between w-full">
+                      <span className="font-semibold text-xs text-text">Manual approval</span>
+                      {executionMode === "manual" ? (
+                        <CheckCircle2 className="h-4 w-4 text-signal shrink-0" aria-hidden="true" />
+                      ) : null}
                     </div>
-                    <Switch
-                      checked={autoApprove}
-                      onCheckedChange={setAutoApprove}
-                      aria-label="Auto-approve plans on this VPS"
-                    />
-                  </div>
+                    <p className="mt-1 text-[11px] text-dim leading-4">
+                      Requires operator confirmation for every proposed mutation plan. Recommended for production.
+                    </p>
+                  </button>
 
-                  {autoApprove ? (
-                    <div
-                      data-testid="yolo-policy-warning"
-                      className="flex items-start gap-2 border border-warn/40 bg-warn/10 p-2.5 text-xs text-warn"
-                    >
-                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" />
-                      <span>
-                        Warning: Autoexecutes allowed changes on this VPS without waiting for manual confirmation. Scope limits, capability checks, and uncertain-outcome fences remain active.
+                  <button
+                    type="button"
+                    role="radio"
+                    data-testid="execution-mode-yolo"
+                    aria-checked={executionMode === "yolo"}
+                    aria-label="Full YOLO"
+                    onClick={() => {
+                      if (executionMode === "yolo") return;
+                      setYoloAckChecked(false);
+                      setYoloModalOpen(true);
+                    }}
+                    className={cn(
+                      "flex flex-col text-left p-3 border transition-colors",
+                      executionMode === "yolo"
+                        ? "border-warn bg-warn/10"
+                        : "border-line bg-panel hover:border-line/80"
+                    )}
+                  >
+                    <div className="flex items-center justify-between w-full">
+                      <span className="font-semibold text-xs text-warn flex items-center gap-1">
+                        <Zap className="h-3.5 w-3.5 text-warn shrink-0" aria-hidden="true" />
+                        Full YOLO
                       </span>
+                      {executionMode === "yolo" ? (
+                        <CheckCircle2 className="h-4 w-4 text-warn shrink-0" aria-hidden="true" />
+                      ) : null}
                     </div>
-                  ) : null}
+                    <p className="mt-1 text-[11px] text-dim leading-4">
+                      Plans auto-execute autonomously with root permissions. Independent data egress controls remain enforced.
+                    </p>
+                  </button>
                 </div>
+
+                {executionMode === "yolo" ? (
+                  <div
+                    data-testid="yolo-policy-warning"
+                    className="flex items-start gap-2 border border-warn/40 bg-warn/10 p-2.5 text-xs text-warn"
+                  >
+                    <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-warn" aria-hidden="true" />
+                    <div className="space-y-1">
+                      <div className="font-semibold">Autonomous root execution active (YOLO)</div>
+                      <p>
+                        Mutations execute automatically without per-plan approval. Shell actions run as root on the host. Data egress (sending logs/files) remains independently restricted.
+                      </p>
+                    </div>
+                  </div>
+                ) : null}
 
                 <h3 className="pt-2 text-xs font-semibold uppercase tracking-wider text-dim">
                   Data egress
@@ -1505,5 +1564,72 @@ export function AssistantSettingsModal({
         </div>
       </div>
     </div>
+      {yoloModalOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-ink/80 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="yolo-ack-title"
+        >
+          <div
+            className="w-full max-w-md border border-line bg-panel p-5 space-y-4 shadow-xl"
+            data-testid="yolo-ack-modal"
+          >
+            <div className="flex items-center gap-2">
+              <ShieldAlert className="h-5 w-5 shrink-0 text-warn" aria-hidden="true" />
+              <h4 id="yolo-ack-title" className="text-sm font-semibold text-text">
+                Enable Full YOLO autonomous execution
+              </h4>
+            </div>
+            <div className="space-y-2 text-xs leading-5 text-dim">
+              <p className="font-medium text-warn">
+                Warning: AI agent will execute all proposed mutation plans autonomously with root host permissions without human approval per step.
+              </p>
+              <p>
+                Shell commands execute directly as root on the host, outside the sandbox. In-flight actions cannot be selectively intercepted once dispatched.
+              </p>
+              <p className="border-l-2 border-line pl-2 text-text">
+                <strong>Independent data egress:</strong> YOLO grants autonomous local execution, but never bypasses egress boundaries. Sending logs or files to external providers remains strictly governed by your Data Egress settings.
+              </p>
+            </div>
+            <label className="flex items-start gap-2 text-xs font-medium text-text cursor-pointer">
+              <input
+                type="checkbox"
+                data-testid="yolo-ack-checkbox"
+                checked={yoloAckChecked}
+                onChange={(e) => setYoloAckChecked(e.target.checked)}
+                aria-label="I understand the risks of autonomous root execution"
+                className="mt-0.5 h-4 w-4"
+              />
+              <span>I understand the risks of full autonomous root execution on this host</span>
+            </label>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setYoloModalOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                data-testid="yolo-ack-confirm"
+                disabled={!yoloAckChecked}
+                onClick={() => {
+                  setExecutionMode("yolo");
+                  setAcknowledgeYolo(true);
+                  setYoloModalOpen(false);
+                }}
+              >
+                Enable Full YOLO
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }

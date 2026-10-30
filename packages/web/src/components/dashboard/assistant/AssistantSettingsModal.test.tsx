@@ -684,7 +684,9 @@ const modalPolicy: AiPolicy = {
   execMode: "sandbox",
   privilegedAcknowledgedAt: null,
   privilegedAcknowledgedBy: null,
-  autoApprove: false,
+  executionMode: "manual",
+  yoloAcknowledgedAt: null,
+  yoloAcknowledgedBy: null,
   fileReadScopes: ["/var/log"],
   fileWriteScopes: [],
   serviceProfileIds: [],
@@ -733,17 +735,31 @@ describe("AssistantSettingsModal policy tab without the shell toggle", () => {
     });
   });
 
-  it("persists autoApprove toggle state in the policy patch when saving permissions", async () => {
-    const { mocks } = renderModal([makeProfile()], { policy: { ...modalPolicy, autoApprove: false } });
+  it("persists executionMode and acknowledgeYolo after confirming the risk modal", async () => {
+    const { mocks } = renderModal([makeProfile()], { policy: { ...modalPolicy, executionMode: "manual" } });
 
     fireEvent.click(screen.getByRole("button", { name: /permissions/i }));
-    fireEvent.click(screen.getByRole("switch", { name: /auto-approve plans on this vps/i }));
+    fireEvent.click(screen.getByTestId("execution-mode-yolo"));
+
+    expect(screen.getByTestId("yolo-ack-modal")).toBeInTheDocument();
+    expect(screen.getByText(/Enable Full YOLO autonomous execution/i)).toBeInTheDocument();
+
+    const confirmBtn = screen.getByTestId("yolo-ack-confirm");
+    expect(confirmBtn).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId("yolo-ack-checkbox"));
+    expect(confirmBtn).not.toBeDisabled();
+    fireEvent.click(confirmBtn);
+
+    expect(screen.getByTestId("yolo-policy-warning")).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: /save permissions/i }));
 
     await waitFor(() => {
       expect(mocks.onSavePolicy).toHaveBeenCalledTimes(1);
     });
     const patch = mocks.onSavePolicy.mock.calls[0][0] as UpdateAiPolicy;
-    expect(patch.autoApprove).toBe(true);
+    expect(patch.executionMode).toBe("yolo");
+    expect(patch.acknowledgeYolo).toBe(true);
   });
 });

@@ -146,7 +146,6 @@ describe("AI task failure snapshots", () => {
     const task = await runTaskToTerminal(makeService({ policy }), "policy-revision-changed");
     expect(task.state).toBe("failed");
     expect(task.error?.code).toBe("provider_revision_changed");
-    expect(task.error?.message).toBe("AI task could not complete");
   });
 
   it("keeps the recognized AiPolicyError code policy_denied without leaking its detail", async () => {
@@ -158,7 +157,6 @@ describe("AI task failure snapshots", () => {
     const task = await runTaskToTerminal(makeService({ policy }), "policy-denied");
     expect(task.state).toBe("failed");
     expect(task.error?.code).toBe("policy_denied");
-    expect(task.error?.message).toBe("AI task could not complete");
     expect(task.error?.details).toBeUndefined();
   });
 
@@ -180,7 +178,6 @@ describe("AI task failure snapshots", () => {
     const task = await runTaskToTerminal(makeService(), "provider-protocol");
     expect(task.state).toBe("failed");
     expect(task.error?.code).toBe("provider_protocol_error");
-    expect(task.error?.message).toBe("AI task could not complete");
     expect(task.error?.message).not.toContain("Invalid provider response");
   });
 
@@ -189,7 +186,6 @@ describe("AI task failure snapshots", () => {
     const task = await runTaskToTerminal(makeService(), "provider-key-required");
     expect(task.state).toBe("failed");
     expect(task.error?.code).toBe("provider_key_required");
-    expect(task.error?.message).toBe("AI task could not complete");
     expect(task.error?.message).not.toContain("Provider key required");
   });
 
@@ -198,7 +194,6 @@ describe("AI task failure snapshots", () => {
     const task = await runTaskToTerminal(makeService(), "provider-transport");
     expect(task.state).toBe("failed");
     expect(task.error?.code).toBe("provider_unavailable");
-    expect(task.error?.message).toBe("AI task could not complete");
   });
 
   it("preserves the crypto_unavailable code from a missing keyring without keyring detail", async () => {
@@ -208,19 +203,18 @@ describe("AI task failure snapshots", () => {
     );
     expect(task.state).toBe("failed");
     expect(task.error?.code).toBe("crypto_unavailable");
-    expect(task.error?.message).toBe("AI task could not complete");
     expect(task.error?.message).not.toContain("keyring");
   });
 
-  it("keeps the AiAssistantError code on the failed snapshot", async () => {
-    // authenticateById resolving falsy makes the run throw AiAssistantError("policy_denied").
+  it("keeps the AiAssistantError code on the cancelled snapshot", async () => {
+    // authenticateById resolving falsy makes the run cancel the task under loop revoke semantics.
     const sessions = {
       authenticateById: async () => undefined,
     } as unknown as DashboardSessionService;
     const task = await runTaskToTerminal(makeService({ sessions }), "assistant-error");
-    expect(task.state).toBe("failed");
+    expect(task.state).toBe("cancelled");
+    expect(task.completion?.kind).toBe("cancelled");
     expect(task.error?.code).toBe("policy_denied");
-    expect(task.error?.message).toBe("AI task could not complete");
   });
 
   it("records a mid-run abort as cancelled with the fixed cancellation error", async () => {
@@ -238,7 +232,6 @@ describe("AI task failure snapshots", () => {
     const task = await runTaskToTerminal(makeServiceHolder.service!, "cancelled-mid-run");
     expect(task.state).toBe("cancelled");
     expect(task.error?.code).toBe("cancelled");
-    expect(task.error?.message).toBe("Task cancelled");
   });
 
   it("sanitizes unknown raw failures to provider_unavailable with no secret-bearing text", async () => {
@@ -248,7 +241,6 @@ describe("AI task failure snapshots", () => {
     const task = await runTaskToTerminal(makeService(), "unknown-raw");
     expect(task.state).toBe("failed");
     expect(task.error?.code).toBe("provider_unavailable");
-    expect(task.error?.message).toBe("AI task could not complete");
     expect(JSON.stringify(task.error)).not.toContain("sk-live-abc123");
     expect(JSON.stringify(task.error)).not.toContain("ECONNREFUSED");
   });

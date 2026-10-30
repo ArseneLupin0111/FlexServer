@@ -242,11 +242,15 @@ describe("phase one redaction", () => {
       redactValue({
         password: "secret",
         nested: { privateKey: "key" },
+        leaseToken: "turn-credential",
+        nestedLease: { lease_token: "old-turn-credential" },
         ok: "visible",
       }),
     ).toEqual({
       password: "[REDACTED]",
       nested: { privateKey: "[REDACTED]" },
+      leaseToken: "[REDACTED]",
+      nestedLease: { lease_token: "[REDACTED]" },
       ok: "visible",
     });
   });

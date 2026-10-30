@@ -260,11 +260,12 @@ Connecting a provider makes cached metrics and inventory available without per-V
 
 ### Retention semantics and state fences
 
-1. **Scheduled retention lifecycle:** `AiRetentionService` runs a lightweight 5-second session/lease reconciliation loop and a periodic 300-second retention pass.
-2. **Terminal task pruning:** Only tasks in terminal states (`succeeded`, `failed`, `cancelled`, `expired`) older than the 30-day cutoff are pruned. Active tasks (`planning`, `awaiting_input`, `awaiting_approval`, `executing`, `verifying`, `cancel_requested`) and `uncertain` tasks are strictly preserved and never TTL-deleted.
-3. **Durable fence and receipt preservation:** Any task associated with active outbox entries (`pending` or `dispatched`) or `uncertain` execution receipts is protected from retention deletion. Terminal task pruning purges only resolved receipts and acknowledged outbox entries, keeping all fences intact.
-4. **Needed execution blob protection:** Encrypted execution blobs (`AiExecutionBlob`) are deleted on expiration only if not needed by an active or uncertain task, active outbox commands, or uncertain receipts. Needed blobs remain durable until their associated work settles.
-5. **Audit preservation on chat deletion:** Deleting a chat conversation (`deleteConversation`) deletes conversation metadata and messages but preserves all historical audit events (`state.auditEvents`) and records an immutable deletion audit event. Audit records are maintained under the 90-day retention baseline.
+1. **Scheduled retention and continuation lifecycle:** `AiRetentionService` runs startup recovery before requests are accepted, then a single-flight 5-second session/lease reconciliation loop and a 300-second retention pass. The continuation scheduler is separate: `AiTaskService.onModuleInit()` awaits one immediate sweep and then starts a five-second interval. Each sweep uses a per-service UUID owner and repository CAS to atomically claim at most 100 eligible `executionVersion: 2` continuations with a 60-second lease; `planning`/`verifying` tasks with continuation ready or a missing/expired turn lease are eligible, while `cancel_requested` tasks are excluded. Claims fence concurrent API instances, and `run(..., alreadyClaimed: true)` prevents a duplicate turn claim. A claim without `initiatingSessionId` fails closed with blocked `missing_initiating_session`; sweep errors are caught/logged, and shutdown clears the timer and aborts active workers.
+2. **Durable counters and no-progress fence:** Loop counters (provider/read/tool calls, mutation plans, verification attempts, token usage, no-progress streak, and absolute deadline) survive resume and restart. Three consecutive identical tool/target/result fingerprints (`no_progress3`) produce a blocked completion with `no_progress`; the loop does not continue or issue a compensating mutation.
+3. **Terminal task pruning:** Only tasks in terminal states (`succeeded`, `failed`, `cancelled`, `expired`) older than the 30-day cutoff are pruned. Active tasks (`planning`, `awaiting_input`, `awaiting_approval`, `executing`, `verifying`, `cancel_requested`) and `uncertain` tasks are strictly preserved and never TTL-deleted.
+4. **Durable fence and receipt preservation:** Any task associated with active outbox entries (`pending` or `dispatched`) or `uncertain` execution receipts is protected from retention deletion. Terminal task pruning purges only resolved receipts and acknowledged outbox entries, keeping all fences intact. Cancellation never deletes a receipt: a post-dispatch successful receipt is recorded as a cancellation-after-dispatch outcome; an uncertain or indeterminate post-execution result remains `uncertain` and cannot be retried blindly.
+5. **Needed execution blob protection:** Encrypted execution blobs (`AiExecutionBlob`) are deleted on expiration only if not needed by an active or uncertain task, active outbox commands, or uncertain receipts. Needed blobs remain durable until their associated work settles.
+6. **Audit preservation on chat deletion:** Deleting a chat conversation (`deleteConversation`) deletes conversation metadata and messages but preserves all historical audit events (`state.auditEvents`) and records an immutable deletion audit event. Audit records are maintained under the 90-day retention baseline.
 
 AI agent result, live output, heartbeat, and cancel-status reports are accepted only for an outbox command already dispatched to the reporting agent instance on the credential's VPS. Result step and plan identities must also match the dispatched command; an acknowledged command can submit an identical result retry. A stolen VPS agent credential plus the exact dispatched command identity can still impersonate that agent: revoke the credential and reconcile affected work if compromise is suspected.
 
@@ -274,15 +275,15 @@ AI agent result, live output, heartbeat, and cancel-status reports are accepted 
    - Tasks in `executing` or `verifying` are transitioned to `cancel_requested` with code `session_revoked`, instructing the agent to terminate execution on its next heartbeat rather than running detached.
    - Tasks in `planning`, `awaiting_approval`, or `awaiting_input` are expired immediately with code `session_revoked`.
 2. **Owner lease expiration:** Tasks in `executing` or `verifying` whose runtime owner lease expires without fresh heartbeat/receipt are transitioned to `uncertain` with wire code `uncertain_outcome`, preserving the active-slot fence without duplicate execution. Stale `planning` leases expire to unblock VPS crashes.
-3. **Awaiting task expiration:** Tasks remaining in `awaiting_approval`, `awaiting_input`, or `planning` past their `expiresAt` deadline are transitioned to `expired` with wire code `approval_expired`.
+3. **Awaiting task expiration:** Tasks remaining in `awaiting_approval`, `awaiting_input`, or `planning` past their `expiresAt` deadline are transitioned to `expired` with wire code `approval_expired`. A loop's absolute deadline is authoritative and is not reset by resume or restart.
 
 ### Secret redaction and streaming boundaries
 
-1. **Shared secret redaction:** All outgoing responses and provider communications pass through `packages/api/src/common/redaction.ts`. Redaction matches private key PEM blocks, SSH keys, passwords, bearer tokens, scoped `vma_` tokens, `sk-` provider keys, generic secret assignments, and `.env` variable assignments.
+1. **Shared secret redaction:** All outgoing responses and provider communications pass through `packages/api/src/common/redaction.ts`. Redaction matches private key PEM blocks, SSH keys, passwords, bearer tokens, scoped `vma_` tokens, `sk-` provider keys, generic secret assignments, and `.env` variable assignments. Object keys normalized to `leaseToken` (including `lease_token`) are also redacted; public task projections must still exclude internal turn leases rather than relying on redaction.
 2. **ANSI escape stripping:** Terminal and subprocess output undergoes ANSI sequence stripping before pattern matching to prevent escape code fragmentation from evading secret redaction.
 3. **Chunk boundary streaming redactor:** `ChunkRedactor` buffers stream chunks across packet boundaries to detect and redact split tokens or headers that cross chunk splits, using line-oriented buffering and dedicated PEM block masking.
 4. **Exact preview byte preservation:** Authenticated execution preview payloads are exempted from output value mutation to guarantee that script/content byte digests match during subsequent approval verification.
-5. **Operational limits:** Production deployment of AI assistant host execution and multi-node confinement has NOT been verified. Passing local unit tests and simulated adapter runs does not guarantee provider reliability, billing boundaries, or safe confinement on production Linux hosts.
+5. **Operational limits:** Authorized disposable-host runtime proof is complete for the durable loop, including manual approval, restart/recovery, no-replay, and explicit YOLO root execution checks. Production multi-node confinement and real-provider execution remain separate limits; local and disposable-host evidence does not establish real-provider reliability or billing behavior.
 
 ### Host Confinement Runtime (ai-host-helper / ai-executor)
 
@@ -304,6 +305,47 @@ Each VPS AI policy carries `execMode: "sandbox" | "privileged"` (default `sandbo
 - **Capability gate (fail-closed):** The agent probes the helper socket once at worker startup (`privileged_probe`). The result is reported in the agent claim as `privilegedSupported`. Dispatch in privileged mode requires a fresh capability claim with `privilegedSupported === true`; a helper that is missing or too old to answer the probe leaves the flag `false` and privileged dispatch fails with `sandbox_unavailable` ("privileged execution unavailable (helper missing or outdated)"). The sandbox path's own `supported`/cgroup-v2 requirements are unchanged.
 - **Known information exposure — script bytes in argv:** `/bin/sh -c <script>` places the script text in the process argv, where it is briefly readable in `/proc/<pid>/cmdline` by other local users of that host while the script runs. This is an accepted trade-off of privileged mode; sandbox mode does not have it (the script is written inside the pinned rootfs, not passed as an argument).
 
+## Autonomous AI Execution Loop (executionMode & YOLO Root Security)
+
+The AI assistant operates across two orthogonal execution policy axes:
+- **`execMode` ("sandbox" | "privileged"):** defines host shell confinement (rootfs/namespaces/cgroups vs unconfined root).
+- **`executionMode` ("manual" | "yolo"):** defines loop approval automation and scope boundaries.
+
+### Per-Plan Manual Approval (`executionMode: "manual"`)
+
+The default execution mode is `manual`. Under `executionVersion: 2` multi-turn loops, each proposed mutation plan requires independent human operator review and approval via `POST /api/vps/:vpsId/ai/tasks/:taskId/approve`. Approval verifies the exact plan version and SHA-256 payload digest. One-time plan consumption ensures that no unreviewed steps execute, preventing multi-turn prompt injection from chaining unapproved mutations.
+
+### Explicitly Acknowledged YOLO Root Mode (`executionMode: "yolo"`)
+
+YOLO mode provides autonomous multi-turn execution without human approval pauses:
+- **Root-level capability expansion:** Transitioning a policy to YOLO automatically escalates permissions to full root access: `fileReadScopes: ["/"]`, `fileWriteScopes: ["/"]`, and forces `execMode: "privileged"`. All tool and service profile restrictions are bypassed.
+- **Autonomous per-turn plan approval:** The server automatically approves proposed plans per turn using the credentials and permissions of the initiating dashboard session.
+- **Mandatory explicit root risk acknowledgment:** Because YOLO combines unconfined root shell execution with autonomous loop approval, activating `executionMode: "yolo"` on `PATCH /api/vps/:vpsId/ai/policy` strictly requires explicit consent (`acknowledgeYolo: true`). The server records `yoloAcknowledgedAt` and `yoloAcknowledgedBy`. Unacknowledged requests are rejected with `400 Bad Request`.
+- **Legacy `autoApprove` normalization:** Migration 037 drops legacy `auto_approve` and normalizes policies to `executionMode: "manual"`. Legacy tasks default to `executionVersion: 1`. Autonomous root capabilities are NEVER granted silently to existing deployments.
+
+### Independent Provider Egress Decoupling
+
+To protect data confidentiality and prevent exfiltration of sensitive server assets:
+- **Strict decoupling:** `sendLogsToProvider` and `sendFilesToProvider` are strictly independent of `executionMode` and `execMode`.
+- **Zero implicit egress:** Enabling full YOLO root mode does **NOT** grant permission to send container/host logs or file contents to the external LLM provider.
+- Model prompts receive tool metadata, command exit codes, and truncated previews, but raw log streams and file reads remain blocked from provider egress unless separately and explicitly consented by the operator.
+
+### Fail-Closed Uncertainty and Zero Blind Retries
+
+When executing commands on host systems, uncertainty cannot be resolved by blindly retrying:
+- **Uncertainty triggers:** If an execution turn lease expires without a receipt, a receipt is marked `"uncertain"`, or execution was cancelled after starting on the host, the task transitions to `state: "uncertain"` with error code `uncertain_outcome`.
+- **Continuation halted:** The execution loop immediately halts all further execution.
+- **No blind retries:** The runtime strictly refuses to retry or re-dispatch an uncertain mutation step. Re-running a command that partially completed or succeeded without acknowledging receipt could result in corrupted data, broken configurations, or duplicate destructive side effects.
+- **Mutation fence:** Outbox mutation fences block any further plan approval or dispatch on that VPS while an unresolved uncertain task exists. Manual inspection or receipt reconciliation is required.
+
+### Resume Security Constraints (`POST /api/vps/:vpsId/ai/tasks/:taskId/resume`)
+
+Resuming a loop task is guarded by strict admission and session fences:
+- **Initiating session check:** Caller's dashboard session must match `task.initiatingSessionId`. Cross-session resume is denied (`policy_denied`).
+- **Version enforcement:** Only `executionVersion: 2` loop tasks can be resumed. Legacy `executionVersion: 1` tasks fail closed with `stale_plan`.
+- **Uncertain state block:** Resuming an `uncertain` task is forbidden (`uncertain_outcome`) until reconciliation resolves receipts.
+- **Policy & provider drift prevention:** Admission policy and provider profile revisions are re-validated. If the provider profile is missing or invalid, resume fails closed with `provider_unavailable`. Upon valid admission, pinned revisions (`pinnedPolicyRevision`, `pinnedProviderRevision`, `pinnedProviderId`) are updated to current, `pauseReason` cleared, and continuation is resumed safely.
+
 ### AI bundle install over saved SSH or host-bundled install
 
-The API image bundles the complete AI runtime under `/app/agent/ai/` (binaries for both architectures, digest-pinned BusyBox rootfs tarballs and manifests, service profiles, and the installer). Installation on a remote VPS uses the **saved SSH credentials** for that VPS: the API uploads the artifacts to a staging directory, verifies digests, and runs `install-local-agent.sh --install-ai`. Agent installation also includes the AI runtime by default; a first remote AI install may be triggered by a deliberate admin policy action (turning AI or shell on, or changing `execMode`), never by ordinary application startup or the default `aiEnabled` state. On the local/system host there is no SSH remote or automatic install channel: the administrator runs `sudo bash scripts/install/install.sh` on the host (AI install is the default; `--skip-ai` opts out). Re-running the installer with a newer bundle refreshes the local AI runtime. `APP_AI_ENABLED=false` disables the subsystem without uninstalling anything.
+The API image bundles the complete AI runtime under `/app/agent/ai/` (binaries for both architectures, digest-pinned BusyBox rootfs tarballs and manifests, service profiles, and the installer). Installation on a remote VPS uses the **saved SSH credentials** for that VPS: the API uploads the artifacts to a staging directory, verifies digests, and runs `install-local-agent.sh --install-ai`. Agent installation also includes the AI runtime by default; a first remote AI install may be triggered by a deliberate admin policy action (turning AI or shell on, or changing `execMode` or `executionMode`), never by ordinary application startup or the default `aiEnabled` state. On the local/system host there is no SSH remote or automatic install channel: the administrator runs `sudo bash scripts/install/install.sh` on the host (AI install is the default; `--skip-ai` opts out). Re-running the installer with a newer bundle refreshes the local AI runtime. `APP_AI_ENABLED=false` disables the subsystem without uninstalling anything.

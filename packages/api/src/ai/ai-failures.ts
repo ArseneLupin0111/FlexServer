@@ -12,6 +12,9 @@ export type AiErrorCode =
   | "provider_rate_limit"
   | "provider_context_overflow"
   | "provider_response_truncated"
+  | "provider_protocol_error"
+  | "provider_key_required"
+  | "crypto_unavailable"
   | "provider_revision_changed"
   | "capability_unavailable"
   | "task_busy"
@@ -25,6 +28,8 @@ export type AiErrorCode =
   | "budget_exhausted"
   | "output_gap"
   | "uncertain_outcome"
+  | "no_progress"
+  | "cancelled"
   | "sandbox_unavailable"
   | "file_changed"
   | "profile_changed";
@@ -35,6 +40,9 @@ const AI_HTTP_STATUS: Record<AiErrorCode, number> = {
   provider_rate_limit: 429,
   provider_context_overflow: 413,
   provider_response_truncated: 502,
+  provider_protocol_error: 502,
+  provider_key_required: 503,
+  crypto_unavailable: 503,
   provider_revision_changed: 409,
   capability_unavailable: 409,
   task_busy: 409,
@@ -48,6 +56,8 @@ const AI_HTTP_STATUS: Record<AiErrorCode, number> = {
   budget_exhausted: 429,
   output_gap: 502,
   uncertain_outcome: 409,
+  no_progress: 429,
+  cancelled: 409,
   sandbox_unavailable: 503,
   file_changed: 409,
   profile_changed: 409,

@@ -23,6 +23,7 @@ import { encryptAiSecret } from "../src/ai/ai-crypto.js";
 import { AI_PROVIDER_KEY_CONTEXT } from "../src/ai/ai-routes.service.js";
 import { createTestKeyring, saveKeyringToFile, type Keyring } from "../src/ssh/key-encryption.js";
 import type { AiCapability, AiPolicy, AiTask } from "../src/ai/ai.models.js";
+import { readJsonFile, writeJsonFile } from "../src/persistence/repositories/json-file.js";
 
 // Slice 1 (docs/ai-agent-autoupdate-execmode-plan.md): pre-dispatch shell
 // branch, plan execMode stamping and the approve-time stale_plan mode guard.
@@ -255,10 +256,15 @@ describe("AI shell execMode dispatch", () => {
     const task = await proposeShellPlan({ execMode: "privileged" });
     expect(task.state).toBe("awaiting_approval");
 
-    // Simulate a plan stamped under the previous (sandbox) mode while the
-    // stored policyRevision still matches, so only the mode guard can fire.
-    const current = await aiRepo.getTask(vpsId, task.id);
-    await aiRepo.updateTask({ id: task.id, expectedRevision: current!.revision, plan: { ...current!.plan!, execMode: "sandbox" } });
+    // Change policy in persistence to sandbox while preserving policyRevision,
+    // so revalidateForDispatch passes and only the mode guard triggers stale_plan.
+    const aiFile = join(dir, "ai.json");
+    const raw = await readJsonFile<{ policies: AiPolicy[] }>(aiFile, { policies: [] });
+    const pol = raw.policies.find((p) => p.vpsId === vpsId);
+    if (pol) {
+      pol.execMode = "sandbox";
+      await writeJsonFile(aiFile, raw);
+    }
 
     await expect(
       service.approve(request, vpsId, task.id, { planVersion: 1, planDigest: task.plan!.planDigest }),

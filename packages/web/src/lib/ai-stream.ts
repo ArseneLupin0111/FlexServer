@@ -283,6 +283,7 @@ export function useAiTaskStream({
 
     // Register canonical wire event names only (no legacy aliases)
     source.addEventListener("ai.task.snapshot", handleSnapshot);
+    source.addEventListener("ai.task.updated", handleSnapshot);
     source.addEventListener("ai.step.updated", handleStepUpdate);
     source.addEventListener("ai.approval.required", handleApprovalRequired);
     source.addEventListener("ai.output.chunk", handleOutputChunk);

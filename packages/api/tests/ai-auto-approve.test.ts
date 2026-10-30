@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { Request } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseAppConfig, type AppConfig } from "../src/config/app-config.js";
-import { createJsonAiRepository, defaultAiPolicy } from "../src/persistence/repositories/ai.repository.js";
+import { createJsonAiRepository } from "../src/persistence/repositories/ai.repository.js";
 import type { AiRepository } from "../src/persistence/repositories/ai.persistence.js";
 import type { DockerMonitoringRepository } from "../src/persistence/repositories/docker-monitoring.repository.js";
 import { createVpsStore } from "../src/persistence/store/vpsStore.js";
@@ -22,8 +22,6 @@ import { encryptAiSecret } from "../src/ai/ai-crypto.js";
 import { AI_PROVIDER_KEY_CONTEXT } from "../src/ai/ai-routes.service.js";
 import { createTestKeyring, saveKeyringToFile, type Keyring } from "../src/ssh/key-encryption.js";
 import type { AiCapability, AiHostCommand, AiPolicy, AiTask } from "../src/ai/ai.models.js";
-import { updateAiPolicySchema } from "../src/ai/ai.schemas.js";
-import { readJsonFile, writeJsonFile } from "../src/persistence/repositories/json-file.js";
 import { AiAssistantError } from "../src/ai/ai-failures.js";
 
 const request = { dashboardSessionId: "admin-session" } as unknown as Request;
@@ -118,9 +116,14 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
 
   async function seedPolicy(overrides: Partial<AiPolicy> = {}): Promise<AiPolicy> {
     const current = await aiRepo.getAiPolicy(vpsId);
+    const patch: Partial<AiPolicy> = { shellEnabled: true, ...overrides };
+    if (patch.executionMode === "yolo" && patch.yoloAcknowledgedAt === undefined) {
+      patch.yoloAcknowledgedAt = new Date().toISOString();
+      patch.yoloAcknowledgedBy = "admin-session";
+    }
     return aiRepo.updateAiPolicy({
       vpsId,
-      patch: { shellEnabled: true, ...overrides },
+      patch,
       expectedRevision: current!.revision,
     });
   }
@@ -134,7 +137,7 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
       cgroupV2Available: true,
       namespacesAvailable: true,
       seccompAvailable: true,
-      privilegedSupported: false,
+      privilegedSupported: true,
       profiles: [],
       rootfsDigest,
       profilesDigest,
@@ -171,10 +174,11 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
     for (;;) {
       const task = await aiRepo.getTask(vpsId, created.id);
       if (task) {
-        if (!currentPol?.autoApprove && (task.state === "awaiting_approval" || TERMINAL[task.state])) {
+        const isAuto = currentPol?.executionMode === "yolo";
+        if (!isAuto && (task.state === "awaiting_approval" || TERMINAL[task.state])) {
           return task;
         }
-        if (currentPol?.autoApprove) {
+        if (isAuto) {
           if (task.state === "failed" || task.state === "uncertain" || task.state === "succeeded" || task.state === "cancelled") {
             return task;
           }
@@ -195,44 +199,10 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
     }
   }
 
-  describe("Schema & policy normalization", () => {
-    it("defaults autoApprove to false in defaultAiPolicy", () => {
-      const policy = defaultAiPolicy(vpsId);
-      expect(policy.autoApprove).toBe(false);
-    });
-
-    it("validates updateAiPolicySchema: allows autoApprove boolean and rejects non-boolean values", () => {
-      expect(updateAiPolicySchema.safeParse({ autoApprove: true }).success).toBe(true);
-      expect(updateAiPolicySchema.safeParse({ autoApprove: false }).success).toBe(true);
-      expect(updateAiPolicySchema.safeParse({ autoApprove: "true" }).success).toBe(false);
-    });
-
-    it("normalizes absent or corrupt autoApprove to false on read (fail-closed)", async () => {
-      const aiFile = join(dir, "ai.json");
-      const raw = await readJsonFile<{ policies: Record<string, unknown>[] }>(aiFile, { policies: [] });
-      raw.policies.push({ vpsId, revision: 1, updatedAt: new Date().toISOString() });
-      await writeJsonFile(aiFile, raw);
-
-      const policy = await aiRepo.getAiPolicy(vpsId);
-      expect(policy?.autoApprove).toBe(false);
-    });
-
-    it("persists autoApprove toggles cleanly", async () => {
-      const p1 = await aiRepo.updateAiPolicy({ vpsId, patch: { autoApprove: true }, expectedRevision: 0 });
-      expect(p1.autoApprove).toBe(true);
-      const read1 = await aiRepo.getAiPolicy(vpsId);
-      expect(read1?.autoApprove).toBe(true);
-
-      const p2 = await aiRepo.updateAiPolicy({ vpsId, patch: { autoApprove: false }, expectedRevision: p1.revision });
-      expect(p2.autoApprove).toBe(false);
-      const read2 = await aiRepo.getAiPolicy(vpsId);
-      expect(read2?.autoApprove).toBe(false);
-    });
-  });
 
   describe("Auto-approval execution and safety gates", () => {
-    it("autoApprove OFF (default): leaves plan in awaiting_approval with pending status", async () => {
-      await seedPolicy({ autoApprove: false });
+    it("executionMode manual (default): leaves plan in awaiting_approval with pending status", async () => {
+      await seedPolicy({ executionMode: "manual" });
       await seedCapability();
 
       const task = await proposeShellPlan();
@@ -243,8 +213,8 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
       expect(outbox).toHaveLength(0);
     });
 
-    it("autoApprove ON: automatically approves, transitions to executing and enqueues outbox command", async () => {
-      await seedPolicy({ autoApprove: true });
+    it("executionMode yolo: automatically approves, transitions to executing and enqueues outbox command", async () => {
+      await seedPolicy({ executionMode: "yolo" });
       await seedCapability();
 
       const task = await proposeShellPlan();
@@ -263,18 +233,22 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
       expect(claimed[0]?.kind).toBe("shell");
     });
 
-    it("no retroactive dispatch: enabling autoApprove does NOT dispatch existing awaiting_approval plan", async () => {
-      await seedPolicy({ autoApprove: false });
+    it("no retroactive dispatch: switching to executionMode yolo does NOT dispatch existing awaiting_approval plan", async () => {
+      await seedPolicy({ executionMode: "manual" });
       await seedCapability();
 
       const task = await proposeShellPlan();
       expect(task.state).toBe("awaiting_approval");
 
-      // Enable autoApprove now
+      // Enable executionMode yolo now
       const current = await aiRepo.getAiPolicy(vpsId);
       await aiRepo.updateAiPolicy({
         vpsId,
-        patch: { autoApprove: true },
+        patch: {
+          executionMode: "yolo",
+          yoloAcknowledgedAt: new Date().toISOString(),
+          yoloAcknowledgedBy: "admin-session",
+        },
         expectedRevision: current!.revision,
       });
 
@@ -288,7 +262,7 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
     });
 
     it("safety fence: uncertain outcome fence blocks autoapproval without corrupting state", async () => {
-      await seedPolicy({ autoApprove: true });
+      await seedPolicy({ executionMode: "yolo" });
       await seedCapability();
 
       // Seed an unresolved uncertain task on this VPS
@@ -313,14 +287,15 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
     });
 
     it("safety fence: revoked session blocks autoapproval with policy_denied", async () => {
-      await seedPolicy({ autoApprove: true });
+      await seedPolicy({ executionMode: "yolo" });
       await seedCapability();
 
       // Session revoked before proposal
       sessionValid = false;
 
       const task = await proposeShellPlan();
-      expect(task.state).toBe("failed");
+      expect(task.state).toBe("cancelled");
+      expect(task.completion?.kind).toBe("cancelled");
       expect(task.error?.code).toBe("policy_denied");
 
       const outbox = await aiRepo.claimCommands("agent-inst-1", vpsId, 10);
@@ -328,7 +303,7 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
     });
 
     it("no replay: autoapproved and consumed plan cannot be re-approved", async () => {
-      await seedPolicy({ autoApprove: true });
+      await seedPolicy({ executionMode: "yolo" });
       await seedCapability();
 
       const task = await proposeShellPlan();
@@ -344,8 +319,17 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
       ).rejects.toThrowError(AiAssistantError);
     });
 
+    it("auto-approves plan when executionMode is yolo", async () => {
+      await seedPolicy({ executionMode: "yolo" });
+      await seedCapability();
+
+      const task = await proposeShellPlan();
+      expect(task.state).toBe("executing");
+      expect(task.plan?.status).toBe("consumed");
+    });
+
     it("post-dispatch error preserves uncertain mutation fence without marking task failed", async () => {
-      await seedPolicy({ autoApprove: true });
+      await seedPolicy({ executionMode: "yolo" });
       await seedCapability();
 
       vi.spyOn(aiRepo, "enqueueCommands").mockRejectedValueOnce(new Error("Disk full on outbox journal"));

@@ -11,24 +11,61 @@ import {
   AI_HISTORY_MAX_PAGE,
   AI_TERMINAL_TASK_STATES,
   AiPersistenceConflictError,
+  type AiAppendJournalInput,
   type AiBundleJobFinishInput,
   type AiBundleJobRecord,
   type AiBundleJobStartInput,
   type AiBundleJobStartResult,
   type AiCapabilityUpsertInput,
   type AiCheckpointAdvanceInput,
+  type AiClaimContinuationInput,
+  type AiClaimTurnInput,
   type AiConversationAppendMessageInput,
   type AiOutboxCommandExpect,
   type AiPlanApprovalInput,
   type AiPolicyUpdateInput,
   type AiProviderMigrationView,
   type AiProviderProfileWriteInput,
+  type AiRecordObservationInput,
+  type AiReleaseOrCommitTurnInput,
+  type AiRenewTurnLeaseInput,
   type AiRepository,
+  type AiReserveProviderCallInput,
+  type AiResumeTaskInput,
   type AiSettingsUpdateInput,
   type AiTaskCreateInput,
+  type AiTaskLoopInitInput,
+  type AiTaskLoopPatch,
   type AiTaskTransitionInput,
 } from "./ai.persistence.js";
-import type { AiConversation, AiConversationCheckpoint, AiConversationMessage, AiAuditEvent, AiBundleJobState, AiCapability, AiExecutionBlob, AiExecutionReceipt, AiHostCommand, AiOutboxEntry, AiPlan, AiPolicy, AiProviderProfileInternal, AiProviderSettingsInternal, AiTask, AiTaskState, AiTaskUsage } from "../../ai/ai.models.js";
+import type {
+  AiAuditEvent,
+  AiBundleJobState,
+  AiCapability,
+  AiCompletionKind,
+  AiConversation,
+  AiConversationCheckpoint,
+  AiConversationMessage,
+  AiExecutionBlob,
+  AiExecutionMode,
+  AiExecutionReceipt,
+  AiHostCommand,
+  AiOutboxEntry,
+  AiPlan,
+  AiPlanStatus,
+  AiPolicy,
+  AiProviderProfileInternal,
+  AiProviderSettingsInternal,
+  AiTask,
+  AiTaskCompletionOutcome,
+  AiTaskJournalEntry,
+  AiTaskLoopCounters,
+  AiTaskLoopPhase,
+  AiTaskLoopState,
+  AiTaskObservation,
+  AiTaskState,
+  AiTaskUsage,
+} from "../../ai/ai.models.js";
 import {
   readJsonFile,
   readModifyWriteJsonFile,
@@ -44,23 +81,128 @@ export const defaultAiPolicy = (vpsId: string): AiPolicy => ({
   vpsId, aiEnabled: true, readEnabled: true, dockerActionsEnabled: true,
   composeActionsEnabled: true, shellEnabled: false, execMode: "sandbox",
   privilegedAcknowledgedAt: null, privilegedAcknowledgedBy: null,
-  autoApprove: false,
+  executionMode: "manual",
+  yoloAcknowledgedAt: null,
+  yoloAcknowledgedBy: null,
   fileReadScopes: [], fileWriteScopes: [], serviceProfileIds: [],
   sendLogsToProvider: false, sendFilesToProvider: false, revision: 0,
   updatedAt: new Date(0).toISOString(),
 });
 /** Read normalization (execmode plan contract): rows persisted before
  * execMode existed (and any corrupt value) read as "sandbox"; acknowledgment
- * fields read as null when absent. Ack fields are never cleared by this. */
-const normalizePolicy = (policy: AiPolicy): AiPolicy => ({
-  ...policy,
-  execMode: policy.execMode === "privileged" ? "privileged" : "sandbox",
-  privilegedAcknowledgedAt: policy.privilegedAcknowledgedAt ?? null,
-  privilegedAcknowledgedBy: policy.privilegedAcknowledgedBy ?? null,
-  autoApprove: policy.autoApprove === true,
-});
+ * fields read as null when absent. Ack fields are never cleared by this.
+ * Legacy autoApprove is stripped; legacy policies default to manual executionMode. */
+const normalizePolicy = (policy: AiPolicy | (AiPolicy & { autoApprove?: boolean })): AiPolicy => {
+  const { autoApprove: _autoApprove, ...rest } = policy as AiPolicy & { autoApprove?: boolean };
+  return {
+    ...rest,
+    execMode: rest.execMode === "privileged" ? "privileged" : "sandbox",
+    privilegedAcknowledgedAt: rest.privilegedAcknowledgedAt ?? null,
+    privilegedAcknowledgedBy: rest.privilegedAcknowledgedBy ?? null,
+    executionMode: rest.executionMode === "yolo" ? "yolo" : "manual",
+    yoloAcknowledgedAt: rest.yoloAcknowledgedAt ?? null,
+    yoloAcknowledgedBy: rest.yoloAcknowledgedBy ?? null,
+  };
+};
+
+export const normalizeAiState = (state: StoredAiState): StoredAiState => {
+  for (const task of state.tasks) {
+    if (task.executionVersion === undefined) {
+      task.executionVersion = 1;
+    }
+  }
+  if (state.policies) {
+    state.policies = state.policies.map(normalizePolicy);
+  }
+  return state;
+};
+
+const appendObservationIdempotent = (
+  observations: AiTaskObservation[],
+  obs: AiTaskObservation,
+): { observations: AiTaskObservation[]; created: boolean } => {
+  const duplicate = observations.find(
+    (o) =>
+      o.id === obs.id ||
+      (obs.commandId && o.commandId === obs.commandId && obs.stepId && o.stepId === obs.stepId),
+  );
+  if (duplicate) {
+    return { observations, created: false };
+  }
+  return { observations: [...observations, obs], created: true };
+};
+
+const appendJournalEntriesIdempotent = (
+  journal: AiTaskJournalEntry[],
+  entries: AiTaskJournalEntry[],
+): { journal: AiTaskJournalEntry[]; count: number } => {
+  let count = 0;
+  const next = [...journal];
+  for (const entry of entries) {
+    const duplicate = next.find(
+      (j) => j.journalId === entry.journalId || (entry.callId && j.callId === entry.callId),
+    );
+    if (!duplicate) {
+      next.push(entry);
+      count++;
+    }
+  }
+  return { journal: next, count };
+};
+
+const PLAN_STATUS_ORDER: Record<AiPlanStatus, number> = {
+  pending: 0,
+  approved: 1,
+  consumed: 2,
+  denied: 2,
+  expired: 2,
+};
+
+const applyPlanMonotonic = (
+  currentHistory: AiPlan[],
+  newPlan: AiPlan,
+): AiPlan[] => {
+  const existingIndex = currentHistory.findIndex(
+    (p) => p.planId === newPlan.planId && p.planVersion === newPlan.planVersion,
+  );
+  if (existingIndex !== -1) {
+    const existing = currentHistory[existingIndex];
+    if (
+      existing.planDigest !== newPlan.planDigest ||
+      existing.taskId !== newPlan.taskId ||
+      existing.vpsId !== newPlan.vpsId ||
+      existing.execMode !== newPlan.execMode ||
+      !isDeepStrictEqual(existing.steps, newPlan.steps) ||
+      !isDeepStrictEqual(existing.preconditions, newPlan.preconditions)
+    ) {
+      throw new AiPersistenceConflictError(
+        "task_conflict",
+        `plan ${newPlan.planId} v${newPlan.planVersion} identity/digest/payload cannot be mutated`,
+      );
+    }
+    const currentOrder = PLAN_STATUS_ORDER[existing.status];
+    const newOrder = PLAN_STATUS_ORDER[newPlan.status];
+    if (newOrder < currentOrder || (currentOrder === 2 && existing.status !== newPlan.status)) {
+      throw new AiPersistenceConflictError(
+        "task_conflict",
+        `invalid backward plan status transition from ${existing.status} to ${newPlan.status}`,
+      );
+    }
+    const updated = [...currentHistory];
+    updated[existingIndex] = newPlan;
+    return updated;
+  }
+  const maxVersion = currentHistory.reduce((max, p) => Math.max(max, p.planVersion), 0);
+  if (newPlan.planVersion <= maxVersion) {
+    throw new AiPersistenceConflictError(
+      "task_conflict",
+      `planVersion ${newPlan.planVersion} is not strictly monotonic (max ${maxVersion})`,
+    );
+  }
+  return [...currentHistory, newPlan];
+};
 const refreshPolicy = (base: AiPolicy, patch: AiPolicyUpdateInput["patch"], now: string): AiPolicy =>
-  ({ ...base, ...patch, vpsId: base.vpsId, revision: bumpRevision(base.revision), updatedAt: now });
+  normalizePolicy({ ...base, ...patch, vpsId: base.vpsId, revision: bumpRevision(base.revision), updatedAt: now });
 const matchesAuditFilter = (event: AiAuditEvent, filter?: { vpsId?: string; taskId?: string }): boolean =>
   (!filter?.vpsId || event.vpsId === filter.vpsId) && (!filter?.taskId || event.taskId === filter.taskId);
 
@@ -388,7 +530,7 @@ const customizeIncomingReceipts = (
 const planChanged = (
   state: StoredAiState,
   task: StoredTask,
-  input: AiTaskTransitionInput,
+  input: { plan?: AiPlan | null },
 ): boolean => {
   if (input.plan === undefined || input.plan === task.plan) return false;
   const previous = task.plan;
@@ -410,11 +552,18 @@ const assertActiveTransition = (
   state: StoredAiState,
   next: StoredTask,
   lease?: { ownerInstanceId: string; leaseSeconds: number } | null,
+  nowIso?: string,
 ): void => {
   if (!ACTIVE_STATES.has(next.state)) return;
   if (next.state === "executing") {
     const leaseSeconds = lease?.leaseSeconds ?? 0;
-    if (!lease || leaseSeconds <= 0) {
+    const nowMs = nowIso ? Date.parse(nowIso) : Date.now();
+    const hasExistingLease = Boolean(
+      next.ownerInstanceId &&
+      next.ownerLeaseExpiresAt &&
+      Date.parse(next.ownerLeaseExpiresAt) > nowMs,
+    );
+    if ((!lease || leaseSeconds <= 0) && !hasExistingLease) {
       throw new AiPersistenceConflictError(
         "task_conflict",
         `task ${next.id} entering 'executing' requires an owner lease`,
@@ -702,15 +851,51 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
           (t) =>
             t.vpsId === input.vpsId && t.idempotencyKey === input.idempotencyKey,
         );
-        if (replay) return { task: replay as AiTask, replay: true };
+        if (replay) return { task: snapshotTask(replay), replay: true };
         assertNoActiveTask(state, input.vpsId);
         assertConversation(state, input.vpsId, input.conversationId);
+        const isLoop = input.executionVersion === 2 || input.loop !== undefined;
+        const executionVersion = isLoop ? (2 as const) : (input.executionVersion ?? 1);
+        const executionMode: AiExecutionMode | undefined = isLoop
+          ? (input.loop?.mode ?? input.executionMode ?? "manual")
+          : input.executionMode;
+        const loopState: AiTaskLoopState | undefined = isLoop
+          ? {
+              contractVersion: "loop_v1",
+              mode: executionMode ?? "manual",
+              turn: 0,
+              phase: "planning",
+              leaseToken: randomUUID(),
+              turnLeaseOwnerInstanceId: undefined,
+              turnLeaseExpiresAt: undefined,
+              continuationReady: true,
+              pinnedProviderId: input.loop?.pinnedProviderId ?? input.providerId,
+              pinnedProviderRevision: input.loop?.pinnedProviderRevision,
+              pinnedPolicyRevision: input.loop?.pinnedPolicyRevision,
+              pinnedCapabilityRevision: input.loop?.pinnedCapabilityRevision,
+              counters: {
+                providerCalls: input.loop?.counters?.providerCalls ?? 0,
+                readCalls: input.loop?.counters?.readCalls ?? 0,
+                mutationPlans: input.loop?.counters?.mutationPlans ?? 0,
+                verificationAttempts: input.loop?.counters?.verificationAttempts ?? 0,
+                toolCalls: input.loop?.counters?.toolCalls ?? 0,
+                noProgressStreak: input.loop?.counters?.noProgressStreak ?? 0,
+                noProgressFingerprint: input.loop?.counters?.noProgressFingerprint,
+                deadlineAt: input.loop?.deadlineAt ?? input.loop?.counters?.deadlineAt ?? input.expiresAt ?? new Date(Date.now() + 3600 * 1000).toISOString(),
+              },
+              planHistory: [],
+              observations: [],
+              journal: [],
+            }
+          : undefined;
         const task: StoredTask = {
           id: input.id,
           conversationId: input.conversationId,
           vpsId: input.vpsId,
           state: input.state,
           revision: 1,
+          executionVersion,
+          executionMode,
           providerId: input.providerId,
           model: input.model,
           requestSummary: input.requestSummary,
@@ -721,9 +906,10 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
           expiresAt: input.expiresAt,
           idempotencyKey: input.idempotencyKey,
           initiatingSessionId: input.initiatingSessionId,
+          loop: loopState,
         };
         state.tasks.push(task);
-        return { task: task as AiTask, replay: false };
+        return { task: snapshotTask(task), replay: false };
       });
     },
 
@@ -736,7 +922,7 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
     async getActiveTask(vpsId) {
       const state = await exec((s) => s);
       const task = findActiveTask(state, vpsId);
-      return task ? (task as AiTask) : undefined;
+      return task ? snapshotTask(task) : undefined;
     },
 
     async listTasks(vpsId, limit = 50) {
@@ -767,6 +953,14 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
             `task ${input.id} revision ${task.revision} != expected ${input.expectedRevision}`,
           );
         }
+        if (input.expectedLeaseToken !== undefined) {
+          if (task.loop?.leaseToken !== input.expectedLeaseToken) {
+            throw new AiPersistenceConflictError(
+              "task_conflict",
+              `task ${input.id} turn lease token mismatch`,
+            );
+          }
+        }
         if (planChanged(state, task, input)) {
           throw new AiPersistenceConflictError(
             "task_conflict",
@@ -774,8 +968,90 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
           );
         }
         const nextRevision = bumpRevision(task.revision);
+
+        let nextLoop = task.loop;
+        if (task.loop || input.loopPatch) {
+          const baseLoop: AiTaskLoopState = task.loop ?? {
+            contractVersion: "loop_v1",
+            mode: task.executionMode ?? "manual",
+            turn: 0,
+            phase: "planning",
+            leaseToken: randomUUID(),
+            continuationReady: true,
+            counters: {
+              providerCalls: 0,
+              readCalls: 0,
+              mutationPlans: 0,
+              verificationAttempts: 0,
+              toolCalls: 0,
+              noProgressStreak: 0,
+              deadlineAt: task.expiresAt ?? new Date(Date.now() + 3600 * 1000).toISOString(),
+            },
+            planHistory: [],
+            observations: [],
+            journal: [],
+          };
+          const patch = input.loopPatch;
+          let loopPlanHistory = baseLoop.planHistory;
+          if (input.plan && input.plan !== task.plan) {
+            loopPlanHistory = applyPlanMonotonic(loopPlanHistory, input.plan);
+          }
+          if (patch?.appendPlan) {
+            loopPlanHistory = applyPlanMonotonic(loopPlanHistory, patch.appendPlan);
+          }
+          let loopObservations = baseLoop.observations;
+          if (patch?.appendObservations) {
+            for (const obs of patch.appendObservations) {
+              const res = appendObservationIdempotent(loopObservations, obs);
+              loopObservations = res.observations;
+            }
+          }
+          let loopJournal = baseLoop.journal;
+          if (patch?.appendJournal) {
+            const res = appendJournalEntriesIdempotent(loopJournal, patch.appendJournal);
+            loopJournal = res.journal;
+          }
+          let counters = baseLoop.counters;
+          if (patch?.countersDelta) {
+            counters = {
+              providerCalls: counters.providerCalls + (patch.countersDelta.providerCalls ?? 0),
+              readCalls: counters.readCalls + (patch.countersDelta.readCalls ?? 0),
+              mutationPlans: counters.mutationPlans + (patch.countersDelta.mutationPlans ?? 0),
+              verificationAttempts: counters.verificationAttempts + (patch.countersDelta.verificationAttempts ?? 0),
+              toolCalls: counters.toolCalls + (patch.countersDelta.toolCalls ?? 0),
+              noProgressStreak: counters.noProgressStreak + (patch.countersDelta.noProgressStreak ?? 0),
+              noProgressFingerprint: patch.countersDelta.noProgressFingerprint ?? counters.noProgressFingerprint,
+              deadlineAt: patch.deadlineAt ?? counters.deadlineAt,
+            };
+          } else if (patch?.deadlineAt) {
+            counters = { ...counters, deadlineAt: patch.deadlineAt };
+          }
+          const completion = input.completion ?? patch?.completion ?? baseLoop.completion;
+          let pauseReason = baseLoop.pauseReason;
+          if (patch?.pauseReason !== undefined) {
+            pauseReason = patch.pauseReason === null ? undefined : patch.pauseReason;
+          }
+          nextLoop = {
+            ...baseLoop,
+            phase: patch?.phase ?? baseLoop.phase,
+            continuationReady: patch?.continuationReady !== undefined ? patch.continuationReady : baseLoop.continuationReady,
+            pauseReason,
+            pinnedProviderId: patch?.pinnedProviderId ?? baseLoop.pinnedProviderId,
+            pinnedProviderRevision: patch?.pinnedProviderRevision !== undefined ? patch.pinnedProviderRevision : baseLoop.pinnedProviderRevision,
+            pinnedPolicyRevision: patch?.pinnedPolicyRevision !== undefined ? patch.pinnedPolicyRevision : baseLoop.pinnedPolicyRevision,
+            pinnedCapabilityRevision: patch?.pinnedCapabilityRevision !== undefined ? patch.pinnedCapabilityRevision : baseLoop.pinnedCapabilityRevision,
+            counters,
+            planHistory: loopPlanHistory,
+            observations: loopObservations,
+            journal: loopJournal,
+            completion,
+          };
+        }
+
+        const completion = input.completion ?? nextLoop?.completion ?? task.completion;
         const next: StoredTask = {
           ...task,
+          initiatingSessionId: input.initiatingSessionId ?? task.initiatingSessionId,
           state: input.state ?? task.state,
           summary: input.summary ?? task.summary,
           clarificationPrompt:
@@ -800,14 +1076,22 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
             input.compacting !== undefined
               ? input.compacting || undefined
               : task.compacting,
+          loop: nextLoop,
+          completion,
           revision: nextRevision,
           updatedAt: now,
         };
+        if (next.loop && (next.state === "cancelled" || next.state === "cancel_requested" || isTerminalState(next.state))) {
+          next.loop = {
+            ...next.loop,
+            continuationReady: false,
+          };
+        }
         if (isTerminalState(next.state)) delete next.compacting;
-        assertActiveTransition(state, next, input.ownerLease);
+        assertActiveTransition(state, next, input.ownerLease, now);
         const index = state.tasks.findIndex((t) => t.id === input.id);
         state.tasks[index!] = next;
-        return next as AiTask;
+        return snapshotTask(next);
       });
     },
 
@@ -902,15 +1186,24 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
             `plan ${plan.planId} status ${plan.status}; only pending or approved plans can be consumed`,
           );
         }
+        const consumedPlan = {
+          ...plan,
+          status: "consumed" as const,
+          approvedAt: plan.approvedAt ?? now,
+          consumedAt: now,
+          approvedSessionId: input.approvedSessionId,
+        };
+        let loop = task.loop;
+        if (loop) {
+          loop = {
+            ...loop,
+            planHistory: applyPlanMonotonic(loop.planHistory, consumedPlan),
+          };
+        }
         const next: StoredTask = {
           ...task,
-          plan: {
-            ...plan,
-            status: "consumed",
-            approvedAt: plan.approvedAt ?? now,
-            consumedAt: now,
-            approvedSessionId: input.approvedSessionId,
-          },
+          plan: consumedPlan,
+          loop,
           revision: bumpRevision(task.revision),
           updatedAt: now,
         };
@@ -918,6 +1211,512 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
         state.tasks[index!] = next;
         return next.plan!;
       });
+    },
+
+    async claimTurn(input) {
+      const now = isoNow(input.now);
+      const nowMs = Date.parse(now);
+      return exec((state) => {
+        const task = findTask(state, input.taskId);
+        if (!task || task.vpsId !== input.vpsId) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} not found on vps ${input.vpsId}`);
+        }
+        const eligibleStates = new Set<AiTaskState>(["planning", "verifying"]);
+        if (!eligibleStates.has(task.state)) {
+          throw new AiPersistenceConflictError(
+            "task_conflict",
+            `task ${input.taskId} state '${task.state}' not eligible for claimTurn (eligible: planning, verifying)`,
+          );
+        }
+        if (!task.loop) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} is not a loop task`);
+        }
+        if (input.expectedTurn !== undefined && task.loop.turn !== input.expectedTurn) {
+          throw new AiPersistenceConflictError(
+            "task_conflict",
+            `task ${input.taskId} turn ${task.loop.turn} != expected ${input.expectedTurn}`,
+          );
+        }
+        if (input.expectedLeaseToken !== undefined && task.loop.leaseToken !== input.expectedLeaseToken) {
+          throw new AiPersistenceConflictError(
+            "task_conflict",
+            `task ${input.taskId} turn lease token mismatch`,
+          );
+        }
+        const leaseExpiresMs = task.loop.turnLeaseExpiresAt ? Date.parse(task.loop.turnLeaseExpiresAt) : 0;
+        if (leaseExpiresMs > nowMs) {
+          if (!input.expectedLeaseToken || input.expectedLeaseToken !== task.loop.leaseToken) {
+            throw new AiPersistenceConflictError(
+              "task_conflict",
+              `task ${input.taskId} turn lease currently active until ${task.loop.turnLeaseExpiresAt}`,
+            );
+          }
+        }
+        const nextLeaseToken = randomUUID();
+        const nextTurn = task.loop.turn + 1;
+        const expiresAt = new Date(nowMs + input.leaseSeconds * 1000).toISOString();
+        const nextLoop: AiTaskLoopState = {
+          ...task.loop,
+          turn: nextTurn,
+          leaseToken: nextLeaseToken,
+          turnLeaseOwnerInstanceId: input.ownerInstanceId,
+          turnLeaseExpiresAt: expiresAt,
+          continuationReady: false,
+        };
+        const next: StoredTask = {
+          ...task,
+          loop: nextLoop,
+          revision: bumpRevision(task.revision),
+          updatedAt: now,
+        };
+        const index = state.tasks.findIndex((t) => t.id === input.taskId);
+        state.tasks[index!] = next;
+        return snapshotTask(next);
+      });
+    },
+
+    async renewTurnLease(input) {
+      const now = isoNow(input.now);
+      const nowMs = Date.parse(now);
+      return exec((state) => {
+        const task = findTask(state, input.taskId);
+        if (!task || task.vpsId !== input.vpsId) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} not found on vps ${input.vpsId}`);
+        }
+        if (isTerminalState(task.state)) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} is in terminal state '${task.state}'`);
+        }
+        if (!task.loop) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} is not a loop task`);
+        }
+        if (task.loop.leaseToken !== input.expectedLeaseToken) {
+          throw new AiPersistenceConflictError("task_conflict", `turn lease token mismatch`);
+        }
+        if (!task.loop.turnLeaseOwnerInstanceId || task.loop.turnLeaseOwnerInstanceId !== input.ownerInstanceId) {
+          throw new AiPersistenceConflictError("task_conflict", `turn lease owned by another instance or ownerless`);
+        }
+        const leaseExpiresMs = task.loop.turnLeaseExpiresAt ? Date.parse(task.loop.turnLeaseExpiresAt) : 0;
+        if (leaseExpiresMs <= nowMs) {
+          throw new AiPersistenceConflictError("task_conflict", `turn lease has already expired`);
+        }
+        const nextExpiresAt = new Date(nowMs + input.leaseSeconds * 1000).toISOString();
+        const nextLoop: AiTaskLoopState = {
+          ...task.loop,
+          turnLeaseOwnerInstanceId: input.ownerInstanceId,
+          turnLeaseExpiresAt: nextExpiresAt,
+        };
+        const next: StoredTask = {
+          ...task,
+          loop: nextLoop,
+          revision: bumpRevision(task.revision),
+          updatedAt: now,
+        };
+        const index = state.tasks.findIndex((t) => t.id === input.taskId);
+        state.tasks[index!] = next;
+        return snapshotTask(next);
+      });
+    },
+    async reserveProviderCall(input) {
+      const now = isoNow(input.now);
+      const nowMs = Date.parse(now);
+      return exec((state) => {
+        const task = findTask(state, input.taskId);
+        if (!task || task.vpsId !== input.vpsId) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} not found on vps ${input.vpsId}`);
+        }
+        if (isTerminalState(task.state)) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} is in terminal state '${task.state}'`);
+        }
+        if (!task.loop) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} is not a loop task`);
+        }
+        if (task.revision !== input.expectedRevision) {
+          throw new AiPersistenceConflictError("task_conflict", `task revision ${task.revision} != expected ${input.expectedRevision}`);
+        }
+        if (task.loop.leaseToken !== input.expectedLeaseToken) {
+          throw new AiPersistenceConflictError("task_conflict", `turn lease token mismatch`);
+        }
+        if (!task.loop.turnLeaseOwnerInstanceId) {
+          throw new AiPersistenceConflictError("task_conflict", `turn lease is ownerless`);
+        }
+        const leaseExpiresMs = task.loop.turnLeaseExpiresAt ? Date.parse(task.loop.turnLeaseExpiresAt) : 0;
+        if (leaseExpiresMs <= nowMs) {
+          throw new AiPersistenceConflictError("task_conflict", `turn lease has expired`);
+        }
+        if (task.loop.counters.deadlineAt && new Date(task.loop.counters.deadlineAt).getTime() < nowMs) {
+          throw new AiPersistenceConflictError("task_conflict", `task loop deadline exceeded`);
+        }
+        const nextCounters: AiTaskLoopCounters = {
+          ...task.loop.counters,
+          providerCalls: task.loop.counters.providerCalls + 1,
+        };
+        let usage = task.usage;
+        if (input.estimatedInputTokens) {
+          usage = {
+            ...usage,
+            inputTokens: usage.inputTokens + input.estimatedInputTokens,
+            estimated: true,
+          };
+        }
+        const next: StoredTask = {
+          ...task,
+          usage,
+          loop: {
+            ...task.loop,
+            counters: nextCounters,
+          },
+          revision: bumpRevision(task.revision),
+          updatedAt: now,
+        };
+        const index = state.tasks.findIndex((t) => t.id === input.taskId);
+        state.tasks[index!] = next;
+        return snapshotTask(next);
+      });
+    },
+
+    async releaseOrCommitTurn(input) {
+      const now = isoNow(input.now);
+      const nowMs = Date.parse(now);
+      return exec((state) => {
+        const task = findTask(state, input.taskId);
+        if (!task || task.vpsId !== input.vpsId) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} not found on vps ${input.vpsId}`);
+        }
+        if (isTerminalState(task.state)) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} is in terminal state '${task.state}'`);
+        }
+        if (!task.loop) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} is not a loop task`);
+        }
+        if (task.revision !== input.expectedRevision) {
+          throw new AiPersistenceConflictError("task_conflict", `task revision ${task.revision} != expected ${input.expectedRevision}`);
+        }
+        if (task.loop.leaseToken !== input.expectedLeaseToken) {
+          throw new AiPersistenceConflictError("task_conflict", `turn lease token mismatch`);
+        }
+        if (!task.loop.turnLeaseOwnerInstanceId || task.loop.turnLeaseOwnerInstanceId !== input.ownerInstanceId) {
+          throw new AiPersistenceConflictError("task_conflict", `turn lease owned by another instance or ownerless`);
+        }
+        const leaseExpiresMs = task.loop.turnLeaseExpiresAt ? Date.parse(task.loop.turnLeaseExpiresAt) : 0;
+        if (leaseExpiresMs <= nowMs) {
+          throw new AiPersistenceConflictError("task_conflict", `turn lease has expired`);
+        }
+        if (planChanged(state, task, input)) {
+          throw new AiPersistenceConflictError("task_conflict", `task plan replaced while previous plan still unconsumed`);
+        }
+
+        let loopState: AiTaskLoopState = { ...task.loop };
+        const patch = input.loopPatch;
+        if (patch) {
+          if (patch.phase) loopState.phase = patch.phase;
+          if (patch.continuationReady !== undefined) loopState.continuationReady = patch.continuationReady;
+          if (patch.pauseReason !== undefined) {
+            loopState.pauseReason = patch.pauseReason === null ? undefined : patch.pauseReason;
+          }
+          if (patch.pinnedProviderId) loopState.pinnedProviderId = patch.pinnedProviderId;
+          if (patch.pinnedProviderRevision !== undefined) loopState.pinnedProviderRevision = patch.pinnedProviderRevision;
+          if (patch.pinnedPolicyRevision !== undefined) loopState.pinnedPolicyRevision = patch.pinnedPolicyRevision;
+          if (patch.pinnedCapabilityRevision !== undefined) loopState.pinnedCapabilityRevision = patch.pinnedCapabilityRevision;
+          if (patch.countersDelta) {
+            loopState.counters = {
+              providerCalls: loopState.counters.providerCalls + (patch.countersDelta.providerCalls ?? 0),
+              readCalls: loopState.counters.readCalls + (patch.countersDelta.readCalls ?? 0),
+              mutationPlans: loopState.counters.mutationPlans + (patch.countersDelta.mutationPlans ?? 0),
+              verificationAttempts: loopState.counters.verificationAttempts + (patch.countersDelta.verificationAttempts ?? 0),
+              toolCalls: loopState.counters.toolCalls + (patch.countersDelta.toolCalls ?? 0),
+              noProgressStreak: loopState.counters.noProgressStreak + (patch.countersDelta.noProgressStreak ?? 0),
+              noProgressFingerprint: patch.countersDelta.noProgressFingerprint ?? loopState.counters.noProgressFingerprint,
+              deadlineAt: patch.deadlineAt ?? loopState.counters.deadlineAt,
+            };
+          } else if (patch.deadlineAt) {
+            loopState.counters = { ...loopState.counters, deadlineAt: patch.deadlineAt };
+          }
+          if (patch.appendObservations) {
+            for (const obs of patch.appendObservations) {
+              const res = appendObservationIdempotent(loopState.observations, obs);
+              loopState.observations = res.observations;
+            }
+          }
+          if (patch.appendJournal) {
+            const res = appendJournalEntriesIdempotent(loopState.journal, patch.appendJournal);
+            loopState.journal = res.journal;
+          }
+          if (patch.appendPlan) {
+            loopState.planHistory = applyPlanMonotonic(loopState.planHistory, patch.appendPlan);
+          }
+        }
+
+        const nextPlan = input.plan !== undefined ? input.plan : task.plan;
+        if (nextPlan && nextPlan !== task.plan) {
+          loopState.planHistory = applyPlanMonotonic(loopState.planHistory, nextPlan);
+        }
+
+        const completion = input.completion ?? patch?.completion ?? task.completion;
+        if (completion) {
+          loopState.completion = completion;
+        }
+
+        if (input.releaseTurnLease) {
+          loopState.turnLeaseOwnerInstanceId = undefined;
+          loopState.turnLeaseExpiresAt = undefined;
+          loopState.leaseToken = randomUUID();
+        } else if (input.nextTurnLeaseSeconds) {
+          loopState.turnLeaseOwnerInstanceId = input.ownerInstanceId;
+          loopState.turnLeaseExpiresAt = new Date(nowMs + input.nextTurnLeaseSeconds * 1000).toISOString();
+        }
+
+        const nextRevision = bumpRevision(task.revision);
+        const next: StoredTask = {
+          ...task,
+          state: input.state ?? task.state,
+          summary: input.summary ?? task.summary,
+          clarificationPrompt:
+            input.clarificationPrompt !== undefined ? input.clarificationPrompt : task.clarificationPrompt,
+          plan: nextPlan,
+          usage: applyUsageDelta(task.usage, input.usageDelta),
+          error: input.error !== undefined ? input.error ?? undefined : task.error,
+          capabilityMetadata:
+            input.capabilityMetadata !== undefined ? input.capabilityMetadata : task.capabilityMetadata,
+          expiresAt: input.expiresAt !== undefined ? input.expiresAt ?? undefined : task.expiresAt,
+          compacting:
+            input.compacting !== undefined ? input.compacting || undefined : task.compacting,
+          loop: loopState,
+          completion,
+          revision: nextRevision,
+          updatedAt: now,
+        };
+        if (isTerminalState(next.state)) delete next.compacting;
+        assertActiveTransition(state, next, null, now);
+        const index = state.tasks.findIndex((t) => t.id === input.taskId);
+        state.tasks[index!] = next;
+        return snapshotTask(next);
+      });
+    },
+
+    async resumeTask(input) {
+      const now = isoNow(input.now);
+      return exec((state) => {
+        const task = findTask(state, input.taskId);
+        if (!task || task.vpsId !== input.vpsId) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} not found on vps ${input.vpsId}`);
+        }
+        if (!task.loop) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} is not a loop task`);
+        }
+        if (task.revision !== input.expectedRevision) {
+          throw new AiPersistenceConflictError("task_conflict", `task revision ${task.revision} != expected ${input.expectedRevision}`);
+        }
+        const RESUMABLE_STATES = new Set<AiTaskState>(["awaiting_input", "awaiting_approval", "planning", "verifying"]);
+        if (!RESUMABLE_STATES.has(task.state) && !task.loop.pauseReason) {
+          throw new AiPersistenceConflictError(
+            "task_conflict",
+            `task ${input.taskId} in state '${task.state}' cannot be resumed (resumable: awaiting_input, awaiting_approval, planning, verifying, or paused)`,
+          );
+        }
+        if (task.state === "uncertain" || task.state === "executing" || isTerminalState(task.state)) {
+          throw new AiPersistenceConflictError(
+            "task_conflict",
+            `task ${input.taskId} in state '${task.state}' cannot be resumed`,
+          );
+        }
+        const pendingOutbox = state.outbox.some(
+          (entry) => entry.taskId === task.id && entry.status !== "acknowledged" && entry.status !== "failed",
+        );
+        if (pendingOutbox) {
+          throw new AiPersistenceConflictError(
+            "task_conflict",
+            `task ${input.taskId} has unacknowledged commands in outbox`,
+          );
+        }
+        let plan = task.plan;
+        let planHistory = task.loop.planHistory;
+        if (plan && (plan.status === "pending" || plan.status === "approved")) {
+          const expiredPlan = { ...plan, status: "expired" as const };
+          plan = expiredPlan;
+          planHistory = applyPlanMonotonic(planHistory, expiredPlan);
+        }
+        const nextLoop: AiTaskLoopState = {
+          ...task.loop,
+          phase: "planning",
+          continuationReady: true,
+          pauseReason: undefined,
+          leaseToken: randomUUID(),
+          turnLeaseOwnerInstanceId: undefined,
+          turnLeaseExpiresAt: undefined,
+          pinnedProviderId: input.pinnedProviderId ?? task.loop.pinnedProviderId,
+          pinnedProviderRevision: input.pinnedProviderRevision !== undefined ? input.pinnedProviderRevision : task.loop.pinnedProviderRevision,
+          pinnedPolicyRevision: input.pinnedPolicyRevision !== undefined ? input.pinnedPolicyRevision : task.loop.pinnedPolicyRevision,
+          pinnedCapabilityRevision: input.pinnedCapabilityRevision !== undefined ? input.pinnedCapabilityRevision : task.loop.pinnedCapabilityRevision,
+          planHistory,
+        };
+        const next: StoredTask = {
+          ...task,
+          state: "planning",
+          plan,
+          error: undefined,
+          clarificationPrompt: undefined,
+          initiatingSessionId: input.initiatingSessionId ?? task.initiatingSessionId,
+          loop: nextLoop,
+          revision: bumpRevision(task.revision),
+          updatedAt: now,
+        };
+        assertActiveTransition(state, next, null, now);
+        const index = state.tasks.findIndex((t) => t.id === input.taskId);
+        state.tasks[index!] = next;
+        return snapshotTask(next);
+      });
+    },
+
+    async recordObservation(input) {
+      const now = isoNow(input.now);
+      return exec((state) => {
+        const task = findTask(state, input.taskId);
+        if (!task || (input.vpsId && task.vpsId !== input.vpsId)) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} not found`);
+        }
+        if (!task.loop) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} is not a loop task`);
+        }
+        if (input.expectedRevision !== undefined && task.revision !== input.expectedRevision) {
+          throw new AiPersistenceConflictError("task_conflict", `task revision mismatch`);
+        }
+        if (input.expectedLeaseToken !== undefined && task.loop.leaseToken !== input.expectedLeaseToken) {
+          throw new AiPersistenceConflictError("task_conflict", `turn lease token mismatch`);
+        }
+        const observationWithServerTime: AiTaskObservation = {
+          ...input.observation,
+          createdAt: input.observation.createdAt || now,
+        };
+        const { observations, created } = appendObservationIdempotent(
+          task.loop.observations,
+          observationWithServerTime,
+        );
+        if (!created && input.state === undefined && input.continuationReady === undefined) {
+          return { task: snapshotTask(task), created: false };
+        }
+        const nextLoop: AiTaskLoopState = {
+          ...task.loop,
+          observations,
+          continuationReady: input.continuationReady !== undefined ? input.continuationReady : task.loop.continuationReady,
+          phase: input.continuationReady ? "continuation_ready" : task.loop.phase,
+        };
+        const next: StoredTask = {
+          ...task,
+          state: input.state ?? task.state,
+          loop: nextLoop,
+          revision: bumpRevision(task.revision),
+          updatedAt: now,
+        };
+        assertActiveTransition(state, next, null, now);
+        const index = state.tasks.findIndex((t) => t.id === input.taskId);
+        state.tasks[index!] = next;
+        return { task: snapshotTask(next), created };
+      });
+    },
+
+    async appendJournal(input) {
+      const now = isoNow(input.now);
+      return exec((state) => {
+        const task = findTask(state, input.taskId);
+        if (!task || (input.vpsId && task.vpsId !== input.vpsId)) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} not found`);
+        }
+        if (!task.loop) {
+          throw new AiPersistenceConflictError("task_conflict", `task ${input.taskId} is not a loop task`);
+        }
+        if (input.expectedRevision !== undefined && task.revision !== input.expectedRevision) {
+          throw new AiPersistenceConflictError("task_conflict", `task revision mismatch`);
+        }
+        if (input.expectedLeaseToken !== undefined && task.loop.leaseToken !== input.expectedLeaseToken) {
+          throw new AiPersistenceConflictError("task_conflict", `turn lease token mismatch`);
+        }
+        const { journal, count } = appendJournalEntriesIdempotent(task.loop.journal, input.entries);
+        if (count === 0) {
+          return { task: snapshotTask(task), appendedCount: 0 };
+        }
+        const nextLoop: AiTaskLoopState = {
+          ...task.loop,
+          journal,
+        };
+        const next: StoredTask = {
+          ...task,
+          loop: nextLoop,
+          revision: bumpRevision(task.revision),
+          updatedAt: now,
+        };
+        const index = state.tasks.findIndex((t) => t.id === input.taskId);
+        state.tasks[index!] = next;
+        return { task: snapshotTask(next), appendedCount: count };
+      });
+    },
+
+    async claimPendingContinuation(input) {
+      const now = isoNow(input.now);
+      const nowDate = new Date(now).getTime();
+      return exec((state) => {
+        const candidate = state.tasks.find((task) => {
+          if (task.executionVersion !== 2 || !task.loop) return false;
+          if (!ACTIVE_STATES.has(task.state)) return false;
+          if (task.state === "cancel_requested") return false;
+          if (task.state !== "planning" && task.state !== "verifying") return false;
+          if (input.vpsId && task.vpsId !== input.vpsId) return false;
+
+          const hasActiveTurnLease = Boolean(
+            task.loop.turnLeaseExpiresAt &&
+            new Date(task.loop.turnLeaseExpiresAt).getTime() > nowDate &&
+            task.loop.turnLeaseOwnerInstanceId &&
+            task.loop.turnLeaseOwnerInstanceId !== input.ownerInstanceId,
+          );
+          if (hasActiveTurnLease) return false;
+
+          if (task.loop.continuationReady) return true;
+          if (!task.loop.turnLeaseExpiresAt) return true;
+          return new Date(task.loop.turnLeaseExpiresAt).getTime() <= nowDate;
+        });
+        if (!candidate || !candidate.loop) return undefined;
+
+        const nextLeaseToken = randomUUID();
+        const nextExpiresAt = new Date(Date.now() + input.leaseSeconds * 1000).toISOString();
+        const nextTurn = candidate.loop.turn + 1;
+        const nextLoop: AiTaskLoopState = {
+          ...candidate.loop,
+          turn: nextTurn,
+          leaseToken: nextLeaseToken,
+          turnLeaseOwnerInstanceId: input.ownerInstanceId,
+          turnLeaseExpiresAt: nextExpiresAt,
+          continuationReady: false,
+          phase: candidate.state === "verifying" ? "verifying" : "planning",
+        };
+        const next: StoredTask = {
+          ...candidate,
+          loop: nextLoop,
+          revision: bumpRevision(candidate.revision),
+          updatedAt: now,
+        };
+        assertActiveTransition(state, next, null, now);
+        const index = state.tasks.findIndex((t) => t.id === candidate.id);
+        state.tasks[index!] = next;
+        return snapshotTask(next);
+      });
+    },
+
+    async listActiveLoopTasks(options) {
+      const now = isoNow(options?.now);
+      const nowDate = new Date(now).getTime();
+      const state = await exec((s) => s);
+      return state.tasks
+        .filter((task) => {
+          if (task.executionVersion !== 2 || !task.loop) return false;
+          if (!ACTIVE_STATES.has(task.state)) return false;
+          if (options?.vpsId && task.vpsId !== options.vpsId) return false;
+          if (options?.continuationReadyOnly && !task.loop.continuationReady) return false;
+          if (options?.expiredTurnOnly) {
+            if (!task.loop.turnLeaseExpiresAt) return true;
+            return new Date(task.loop.turnLeaseExpiresAt).getTime() <= nowDate;
+          }
+          return true;
+        })
+        .map(snapshotTask);
     },
 
     async enqueueCommands(entries) {
@@ -1479,7 +2278,8 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
 
 export function createJsonAiRepository(filePath: string): AiRepository {
   return createAiRepositoryCore(async (mutate) => withFileLock(filePath, async () => {
-    const state = await readJsonFile(filePath, emptyAiState());
+    const raw = await readJsonFile(filePath, emptyAiState());
+    const state = normalizeAiState({ ...emptyAiState(), ...raw });
     const result = mutate(state);
     await writeJsonFile(filePath, state);
     return structuredClone(result);
@@ -1506,10 +2306,10 @@ async function withPostgresAiState<T>(pool: Pool, mutate: (state: StoredAiState)
         typeof rawState === "string"
           ? JSON.parse(rawState)
           : (rawState ?? {});
-      const state: StoredAiState = {
+      const state: StoredAiState = normalizeAiState({
         ...emptyAiState(),
         ...loaded,
-      };
+      });
       const result = await mutate(state);
       await client.query(
         "UPDATE ai_state_journal SET state = $1::jsonb, updated_at = NOW() WHERE id = 1",

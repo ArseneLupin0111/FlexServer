@@ -207,18 +207,55 @@ export class AiRetentionService implements OnApplicationBootstrap, OnApplication
       }
 
       // Check task expiration (awaiting_approval, awaiting_input, planning)
+      const isLoop = activeTask.executionVersion === 2 || Boolean(activeTask.loop);
+
+      // Recover from model-turn crash: if planning turn lease expired with continuationReady false, set continuationReady true
+      if (
+        isLoop &&
+        activeTask.state === "planning" &&
+        activeTask.loop?.turnLeaseExpiresAt &&
+        new Date(activeTask.loop.turnLeaseExpiresAt).getTime() <= now &&
+        !activeTask.loop.continuationReady
+      ) {
+        try {
+          await this.repository.updateTask({
+            id: activeTask.id,
+            expectedRevision: activeTask.revision,
+            state: "planning",
+            loopPatch: { continuationReady: true },
+          });
+          recoveredCount++;
+        } catch {
+          // CAS race handled on next cycle
+        }
+        continue;
+      }
+
+      const isLoopContinuationActive = isLoop && (
+        activeTask.loop?.continuationReady === true ||
+        (activeTask.loop?.turnLeaseExpiresAt && new Date(activeTask.loop.turnLeaseExpiresAt).getTime() > now)
+      );
+
       const isStalePlanning =
+        !isLoopContinuationActive &&
         activeTask.state === "planning" &&
         stored.ownerLeaseExpiresAt &&
         new Date(stored.ownerLeaseExpiresAt).getTime() <= now;
 
+      // Loop deadline expiry only terminalizes non-executing and non-uncertain tasks to preserve inflight fences
+      const isLoopDeadlineExpired = isLoop &&
+        (activeTask.state === "planning" || activeTask.state === "awaiting_approval" || activeTask.state === "awaiting_input") &&
+        activeTask.loop?.counters.deadlineAt &&
+        new Date(activeTask.loop.counters.deadlineAt).getTime() <= now;
+
       const isExpiredAwaiting =
+        Boolean(isLoopDeadlineExpired) || (
+        !isLoopContinuationActive &&
         (activeTask.state === "awaiting_approval" ||
           activeTask.state === "awaiting_input" ||
           activeTask.state === "planning") &&
         activeTask.expiresAt &&
-        new Date(activeTask.expiresAt).getTime() <= now;
-
+        new Date(activeTask.expiresAt).getTime() <= now);
       if (isStalePlanning || isExpiredAwaiting) {
         try {
           await this.repository.updateTask({
@@ -226,9 +263,17 @@ export class AiRetentionService implements OnApplicationBootstrap, OnApplication
             expectedRevision: activeTask.revision,
             state: "expired",
             plan: activeTask.plan ? { ...activeTask.plan, status: "expired" } : undefined,
+            completion: isLoop ? {
+              kind: "expired",
+              reasonCode: isLoopDeadlineExpired ? "deadline_exceeded" : "approval_expired",
+              message: isLoopDeadlineExpired ? "Loop task deadline exceeded" : "Task awaiting input or approval expired",
+              completedAt: new Date().toISOString(),
+            } : undefined,
             error: {
-              code: "approval_expired",
-              message: isStalePlanning
+              code: isLoopDeadlineExpired ? "deadline_exceeded" : "approval_expired",
+              message: isLoopDeadlineExpired
+                ? "Loop task deadline exceeded"
+                : isStalePlanning
                 ? "Planning lease expired following crash or disconnect"
                 : "Task awaiting input or approval expired",
             },
@@ -250,7 +295,7 @@ export class AiRetentionService implements OnApplicationBootstrap, OnApplication
       }
       // Check owner lease expiration for executing/verifying tasks
       if (
-        (activeTask.state === "executing" || activeTask.state === "verifying") &&
+        (activeTask.state === "executing" || (!isLoop && activeTask.state === "verifying")) &&
         stored.ownerLeaseExpiresAt &&
         new Date(stored.ownerLeaseExpiresAt).getTime() <= now
       ) {

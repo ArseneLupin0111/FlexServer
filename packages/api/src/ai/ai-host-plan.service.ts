@@ -7,7 +7,7 @@ import type { AppConfig } from "../config/app-config.js";
 import type { AiHostCommandKind, AiPlanStep, AiPolicy, AiTask } from "./ai.models.js";
 import { encryptAiSecret, loadAiKeyring } from "./ai-crypto.js";
 import { AiAssistantError } from "./ai-failures.js";
-
+import { getEffectiveAiPolicy } from "./ai-policy.service.js";
 import type { ProviderTool } from "./ai-provider.js";
 const path = z.string().min(1).max(1024).refine(value => value.startsWith("/") && !value.split("/").includes("..") && !value.includes("\0"));
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -34,7 +34,7 @@ export const hostTools: ProviderTool[] = Object.entries(schemas)
     type: "function",
     function: {
       name: `host_${kind}`,
-      description: `Propose ${kind} for explicit human approval. Never executes immediately.`,
+      description: `Propose ${kind} plan step subject to configured approval policy. Never executes immediately inline.`,
       parameters: {
         type: "object",
         properties: Object.fromEntries(
@@ -61,6 +61,7 @@ export class AiHostPlanService {
   constructor(@Inject(AI_REPOSITORY) private readonly repository: AiRepository, @Inject(APP_CONFIG) private readonly config: AppConfig) {}
 
   async propose(task: AiTask, kind: AiHostCommandKind, input: unknown, policy: AiPolicy): Promise<AiPlanStep> {
+    const effectivePolicy = getEffectiveAiPolicy(policy);
     const parsed = schemas[kind].safeParse(input);
     if (!parsed.success) throw new AiAssistantError("policy_denied");
     const payload: Record<string, unknown> = parsed.data;
@@ -69,10 +70,10 @@ export class AiHostPlanService {
       // plan): callers reject model-supplied execMode values that differ from
       // the policy before this, so stamping here keeps the encrypted payload,
       // the approval-visible args and plan.execMode in agreement ("sandbox"
-      // under the default policy).
-      payload.execMode = policy.execMode;
+      // under manual policy, "privileged" under YOLO).
+      payload.execMode = effectivePolicy.execMode;
     }
-    this.authorize(kind, payload, policy);
+    this.authorize(kind, payload, effectivePolicy);
     const stepId = randomUUID();
     const id = randomUUID();
     const now = new Date().toISOString();
@@ -89,10 +90,11 @@ export class AiHostPlanService {
   }
 
   authorize(kind: AiHostCommandKind, payload: Record<string, unknown>, policy: AiPolicy): void {
-    if (!policy.aiEnabled) throw new AiAssistantError("policy_denied");
-    if (kind === "file_read" && !policy.readEnabled) throw new AiAssistantError("policy_denied");
-    if (kind === "shell" && !policy.shellEnabled) throw new AiAssistantError("policy_denied");
-    if (kind === "shell" && payload.execMode !== undefined && payload.execMode !== policy.execMode) throw new AiAssistantError("policy_denied");
+    const effectivePolicy = getEffectiveAiPolicy(policy);
+    if (!effectivePolicy.aiEnabled) throw new AiAssistantError("policy_denied");
+    if (kind === "file_read" && !effectivePolicy.readEnabled) throw new AiAssistantError("policy_denied");
+    if (kind === "shell" && !effectivePolicy.shellEnabled) throw new AiAssistantError("policy_denied");
+    if (kind === "shell" && payload.execMode !== undefined && payload.execMode !== effectivePolicy.execMode) throw new AiAssistantError("policy_denied");
     for (const field of ["script", "content", "candidateContent"]) {
       const value = payload[field];
       if (typeof value === "string" && Buffer.byteLength(value, "utf8") > (field === "script" ? 32768 : 262144)) throw new AiAssistantError("policy_denied");
@@ -120,13 +122,20 @@ export class AiHostPlanService {
     checkProtectedPath(payload.backupPath);
 
     if (kind === "file_read" || kind === "file_apply") {
-      const scopes = kind === "file_read" ? policy.fileReadScopes : policy.fileWriteScopes;
       const target = String(payload.path);
       const scope = String(payload.scope);
-      if (!scopes.includes(scope) || !within(target, scope)) throw new AiAssistantError("policy_denied");
+      if (effectivePolicy.executionMode !== "yolo") {
+        const scopes = kind === "file_read" ? effectivePolicy.fileReadScopes : effectivePolicy.fileWriteScopes;
+        if (!scopes.includes(scope) || !within(target, scope)) throw new AiAssistantError("policy_denied");
+      } else {
+        // In YOLO mode, old scope list gate (scopes.includes) is bypassed, but path containment within requested scope is checked if scope provided
+        if (scope && !within(target, scope)) throw new AiAssistantError("policy_denied");
+      }
     }
     if (kind.startsWith("service_") || kind.startsWith("config_")) {
-      if (!policy.serviceProfileIds.includes(String(payload.profileId))) throw new AiAssistantError("policy_denied");
+      if (effectivePolicy.executionMode !== "yolo") {
+        if (!effectivePolicy.serviceProfileIds.includes(String(payload.profileId))) throw new AiAssistantError("policy_denied");
+      }
       if (typeof payload.service === "string" && /(^|[\/_\-\.:])(flexserver|vps-manager|vps_manager|vps-agent|vps_agent|postgres|sshd)([\/_\-\.:]|$)/i.test(payload.service)) {
         throw new AiAssistantError("protected_target", "Target service is a protected system resource");
       }

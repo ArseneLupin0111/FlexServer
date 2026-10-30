@@ -389,17 +389,19 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
               <h3 className="text-sm font-semibold text-text">
-                Execution mode
+                Shell confinement
               </h3>
               <p className="mt-0.5 text-xs text-dim">
                 {execMode === "privileged"
-                  ? "Shell commands run as root directly on the host — no sandbox. Every command still needs your approval."
+                  ? policy?.executionMode === "yolo"
+                    ? "Shell commands run as root directly on the host without sandbox. Under Full YOLO, commands execute autonomously without per-step approval."
+                    : "Shell commands run as root directly on the host — no sandbox. Every command still needs your approval."
                   : "Shell commands run inside the AI sandbox on the host."}
               </p>
             </div>
             <div
               role="group"
-              aria-label="Execution mode"
+              aria-label="Shell confinement"
               className="flex shrink-0 border border-line"
             >
               <button
@@ -635,9 +637,10 @@ export function AgentSettingsCard({ vpsId }: { vpsId: string }) {
               the sandbox, with no namespace, cgroup, or filesystem isolation.
             </p>
             <p className="mt-2 text-xs leading-5 text-dim">
-              What still protects the host: every command is shown for manual
-              approval before it runs, protected targets and redaction stay
-              enforced, and all activity is audited.
+              What still protects the host:{" "}
+              {policy?.executionMode === "yolo"
+                ? "Full YOLO executes plans autonomously on this VPS; protected targets and secret redaction stay enforced, and all activity is audited."
+                : "every command is shown for manual approval before it runs, protected targets and redaction stay enforced, and all activity is audited."}
             </p>
             <label className="mt-3 flex items-center gap-2 text-xs font-medium text-text">
               <input

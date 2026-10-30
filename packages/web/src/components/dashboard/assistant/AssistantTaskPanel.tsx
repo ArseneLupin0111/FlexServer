@@ -5,15 +5,18 @@ import {
   Activity,
   AlertOctagon,
   AlertTriangle,
+  CheckCircle2,
   Clock,
   Code2,
   Copy,
   LoaderCircle,
+  Play,
   RefreshCw,
   RotateCcw,
   Terminal,
   Trash2,
   XCircle,
+  Zap,
 } from "lucide-react";
 import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
@@ -30,11 +33,82 @@ export type AssistantTaskPanelProps = {
   onClearOutput: () => void;
   onCancelTask: () => Promise<void>;
   onReconcileTask: () => Promise<void>;
+  onResumeTask?: () => Promise<void>;
   onApprovePlan: (planVersion: number, planDigest: string) => Promise<void>;
   onDenyPlan: () => Promise<void>;
   onReconnectStream?: () => void;
   busy?: boolean;
 };
+
+function planStatusTone(status: string): string {
+  switch (status) {
+    case "approved":
+      return "border-signal/40 bg-signal/10 text-signal";
+    case "pending":
+      return "border-warn/40 bg-warn/10 text-warn animate-pulse";
+    case "denied":
+      return "border-crit/40 bg-crit/10 text-crit";
+    case "consumed":
+      return "border-line bg-raised/30 text-dim";
+    case "expired":
+      return "border-line bg-raised/30 text-dim";
+    default:
+      return "border-line text-dim";
+  }
+}
+
+function observationStatusTone(status: string): string {
+  switch (status) {
+    case "succeeded":
+      return "border-signal/40 bg-signal/10 text-signal";
+    case "failed":
+      return "border-crit/40 bg-crit/10 text-crit";
+    case "uncertain":
+      return "border-warn/40 bg-warn/10 text-warn";
+    case "cancelled":
+      return "border-line bg-raised/30 text-dim";
+    default:
+      return "border-line text-dim";
+  }
+}
+
+function completionOutcomeTone(kind: string): {
+  badgeClass: string;
+  cardClass: string;
+} {
+  switch (kind) {
+    case "verified":
+      return {
+        badgeClass: "border-signal/40 bg-signal/10 text-signal font-semibold",
+        cardClass: "border-signal/40 bg-signal/5",
+      };
+    case "unverified":
+      return {
+        badgeClass: "border-warn/40 bg-warn/10 text-warn font-semibold",
+        cardClass: "border-warn/40 bg-warn/5",
+      };
+    case "blocked":
+      return {
+        badgeClass: "border-crit/40 bg-crit/10 text-crit font-semibold",
+        cardClass: "border-crit/40 bg-crit/5",
+      };
+    case "cancelled":
+      return {
+        badgeClass: "border-line bg-raised/30 text-dim font-medium",
+        cardClass: "border-line bg-raised/10",
+      };
+    case "expired":
+      return {
+        badgeClass: "border-line bg-raised/30 text-dim font-medium",
+        cardClass: "border-line bg-raised/10",
+      };
+    default:
+      return {
+        badgeClass: "border-line bg-raised/30 text-dim",
+        cardClass: "border-line bg-panel",
+      };
+  }
+}
 
 function taskStateTone(state: AiTaskState): {
   badgeClass: string;
@@ -114,6 +188,7 @@ export function AssistantTaskPanel({
   onClearOutput,
   onCancelTask,
   onReconcileTask,
+  onResumeTask,
   onApprovePlan,
   onDenyPlan,
   onReconnectStream,
@@ -121,6 +196,7 @@ export function AssistantTaskPanel({
 }: AssistantTaskPanelProps) {
   const [cancelling, setCancelling] = useState(false);
   const [reconciling, setReconciling] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const [copied, setCopied] = useState(false);
 
@@ -156,7 +232,14 @@ export function AssistantTaskPanel({
   const isAwaitingApproval = task.state === "awaiting_approval";
   const isUncertain = task.state === "uncertain";
   const isCancelRequested = task.state === "cancel_requested";
-
+  const isPaused = Boolean(task.loop?.pauseReason) || task.state === "awaiting_input";
+  const canResume = Boolean(
+    onResumeTask &&
+      !isTerminal &&
+      !isCancelRequested &&
+      !isUncertain &&
+      (isPaused || task.state === "planning" || task.state === "verifying"),
+  );
   async function handleCancel() {
     if (cancelling || busy || isTerminal) return;
     setCancelling(true);
@@ -177,6 +260,16 @@ export function AssistantTaskPanel({
     }
   }
 
+  async function handleResume() {
+    if (resuming || busy || !onResumeTask) return;
+    setResuming(true);
+    try {
+      await onResumeTask();
+    } finally {
+      setResuming(false);
+    }
+  }
+
   async function handleCopyTaskId() {
     if (!task) return;
     await navigator.clipboard.writeText(task.id);
@@ -192,6 +285,26 @@ export function AssistantTaskPanel({
           <Badge variant="outline" className={badgeClass}>
             {stateLabel}
           </Badge>
+          {task.executionMode === "yolo" ? (
+            <Badge variant="outline" className="border-warn/40 bg-warn/10 text-warn font-semibold">
+              <Zap className="mr-1 h-3 w-3" />
+              YOLO
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="border-line text-dim">
+              Manual
+            </Badge>
+          )}
+          {task.completion ?? task.loop?.completion ? (
+            <Badge
+              variant="outline"
+              className={`font-semibold ${
+                completionOutcomeTone((task.completion ?? task.loop?.completion)!.kind).badgeClass
+              }`}
+            >
+              {(task.completion ?? task.loop?.completion)!.kind}
+            </Badge>
+          ) : null}
           <div className="flex items-center gap-1 font-mono text-xs text-dim">
             <span>ID:</span>
             <span className="select-all text-text" title={task.id}>
@@ -238,11 +351,14 @@ export function AssistantTaskPanel({
 
         {/* Cancellation Pending Alert */}
         {isCancelRequested ? (
-          <div className="flex items-center gap-2 border border-warn/40 bg-warn/10 p-3 text-xs text-warn">
-            <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" />
-            <span>
-              Cancellation requested. Waiting for executor acknowledgement...
-            </span>
+          <div className="space-y-1 border border-warn/40 bg-warn/10 p-3 text-xs text-warn">
+            <div className="flex items-center gap-2 font-semibold">
+              <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" />
+              <span>Cancellation Requested</span>
+            </div>
+            <p className="text-[11px] text-dim">
+              Halting future plan steps. Any in-flight host command will record its receipt before stopping; executed changes are not rolled back.
+            </p>
           </div>
         ) : null}
 
@@ -258,23 +374,57 @@ export function AssistantTaskPanel({
               State changes may be partially applied; receipts are protected and will never be replayed.
             </p>
             <p className="text-[11px] text-dim">
-              You can continue chat and read-only investigation, but further changes remain blocked until state is reconciled.
+              Automatic mutation retries are blocked to prevent unsafe replay. You must reconcile state until an authoritative outcome is reached; resuming an uncertain mutation is strictly blocked.
             </p>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={reconciling || busy}
-              onClick={() => void handleReconcile()}
-              className="text-xs border-crit/40 text-crit hover:bg-crit/20"
-            >
-              {reconciling ? (
-                <LoaderCircle className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-              )}
-              Reconcile State
-            </Button>
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={reconciling || busy}
+                onClick={() => void handleReconcile()}
+                className="text-xs border-crit/40 text-crit hover:bg-crit/20"
+              >
+                {reconciling ? (
+                  <LoaderCircle className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                )}
+                Reconcile State
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Execution Paused Alert */}
+        {isPaused && !isTerminal && !isCancelRequested && !isUncertain ? (
+          <div className="space-y-2 border border-line bg-panel p-3 text-xs">
+            <div className="flex items-center gap-2 font-semibold text-text">
+              <Clock className="h-4 w-4 shrink-0 text-signal" />
+              <span>Execution Paused{task.loop?.pauseReason ? ` (${task.loop.pauseReason})` : ""}</span>
+            </div>
+            <p className="text-dim">
+              The loop paused safely (e.g. policy or provider settings changed, or awaiting input). You can resume execution after verifying the current configuration.
+            </p>
+            {onResumeTask ? (
+              <div className="pt-1">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={resuming || busy}
+                  onClick={() => void handleResume()}
+                  className="text-xs"
+                >
+                  {resuming ? (
+                    <LoaderCircle className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Play className="mr-1.5 h-3.5 w-3.5" />
+                  )}
+                  Resume Task
+                </Button>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
@@ -297,42 +447,222 @@ export function AssistantTaskPanel({
           </details>
         ) : null}
 
-        {/* Plan Steps Timeline */}
-        {task.plan && task.plan.steps.length > 0 ? (
-          <div className="space-y-2">
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-dim">
-              Plan Steps ({task.plan.steps.length})
-            </h2>
-            <div className="space-y-2">
-              {task.plan.steps.map((step, idx) => (
-                <div
-                  key={step.stepId || idx}
-                  className="flex items-start justify-between gap-2 border border-line bg-ink/20 p-2.5 text-xs"
-                >
-                  <div className="flex items-start gap-2">
-                    <span className="flex h-4 w-4 shrink-0 items-center justify-center border border-line bg-raised font-mono text-[10px] text-text">
-                      {idx + 1}
-                    </span>
-                    <div>
-                      <div className="font-semibold text-text">
-                        {step.description || step.tool}
-                      </div>
-                      {step.resourceKeys && step.resourceKeys.length > 0 ? (
-                        <div className="mt-0.5 font-mono text-[11px] text-dim">
-                          {step.resourceKeys.join(", ")}
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-                  <Badge variant="outline" className="border-line font-mono text-[10px]">
-                    <Code2 className="mr-1 h-2.5 w-2.5" />
-                    {step.tool}
-                  </Badge>
-                </div>
-              ))}
+        {/* Completion Outcome Card */}
+        {task.completion ?? task.loop?.completion ? (
+          <div
+            data-testid="completion-outcome-card"
+            className={`space-y-2 border p-3 text-xs ${
+              completionOutcomeTone((task.completion ?? task.loop?.completion)!.kind).cardClass
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 font-semibold text-text">
+                {(task.completion ?? task.loop?.completion)!.kind === "verified" ? (
+                  <CheckCircle2 className="h-4 w-4 text-signal shrink-0" />
+                ) : (task.completion ?? task.loop?.completion)!.kind === "unverified" ? (
+                  <AlertTriangle className="h-4 w-4 text-warn shrink-0" />
+                ) : (task.completion ?? task.loop?.completion)!.kind === "blocked" ? (
+                  <AlertOctagon className="h-4 w-4 text-crit shrink-0" />
+                ) : (
+                  <XCircle className="h-4 w-4 text-dim shrink-0" />
+                )}
+                <span>Outcome: {(task.completion ?? task.loop?.completion)!.kind}</span>
+              </div>
+              <Badge
+                variant="outline"
+                className={`font-mono text-[10px] ${
+                  completionOutcomeTone((task.completion ?? task.loop?.completion)!.kind).badgeClass
+                }`}
+              >
+                {(task.completion ?? task.loop?.completion)!.reasonCode}
+              </Badge>
             </div>
+            <p className="text-text">{(task.completion ?? task.loop?.completion)!.message}</p>
+            {(task.completion ?? task.loop?.completion)!.evidenceReferences &&
+            (task.completion ?? task.loop?.completion)!.evidenceReferences!.length > 0 ? (
+              <div className="space-y-1 pt-1">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-dim">
+                  Evidence references:
+                </span>
+                <div className="flex flex-wrap gap-1 font-mono text-[10px]">
+                  {(task.completion ?? task.loop?.completion)!.evidenceReferences!.map((ref, idx) => (
+                    <span
+                      key={idx}
+                      className="border border-line bg-ink/40 px-1.5 py-0.5 text-text"
+                    >
+                      {ref}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
+
+        {/* Multi-Plan Timeline */}
+        {(() => {
+          const planHistory = task.planHistory ?? task.loop?.planHistory ?? (task.plan ? [task.plan] : []);
+          if (planHistory.length === 0) return null;
+          return (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-dim">
+                  Plan History ({planHistory.length})
+                </h2>
+                {task.loop?.counters ? (
+                  <span className="font-mono text-[11px] text-dim">
+                    turn {task.loop.turn} · {task.loop.counters.mutationPlans} plans
+                  </span>
+                ) : null}
+              </div>
+              <div className="space-y-3">
+                {planHistory.map((plan, planIdx) => {
+                  const isCurrent = task.plan && task.plan.planVersion === plan.planVersion;
+                  return (
+                    <div
+                      key={plan.planId || planIdx}
+                      data-testid={`plan-item-v${plan.planVersion}`}
+                      className={`space-y-2 border p-3 text-xs ${
+                        isCurrent && isAwaitingApproval
+                          ? "border-warn/60 bg-warn/5"
+                          : "border-line bg-ink/20"
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line/60 pb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-semibold text-text">
+                            v{plan.planVersion}
+                          </span>
+                          <Badge
+                            variant="outline"
+                            className={`font-mono text-[10px] ${planStatusTone(plan.status)}`}
+                          >
+                            {plan.status}
+                          </Badge>
+                          {plan.execMode === "privileged" ? (
+                            <Badge
+                              variant="outline"
+                              className="border-warn/40 bg-warn/10 text-warn font-mono text-[10px]"
+                            >
+                              privileged
+                            </Badge>
+                          ) : null}
+                        </div>
+                        <span className="font-mono text-[10px] text-dim" title={plan.planDigest}>
+                          digest: {plan.planDigest ? `${plan.planDigest.slice(0, 10)}…` : "none"}
+                        </span>
+                      </div>
+
+                      {/* Plan steps */}
+                      <div className="space-y-1.5 pt-1">
+                        {plan.steps.map((step, stepIdx) => (
+                          <div
+                            key={step.stepId || stepIdx}
+                            className="flex items-start justify-between gap-2 border border-line/60 bg-panel/50 p-2 text-xs"
+                          >
+                            <div className="flex items-start gap-2">
+                              <span className="flex h-4 w-4 shrink-0 items-center justify-center border border-line bg-raised font-mono text-[10px] text-text">
+                                {stepIdx + 1}
+                              </span>
+                              <div>
+                                <div className="font-semibold text-text">
+                                  {step.description || step.tool}
+                                </div>
+                                {step.resourceKeys && step.resourceKeys.length > 0 ? (
+                                  <div className="mt-0.5 font-mono text-[11px] text-dim">
+                                    {step.resourceKeys.join(", ")}
+                                  </div>
+                                ) : null}
+                              </div>
+                            </div>
+                            <Badge variant="outline" className="border-line font-mono text-[10px]">
+                              <Code2 className="mr-1 h-2.5 w-2.5" />
+                              {step.tool}
+                            </Badge>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Loop Observations Timeline */}
+        {(() => {
+          const observations = task.observations ?? task.loop?.observations ?? [];
+          if (observations.length === 0) return null;
+          return (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-dim">
+                  Loop Observations ({observations.length})
+                </h2>
+              </div>
+              <div className="space-y-2">
+                {observations.map((obs, obsIdx) => (
+                  <div
+                    key={obs.id || obsIdx}
+                    data-testid={`observation-item-${obs.id || obsIdx}`}
+                    className="space-y-1.5 border border-line bg-ink/20 p-2.5 text-xs"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 font-mono text-[11px]">
+                        <span className="text-dim">turn {obs.turn}</span>
+                        <span className="text-dim">·</span>
+                        <span className="font-semibold text-text">{obs.tool}</span>
+                        {obs.source ? (
+                          <span className="text-dim">({obs.source.replace(/_/g, " ")})</span>
+                        ) : null}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {obs.exitCode !== undefined ? (
+                          <span className="font-mono text-[10px] text-dim">
+                            exit: {obs.exitCode}
+                          </span>
+                        ) : null}
+                        <Badge
+                          variant="outline"
+                          className={`font-mono text-[10px] ${observationStatusTone(obs.status)}`}
+                        >
+                          {obs.status}
+                        </Badge>
+                      </div>
+                    </div>
+
+                    {obs.target ? (
+                      <div className="font-mono text-[10px] text-dim">
+                        target: <span className="text-text">{obs.target}</span>
+                      </div>
+                    ) : null}
+
+                    {obs.summary || obs.outputPreview ? (
+                      <p className="line-clamp-3 font-mono text-[11px] text-dim whitespace-pre-wrap">
+                        {obs.summary || obs.outputPreview}
+                      </p>
+                    ) : null}
+
+                    {obs.restrictedSources && obs.restrictedSources.length > 0 ? (
+                      <div className="flex flex-wrap gap-1 pt-0.5">
+                        {obs.restrictedSources.map((rs, i) => (
+                          <Badge
+                            key={i}
+                            variant="outline"
+                            className="border-warn/40 bg-warn/10 text-warn font-mono text-[9px]"
+                          >
+                            restricted: {rs}
+                          </Badge>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Live Output Console */}
         <details key={task.id} open={outputChunks.length > 0 || hasGap || isTruncated || streamState === "error"} className="min-w-0 space-y-3">
@@ -456,6 +786,23 @@ export function AssistantTaskPanel({
             </Button>
           ) : null}
 
+          {canResume ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={resuming || busy}
+              onClick={() => void handleResume()}
+              className="text-xs"
+            >
+              {resuming ? (
+                <LoaderCircle className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Play className="mr-1.5 h-3.5 w-3.5" />
+              )}
+              Resume Task
+            </Button>
+          ) : null}
           {isUncertain || task.state === "failed" ? (
             <Button
               type="button"
@@ -474,7 +821,6 @@ export function AssistantTaskPanel({
             </Button>
           ) : null}
         </div>
-
         <div className="text-[11px] text-dim">
           Updated: {new Date(task.updatedAt).toLocaleTimeString()}
         </div>

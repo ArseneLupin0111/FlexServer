@@ -8,6 +8,7 @@ const SECRET_KEYS: Record<string, true> = {
   publickey: true,
   authorization: true,
   token: true,
+  leasetoken: true,
   localauthtoken: true,
   dek: true,
   kek: true,

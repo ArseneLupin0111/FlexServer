@@ -63,6 +63,7 @@ export type AiPlan = {
   providerRevision: number;
   policyRevision: number;
   capabilityRevision: number;
+  execMode?: AiExecMode;
   steps: AiPlanStep[];
   preconditions: { key: string; expectedValue: unknown }[];
   recoverySteps?: AiPlanStep[];
@@ -72,6 +73,93 @@ export type AiPlan = {
   approvedAt?: string;
   approvedSessionId?: string;
   consumedAt?: string;
+};
+
+export type AiExecutionMode = "manual" | "yolo";
+
+export type AiTaskLoopPhase =
+  | "planning"
+  | "awaiting_approval"
+  | "executing"
+  | "verifying"
+  | "continuation_ready"
+  | "completed";
+
+export type AiCompletionKind =
+  | "verified"
+  | "unverified"
+  | "blocked"
+  | "cancelled"
+  | "expired";
+
+export type AiTaskCompletionOutcome = {
+  kind: AiCompletionKind;
+  reasonCode: string;
+  message: string;
+  evidenceReferences?: string[];
+  completedAt: string;
+};
+
+export type AiRestrictedEvidenceSource = "logs" | "files";
+
+export type AiTaskObservation = {
+  id: string;
+  turn: number;
+  tool: string;
+  source: "read_tool" | "host_receipt" | "docker_bridge";
+  commandId?: string;
+  stepId?: string;
+  planVersion?: number;
+  planDigest?: string;
+  target?: string;
+  status: "succeeded" | "failed" | "uncertain" | "cancelled";
+  exitCode?: number;
+  evidence?: AiConversationMessageEvidence[];
+  restrictedSources?: AiRestrictedEvidenceSource[];
+  outputPreview?: string;
+  summary?: string;
+  createdAt: string;
+};
+
+export type AiTaskJournalEntry = {
+  journalId: string;
+  turn: number;
+  callId: string;
+  tool: string;
+  providerId?: string;
+  providerRevision?: number;
+  inputArgs?: Record<string, unknown>;
+  status: "dispatched" | "completed" | "failed" | "cancelled";
+  observationId?: string;
+  commandId?: string;
+  createdAt: string;
+  completedAt?: string;
+};
+
+export type AiTaskLoopCounters = {
+  providerCalls: number;
+  readCalls: number;
+  mutationPlans: number;
+  verificationAttempts: number;
+  toolCalls: number;
+  deadlineAt: string;
+};
+
+export type AiTaskLoopState = {
+  contractVersion: "loop_v1";
+  mode: AiExecutionMode;
+  turn: number;
+  phase: AiTaskLoopPhase;
+  continuationReady: boolean;
+  pauseReason?: string;
+  pinnedProviderRevision?: number;
+  pinnedPolicyRevision?: number;
+  pinnedCapabilityRevision?: number;
+  counters: AiTaskLoopCounters;
+  planHistory: AiPlan[];
+  observations: AiTaskObservation[];
+  journal: AiTaskJournalEntry[];
+  completion?: AiTaskCompletionOutcome;
 };
 
 export type AiTaskUsage = {
@@ -98,10 +186,16 @@ export type AiTask = {
   // `state`; unset/false means no compaction is active.
   compacting?: boolean;
   revision: number;
+  executionVersion?: 1 | 2;
+  executionMode?: AiExecutionMode;
   requestSummary: string;
   summary?: string;
   clarificationPrompt?: string;
   plan?: AiPlan | null;
+  planHistory?: AiPlan[];
+  observations?: AiTaskObservation[];
+  completion?: AiTaskCompletionOutcome;
+  loop?: AiTaskLoopState;
   usage: AiTaskUsage;
   error?: AiTaskError;
   capabilityMetadata?: {
@@ -204,8 +298,10 @@ export type AiPolicy = {
    * Switching back to sandbox never clears it (plan Q4). */
   privilegedAcknowledgedAt: string | null;
   privilegedAcknowledgedBy: string | null;
-  /** When true, mutating plans auto-execute on this VPS without manual approval. Default false. */
-  autoApprove: boolean;
+  /** Execution mode: manual requires operator approval; yolo auto-approves. */
+  executionMode: AiExecutionMode;
+  yoloAcknowledgedAt: string | null;
+  yoloAcknowledgedBy: string | null;
   fileReadScopes: string[];
   fileWriteScopes: string[];
   serviceProfileIds: string[];
@@ -225,8 +321,10 @@ export type UpdateAiPolicy = {
   /** Required by the server when switching to "privileged" without a retained
    * acknowledgment; re-acking refreshes the stored who/when (plan Q4). */
   acknowledgePrivileged?: boolean;
-  /** Per-VPS YOLO toggle: auto-approve mutating plans on generation. Default false. */
-  autoApprove?: boolean;
+  /** Execution mode: manual or full yolo */
+  executionMode?: AiExecutionMode;
+  /** Explicit acknowledgment when activating YOLO mode */
+  acknowledgeYolo?: boolean;
   fileReadScopes?: string[];
   fileWriteScopes?: string[];
   serviceProfileIds?: string[];
@@ -263,6 +361,10 @@ export type AiConversationMessageEvidence = {
   timestamp: string;
   title: string;
   data?: unknown;
+  host?: string;
+  source?: string;
+  status?: string;
+  truncated?: boolean;
 };
 
 export type AiConversationMessage = {
@@ -323,6 +425,9 @@ export type AiErrorCode =
   | "provider_rate_limit"
   | "provider_context_overflow"
   | "provider_response_truncated"
+  | "provider_protocol_error"
+  | "provider_key_required"
+  | "crypto_unavailable"
   | "provider_revision_changed"
   | "capability_unavailable"
   | "task_busy"
@@ -336,6 +441,8 @@ export type AiErrorCode =
   | "budget_exhausted"
   | "output_gap"
   | "uncertain_outcome"
+  | "no_progress"
+  | "cancelled"
   | "sandbox_unavailable"
   | "file_changed"
   | "profile_changed";
@@ -659,6 +766,21 @@ export function reconcileVpsAiTask(
 ): Promise<AiTask> {
   return request<AiTask>(
     `${vpsAiRoot(vpsId)}/tasks/${encodeURIComponent(taskId)}/reconcile`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+      signal,
+    },
+  );
+}
+
+export function resumeVpsAiTask(
+  vpsId: string,
+  taskId: string,
+  signal?: AbortSignal,
+): Promise<AiTask> {
+  return request<AiTask>(
+    `${vpsAiRoot(vpsId)}/tasks/${encodeURIComponent(taskId)}/resume`,
     {
       method: "POST",
       body: JSON.stringify({}),

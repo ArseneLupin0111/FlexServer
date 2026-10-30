@@ -418,8 +418,8 @@ export class AiReadToolsService {
     policy: AiPolicy,
     containerKey: string,
   ): Promise<string> {
-    this.policyService.authorizeToolCall(policy, "readEnabled");
-
+    const effective = this.policyService.getEffectiveAiPolicy(policy);
+    this.policyService.authorizeToolCall(effective, "readEnabled");
     const containers = await this.monitoring.listCurrentContainers(vpsId);
     const target = containers.find(
       (c) =>
@@ -506,9 +506,9 @@ export class AiReadToolsService {
     timeoutMs = DEFAULT_LOG_TIMEOUT_MS,
     signal?: AbortSignal,
   ): Promise<string> {
-    this.policyService.authorizeToolCall(policy, "readEnabled");
-    this.policyService.assertEgressAllowed(policy, "logs");
-
+    const effective = this.policyService.getEffectiveAiPolicy(policy);
+    this.policyService.authorizeToolCall(effective, "readEnabled");
+    this.policyService.assertEgressAllowed(effective, "logs");
     const containers = await this.monitoring.listCurrentContainers(task.vpsId);
     const target = containers.find(
       (c) =>
@@ -638,19 +638,28 @@ export class AiReadToolsService {
     maxBytes = 65536,
     signal?: AbortSignal,
   ): Promise<string> {
-    this.policyService.authorizeToolCall(policy, "readEnabled");
-    this.policyService.assertEgressAllowed(policy, "files");
+    const effective = this.policyService.getEffectiveAiPolicy(policy);
+    this.policyService.authorizeToolCall(effective, "readEnabled");
+    this.policyService.assertEgressAllowed(effective, "files");
 
-    if (
-      !policy.fileReadScopes.includes(scope) ||
-      !isWithinScope(targetPath, scope)
-    ) {
-      throw new AiAssistantError(
-        "policy_denied",
-        "Target path outside permitted fileReadScopes",
-      );
+    if (effective.executionMode !== "yolo") {
+      if (
+        !effective.fileReadScopes.includes(scope) ||
+        !isWithinScope(targetPath, scope)
+      ) {
+        throw new AiAssistantError(
+          "policy_denied",
+          "Target path outside permitted fileReadScopes",
+        );
+      }
+    } else {
+      if (scope && !isWithinScope(targetPath, scope)) {
+        throw new AiAssistantError(
+          "policy_denied",
+          "Target path outside requested scope",
+        );
+      }
     }
-
     const boundedMaxBytes = Math.min(Math.max(1, maxBytes), 262144);
 
     const { commandId } = await this.aiAgentService.enqueueAutoAuthorizedRead(
@@ -727,13 +736,16 @@ export class AiReadToolsService {
     service: string,
     signal?: AbortSignal,
   ): Promise<string> {
-    this.policyService.authorizeToolCall(policy, "readEnabled");
+    const effective = this.policyService.getEffectiveAiPolicy(policy);
+    this.policyService.authorizeToolCall(effective, "readEnabled");
 
-    if (!policy.serviceProfileIds.includes(profileId)) {
-      throw new AiAssistantError(
-        "policy_denied",
-        "Profile ID not in permitted serviceProfileIds",
-      );
+    if (effective.executionMode !== "yolo") {
+      if (!effective.serviceProfileIds.includes(profileId)) {
+        throw new AiAssistantError(
+          "policy_denied",
+          "Profile ID not in permitted serviceProfileIds",
+        );
+      }
     }
 
     const { commandId } = await this.aiAgentService.enqueueAutoAuthorizedRead(

@@ -29,28 +29,51 @@ const SECRET_KEYS: Record<string, true> = {
   clientsecret: true,
 };
 
-export const SECRET_PATTERNS: readonly RegExp[] = [
-  // PEM private keys (full blocks and headers/footers)
-  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/gi,
+const SENSITIVE_KEY_SUFFIXES = [
+  "password",
+  "passwd",
+  "pwd",
+  "secret",
+  "secretkey",
+  "apikey",
+  "privatekey",
+  "passphrase",
+  "clientsecret",
+  "cookie",
+];
+
+const TOKEN_COUNT_EXCLUSIONS = /^(?:input|output|prompt|completion|total|max|estimated?|billable|consumed)?tokens?$/i;
+
+const PEM_PATTERNS: readonly RegExp[] = [
   /-----BEGIN [A-Z0-9 ]*KEY-----[\s\S]*?-----END [A-Z0-9 ]*KEY-----/gi,
+  /-----BEGIN [A-Z0-9 ]*KEY-----(?:[^"'\r\n\\]|\\.)*(?=["']|$)|-----BEGIN [A-Z0-9 ]*KEY-----[\s\S]*$/gi,
+  /-----END [A-Z0-9 ]*KEY-----/gi,
+];
+
+const ASSIGNMENT_PATTERNS: readonly RegExp[] = [
   // SSH keys
   /(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521)\s+[A-Za-z0-9+/=]+(?:\s+\S+)?/gi,
   // Password assignments
-  /(?:password|passwd|pwd)\s*[:=]\s*[^\s&,"']+/gi,
+  /(?:password|passwd|pwd)\s*[:=]\s*(?!\[REDACTED\])[^\s&,"']+/gi,
   // Bearer authentication
   /bearer\s+[A-Za-z0-9._~+/-]+=*/gi,
   // Scoped agent tokens
   /\bvma_[A-Za-z0-9_-]+\b/g,
   // OpenAI / LLM API keys
   /\bsk-[a-zA-Z0-9_-]{20,}\b/g,
+  /\bsk-[a-zA-Z0-9_-]{8,}$/g,
   // Generic secret / API key assignments
-  /(?:api[_-]?key|secret[_-]?key|secret|token)\s*[:=]\s*[^\s&,"']+/gi,
-  // .env variable assignments with sensitive names
-  /(?:^|[\r\n])\s*(?:export\s+)?([A-Za-z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|AUTH)[A-Za-z0-9_]*\s*=\s*)([^\r\n]+)/gi,
+  /(?:api[_-]?key|secret[_-]?key|secret|(?!(?:[A-Za-z0-9_.-]*[_-])?(?:input|output|prompt|completion|total|max|estimated?|billable|consumed)[_-]?tokens?\b)token)\s*[:=]\s*(?!\[REDACTED\])[^\s&,"']+/gi,
 ];
 
+export const SECRET_PATTERNS: readonly RegExp[] = [...PEM_PATTERNS, ...ASSIGNMENT_PATTERNS];
+
 export function isSecretKey(key: string): boolean {
-  return SECRET_KEYS[key.replace(/[-_]/g, "").toLowerCase()] === true;
+  const norm = key.replace(/[-_.]/g, "").toLowerCase();
+  if (SECRET_KEYS[norm] === true) return true;
+  if (SENSITIVE_KEY_SUFFIXES.some((s) => norm.endsWith(s))) return true;
+  if (norm.endsWith("token") && !TOKEN_COUNT_EXCLUSIONS.test(norm)) return true;
+  return false;
 }
 
 export const ANSI_REGEX = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
@@ -58,14 +81,75 @@ export function stripAnsi(text: string): string {
   return text.replace(ANSI_REGEX, "");
 }
 
-export function redactString(value: string): string {
-  let result = value.replace(ANSI_REGEX, "");
-  // .env line redaction preserves the variable name but masks the value
-  result = result.replace(
-    /(?:^|[\r\n])\s*(?:export\s+)?([A-Za-z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|AUTH)[A-Za-z0-9_]*\s*=\s*)([^\r\n]+)/gi,
-    (match, prefix) => match.replace(/[^\r\n]+$/, `${prefix}${REDACTED}`),
-  );
-  return SECRET_PATTERNS.reduce((next, pattern) => next.replace(pattern, REDACTED), result);
+function redactPlainText(value: string): string {
+  let result = stripAnsi(value);
+
+  // Apply multiline PEM block patterns first so single-line assignment patterns don't bisect them
+  result = PEM_PATTERNS.reduce((next, pattern) => next.replace(pattern, REDACTED), result);
+
+  // URL userinfo
+  if (result.includes("://") && result.includes("@")) {
+    result = result.replace(
+      /\b([a-zA-Z][a-zA-Z0-9+.-]{1,31}:\/\/)(?:([^/\s:@]+):|:)?([^/\s@]+)@/gi,
+      (m, scheme, user) => (user ? `${scheme}${user}:${REDACTED}@` : `${scheme}${REDACTED}@`),
+    );
+  }
+
+  // URL sensitive query params
+  if (result.includes("?") || result.includes("&")) {
+    result = result.replace(
+      /([?&](?:[a-zA-Z0-9_.-]{0,64}(?:password|passwd|pwd|secret|apikey|api[_-]?key|session[_-]?id)|(?!(?:input|output|prompt|completion|total|max|estimated?)[_-])[a-zA-Z0-9_.-]{0,64}token)=)([^&#\s]+)/gi,
+      (m, prefix) => `${prefix}${REDACTED}`,
+    );
+  }
+
+  // Quoted JSON properties with credential names (for unparseable snippets or freeform lines)
+  if (result.includes('"')) {
+    result = result.replace(
+      /"([a-zA-Z0-9_.-]{0,64}(?:password|passwd|pwd|secret|apikey|api[_-]?key|private[_-]?key|passphrase|authorization|set[-_]?cookie|cookie|session[_-]?id)|(?!(?:input|output|prompt|completion|total|max|estimated?)[_-])[a-zA-Z0-9_.-]{0,64}token)"\s*:\s*(?:"(?:[^"\\\r\n]|\\.)*(?:"|$)|'(?:[^'\\\r\n]|\\.)*(?:'|$)|(?!\[REDACTED\])[^\s,;}{\]\r\n]+)/gi,
+      (m, key) => `"${key}": "${REDACTED}"`,
+    );
+  }
+
+  // YAML line assignments
+  if (result.includes(":")) {
+    result = result.replace(
+      /(?:^|[\r\n])(\s*(?:-\s+)?)([a-zA-Z0-9_.-]{0,64}(?:password|passwd|pwd|secret|apikey|api[_-]?key|private[_-]?key|passphrase|authorization|set[-_]?cookie|cookie|session[_-]?id)|(?!(?:input|output|prompt|completion|total|max|estimated?)[_-])[a-zA-Z0-9_.-]{0,64}token)\s*:\s*(?:"(?:[^"\\\r\n]|\\.)*(?:"|$)|'(?:[^'\\\r\n]|\\.)*(?:'|$)|(?!\[REDACTED\])[^\r\n]+)/gi,
+      (match, indent, key) =>
+        `${match.startsWith("\r\n") ? "\r\n" : match.startsWith("\n") ? "\n" : match.startsWith("\r") ? "\r" : ""}${indent}${key}: ${REDACTED}`,
+    );
+  }
+
+  // .env, export, and CLI flag assignments
+  if (result.includes("=")) {
+    result = result.replace(
+      /(?:^|[\r\n;])\s*(?:export\s+|--)?((?!(?:[A-Za-z0-9_.-]*[_-])?(?:input|output|prompt|completion|total|max|estimated?|billable|consumed)[_-]?tokens?\s*=)[A-Za-z0-9_.-]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|AUTH)[A-Za-z0-9_.-]*\s*=\s*)(?:"(?:[^"\\\r\n]|\\.)*(?:"|$)|'(?:[^'\\\r\n]|\\.)*(?:'|$)|(?!\[REDACTED\])[^;\r\n]+)/gi,
+      (match, prefix) =>
+        match.replace(/(?:"(?:[^"\\\r\n]|\\.)*(?:"|$)|'(?:[^'\\\r\n]|\\.)*(?:'|$)|(?!\[REDACTED\])[^;\r\n]+)$/, `${prefix}${REDACTED}`),
+    );
+  }
+
+  // HTTP Authorization / Proxy-Authorization headers
+  if (/authorization/i.test(result)) {
+    result = result.replace(
+      /(^|[\r\n\s"'])\b((?:proxy-)?authorization)\s*:\s*(?:basic\s+[A-Za-z0-9+/=]+|bearer\s+[A-Za-z0-9._~+/-]+=*|(?!\[REDACTED\])[^\r\n"']+)/gi,
+      (m, prefix, header) => `${prefix}${header}: ${REDACTED}`,
+    );
+  }
+
+  // HTTP Cookie / Set-Cookie headers
+  if (/cookie/i.test(result)) {
+    result = result.replace(
+      /(^|[\r\n\s"'])\b(set[-_]?cookie|cookie)\s*:\s*(?!\[REDACTED\])[^\r\n"']+/gi,
+      (m, prefix, header) => `${prefix}${header}: ${REDACTED}`,
+    );
+  }
+
+  // Generic token / key assignments
+  result = ASSIGNMENT_PATTERNS.reduce((next, pattern) => next.replace(pattern, REDACTED), result);
+
+  // shortcut: heuristic regexes cover standard serialization formats; arbitrary ad-hoc token structures require domain schema
+  return result;
 }
 
 export function redactValue(value: unknown): unknown {
@@ -79,6 +163,19 @@ export function redactValue(value: unknown): unknown {
       isSecretKey(key) ? REDACTED : redactValue(entry),
     ]),
   );
+}
+
+export function redactString(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(value);
+      return JSON.stringify(redactValue(parsed));
+    } catch {
+      // unparseable or partial JSON, proceed with plain text redactor
+    }
+  }
+  return redactPlainText(value);
 }
 
 function truncateUtf8Bytes(buf: Buffer, maxBytes: number): Buffer {

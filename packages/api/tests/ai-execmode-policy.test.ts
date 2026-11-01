@@ -422,7 +422,7 @@ describe("centralized effective policy resolution (getEffectiveAiPolicy)", () =>
     expect(effective.readEnabled).toBe(true);
   });
 
-  it("yolo mode: keeps egress strictly independent (never auto-elevates)", () => {
+  it("yolo mode: elevates egress when AI is enabled", () => {
     const yoloPolicy: AiPolicy = {
       ...basePolicy,
       executionMode: "yolo",
@@ -430,21 +430,56 @@ describe("centralized effective policy resolution (getEffectiveAiPolicy)", () =>
       sendFilesToProvider: false,
     };
     const effective = getEffectiveAiPolicy(yoloPolicy);
-    expect(effective.sendLogsToProvider).toBe(false);
-    expect(effective.sendFilesToProvider).toBe(false);
+    expect(effective.sendLogsToProvider).toBe(true);
+    expect(effective.sendFilesToProvider).toBe(true);
   });
 
-  it("disabled AI remains disabled even with executionMode yolo", () => {
+  it("disabled AI remains disabled even with executionMode yolo (egress not elevated)", () => {
     const disabledYolo: AiPolicy = {
       ...basePolicy,
       aiEnabled: false,
       executionMode: "yolo",
+      sendLogsToProvider: false,
+      sendFilesToProvider: false,
     };
     const effective = getEffectiveAiPolicy(disabledYolo);
     expect(effective.aiEnabled).toBe(false);
     expect(effective.shellEnabled).toBe(false);
     expect(effective.dockerActionsEnabled).toBe(false);
     expect(effective.composeActionsEnabled).toBe(false);
+    expect(effective.sendLogsToProvider).toBe(false);
+    expect(effective.sendFilesToProvider).toBe(false);
+  });
+
+  it("assertEgressAllowed normalizes raw policy so YOLO grants apply", () => {
+    const policyService = new AiPolicyService({ ai: { enabled: true } } as unknown as AppConfig, {} as unknown as AiRepository);
+    const rawYolo: AiPolicy = {
+      ...basePolicy,
+      executionMode: "yolo",
+      sendLogsToProvider: false,
+      sendFilesToProvider: false,
+    };
+    expect(() => policyService.assertEgressAllowed(rawYolo, "logs")).not.toThrow();
+    expect(() => policyService.assertEgressAllowed(rawYolo, "files")).not.toThrow();
+
+    const rawManual: AiPolicy = {
+      ...basePolicy,
+      executionMode: "manual",
+      sendLogsToProvider: false,
+      sendFilesToProvider: false,
+    };
+    expect(() => policyService.assertEgressAllowed(rawManual, "logs")).toThrow();
+    expect(() => policyService.assertEgressAllowed(rawManual, "files")).toThrow();
+
+    const rawDisabledYolo: AiPolicy = {
+      ...basePolicy,
+      aiEnabled: false,
+      executionMode: "yolo",
+      sendLogsToProvider: false,
+      sendFilesToProvider: false,
+    };
+    expect(() => policyService.assertEgressAllowed(rawDisabledYolo, "logs")).toThrow();
+    expect(() => policyService.assertEgressAllowed(rawDisabledYolo, "files")).toThrow();
   });
 });
 

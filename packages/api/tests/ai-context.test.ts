@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { boundedEvidence, EVIDENCE_DATA_MAX_BYTES, historicalMessage } from "../src/ai/ai-context.js";
+import { SyntheticLogsResponse } from "../src/ai/ai-read-tools.service.js";
 import { estimateTokens, measureProviderRequest } from "../src/ai/ai-provider.js";
 
 const CAPTURE_TS = "2026-10-24T12:00:00.000Z";
@@ -94,7 +95,7 @@ describe("assistant context projection", () => {
 
   it("redacts secrets inside structured tool JSON", () => {
     const evidence = boundedEvidence("read_file", "host-1", JSON.stringify({ path: "/srv/app.env", content: "apiKey=sk-abc123def456ghi789jkl" }), CAPTURE_TS);
-    expect(evidence.data).toEqual({ path: "/srv/app.env", content: "[REDACTED]" });
+    expect(evidence.data).toEqual({ path: "/srv/app.env", content: "apiKey=[REDACTED]" });
   });
 
   it("projects at most twelve evidence items as historical observations", () => {
@@ -106,5 +107,38 @@ describe("assistant context projection", () => {
     expect(projected.content).toContain("tool_11");
     expect(projected.content).not.toContain("tool_12");
     expect(projected.content).toContain("2026-10-24T10:00:00.000Z");
+  });
+
+  it("sanitizes multiline PEM before byte capping so secrets do not straddle slice boundary", () => {
+    const pem = `-----BEGIN RSA PRIVATE KEY-----\n${"MIIEowIBAAKCAQEA0".repeat(50)}\n-----END RSA PRIVATE KEY-----`;
+    const content = `${pem}\n${"a".repeat(5000)}`;
+    const evidence = boundedEvidence("read_file", "host-1", content, CAPTURE_TS);
+    expect(evidence.truncated).toBe(true);
+    expect(typeof evidence.data).toBe("string");
+    expect(evidence.data as string).not.toContain("BEGIN RSA PRIVATE KEY");
+    expect(evidence.data as string).not.toContain("MIIE");
+    expect(evidence.data as string).toContain("[REDACTED]");
+  });
+
+  it("redacts multiline PEM blocks streamed across container log lines into a single redacted line", () => {
+    const res = new SyntheticLogsResponse();
+    res.write('event: lines\ndata: {"lines":["starting container","-----BEGIN RSA PRIVATE KEY-----"]}\n\n');
+    res.write('event: lines\ndata: {"lines":["MIIEowIBAAKCAQEA0abcdef","-----END RSA PRIVATE KEY-----","container ready"]}\n\n');
+    res.end();
+    expect(res.lines).toEqual([
+      "starting container",
+      "[REDACTED]",
+      "container ready",
+    ]);
+  });
+
+  it("redacts unclosed PEM blocks when container log stream terminates", () => {
+    const res = new SyntheticLogsResponse();
+    res.write('event: lines\ndata: {"lines":["init log","-----BEGIN EC PRIVATE KEY-----","secretkeydata123"]}\n\n');
+    res.end();
+    expect(res.lines).toEqual([
+      "init log",
+      "[REDACTED]",
+    ]);
   });
 });

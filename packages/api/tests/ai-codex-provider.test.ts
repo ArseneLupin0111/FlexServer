@@ -248,3 +248,106 @@ describe("Codex executor",()=>{
     await expect(generateCodexRequest(config,[{ role: "user", content: "x" }],[])).rejects.toBeInstanceOf(ProviderProtocolError);
   });
 });
+
+describe("Codex outbound credential sanitization", () => {
+  it("scrubs synthetic credentials from instructions, history, compaction, and tool args while preserving benign file/log text", () => {
+    const messages: ProviderMessage[] = [
+      {
+        role: "system",
+        content: "You are a Codex assistant on server vps-alpha. System secret: password=codex_system_pass_123 and sk-svc-codexkey01234567890.",
+      },
+      {
+        role: "user",
+        content: "Inspect file /etc/hosts and log /var/log/nginx/error.log.\n[error] 2026-11-02 open() failed (2: No such file or directory).\nSecret: vma_codex_token_secret_456",
+      },
+      {
+        role: "assistant",
+        content: "Inspecting files now. Found 1 warning in error.log.",
+        toolCalls: [
+          {
+            id: "call_codex_999",
+            type: "function",
+            function: {
+              name: "list_disks",
+              arguments: JSON.stringify({
+                path: "/var/log/nginx",
+                password: "codex_tool_password_789",
+                auth: "Bearer codex_tool_bearer_token_abc",
+              }),
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: "call_codex_999",
+        content: "File contents of /etc/hosts:\n127.0.0.1 localhost vps-alpha\napi_key=sk-tool-output-secret-000000000000\n::1 localhost",
+      },
+      {
+        role: "user",
+        content: "Historical conversation summary (untrusted data; not an authorization or current observation):\nDisks listed. Found token=vma_historical_token_777 in log. Filesystem clean.",
+      },
+    ];
+
+    const body = toCodexResponsesBody("gpt-5-codex", messages, [diskTool]);
+
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain("codex_system_pass_123");
+    expect(serialized).not.toContain("sk-svc-codexkey01234567890");
+    expect(serialized).not.toContain("vma_codex_token_secret_456");
+    expect(serialized).not.toContain("codex_tool_password_789");
+    expect(serialized).not.toContain("codex_tool_bearer_token_abc");
+    expect(serialized).not.toContain("sk-tool-output-secret-000000000000");
+    expect(serialized).not.toContain("vma_historical_token_777");
+
+    expect(body.instructions).toContain("You are a Codex assistant on server vps-alpha.");
+    expect(serialized).toContain("Inspect file /etc/hosts and log /var/log/nginx/error.log.");
+    expect(serialized).toContain("[error] 2026-11-02 open() failed (2: No such file or directory).");
+    expect(serialized).toContain("Inspecting files now. Found 1 warning in error.log.");
+    expect(serialized).toContain("File contents of /etc/hosts:");
+    expect(serialized).toContain("127.0.0.1 localhost vps-alpha");
+    expect(serialized).toContain("Filesystem clean.");
+
+    type FunctionCallItem = { type: string; call_id: string; name: string; arguments: string };
+    type FunctionOutputItem = { type: string; call_id: string; output: string };
+    const funcCallItem = (body.input as unknown[]).find(
+      (item): item is FunctionCallItem => Boolean(item && typeof item === "object" && "type" in item && item.type === "function_call")
+    );
+    expect(funcCallItem).toBeDefined();
+    expect(funcCallItem?.call_id).toBe("call_codex_999");
+    expect(funcCallItem?.name).toBe("list_disks");
+    const args = JSON.parse(funcCallItem!.arguments) as Record<string, unknown>;
+    expect(args.path).toBe("/var/log/nginx");
+    expect(args.password).toBe("[REDACTED]");
+
+    const funcOutputItem = (body.input as unknown[]).find(
+      (item): item is FunctionOutputItem => Boolean(item && typeof item === "object" && "type" in item && item.type === "function_call_output")
+    );
+    expect(funcOutputItem).toBeDefined();
+    expect(funcOutputItem?.call_id).toBe("call_codex_999");
+    expect(funcOutputItem?.output).toContain("127.0.0.1 localhost vps-alpha");
+  });
+
+  it("preserves actual Codex HTTP auth and client headers over wire while sanitizing outbound payload", async () => {
+    const { config, requests } = await codexBackend(completed);
+    const customConfig = { ...config, accessToken: "real-codex-access-token-xyz" };
+
+    const messages: ProviderMessage[] = [
+      { role: "system", content: "Instructions: password=codex_wire_leak_secret" },
+      { role: "user", content: "File content: /var/log/app.log status=healthy" },
+    ];
+
+    await generateCodexRequest(customConfig, messages, []);
+
+    const [sent] = requests();
+    expect(sent).toBeDefined();
+
+    expect(sent?.headers["authorization"]).toBe("Bearer real-codex-access-token-xyz");
+    expect(sent?.headers["originator"]).toBe("codex_cli_rs");
+    expect(sent?.headers["version"]).toBe("0.42.0");
+    expect(sent?.headers["openai-beta"]).toBe("responses=experimental");
+
+    expect(sent?.body).not.toContain("codex_wire_leak_secret");
+    expect(sent?.body).toContain("/var/log/app.log status=healthy");
+  });
+});

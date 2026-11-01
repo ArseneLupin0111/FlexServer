@@ -33,6 +33,8 @@ describe("AI loop security and budget boundaries", () => {
   let service: AiTaskService;
   let bridgeService: AiDockerBridgeService;
   let readToolsService: AiReadToolsService;
+  let dockerService: DockerMonitoringService;
+  let containerRows: Array<Record<string, unknown>>;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "ai-loop-security-tests-"));
@@ -85,6 +87,8 @@ describe("AI loop security and budget boundaries", () => {
       })),
       execute: vi.fn(async () => ({ ok: true, result: { message: "mutation applied" } })),
     } as unknown as AiDockerBridgeService;
+    containerRows = [];
+    dockerService = { currentContainers: vi.fn(async () => containerRows) } as unknown as DockerMonitoringService;
     readToolsService = {
       isReadTool: vi.fn((name: string) => name === "service_status"),
       execute: vi.fn(async () => JSON.stringify({ active: "active", status: "running", subState: "running", unit: "app-service" })),
@@ -96,7 +100,7 @@ describe("AI loop security and budget boundaries", () => {
       new AiPolicyService(config, aiRepo),
       { list: vi.fn(async () => []) } as unknown as MetricService,
       sessions,
-      {} as unknown as DockerMonitoringService,
+      dockerService,
       {} as unknown as AiHostPlanService,
       bridgeService,
       { getAuthoritativeLatest: vi.fn(async () => ({ activeInstanceId: "agent-inst-1" })), currentContainers: vi.fn(async () => []) } as unknown as DockerMonitoringRepository,
@@ -201,7 +205,7 @@ describe("AI loop security and budget boundaries", () => {
   });
 
   it("allows finite changing health polling and stops unchanging polling at the no-progress bound", async () => {
-    await setPolicy();
+    await setPolicy({ executionMode: "yolo" });
     let calls = 0;
     const finiteObservations = [
       { active: "activating", status: "starting", subState: "start-pre", unit: "app-service" },
@@ -235,7 +239,7 @@ describe("AI loop security and budget boundaries", () => {
   });
 
   it("feeds a deterministic read-tool failure observation back to the model", async () => {
-    await setPolicy();
+    await setPolicy({ executionMode: "yolo" });
     const seen: string[] = [];
     let calls = 0;
     vi.spyOn(readToolsService, "execute").mockRejectedValue(new Error("deterministic service status failure"));
@@ -305,5 +309,75 @@ describe("AI loop security and budget boundaries", () => {
     expect(result.error?.code).toBe("policy_denied");
     expect(bridgeService.execute).toHaveBeenCalledTimes(1);
     expect((await aiRepo.getTask(vpsId, task.id))?.state).toBe("failed");
+  });
+
+  const containerFixture = [
+    { agentInstanceId: "agent-inst-1", containerKey: "postgres", name: "vps-manager-postgres", image: "postgres:16", state: "running", status: "Up 26 hours (healthy)", metrics: { cpuPercent: 0.2, memoryUsageBytes: 110100480, pids: 0 }, collectedAt: "2026-10-30T10:00:00.000Z" },
+    { agentInstanceId: "agent-inst-1", containerKey: "controller", name: "vps-manager-controller", image: "vps-manager-controller", state: "restarting", status: "Restarting (1) 53 seconds ago", metrics: { cpuPercent: 0.1, memoryUsageBytes: 52428800, pids: 1 }, collectedAt: "2026-10-30T10:00:00.000Z" },
+  ];
+
+  async function runDockerInventory(grantEgress: boolean): Promise<{ toolContents: string[]; restrictedSources: Array<string[] | undefined>; finalContent: string }> {
+    await setPolicy({ executionMode: "yolo", ...(grantEgress ? { sendLogsToProvider: true, sendFilesToProvider: true } : {}) });
+    containerRows = containerFixture;
+    const toolContents: string[] = [];
+    let calls = 0;
+    vi.spyOn(AiProvider.prototype, "generate").mockImplementation(async (_config, messages) => {
+      calls += 1;
+      if (calls > 1) {
+        for (const message of messages) if (message.role === "tool") toolContents.push(message.content);
+        return providerResult("Postgres is running and the controller is restarting.");
+      }
+      return providerResult("inventory", [{ id: "inventory-call", name: "docker_inventory", arguments: {} }]);
+    });
+    const task = await createLoopTask(grantEgress ? "inventory-egress-key" : "inventory-no-egress-key", "What containers are running?");
+    const completed = await pollUntil((candidate) => candidate.state === "succeeded", task.id);
+    expect(completed.completion?.reasonCode).toBe("query_answered");
+    const messages = await aiRepo.listMessages(task.conversationId);
+    return {
+      toolContents,
+      restrictedSources: messages.filter((message) => message.role === "assistant").map((message) => message.restrictedSources),
+      finalContent: completed.completion?.message ?? "",
+    };
+  }
+
+  it("replays docker_inventory metadata without egress grants and leaves the conversation untainted", async () => {
+    const result = await runDockerInventory(false);
+    const replayed = result.toolContents.join("\n");
+    expect(replayed).toContain("vps-manager-postgres");
+    expect(replayed).toContain("vps-manager-controller");
+    expect(replayed).toContain("Up 26 hours (healthy)");
+    expect(replayed).toContain("Restarting (1) 53 seconds ago");
+    expect(replayed).not.toContain("outputOmitted");
+    expect(result.restrictedSources.every((sources) => sources === undefined)).toBe(true);
+    expect(result.finalContent).toContain("Postgres is running");
+  });
+
+  it("never taints the conversation with docker_inventory metadata when egress grants are enabled", async () => {
+    const result = await runDockerInventory(true);
+    expect(result.toolContents.join("\n")).toContain("vps-manager-postgres");
+    expect(result.restrictedSources.every((sources) => sources === undefined)).toBe(true);
+  });
+
+  it("permits docker logs and file reads under YOLO effective egress", async () => {
+    await setPolicy({ executionMode: "yolo" });
+    const toolContents: string[] = [];
+    vi.spyOn(readToolsService, "execute").mockImplementation(async (call) =>
+      call.name === "docker_logs" ? "BOUNDED_LOG_LINE" : "BOUNDED_FILE_LINE");
+    let calls = 0;
+    vi.spyOn(AiProvider.prototype, "generate").mockImplementation(async (_config, messages) => {
+      calls += 1;
+      if (calls > 1) {
+        for (const message of messages) if (message.role === "tool") toolContents.push(message.content);
+      }
+      if (calls === 1) return providerResult("logs", [{ id: "logs-call", name: "docker_logs", arguments: { containerKey: "postgres" } }]);
+      if (calls === 2) return providerResult("files", [{ id: "file-call", name: "file_read", arguments: { path: "/etc/app/config.yml" } }]);
+      return providerResult("Both reads completed under YOLO effective egress.");
+    });
+    const task = await createLoopTask("restricted-egress-key", "Read logs and config");
+    await pollUntil((candidate) => candidate.state === "succeeded", task.id);
+    const replayed = toolContents.join("\n");
+    expect(replayed).toContain("BOUNDED_LOG_LINE");
+    expect(replayed).toContain("BOUNDED_FILE_LINE");
+    expect(replayed).not.toContain("outputOmitted");
   });
 });

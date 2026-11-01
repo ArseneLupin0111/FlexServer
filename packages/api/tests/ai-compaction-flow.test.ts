@@ -87,7 +87,7 @@ describe("assistant context compaction", () => {
     expect(outcome.state, JSON.stringify(outcome.error)).toBe("succeeded");
     expect(requests.some(entry => entry.noTools)).toBe(true);
     expect((await repository.getConversationCheckpoint(server.id, conversation.id))?.summaryModel).toBe("test-model");
-  });
+  }, 15_000);
 
   it("retries one proven overflow after compaction and never dispatches a third attempt", async () => {
     const { repository, service, server, conversation } = await setup();
@@ -240,6 +240,12 @@ describe("assistant context compaction", () => {
       return { message: { role: "assistant", content: "", toolCalls: [{ id: `call-${call}`, type: "function", function: { name: call === 1 ? "service_status" : "docker_action", arguments: "{}" } }] }, usage: { inputTokens: 100, outputTokens: 20, estimated: false } };
     });
     const task = await service.create(request, server.id, { conversationId: conversation.id, request: "Inspect then propose", idempotencyKey: "approval-evidence" });
+    const firstPlan = await wait(repository, server.id, task.id);
+    expect(firstPlan.state).toBe("awaiting_approval");
+    await service.approve(request, server.id, task.id, {
+      planVersion: firstPlan.plan!.planVersion,
+      planDigest: firstPlan.plan!.planDigest,
+    });
     const outcome = await wait(repository, server.id, task.id);
     expect(outcome.state, JSON.stringify(outcome.error)).toBe("awaiting_approval");
     const history = await repository.listConversationHistory(conversation.id);

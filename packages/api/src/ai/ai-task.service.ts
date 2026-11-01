@@ -16,7 +16,7 @@ import { aiProviderKeyAad } from "../persistence/repositories/ai.repository.js";
 import { AiProvider, type ProviderMessage, type ProviderTool, ProviderProtocolError, ProviderTransportError, ProviderKeyRequiredError, ProviderContextOverflowError, measureProviderRequest, estimateTokens, type ProviderRequestMeasure, PROVIDER_MAX_OUTPUT_TOKENS, PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS } from "./ai-provider.js";
 import { generateCodexRequest, toCodexResponsesBody } from "./ai-codex-provider.js";
 import { AiCodexOauthService } from "./ai-codex-oauth.service.js";
-import type { AiTask, AiPlan, AiExecMode, AiPolicy, AiHostCommandKind, AiRestrictedEvidenceSource, AiConversation, AiProviderProfileInternal, AiExecutionMode, AiTaskLoopState, AiTaskObservation, AiTaskJournalEntry, AiTaskCompletionOutcome, AiCompletionKind } from "./ai.models.js";
+import type { AiTask, AiPlan, AiPlanStep, AiTaskState, AiExecMode, AiPolicy, AiHostCommandKind, AiRestrictedEvidenceSource, AiConversation, AiProviderProfileInternal, AiExecutionMode, AiTaskLoopState, AiTaskObservation, AiTaskJournalEntry, AiTaskCompletionOutcome, AiCompletionKind } from "./ai.models.js";
 import { DashboardSessionService } from "../auth/dashboard-session.service.js";
 import { DockerMonitoringService } from "../docker/docker-monitoring.service.js";
 import { AiHostPlanService, hostTools, sha256 } from "./ai-host-plan.service.js";
@@ -48,9 +48,22 @@ const tools: ProviderTool[] = [
   ...readTools,
 ];
 const terminal = new Set(["succeeded", "failed", "cancelled", "expired"]);
+/** Read-only Docker metadata tools. Their bounded output is never shell/exec evidence; docker_action/logs stay restricted. */
+const dockerMetadataTool: Record<string, true> = { docker_inventory: true, docker_inspect: true, container_inspect: true };
+const isShellOrExecTool = (name: string): boolean =>
+  name.includes("shell") || name.includes("command") || name === "host_exec" || name === "host_command" || name.startsWith("compose_") || (name.startsWith("docker_") && !dockerMetadataTool[name]);
 const restrictedSourceForTool = (name: string): AiRestrictedEvidenceSource | undefined =>
   ["container_logs", "docker_logs"].includes(name) ? "logs" :
   ["file_read", "host_file_read", "files_read"].includes(name) ? "files" : undefined;
+const isReadPlanTool = (tool: string): boolean =>
+  isReadTool(tool) || tool === "docker_inventory" || tool === "host_metrics";
+const isReadPlan = (plan: AiPlan): boolean =>
+  plan.steps.length > 0 && plan.steps.every(s => isReadPlanTool(s.tool));
+const readPreconditions = (tool: string): Array<{ key: string; expectedValue: unknown }> => {
+  if (tool === "container_logs" || tool === "docker_logs") return [{ key: "sendLogsToProvider", expectedValue: true }];
+  if (tool === "file_read" || tool === "host_file_read" || tool === "files_read") return [{ key: "sendFilesToProvider", expectedValue: true }];
+  return [];
+};
 /** Snapshot failure code: recognized errors keep their stable wire code;
  * anything else falls back to provider_unavailable — never a raw error string. */
 function snapshotFailureCode(error: unknown): string {
@@ -79,7 +92,7 @@ const publicTask = (task: AiTask): AiTask => {
         status: obs.status,
         exitCode: obs.exitCode,
         restrictedSources: obs.restrictedSources,
-        outputPreview: obs.outputPreview ? redactString(obs.outputPreview.slice(0, 500)) : undefined,
+        outputPreview: obs.outputPreview ? redactString(obs.outputPreview).slice(0, 500) : undefined,
         summary: obs.summary ? redactString(obs.summary) : undefined,
         createdAt: obs.createdAt,
       })),
@@ -148,7 +161,7 @@ const publicTask = (task: AiTask): AiTask => {
 function formatSafeObservationContent(obs: AiTaskObservation, policy: AiPolicy): { content: string; sourceTaints?: AiRestrictedEvidenceSource[] } {
   const isLogs = obs.restrictedSources?.includes("logs") || obs.tool.includes("logs") || obs.tool === "container_logs" || obs.tool === "docker_logs";
   const isFiles = obs.restrictedSources?.includes("files") || obs.tool.includes("file") || obs.tool.includes("config") || obs.tool === "host_file_read" || obs.tool === "file_read" || obs.tool === "host_config_apply";
-  const isShellOrExec = obs.tool.includes("shell") || obs.tool.includes("command") || obs.tool === "host_exec" || obs.tool.startsWith("compose_") || obs.tool.startsWith("docker_") || obs.tool === "host_command";
+  const isShellOrExec = isShellOrExecTool(obs.tool);
 
   let allowOutput = true;
   const taints: AiRestrictedEvidenceSource[] = [];
@@ -186,7 +199,7 @@ function formatSafeObservationContent(obs: AiTaskObservation, policy: AiPolicy):
       status: obs.status,
       exitCode: obs.exitCode,
       summary: obs.summary ? redactString(obs.summary) : undefined,
-      output: redactString(obs.outputPreview.slice(0, 4096)),
+      output: redactString(obs.outputPreview).slice(0, 4096),
     }),
     sourceTaints: taints.length ? taints : undefined,
   };
@@ -333,8 +346,10 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
     if (!await this.sessions.authenticateById(dispatch.sessionId)) throw new AiAssistantError("policy_denied");
     signal.throwIfAborted();
     await this.policy.revalidateForDispatch(task.vpsId, { providerRevision: dispatch.providerRevision, policyRevision: dispatch.policyRevision, providerId: task.providerId });
-    const policy = await this.repository.getAiPolicy(task.vpsId);
-    if (!policy || sources.some(source => source === "logs" ? !policy.sendLogsToProvider : !policy.sendFilesToProvider)) throw new AiAssistantError("policy_denied");
+    const rawPolicy = await this.repository.getAiPolicy(task.vpsId);
+    if (!rawPolicy) throw new AiAssistantError("policy_denied");
+    const policy = this.policy.getEffectiveAiPolicy(rawPolicy);
+    if (sources.some(source => source === "logs" ? !policy.sendLogsToProvider : !policy.sendFilesToProvider)) throw new AiAssistantError("policy_denied");
     signal.throwIfAborted();
   }
   /** Settings shape carried through prepareContext/dispatch. For
@@ -380,8 +395,9 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
     if (!await this.repository.getConversation(task.vpsId, task.conversationId)) throw new AiAssistantError("policy_denied");
     const limits = this.contextLimitsFor(settings.model);
     const history = await this.conversationHistory(task.conversationId);
-    const policy = await this.repository.getAiPolicy(task.vpsId);
-    if (!policy) throw new AiAssistantError("policy_denied");
+    const storedPolicy = await this.repository.getAiPolicy(task.vpsId);
+    if (!storedPolicy) throw new AiAssistantError("policy_denied");
+    const policy = this.policy.getEffectiveAiPolicy(storedPolicy);
     const sourceAllowed = (source: AiRestrictedEvidenceSource) => source === "logs" ? policy.sendLogsToProvider : policy.sendFilesToProvider;
     const messageAllowed = (message: AiConversationMessage) => {
       const sources = message.restrictedSources;
@@ -468,7 +484,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
       try {
         const result = await this.dispatchGenerate(settings, summaryInput, [], signal, { maxOutputTokens: PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS });
         task = await this.chargeCompact(task, result.usage);
-        const summary = redactString(result.message.content.trim());
+        const summary = redactString(result.message.content).trim();
         if (result.message.toolCalls?.length || !summary || Buffer.byteLength(summary, "utf8") > COMPACT_SUMMARY_MAX_BYTES) throw new AiAssistantError("budget_exhausted");
         const candidateCheckpoint = { summary, restrictedSources: [...sensitiveSources] };
         const candidateCovered = covered + selected;
@@ -572,13 +588,13 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
       existingConversation = await this.repository.getConversation(vpsId, conversationId);
       if (!existingConversation) throw new NotFoundException("Conversation not found");
     }
-    if (!conversationId) conversationId = (await this.repository.createConversation(vpsId, input.data.request.slice(0, 80))).id;
+    const sanitizedRequest = redactString(input.data.request);
+    if (!conversationId) conversationId = (await this.repository.createConversation(vpsId, sanitizedRequest.slice(0, 80))).id;
     // Q16 resolution: explicit > conversation > last used > default. An
     // explicit selection that cannot be honored fails closed (no fallback).
     const selection = await this.resolveSelection(input.data.providerId, input.data.model, existingConversation);
     if (!selection) throw new AiAssistantError("provider_unavailable");
     if (!this.policy.isProfileReady(selection.profile)) throw new AiAssistantError("provider_unavailable");
-    const sanitizedRequest = redactString(input.data.request);
     const execMode: AiExecutionMode = policy.executionMode === "yolo" ? "yolo" : "manual";
     const deadlineAt = new Date(Date.now() + 600000).toISOString();
     let admitted;
@@ -678,6 +694,48 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
   private requireCodexOauth(): AiCodexOauthService {
     if (!this.codexOauth) throw new AiAssistantError("provider_unavailable");
     return this.codexOauth;
+  }
+  private async executeReadCall(
+    claimedTask: AiTask,
+    currentPolicy: AiPolicy,
+    call: { id: string; name: string; arguments: string },
+    signal?: AbortSignal,
+  ): Promise<{ status: "succeeded" | "failed"; toolContent: string }> {
+    let toolContent = "";
+    let status: "succeeded" | "failed" = "succeeded";
+    try {
+      if (signal?.aborted) throw signal.reason ?? new AiAssistantError("cancelled");
+      const isRead = isReadTool(call.name) || (typeof this.readToolsService?.isReadTool === "function" && this.readToolsService.isReadTool(call.name));
+      if (isRead) {
+        if (typeof this.readToolsService?.execute === "function") {
+          toolContent = await this.readToolsService.execute(
+            { id: call.id, name: call.name, arguments: call.arguments },
+            { task: claimedTask, policy: currentPolicy, signal },
+          );
+        } else {
+          throw new AiAssistantError("provider_unavailable", "Read tools service unavailable");
+        }
+      } else if (call.name === "docker_inventory") {
+        this.policy.authorizeToolCall(currentPolicy, "readEnabled");
+        if (Object.keys(JSON.parse(call.arguments || "{}")).length) throw new AiAssistantError("policy_denied");
+        const rows = await this.docker.currentContainers(claimedTask.vpsId);
+        const containers = rows.slice(0, 100).map(row => ({ agentInstanceId: row.agentInstanceId, containerKey: row.containerKey, name: row.name, image: row.image, state: row.state, status: row.status, collectedAt: row.collectedAt }));
+        toolContent = JSON.stringify({ vpsId: claimedTask.vpsId, observedAt: new Date().toISOString(), available: containers.length > 0, truncated: rows.length > 100, containers });
+      } else if (call.name === "host_metrics") {
+        this.policy.authorizeToolCall(currentPolicy, "readEnabled");
+        if (Object.keys(JSON.parse(call.arguments || "{}")).length) throw new AiAssistantError("policy_denied");
+        const data = await this.metrics.list(claimedTask.vpsId);
+        const capped = data.slice(-120);
+        toolContent = JSON.stringify({ vpsId: claimedTask.vpsId, observedAt: new Date().toISOString(), available: capped.length > 0, truncated: data.length > 120, samples: capped });
+      } else {
+        throw new AiAssistantError("policy_denied", `Unknown read tool: ${call.name}`);
+      }
+    } catch (readErr) {
+      if (signal?.aborted) throw readErr;
+      status = "failed";
+      toolContent = readErr instanceof Error ? readErr.message : "Read tool execution failed";
+    }
+    return { status, toolContent };
   }
   private async run(task: AiTask, providerRevision: number, policyRevision: number, controller: AbortController, sessionId: string, alreadyClaimed = false): Promise<void> {
     if (task.executionVersion === 2 || task.loop) {
@@ -860,7 +918,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
           delete safeArgs.payload;
 
           const isFileOrConfigTool = j.tool.includes("file") || j.tool.includes("config") || j.tool === "host_file_apply" || j.tool === "file_write" || j.tool === "host_config_apply";
-          const isShellOrCommandTool = j.tool.includes("shell") || j.tool.includes("command") || j.tool === "host_exec" || j.tool === "host_command" || j.tool.startsWith("compose_") || j.tool.startsWith("docker_");
+          const isShellOrCommandTool = isShellOrExecTool(j.tool);
 
           if (isFileOrConfigTool) {
             if (!currentPolicy.sendFilesToProvider) {
@@ -1007,18 +1065,19 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
           if (!result.message.content.trim()) throw new AiAssistantError("provider_unavailable");
           const sanitizedContent = redactString(result.message.content);
           const planHistory = claimedTask.loop?.planHistory ?? [];
-          const hasMutations = planHistory.length > 0;
+          const mutationPlans = planHistory.filter(p => !isReadPlan(p));
+          const hasMutations = mutationPlans.length > 0;
           let completionKind: AiCompletionKind = "verified";
           let reasonCode = "query_answered";
 
           if (hasMutations) {
-            const latestPlan = planHistory[planHistory.length - 1]!;
+            const latestPlan = mutationPlans[mutationPlans.length - 1]!;
             const mutationObs = observations.filter(o => o.planDigest === latestPlan.planDigest || (o.stepId && latestPlan.steps.some(s => s.stepId === o.stepId)));
             const allMutationSucceeded = mutationObs.length > 0 && mutationObs.every(o => o.status === "succeeded");
             const latestMutationTime = mutationObs.reduce((max, o) => Math.max(max, Date.parse(o.createdAt || "0")), 0);
             const verificationObs = observations.filter(o => {
               const obsTime = Date.parse(o.createdAt || "0");
-              const isRead = o.source === "read_tool" || (typeof this.readToolsService?.isReadTool === "function" && this.readToolsService.isReadTool(o.tool));
+              const isRead = o.source === "read_tool" || isReadPlanTool(o.tool) || (typeof this.readToolsService?.isReadTool === "function" && this.readToolsService.isReadTool(o.tool));
               return obsTime >= latestMutationTime && isRead && o.status === "succeeded";
             });
 
@@ -1112,100 +1171,169 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
 
         const isRead = isReadTool(call.function.name) || (typeof this.readToolsService?.isReadTool === "function" && this.readToolsService.isReadTool(call.function.name));
         if (isRead || call.function.name === "docker_inventory" || call.function.name === "host_metrics") {
-          let toolContent = "";
-          let status: "succeeded" | "failed" = "succeeded";
-          try {
-            if (isRead) {
-              if (typeof this.readToolsService?.execute === "function") {
-                toolContent = await this.readToolsService.execute(
-                  { id: call.id, name: call.function.name, arguments: call.function.arguments },
-                  { task: claimedTask, policy: currentPolicy, signal },
-                );
-              } else {
-                throw new AiAssistantError("provider_unavailable", "Read tools service unavailable");
-              }
-            } else if (call.function.name === "docker_inventory") {
-              this.policy.authorizeToolCall(currentPolicy, "readEnabled");
-              const rows = await this.docker.currentContainers(claimedTask.vpsId);
-              const containers = rows.slice(0, 100).map(row => ({ agentInstanceId: row.agentInstanceId, containerKey: row.containerKey, name: row.name, image: row.image, state: row.state, status: row.status, collectedAt: row.collectedAt }));
-              toolContent = JSON.stringify({ vpsId: claimedTask.vpsId, observedAt: new Date().toISOString(), available: containers.length > 0, truncated: rows.length > 100, containers });
-            } else if (call.function.name === "host_metrics") {
-              this.policy.authorizeToolCall(currentPolicy, "readEnabled");
-              const data = await this.metrics.list(claimedTask.vpsId);
-              const capped = data.slice(-120);
-              toolContent = JSON.stringify({ vpsId: claimedTask.vpsId, observedAt: new Date().toISOString(), available: capped.length > 0, truncated: data.length > 120, samples: capped });
-            }
-          } catch (readErr) {
-            status = "failed";
-            toolContent = readErr instanceof Error ? readErr.message : "Read tool execution failed";
+          this.policy.authorizeToolCall(currentPolicy, "readEnabled");
+          const parsedArgs = JSON.parse(call.function.arguments || "{}");
+          if ((call.function.name === "docker_inventory" || call.function.name === "host_metrics") && Object.keys(parsedArgs).length > 0) {
+            throw new AiAssistantError("policy_denied", "Unexpected arguments for read tool");
+          }
+            // Egress grants are independent of approval: an unapproved grant
+            // must fail closed before any plan is offered for approval.
+          if (currentPolicy.executionMode === "yolo") {
+            const { status, toolContent } = await this.executeReadCall(
+              claimedTask,
+              currentPolicy,
+              { id: call.id, name: call.function.name, arguments: call.function.arguments },
+              signal,
+            );
+
+            const obsId = randomUUID();
+            const toolObs: AiTaskObservation = {
+              id: obsId,
+              turn: (claimedTask.loop?.turn ?? 0) + 1,
+              tool: call.function.name,
+              source: "read_tool",
+              commandId: call.id,
+              target: parsedArgs.serviceName || parsedArgs.service || parsedArgs.container || parsedArgs.path || claimedTask.vpsId,
+              status,
+              outputPreview: toolContent ? redactString(toolContent).slice(0, 4096) : undefined,
+              summary: `Read tool ${call.function.name} ${status}`,
+              evidence: status === "succeeded" ? [boundedEvidence(call.function.name, claimedTask.vpsId, toolContent)] : undefined,
+              createdAt: new Date().toISOString(),
+            };
+
+            const journalEntry: AiTaskJournalEntry = {
+              journalId: randomUUID(),
+              turn: (claimedTask.loop?.turn ?? 0) + 1,
+              callId: call.id,
+              tool: call.function.name,
+              inputArgs: parsedArgs,
+              status: status === "succeeded" ? "completed" : "failed",
+              observationId: obsId,
+              createdAt: new Date().toISOString(),
+              completedAt: new Date().toISOString(),
+            };
+
+            const fingerprint = noProgressFingerprint(call.function.name, parsedArgs, toolObs);
+            const priorCounters = claimedTask.loop?.counters;
+            const noProgressStreak = priorCounters?.noProgressFingerprint === fingerprint
+              ? (priorCounters.noProgressStreak ?? 0) + 1
+              : 1;
+            const noProgressTerminal = noProgressStreak >= NO_PROGRESS_THRESHOLD;
+            const noProgressCompletion: AiTaskCompletionOutcome | undefined = noProgressTerminal
+              ? { kind: "blocked", reasonCode: "no_progress", message: "Repeated identical observations made no progress.", completedAt: new Date().toISOString() }
+              : undefined;
+            await this.repository.releaseOrCommitTurn({
+              taskId,
+              vpsId,
+              expectedRevision: claimedTask.revision,
+              expectedLeaseToken: leaseToken,
+              ownerInstanceId,
+              state: noProgressTerminal ? "failed" : "planning",
+              error: noProgressTerminal ? { code: "no_progress", message: "Repeated identical observations made no progress." } : undefined,
+              completion: noProgressCompletion,
+              usageDelta: { ...result.usage, rounds: 1, toolCalls: 1 },
+              loopPatch: {
+                phase: noProgressTerminal ? "completed" : "planning",
+                continuationReady: !noProgressTerminal,
+                appendJournal: [journalEntry],
+                appendObservations: [toolObs],
+                countersDelta: {
+                  providerCalls: 1,
+                  readCalls: 1,
+                  toolCalls: 1,
+                  verificationAttempts: claimedTask.state === "verifying" ? 1 : 0,
+                  noProgressStreak: noProgressStreak - (priorCounters?.noProgressStreak ?? 0),
+                  noProgressFingerprint: fingerprint,
+                },
+                ...(noProgressCompletion ? { completion: noProgressCompletion } : {}),
+              },
+              releaseTurnLease: true,
+            });
+            if (noProgressTerminal) return;
+            continue;
           }
 
-          const obsId = randomUUID();
-          const parsedArgs = JSON.parse(call.function.arguments || "{}");
-          const toolObs: AiTaskObservation = {
-            id: obsId,
-            turn: (claimedTask.loop?.turn ?? 0) + 1,
+          const maxHistoryVersion = (claimedTask.loop?.planHistory ?? []).reduce((max, p) => Math.max(max, p.planVersion), 0);
+          const nextPlanVersion = Math.max(maxHistoryVersion, claimedTask.loop?.counters.mutationPlans ?? 0) + 1;
+
+          const step: AiPlanStep = {
+            stepId: randomUUID(),
             tool: call.function.name,
-            source: "read_tool",
-            commandId: call.id,
-            target: parsedArgs.serviceName || parsedArgs.service || parsedArgs.container || parsedArgs.path || claimedTask.vpsId,
-            status,
-            outputPreview: toolContent,
-            summary: `Read tool ${call.function.name} ${status}`,
-            evidence: status === "succeeded" ? [boundedEvidence(call.function.name, claimedTask.vpsId, toolContent)] : undefined,
-            createdAt: new Date().toISOString(),
+            version: 1,
+            args: parsedArgs,
+            resourceKeys: [],
+            inputDigests: {},
+            description: `Read ${call.function.name}`,
+            timeoutSeconds: 30,
           };
 
+          const readPlan: AiPlan = {
+            planId: randomUUID(),
+            planVersion: nextPlanVersion,
+            taskId,
+            vpsId,
+            agentInstanceId: undefined,
+            providerId: claimedTask.providerId,
+            providerRevision: claimedTask.loop?.pinnedProviderRevision ?? 0,
+            policyRevision: claimedTask.loop?.pinnedPolicyRevision ?? 0,
+            capabilityRevision: 0,
+            execMode: currentPolicy.execMode,
+            steps: [step],
+            preconditions: readPreconditions(call.function.name),
+            planDigest: "",
+            expiresAt: new Date(Date.now() + 120000).toISOString(),
+            status: "pending",
+          };
+          readPlan.planDigest = sha256(JSON.stringify(readPlan));
+
+          const sanitizedJournalArgs: Record<string, unknown> = { ...parsedArgs };
           const journalEntry: AiTaskJournalEntry = {
             journalId: randomUUID(),
             turn: (claimedTask.loop?.turn ?? 0) + 1,
             callId: call.id,
             tool: call.function.name,
-            inputArgs: parsedArgs,
-            status: status === "succeeded" ? "completed" : "failed",
-            observationId: obsId,
+            inputArgs: sanitizedJournalArgs,
+            status: "dispatched",
             createdAt: new Date().toISOString(),
-            completedAt: new Date().toISOString(),
           };
 
-          const fingerprint = noProgressFingerprint(call.function.name, parsedArgs, toolObs);
-          const priorCounters = claimedTask.loop?.counters;
-          const noProgressStreak = priorCounters?.noProgressFingerprint === fingerprint
-            ? (priorCounters.noProgressStreak ?? 0) + 1
-            : 1;
-          const noProgressTerminal = noProgressStreak >= NO_PROGRESS_THRESHOLD;
-          const noProgressCompletion: AiTaskCompletionOutcome | undefined = noProgressTerminal
-            ? { kind: "blocked", reasonCode: "no_progress", message: "Repeated identical observations made no progress.", completedAt: new Date().toISOString() }
-            : undefined;
+          if (evidence.length) {
+            await this.repository.appendMessage({
+              id: randomUUID(),
+              vpsId: claimedTask.vpsId,
+              conversationId: claimedTask.conversationId,
+              taskId: claimedTask.id,
+              role: "assistant",
+              content: "Historical observations used while preparing this plan; execution follows configured approval policy.",
+              evidence: evidence.slice(0, 12),
+              providerId: claimedTask.providerId,
+              model: claimedTask.model,
+              ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}),
+            });
+          }
+
           await this.repository.releaseOrCommitTurn({
             taskId,
             vpsId,
             expectedRevision: claimedTask.revision,
             expectedLeaseToken: leaseToken,
             ownerInstanceId,
-            state: noProgressTerminal ? "failed" : "planning",
-            error: noProgressTerminal ? { code: "no_progress", message: "Repeated identical observations made no progress." } : undefined,
-            completion: noProgressCompletion,
+            state: "awaiting_approval",
+            plan: readPlan,
             usageDelta: { ...result.usage, rounds: 1, toolCalls: 1 },
             loopPatch: {
-              phase: noProgressTerminal ? "completed" : "planning",
-              continuationReady: !noProgressTerminal,
+              phase: "executing",
+              continuationReady: false,
+              appendPlan: readPlan,
               appendJournal: [journalEntry],
-              appendObservations: [toolObs],
               countersDelta: {
                 providerCalls: 1,
-                readCalls: 1,
                 toolCalls: 1,
-                verificationAttempts: claimedTask.state === "verifying" ? 1 : 0,
-                noProgressStreak: noProgressStreak - (priorCounters?.noProgressStreak ?? 0),
-                noProgressFingerprint: fingerprint,
               },
-              ...(noProgressCompletion ? { completion: noProgressCompletion } : {}),
             },
             releaseTurnLease: true,
           });
-          if (noProgressTerminal) return;
-          continue;
+          return;
         }
 
         const isBridge = bridgeTools.some(tool => tool.function.name === call.function.name);
@@ -1214,7 +1342,8 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
           throw new AiAssistantError("policy_denied", `Unknown tool call: ${call.function.name}`);
         }
 
-        const nextPlanVersion = (claimedTask.loop?.counters.mutationPlans ?? 0) + 1;
+        const maxHistoryVersion = (claimedTask.loop?.planHistory ?? []).reduce((max, p) => Math.max(max, p.planVersion), 0);
+        const nextPlanVersion = Math.max(maxHistoryVersion, claimedTask.loop?.counters.mutationPlans ?? 0) + 1;
         let plan: AiPlan;
         const parsedArgs = JSON.parse(call.function.arguments || "{}");
 
@@ -1459,8 +1588,9 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
         for (const call of result.message.toolCalls) {
           signal.throwIfAborted();
           await this.policy.revalidateForDispatch(task.vpsId, { providerRevision, policyRevision, providerId: task.providerId });
-          const activePolicy = await this.repository.getAiPolicy(task.vpsId);
-          if (!activePolicy) throw new AiAssistantError("policy_denied");
+          const rawActivePolicy = await this.repository.getAiPolicy(task.vpsId);
+          if (!rawActivePolicy) throw new AiAssistantError("policy_denied");
+          const activePolicy = this.policy.getEffectiveAiPolicy(rawActivePolicy);
 
           if (bridgeTools.some(tool => tool.function.name === call.function.name)) {
             if (result.message.toolCalls.length !== 1) throw new AiAssistantError("policy_denied");
@@ -1543,27 +1673,75 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
             return;
           }
 
-          if (this.readToolsService.isReadTool(call.function.name)) {
-            const content = await this.readToolsService.execute(
-              { id: call.id, name: call.function.name, arguments: call.function.arguments },
-              { task, policy: activePolicy, signal },
-            );
-            active.push({ role: "tool", toolCallId: call.id, content: redactString(content) });
-            const source = restrictedSourceForTool(call.function.name);
-            if (source) restrictedSources.add(source);
-            if (evidence.length < 12) evidence.push(boundedEvidence(call.function.name, task.vpsId, content));
-            continue;
-          }
-
-          if (call.function.name === "docker_inventory") {
+          const isRead = isReadPlanTool(call.function.name) || (typeof this.readToolsService?.isReadTool === "function" && this.readToolsService.isReadTool(call.function.name));
+          if (isRead) {
             this.policy.authorizeToolCall(activePolicy, "readEnabled");
-            if (Object.keys(JSON.parse(call.function.arguments)).length) throw new AiAssistantError("policy_denied");
-            const rows = await this.docker.currentContainers(task.vpsId);
-            const containers = rows.slice(0, 100).map(row => ({ agentInstanceId: row.agentInstanceId, containerKey: row.containerKey, name: row.name, image: row.image, state: row.state, status: row.status, collectedAt: row.collectedAt }));
-            const toolContent = JSON.stringify({ vpsId: task.vpsId, observedAt: new Date().toISOString(), available: containers.length > 0, truncated: rows.length > 100, containers });
-            active.push({ role: "tool", toolCallId: call.id, content: redactString(toolContent) });
-            if (evidence.length < 12) evidence.push(boundedEvidence(call.function.name, task.vpsId, toolContent));
-            continue;
+            const parsedArgs = JSON.parse(call.function.arguments || "{}");
+            if ((call.function.name === "docker_inventory" || call.function.name === "host_metrics") && Object.keys(parsedArgs).length > 0) {
+              throw new AiAssistantError("policy_denied");
+            }
+
+            if (activePolicy.executionMode === "yolo") {
+              let toolContent = "";
+              if (call.function.name === "docker_inventory") {
+                const rows = await this.docker.currentContainers(task.vpsId);
+                const containers = rows.slice(0, 100).map(row => ({ agentInstanceId: row.agentInstanceId, containerKey: row.containerKey, name: row.name, image: row.image, state: row.state, status: row.status, collectedAt: row.collectedAt }));
+                toolContent = JSON.stringify({ vpsId: task.vpsId, observedAt: new Date().toISOString(), available: containers.length > 0, truncated: rows.length > 100, containers });
+              } else if (call.function.name === "host_metrics") {
+                const data = await this.metrics.list(task.vpsId);
+                const capped = data.slice(-120);
+                toolContent = JSON.stringify({ vpsId: task.vpsId, observedAt: new Date().toISOString(), available: capped.length > 0, truncated: data.length > 120, samples: capped });
+              } else {
+                if (call.function.name === "container_logs" || call.function.name === "docker_logs") {
+                  this.policy.assertEgressAllowed(activePolicy, "logs");
+                }
+                if (call.function.name === "file_read" || call.function.name === "host_file_read" || call.function.name === "files_read") {
+                  this.policy.assertEgressAllowed(activePolicy, "files");
+                }
+                toolContent = await this.readToolsService.execute(
+                  { id: call.id, name: call.function.name, arguments: call.function.arguments },
+                  { task, policy: activePolicy, signal },
+                );
+              }
+              active.push({ role: "tool", toolCallId: call.id, content: redactString(toolContent) });
+              const source = restrictedSourceForTool(call.function.name);
+              if (source) restrictedSources.add(source);
+              if (evidence.length < 12) evidence.push(boundedEvidence(call.function.name, task.vpsId, toolContent));
+              continue;
+            }
+
+            if (result.message.toolCalls.length !== 1) throw new AiAssistantError("policy_denied");
+            const plan: AiPlan = {
+              planId: randomUUID(),
+              planVersion: 1,
+              taskId: task.id,
+              vpsId: task.vpsId,
+              agentInstanceId: undefined,
+              providerId: task.providerId,
+              providerRevision,
+              policyRevision,
+              capabilityRevision: 0,
+              execMode: activePolicy.execMode,
+              steps: [{
+                stepId: randomUUID(),
+                tool: call.function.name,
+                version: 1,
+                args: parsedArgs,
+                resourceKeys: [],
+                inputDigests: {},
+                description: `Read ${call.function.name}`,
+                timeoutSeconds: 30,
+              }],
+              preconditions: readPreconditions(call.function.name),
+              planDigest: "",
+              expiresAt: new Date(Date.now() + 120000).toISOString(),
+              status: "pending",
+            };
+            plan.planDigest = sha256(JSON.stringify(plan));
+            if (evidence.length) await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: "Historical observations used while preparing this plan; execution follows configured approval policy.", evidence: evidence.slice(0, 12), providerId: task.providerId, model: task.model, ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
+            await this.repository.updateTask({ id: task.id, expectedRevision: task.revision, state: "awaiting_approval", plan });
+            await this.maybeAutoApprove(task, plan, sessionId);
+            return;
           }
 
           if (call.function.name === "request_clarification") {
@@ -1573,23 +1751,6 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
             await this.repository.appendMessage({ id: randomUUID(), vpsId: task.vpsId, conversationId: task.conversationId, taskId: task.id, role: "assistant", content: sanitizedQuestion, providerId: task.providerId, model: task.model, ...(evidence.length ? { evidence: evidence.slice(0, 12) } : {}), ...(restrictedSources.size ? { restrictedSources: [...restrictedSources] } : {}) });
             await this.repository.updateTask({ id: task.id, expectedRevision: task.revision, state: "awaiting_input", clarificationPrompt: sanitizedQuestion });
             return;
-          }
-
-          if (call.function.name === "host_metrics") {
-            this.policy.authorizeToolCall(activePolicy, "readEnabled");
-            if (Object.keys(JSON.parse(call.function.arguments)).length) throw new AiAssistantError("policy_denied");
-            const data = await this.metrics.list(task.vpsId);
-            const capped = data.slice(-120);
-            const toolContent = JSON.stringify({
-              vpsId: task.vpsId,
-              observedAt: new Date().toISOString(),
-              available: capped.length > 0,
-              truncated: data.length > 120,
-              samples: capped,
-            });
-            active.push({ role: "tool", toolCallId: call.id, content: redactString(toolContent) });
-            if (evidence.length < 12) evidence.push(boundedEvidence(call.function.name, task.vpsId, toolContent));
-            continue;
           }
 
           throw new AiAssistantError("policy_denied");
@@ -1800,7 +1961,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
                   source: "docker_bridge",
                   status: "failed",
                   summary: redactString(errorMsg),
-                  outputPreview: outcome.result ? JSON.stringify(redactValue(outcome.result)).slice(0, 4096) : undefined,
+                  outputPreview: outcome.result ? redactString(JSON.stringify(redactValue(outcome.result))).slice(0, 4096) : undefined,
                   restrictedSources: ["logs", "files"],
                   createdAt: new Date().toISOString(),
                 },
@@ -1903,6 +2064,167 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
           }
           throw updateErr;
         }
+      }
+    } else if (isReadPlan(plan)) {
+      if (plan.steps.length !== 1) {
+        throw new AiAssistantError("policy_denied", "Multi-step read plans are not supported");
+      }
+      const step = plan.steps[0]!;
+      if (!isReadPlanTool(step.tool)) {
+        throw new AiAssistantError("policy_denied", `Invalid read plan tool: ${step.tool}`);
+      }
+      this.policy.authorizeToolCall(activePolicy, "readEnabled");
+      if (step.tool === "container_logs" || step.tool === "docker_logs") {
+        this.policy.assertEgressAllowed(activePolicy, "logs");
+      }
+      if (step.tool === "file_read" || step.tool === "host_file_read" || step.tool === "files_read") {
+        this.policy.assertEgressAllowed(activePolicy, "files");
+      }
+      if ((step.tool === "docker_inventory" || step.tool === "host_metrics") && Object.keys(step.args || {}).length > 0) {
+        throw new AiAssistantError("policy_denied", "Unexpected arguments for read tool");
+      }
+
+      let approvedPlan: AiPlan;
+      try {
+        approvedPlan = await this.repository.approve({ taskId, ...input.data, approvedSessionId: request.dashboardSessionId! });
+      } catch (err) {
+        if (err instanceof AiPersistenceConflictError && err.code === "uncertain_outcome") {
+          throw new AiAssistantError("uncertain_outcome", err.message);
+        }
+        if (err instanceof AiPersistenceConflictError && err.code === "approval_conflict") {
+          throw new AiAssistantError("stale_plan", err.message);
+        }
+        throw err;
+      }
+      if (!approvedPlan || approvedPlan.planDigest !== plan.planDigest) throw new AiAssistantError("stale_plan");
+
+      const executingTask = await this.repository.getTask(vpsId, taskId);
+      if (!executingTask || terminal.has(executingTask.state)) return publicTask(executingTask ?? task);
+
+      const controller = new AbortController();
+      this.running.set(taskId, controller);
+      try {
+        const { status, toolContent } = await this.executeReadCall(
+          executingTask,
+          activePolicy,
+          { id: randomUUID(), name: step.tool, arguments: JSON.stringify(step.args ?? {}) },
+          controller.signal,
+        );
+
+        const currentTask = await this.repository.getTask(vpsId, taskId);
+        if (!currentTask || terminal.has(currentTask.state)) return publicTask(currentTask ?? executingTask);
+
+        if (currentTask.state === "cancel_requested" || controller.signal.aborted) {
+          const cancelled = await this.repository.updateTask({
+            id: taskId,
+            expectedRevision: currentTask.revision,
+            state: "cancelled",
+            completion: {
+              kind: "cancelled",
+              reasonCode: "cancelled_by_user",
+              message: "Task cancelled by user",
+              completedAt: new Date().toISOString(),
+            },
+          });
+          return publicTask(cancelled);
+        }
+
+        const obsId = randomUUID();
+        const obs: AiTaskObservation = {
+          id: obsId,
+          turn: currentTask.loop?.turn ?? 1,
+          stepId: step.stepId,
+          planVersion: approvedPlan.planVersion,
+          planDigest: approvedPlan.planDigest,
+          target: String(step.args?.serviceName || step.args?.service || step.args?.container || step.args?.path || vpsId),
+          tool: step.tool,
+          source: "read_tool",
+          status,
+          outputPreview: toolContent ? redactString(toolContent).slice(0, 4096) : undefined,
+          summary: `Read tool ${step.tool} ${status}`,
+          evidence: status === "succeeded" ? [boundedEvidence(step.tool, vpsId, toolContent)] : undefined,
+          createdAt: new Date().toISOString(),
+        };
+
+        const journalEntry: AiTaskJournalEntry = {
+          journalId: randomUUID(),
+          turn: currentTask.loop?.turn ?? 1,
+          callId: `${step.stepId}:completed`,
+          tool: step.tool,
+          inputArgs: step.args ?? {},
+          status: status === "succeeded" ? "completed" : "failed",
+          observationId: obsId,
+          createdAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+        };
+
+        const planHistory = currentTask.loop?.planHistory ?? [];
+        const hasPriorMutations = planHistory.some(p => !isReadPlan(p));
+        const targetState: AiTaskState = hasPriorMutations ? "verifying" : "planning";
+        const targetPhase = hasPriorMutations ? "verifying" : "planning";
+
+        if (currentTask.executionVersion === 2 || currentTask.loop) {
+          const resumed = await this.repository.updateTask({
+            id: taskId,
+            expectedRevision: currentTask.revision,
+            state: targetState,
+            loopPatch: {
+              phase: targetPhase,
+              continuationReady: true,
+              appendObservations: [obs],
+              appendJournal: [journalEntry],
+              countersDelta: {
+                readCalls: 1,
+                verificationAttempts: hasPriorMutations ? 1 : 0,
+              },
+            },
+          });
+          void this.wakeContinuation(vpsId, taskId);
+          return publicTask(resumed);
+        }
+
+        const summaryText = redactString(`Read ${step.tool} completed.`);
+        await this.repository.appendMessage({
+          id: randomUUID(),
+          vpsId,
+          conversationId: currentTask.conversationId,
+          taskId,
+          role: "assistant",
+          content: summaryText,
+        });
+        const succeeded = await this.repository.updateTask({
+          id: taskId,
+          expectedRevision: currentTask.revision,
+          state: "succeeded",
+          summary: summaryText,
+        });
+        return publicTask(succeeded);
+      } catch (err) {
+        const current = await this.repository.getTask(vpsId, taskId);
+        if (!current || terminal.has(current.state)) return publicTask(current ?? executingTask);
+        if (current.state === "cancel_requested" || controller.signal.aborted) {
+          const cancelled = await this.repository.updateTask({
+            id: taskId,
+            expectedRevision: current.revision,
+            state: "cancelled",
+            completion: {
+              kind: "cancelled",
+              reasonCode: "cancelled_by_user",
+              message: "Task cancelled by user",
+              completedAt: new Date().toISOString(),
+            },
+          });
+          return publicTask(cancelled);
+        }
+        const failed = await this.repository.updateTask({
+          id: taskId,
+          expectedRevision: current.revision,
+          state: "failed",
+          error: { code: snapshotFailureCode(err), message: "AI task could not complete" },
+        });
+        return publicTask(failed);
+      } finally {
+        this.running.delete(taskId);
       }
     } else {
       const capability = await this.policy.getCapability(vpsId);
@@ -2056,9 +2378,9 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
   async cancel(request: Request, vpsId: string, taskId: string) {
     const task = await this.get(request, vpsId, taskId);
     if (terminal.has(task.state)) return task;
+    this.running.get(task.id)?.abort();
     if (["executing", "verifying", "cancel_requested"].includes(task.state)) return publicTask(await this.repository.updateTask({ id: task.id, expectedRevision: task.revision, state: "cancel_requested" }));
     if (task.state === "uncertain") throw new AiAssistantError("uncertain_outcome");
-    this.running.get(task.id)?.abort();
     return publicTask(await this.repository.updateTask({
       id: task.id,
       expectedRevision: task.revision,

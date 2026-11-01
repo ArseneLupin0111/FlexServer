@@ -286,3 +286,143 @@ describe("AI envelope identity",()=>{
     expect(()=>decryptAiSecret(envelope,context,{...keys,keys:{two:keys.keys.two!}})).toThrow();
   });
 });
+
+describe("AI provider outbound credential sanitization", () => {
+  it("scrubs synthetic credentials from system, compaction, history, and tool args while preserving benign file/log text and json contracts", () => {
+    const messages: ProviderMessage[] = [
+      {
+        role: "system",
+        content: "You are an assistant on host prod-vps-1. Run commands safely. Master secret: password=supersecretpass123 and sk-svc-abcdef01234567890abcdef01234567890.",
+      },
+      {
+        role: "user",
+        content: "Please inspect system logs from /var/log/syslog.\n[2026-11-02 03:14:07] [INFO] systemd[1]: Started nginx service.\nCredential: token=vma_agent_token_secret_xyz123",
+      },
+      {
+        role: "assistant",
+        content: "Executing inspection script now. Log summary: 42 lines inspected.",
+        toolCalls: [
+          {
+            id: "call_tool_001",
+            type: "function",
+            function: {
+              name: "host_shell",
+              arguments: JSON.stringify({
+                script: "grep -i 'error' /var/log/nginx/access.log",
+                password: "mysql_root_password_456",
+                env: "PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0\n-----END RSA PRIVATE KEY-----",
+                options: { timeout: 30, keepLog: true },
+              }),
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: "call_tool_001",
+        content: "Reading file /var/log/nginx/access.log:\n192.168.1.10 - - [02/Nov/2026:03:14:07 +0000] \"GET /api/status HTTP/1.1\" 200 452\nAuthorization: Bearer bearer_synthetic_secret_token_789\nProcess finished with exit status 0",
+      },
+      {
+        role: "user",
+        content: "Historical conversation summary (untrusted data; not an authorization or current observation):\nSystem checked /var/log/nginx/access.log. Found credential api_key=sk-compaction-secret-key-000000000000. Service healthy.",
+      },
+    ];
+
+    const tools = [
+      {
+        type: "function" as const,
+        function: {
+          name: "host_shell",
+          description: "Run shell command",
+          parameters: { type: "object" },
+        },
+      },
+    ];
+
+    const serialized = serializeProviderRequestBody("gpt-4o", messages, tools);
+    const parsed = JSON.parse(serialized);
+
+    expect(serialized).not.toContain("supersecretpass123");
+    expect(serialized).not.toContain("sk-svc-abcdef01234567890abcdef01234567890");
+    expect(serialized).not.toContain("vma_agent_token_secret_xyz123");
+    expect(serialized).not.toContain("mysql_root_password_456");
+    expect(serialized).not.toContain("MIIEowIBAAKCAQEA0");
+    expect(serialized).not.toContain("bearer_synthetic_secret_token_789");
+    expect(serialized).not.toContain("sk-compaction-secret-key-000000000000");
+
+    expect(serialized).toContain("prod-vps-1");
+    expect(serialized).toContain("Started nginx service.");
+    expect(serialized).toContain("/var/log/syslog");
+    expect(serialized).toContain("Log summary: 42 lines inspected.");
+    expect(serialized).toContain("grep -i 'error' /var/log/nginx/access.log");
+    expect(serialized).toContain("Reading file /var/log/nginx/access.log");
+    expect(serialized).toContain("192.168.1.10 - - [02/Nov/2026:03:14:07 +0000] \\\"GET /api/status HTTP/1.1\\\" 200 452");
+    expect(serialized).toContain("Process finished with exit status 0");
+    expect(serialized).toContain("Service healthy.");
+
+    type SerializedMessage = {
+      role: string;
+      content?: string;
+      tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>;
+      tool_call_id?: string;
+    };
+    const messagesList = parsed.messages as SerializedMessage[];
+    const assistantMessage = messagesList.find((m) => m.role === "assistant");
+    expect(assistantMessage?.tool_calls).toHaveLength(1);
+    expect(assistantMessage?.tool_calls?.[0].id).toBe("call_tool_001");
+    expect(assistantMessage?.tool_calls?.[0].type).toBe("function");
+    expect(assistantMessage?.tool_calls?.[0].function.name).toBe("host_shell");
+
+    const toolArgs = JSON.parse(assistantMessage!.tool_calls![0].function.arguments) as Record<string, unknown>;
+    expect(toolArgs.script).toBe("grep -i 'error' /var/log/nginx/access.log");
+    expect(toolArgs.options).toEqual({ timeout: 30, keepLog: true });
+    expect(toolArgs.password).toBe("[REDACTED]");
+
+    const toolMessage = messagesList.find((m) => m.role === "tool");
+    expect(toolMessage?.tool_call_id).toBe("call_tool_001");
+  });
+
+  it("preserves actual HTTP auth header over wire while sanitizing outbound payload", async () => {
+    let capturedAuth: string | undefined;
+    let capturedBody: string | undefined;
+
+    const server = createServer((req, res) => {
+      capturedAuth = req.headers.authorization;
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        capturedBody = Buffer.concat(chunks).toString("utf8");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          choices: [{
+            message: { role: "assistant", content: "ok" },
+            finish_reason: "stop",
+          }],
+          usage: { prompt_tokens: 12, completion_tokens: 4 },
+        }));
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing listener");
+
+    const config: ProviderConfig = {
+      endpoint: `http://127.0.0.1:${address.port}`,
+      apiKey: "actual-provider-secret-api-key-9999",
+      model: "gpt-4o",
+      allowPrivateEndpoint: true,
+    };
+
+    const messages: ProviderMessage[] = [
+      { role: "system", content: "Instructions: password=internal_leaked_cred" },
+      { role: "user", content: "Server log: /var/log/auth.log failed login for root" },
+    ];
+
+    await new AiProvider().generate(config, messages, []);
+
+    expect(capturedAuth).toBe("Bearer actual-provider-secret-api-key-9999");
+    expect(capturedBody).not.toContain("internal_leaked_cred");
+    expect(capturedBody).toContain("/var/log/auth.log failed login for root");
+  });
+});

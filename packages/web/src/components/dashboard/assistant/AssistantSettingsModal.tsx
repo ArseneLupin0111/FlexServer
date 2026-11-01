@@ -1269,8 +1269,8 @@ export function AssistantSettingsModal({
 
                 <p className="text-[11px] text-dim">
                   {executionMode === "yolo"
-                    ? "In Full YOLO mode, Docker and Compose mutations execute autonomously without manual plan approval. Shell commands execute as root directly on the host. Egress remains separately controlled by file and log toggles."
-                    : "Docker and Compose actions run only after you approve the exact plan version. Shell execution is controlled by the Agent card in host Settings (manual approval required)."}
+                    ? "In Full YOLO mode, all proposed tools and actions (reads, inspections, Docker and Compose mutations) execute autonomously without manual plan approval. Shell commands execute as root directly on the host. Provider log and file egress are active (credentials checked and redacted)."
+                    : "In manual mode, all tools (inspections, read queries, Docker and Compose actions) run only after you approve the exact plan version. Shell execution is controlled by the Agent card in host Settings (manual approval required)."}
                 </p>
 
                 <h3 className="pt-2 text-xs font-semibold uppercase tracking-wider text-dim">
@@ -1301,7 +1301,7 @@ export function AssistantSettingsModal({
                       ) : null}
                     </div>
                     <p className="mt-1 text-[11px] text-dim leading-4">
-                      Requires operator confirmation for every proposed mutation plan. Recommended for production.
+                      Requires operator confirmation for every proposed action and plan (including inspections and read queries). Recommended for production.
                     </p>
                   </button>
 
@@ -1333,7 +1333,7 @@ export function AssistantSettingsModal({
                       ) : null}
                     </div>
                     <p className="mt-1 text-[11px] text-dim leading-4">
-                      Plans auto-execute autonomously with root permissions. Independent data egress controls remain enforced.
+                      All plans and tool actions auto-execute autonomously with root permissions. Provider file and log egress are active with secret redaction.
                     </p>
                   </button>
                 </div>
@@ -1347,7 +1347,7 @@ export function AssistantSettingsModal({
                     <div className="space-y-1">
                       <div className="font-semibold">Autonomous root execution active (YOLO)</div>
                       <p>
-                        Mutations execute automatically without per-plan approval. Shell actions run as root on the host. Data egress (sending logs/files) remains independently restricted.
+                        Mutations execute automatically without per-plan approval. Shell actions run as root on the host. Provider log and file egress are active with credential checking and redaction.
                       </p>
                     </div>
                   </div>
@@ -1359,30 +1359,58 @@ export function AssistantSettingsModal({
 
                 <div className="space-y-2">
                   <div className="flex items-center justify-between border border-line bg-panel p-2.5">
-                    <div className="font-semibold text-text">Send logs to provider</div>
+                    <div>
+                      <div className="font-semibold text-text flex items-center gap-2">
+                        Send logs to provider
+                        {executionMode === "yolo" && (
+                          <span className="text-[10px] font-medium text-warn border border-warn/30 bg-warn/10 px-1.5 py-0.5 rounded">
+                            Active in YOLO
+                          </span>
+                        )}
+                      </div>
+                      {executionMode === "yolo" && (
+                        <p className="text-[11px] text-dim">
+                          Automatically enabled for autonomous troubleshooting (credentials redacted)
+                        </p>
+                      )}
+                    </div>
                     <Switch
-                      checked={sendLogs}
+                      checked={executionMode === "yolo" ? true : sendLogs}
                       onCheckedChange={setSendLogs}
+                      disabled={executionMode === "yolo"}
                       aria-label="Send logs to provider"
                     />
                   </div>
 
                   <div className="flex items-center justify-between border border-line bg-panel p-2.5">
-                    <div className="font-semibold text-text">
-                      Send file contents to provider
+                    <div>
+                      <div className="font-semibold text-text flex items-center gap-2">
+                        Send file contents to provider
+                        {executionMode === "yolo" && (
+                          <span className="text-[10px] font-medium text-warn border border-warn/30 bg-warn/10 px-1.5 py-0.5 rounded">
+                            Active in YOLO
+                          </span>
+                        )}
+                      </div>
+                      {executionMode === "yolo" && (
+                        <p className="text-[11px] text-dim">
+                          Automatically enabled for autonomous troubleshooting (credentials redacted)
+                        </p>
+                      )}
                     </div>
                     <Switch
-                      checked={sendFiles}
+                      checked={executionMode === "yolo" ? true : sendFiles}
                       onCheckedChange={setSendFiles}
+                      disabled={executionMode === "yolo"}
                       aria-label="Send files to provider"
                     />
                   </div>
                 </div>
                 <p className="text-[11px] text-dim">
-                  Both stay off unless enabled; content is redacted before it
-                  leaves the API.
+                  {executionMode === "yolo"
+                    ? "In Full YOLO mode, file and log egress are active so the model can inspect host state. Credentials and secrets are automatically checked and redacted before transmission. Switch to Manual approval to toggle individual egress permissions."
+                    : "Both stay off unless enabled; content is redacted before it leaves the API."}
                 </p>
-
                 {/* Advanced scopes behind progressive disclosure */}
                 <details className="group border border-line bg-panel">
                   <summary className="flex cursor-pointer select-none items-center justify-between p-2.5 font-semibold text-dim transition-colors hover:text-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal list-none [&::-webkit-details-marker]:hidden">
@@ -1583,13 +1611,13 @@ export function AssistantSettingsModal({
             </div>
             <div className="space-y-2 text-xs leading-5 text-dim">
               <p className="font-medium text-warn">
-                Warning: AI agent will execute all proposed mutation plans autonomously with root host permissions without human approval per step.
+                Warning: AI agent will execute all proposed actions and plans (inspections, reads, and mutations) autonomously with root host permissions without human approval per step.
               </p>
               <p>
                 Shell commands execute directly as root on the host, outside the sandbox. In-flight actions cannot be selectively intercepted once dispatched.
               </p>
               <p className="border-l-2 border-line pl-2 text-text">
-                <strong>Independent data egress:</strong> YOLO grants autonomous local execution, but never bypasses egress boundaries. Sending logs or files to external providers remains strictly governed by your Data Egress settings.
+                <strong>Provider data egress:</strong> Full YOLO enables sending logs and inspected file contents to the provider so the agent can autonomously diagnose issues. Sensitive credentials and secrets are automatically checked and redacted before transmission.
               </p>
             </div>
             <label className="flex items-start gap-2 text-xs font-medium text-text cursor-pointer">

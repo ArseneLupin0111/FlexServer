@@ -1,5 +1,5 @@
 import "../../../test/setup";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AssistantTaskPanel } from "./AssistantTaskPanel";
@@ -13,7 +13,10 @@ vi.mock("../../../lib/ai-api", async (importOriginal) => {
       Promise.resolve({
         planVersion: 2,
         planDigest: "sha256:targetdigest123",
-        steps: [],
+        steps: [
+          { stepId: "s-1", payload: { cmd: "docker ps" } },
+          { stepId: "step-inventory", payload: {} },
+        ],
       }),
     ),
   };
@@ -380,7 +383,7 @@ describe("AssistantTaskPanel multi-plan timeline, observations, completion and r
       policyRevision: 1,
       capabilityRevision: 1,
       preconditions: [],
-      expiresAt: "2026-10-30T11:00:00.000Z",
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
       status: "pending",
       steps: [makeStep({ stepId: "s-1", tool: "docker_run" })],
     };
@@ -406,6 +409,72 @@ describe("AssistantTaskPanel multi-plan timeline, observations, completion and r
     );
 
     const approveBtn = await screen.findByRole("button", { name: /^approve$/i });
+    await waitFor(() => {
+      expect(approveBtn).toBeEnabled();
+    });
+    fireEvent.click(approveBtn);
+    expect(onApprove).toHaveBeenCalledWith(2, "sha256:targetdigest123");
+  });
+
+  it("renders read action approval card and approves read plan with exact version and digest", async () => {
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    const readPlan: AiPlan = {
+      planId: "plan-read-1",
+      planVersion: 2,
+      planDigest: "sha256:targetdigest123",
+      taskId: "task-100",
+      vpsId: "vps-1",
+      execMode: "sandbox",
+      providerRevision: 1,
+      policyRevision: 1,
+      capabilityRevision: 1,
+      preconditions: [],
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+      status: "pending",
+      steps: [
+        makeStep({
+          stepId: "step-inventory",
+          tool: "docker_inventory",
+          description: "",
+          args: {},
+        }),
+      ],
+    };
+    const task = makeTask({
+      state: "awaiting_approval",
+      plan: readPlan,
+      planHistory: [readPlan],
+    });
+
+    render(
+      <AssistantTaskPanel
+        task={task}
+        outputChunks={[]}
+        streamState="idle"
+        hasGap={false}
+        isTruncated={false}
+        vpsId="vps-1"
+        onClearOutput={vi.fn()}
+        onCancelTask={vi.fn()}
+        onReconcileTask={vi.fn()}
+        onApprovePlan={onApprove}
+        onDenyPlan={vi.fn()}
+      />,
+    );
+
+    // Checks read action badge and descriptive generic fallback text
+    expect(screen.getByText(/read action/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Query host Docker daemon for container and compose inventory/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Read-only host inspection query/i),
+    ).toBeInTheDocument();
+
+    const approveBtn = await screen.findByRole("button", { name: /^approve$/i });
+    await waitFor(() => {
+      expect(approveBtn).toBeEnabled();
+    });
     fireEvent.click(approveBtn);
     expect(onApprove).toHaveBeenCalledWith(2, "sha256:targetdigest123");
   });

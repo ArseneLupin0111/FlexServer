@@ -1,4 +1,4 @@
-import { redactString } from "../common/redaction.js";
+import { redactString, redactValue } from "../common/redaction.js";
 import type { AiConversationMessage, AiConversationMessageEvidence } from "./ai.models.js";
 import type { ProviderMessage } from "./ai-provider.js";
 
@@ -86,7 +86,7 @@ export function boundedEvidence(source: string, host: string, content: string, t
   const bytes = Buffer.from(sanitized, "utf8");
   const capped = bytes.length > EVIDENCE_DATA_MAX_BYTES;
   let parsed: unknown;
-  try { parsed = JSON.parse(sanitized); } catch { parsed = undefined; }
+  try { parsed = redactValue(JSON.parse(sanitized)); } catch { parsed = undefined; }
   const meta = provenanceObject(parsed);
   const observedAt = validIsoTimestamp(meta?.observedAt) ?? validIsoTimestamp(meta?.collectedAt);
   const data = parsed !== undefined && Buffer.byteLength(JSON.stringify(parsed), "utf8") <= EVIDENCE_DATA_MAX_BYTES

@@ -105,7 +105,7 @@ After any host agent replacement — dashboard-driven or manual — confirm end-
 
 ## Durable AI multi-plan loop operations
 
-The `executionVersion: 2` loop is durable state, not a browser callback. Manual mode is the default: every mutation plan on every continuation turn requires approval of the exact `planVersion` and `planDigest` through the dashboard/API. Do not reuse an approval after the plan digest or version changes. YOLO is a separate, explicit root-consent mode: enabling `executionMode: "yolo"` requires `acknowledgeYolo: true`, records the acknowledging admin session, and applies full host-root execution only to the selected VPS. YOLO does not grant provider egress; `sendLogsToProvider` and `sendFilesToProvider` remain independent opt-ins.
+The `executionVersion: 2` loop is durable state, not a browser callback. Manual mode is the default: every mutation plan on every continuation turn requires approval of the exact `planVersion` and `planDigest` through the dashboard/API. Do not reuse an approval after the plan digest or version changes. YOLO is a separate, explicit root-consent mode: enabling `executionMode: "yolo"` requires `acknowledgeYolo: true`, records the acknowledging admin session, and applies full host-root execution only to the selected VPS. Under YOLO with AI enabled, effective log and file egress are enabled with credential checking and redaction, whereas manual mode preserves explicit opt-ins.
 
 ### Restart, scheduler, and cutover behavior
 

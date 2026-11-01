@@ -762,4 +762,34 @@ describe("AssistantSettingsModal policy tab without the shell toggle", () => {
     expect(patch.executionMode).toBe("yolo");
     expect(patch.acknowledgeYolo).toBe(true);
   });
+
+  it("reflects active egress in YOLO mode without unchecked disabled toggles", async () => {
+    renderModal([makeProfile()], {
+      policy: {
+        ...modalPolicy,
+        executionMode: "yolo",
+        sendLogsToProvider: false,
+        sendFilesToProvider: false,
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /permissions/i }));
+
+    const logsSwitch = screen.getByRole("switch", { name: /send logs to provider/i });
+    const filesSwitch = screen.getByRole("switch", { name: /send files to provider/i });
+
+    // Both switches must be checked and disabled in YOLO mode, not unchecked
+    expect(logsSwitch).toBeChecked();
+    expect(logsSwitch).toBeDisabled();
+    expect(filesSwitch).toBeChecked();
+    expect(filesSwitch).toBeDisabled();
+    expect(screen.getAllByText(/Active in YOLO/i).length).toBe(2);
+
+    // Switching back to manual mode restores explicit toggles and interactivity
+    fireEvent.click(screen.getByRole("radio", { name: /manual approval/i }));
+    expect(logsSwitch).not.toBeChecked();
+    expect(logsSwitch).not.toBeDisabled();
+    expect(filesSwitch).not.toBeChecked();
+    expect(filesSwitch).not.toBeDisabled();
+  });
 });

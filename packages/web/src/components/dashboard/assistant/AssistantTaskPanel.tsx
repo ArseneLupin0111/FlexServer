@@ -511,7 +511,7 @@ export function AssistantTaskPanel({
                 </h2>
                 {task.loop?.counters ? (
                   <span className="font-mono text-[11px] text-dim">
-                    turn {task.loop.turn} · {task.loop.counters.mutationPlans} plans
+                    turn {task.loop.turn} · {planHistory.length} {planHistory.length === 1 ? "plan" : "plans"}
                   </span>
                 ) : null}
               </div>
@@ -539,6 +539,30 @@ export function AssistantTaskPanel({
                           >
                             {plan.status}
                           </Badge>
+                          {plan.steps && plan.steps.length > 0 && plan.steps.every((s) =>
+                            s.tool === "docker_inventory" ||
+                            s.tool === "host_metrics" ||
+                            s.tool === "container_inspect" ||
+                            s.tool === "container_logs" ||
+                            s.tool === "file_read" ||
+                            s.tool === "service_status" ||
+                            s.tool.startsWith("container_") ||
+                            s.tool.startsWith("service_")
+                          ) ? (
+                            <Badge
+                              variant="outline"
+                              className="border-info/40 bg-info/10 text-info font-mono text-[10px]"
+                            >
+                              read
+                            </Badge>
+                          ) : (
+                            <Badge
+                              variant="outline"
+                              className="border-line font-mono text-[10px] text-dim"
+                            >
+                              mutation
+                            </Badge>
+                          )}
                           {plan.execMode === "privileged" ? (
                             <Badge
                               variant="outline"

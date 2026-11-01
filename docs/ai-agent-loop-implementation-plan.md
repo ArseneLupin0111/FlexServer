@@ -78,8 +78,8 @@ Tái sử dụng trạng thái hoạt động hiện có, không thêm state cho
 
 ```mermaid
 flowchart TD
-    A[planning: model và read tools] --> B[awaiting_approval]
-    B -->|Manual hoặc YOLO hợp lệ| C[executing]
+    A[planning: model proposal] --> B[awaiting_approval: manual đọc và sửa; YOLO tự động]
+    B -->|Manual duyệt hoặc YOLO hợp lệ| C[executing]
     C -->|Kết quả xác định đã lưu| D[verifying]
     D -->|Cần bước mới| A
     D -->|Kết luận cuối| E[Terminal và completion outcome]
@@ -196,8 +196,8 @@ Thay đổi không chỉ ở prompt hoặc `autoApprove`:
 
 1. Thêm mode có nghĩa rõ vào domain, API validation và persistence.
 2. Legacy policies giữ quyền giới hạn/manual cho đến khi người dùng bật full YOLO rõ ràng. Legacy task giữ one-shot contract, không tự resume thành loop.
-3. Tính effective execution permissions tập trung từ mode và target; rà soát mọi gate API, read tools, plan admission, dispatch, Go worker/helper và bridge.
-4. Không giả mạo bật từng permission egress để đạt execution full quyền; egress độc lập.
+3. Tính effective execution permissions tập trung từ mode và target; rà soát mọi gate API, read tools, plan admission, dispatch, Go worker/helper và bridge. Trong manual mode, mọi tool (reads/inspections/mutations) đều tạo plan yêu cầu người vận hành duyệt. Trong YOLO mode, read tools chạy tự động inline và mutation plans được auto-approve.
+4. Không giả mạo bật từng permission egress để đạt execution full quyền; egress độc lập. Duyệt read plan chỉ thực thi đọc nội bộ, không bypass hay mở rộng quyền gửi log/file ra LLM ngoài (sendLogsToProvider, sendFilesToProvider).
 5. Command mang authorization snapshot/revision phù hợp cơ chế hiện hành; revalidate trước dispatch/claim theo đường thực thi.
 6. Gỡ semantics auto-approve cũ, prompt/tool descriptions và caller obsolete sau khi migration xong. Không giữ shim runtime hoặc hai toggle đồng nghĩa.
 7. Cập nhật capability/version negotiation nếu wire contract đổi; agent cũ không được nhận command mà nó diễn giải sai. Upgrade cần thiết phải là prerequisite rõ ràng, không fallback yếu hơn.

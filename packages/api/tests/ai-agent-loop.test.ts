@@ -825,7 +825,14 @@ describe("AI Agent Multi-Turn Execution Loop (ai-agent-loop)", () => {
         request: "Inspect and ask",
         idempotencyKey: "resume-accum-test",
       });
-
+      const readApprovalTask = await pollUntil(
+        (t) => t.state === "awaiting_approval",
+        task.id,
+      );
+      await service.approve(request, vpsId, task.id, {
+        planVersion: readApprovalTask.plan!.planVersion,
+        planDigest: readApprovalTask.plan!.planDigest,
+      });
       const pausedTask = await pollUntil(
         (t) => t.state === "awaiting_input",
         task.id,

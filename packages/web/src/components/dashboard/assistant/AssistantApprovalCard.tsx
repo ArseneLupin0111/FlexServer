@@ -23,6 +23,40 @@ export type AssistantApprovalCardProps = {
   onApprove: (planVersion: number, planDigest: string) => Promise<void>;
   onDeny: () => Promise<void>;
 };
+function isReadTool(tool: string): boolean {
+  return (
+    tool === "docker_inventory" ||
+    tool === "host_metrics" ||
+    tool === "container_inspect" ||
+    tool === "container_logs" ||
+    tool === "file_read" ||
+    tool === "service_status" ||
+    tool.startsWith("container_") ||
+    tool.startsWith("service_")
+  );
+}
+
+function getStepDescription(step: AiPlan["steps"][number]): string {
+  if (step.description && step.description.trim().length > 0) {
+    return step.description;
+  }
+  switch (step.tool) {
+    case "docker_inventory":
+      return "Query host Docker daemon for container and compose inventory";
+    case "host_metrics":
+      return "Query host CPU, memory, and disk telemetry snapshot";
+    case "container_inspect":
+      return "Inspect Docker container state and configuration";
+    case "container_logs":
+      return "Fetch Docker container log lines";
+    case "file_read":
+      return "Read host file contents";
+    case "service_status":
+      return "Inspect systemd service status";
+    default:
+      return "Unspecified step";
+  }
+}
 
 // Inline approval for the task inspector: the decrypted preview loads on
 // render, and the card disappears with the plan once the task advances.
@@ -43,6 +77,7 @@ export function AssistantApprovalCard({
 
   const effectiveVpsId = vpsId || plan.vpsId;
   const effectiveTaskId = taskId || plan.taskId;
+  const isReadPlan = plan.steps.length > 0 && plan.steps.every((s) => isReadTool(s.tool));
 
   useEffect(() => {
     const controller = new AbortController();
@@ -136,8 +171,15 @@ export function AssistantApprovalCard({
         <div className="flex min-w-0 items-center gap-2 text-sm font-semibold text-warn">
           <ShieldAlert className="h-4 w-4 shrink-0" aria-hidden="true" />
           <span>Approval required</span>
-          <Badge variant="outline" className="border-warn/40 font-mono text-[10px] text-warn">
-            v{plan.planVersion}
+          <Badge
+            variant="outline"
+            className={
+              isReadPlan
+                ? "border-info/40 font-mono text-[10px] text-info"
+                : "border-warn/40 font-mono text-[10px] text-warn"
+            }
+          >
+            {isReadPlan ? "read action" : "mutation plan"} v{plan.planVersion}
           </Badge>
         </div>
         <div className="flex items-center gap-1.5 font-mono text-[11px] text-dim">
@@ -213,7 +255,7 @@ export function AssistantApprovalCard({
                       {idx + 1}
                     </span>
                     <span className="min-w-0 break-words text-xs font-semibold text-text">
-                      {step.description || "Unspecified step"}
+                      {getStepDescription(step)}
                     </span>
                   </div>
                   <Badge variant="outline" className="shrink-0 border-line font-mono text-[10px] text-signal">
@@ -283,6 +325,14 @@ export function AssistantApprovalCard({
                     <pre className="max-h-32 overflow-auto border border-line bg-ink/70 p-2 font-mono text-[10px] text-text">
                       {JSON.stringify(step.args, null, 2)}
                     </pre>
+                  </div>
+                ) : null}
+
+                {isReadTool(step.tool) &&
+                (!stepPayload || Object.keys(stepPayload).length === 0) &&
+                (!step.args || Object.keys(step.args).length === 0) ? (
+                  <div className="border border-line/60 bg-ink/30 px-2 py-1.5 font-mono text-[11px] text-dim">
+                    Read-only host inspection query (no additional parameters required).
                   </div>
                 ) : null}
               </div>

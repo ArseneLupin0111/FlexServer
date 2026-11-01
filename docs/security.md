@@ -313,8 +313,7 @@ The AI assistant operates across two orthogonal execution policy axes:
 
 ### Per-Plan Manual Approval (`executionMode: "manual"`)
 
-The default execution mode is `manual`. Under `executionVersion: 2` multi-turn loops, each proposed mutation plan requires independent human operator review and approval via `POST /api/vps/:vpsId/ai/tasks/:taskId/approve`. Approval verifies the exact plan version and SHA-256 payload digest. One-time plan consumption ensures that no unreviewed steps execute, preventing multi-turn prompt injection from chaining unapproved mutations.
-
+The default execution mode is `manual`. Under `executionVersion: 2` multi-turn loops, ALL proposed tool actions — including read tools (`container_inspect`, `container_logs`, `file_read`, `service_status`), host telemetry queries (`host_metrics`), Docker inventory collection (`docker_inventory`), as well as mutating Docker/Compose/host plans — require independent human operator review and explicit approval via `POST /api/vps/:vpsId/ai/tasks/:taskId/approve`. Approval verifies the exact plan version and SHA-256 payload digest. One-time plan consumption ensures that no unreviewed steps execute, preventing multi-turn prompt injection or unauthorized host reconnaissance. Approving a read plan executes the inspection inline and records durable observations, respecting explicit manual provider egress controls (`sendLogsToProvider` and `sendFilesToProvider`).
 ### Explicitly Acknowledged YOLO Root Mode (`executionMode: "yolo"`)
 
 YOLO mode provides autonomous multi-turn execution without human approval pauses:
@@ -323,13 +322,12 @@ YOLO mode provides autonomous multi-turn execution without human approval pauses
 - **Mandatory explicit root risk acknowledgment:** Because YOLO combines unconfined root shell execution with autonomous loop approval, activating `executionMode: "yolo"` on `PATCH /api/vps/:vpsId/ai/policy` strictly requires explicit consent (`acknowledgeYolo: true`). The server records `yoloAcknowledgedAt` and `yoloAcknowledgedBy`. Unacknowledged requests are rejected with `400 Bad Request`.
 - **Legacy `autoApprove` normalization:** Migration 037 drops legacy `auto_approve` and normalizes policies to `executionMode: "manual"`. Legacy tasks default to `executionVersion: 1`. Autonomous root capabilities are NEVER granted silently to existing deployments.
 
-### Independent Provider Egress Decoupling
+### Provider Egress and Centralized Redaction
 
 To protect data confidentiality and prevent exfiltration of sensitive server assets:
-- **Strict decoupling:** `sendLogsToProvider` and `sendFilesToProvider` are strictly independent of `executionMode` and `execMode`.
-- **Zero implicit egress:** Enabling full YOLO root mode does **NOT** grant permission to send container/host logs or file contents to the external LLM provider.
-- Model prompts receive tool metadata, command exit codes, and truncated previews, but raw log streams and file reads remain blocked from provider egress unless separately and explicitly consented by the operator.
-
+- **Manual Mode Decoupling:** In manual mode, `sendLogsToProvider` and `sendFilesToProvider` remain strictly governed by explicit operator toggles and are not implicitly elevated.
+- **YOLO Mode Egress:** When authorized YOLO mode is active and AI is enabled, effective policy enables file and log egress to allow the LLM to autonomously inspect and troubleshoot host problems without manual per-read approvals. If AI is disabled, egress permissions remain denied.
+- **Centralized Redaction & Credential Checking:** In all modes including YOLO, outgoing evidence is strictly filtered through `redactString` and pattern checks to strip credentials, passwords, session tokens, and private keys before reaching external LLM providers.
 ### Fail-Closed Uncertainty and Zero Blind Retries
 
 When executing commands on host systems, uncertainty cannot be resolved by blindly retrying:

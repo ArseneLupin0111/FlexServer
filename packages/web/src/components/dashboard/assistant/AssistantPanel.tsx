@@ -1136,9 +1136,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4 shrink-0" />
             <span>
-              Provider is ready. Enabling grants read-only observation plus individually-approved
-              managed Docker and Compose actions; shell execution and file egress stay off until
-              explicitly approved in Settings.
+              Provider is ready. Enabling activates the assistant where all tool actions require individual plan approval in manual mode; shell execution and file egress stay off until explicitly approved in Settings.
             </span>
           </div>
           <Button
@@ -1235,7 +1233,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
                 <Zap className="h-4 w-4 shrink-0 mt-0.5 text-crit" aria-hidden="true" />
                 <span>
                   <strong className="font-semibold">Full YOLO mode active (Root Execution):</strong>{" "}
-                  All proposed mutation plans auto-execute autonomously as root directly on the host, regardless of sandbox settings. Egress boundaries remain independently enforced.
+                  All proposed actions and plans (reads, inspections, and mutations) auto-execute autonomously as root directly on the host, regardless of sandbox settings. Provider file and log egress are active with credential checking and redaction.
                 </span>
               </div>
             ) : policy?.execMode === "privileged" ? (

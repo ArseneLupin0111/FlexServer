@@ -117,10 +117,10 @@ The AI Assistant executes tasks through an `executionVersion: 2` durable multi-t
 
 1. **Loop State Tracking:** Tasks admitted under `executionVersion: 2` maintain durable loop state across sequential turns within an overall task deadline and per-turn lease, enabling iterative investigation, mutation, observation, and verification. Durable counters (provider calls, read/tool calls, mutation plans, verification attempts, token usage, and the absolute loop deadline) are persisted and are not reset by a resume or API restart.
 2. **Multi-Turn Execution Cycle:** The loop progresses across sequential phases:
-   - **Investigation & Planning (`planning`):** The model inspects host state via read tools and generates an immutable mutation plan.
-   - **Plan Approval (`awaiting_approval`):** Plan is reviewed and approved (manually per-plan or auto-approved in YOLO mode).
-   - **Dispatch & Execution (`executing`):** Approved plan steps are dispatched to the host agent/helper via the encrypted outbox.
-   - **Durable Observation Recording (`verifying`):** Execution receipts returned by the host worker are persisted as durable observations (`AiTaskObservation` with `tool: "host_command"`, `source: "host_receipt"`, exit code, output preview, and command identity). The task transitions to `verifying` and sets `continuationReady: true`.
+   - **Investigation & Planning (`planning`):** The model determines next actions. In YOLO mode, read tools auto-execute inline and mutation plans are auto-approved. In manual mode, all tool calls (reads, inspections, and mutations) propose an immutable `AiPlan` and pause at `awaiting_approval`.
+   - **Plan Approval (`awaiting_approval`):** Plan is reviewed and approved (manually per-plan in manual mode, or auto-approved in YOLO mode).
+   - **Dispatch & Execution (`executing`):** Approved mutating plan steps are dispatched to the host agent/helper via the encrypted outbox. Approved read plans execute inline.
+   - **Durable Observation Recording (`verifying`):** Execution receipts (from host worker for mutations, or inline read tool execution for read plans) are persisted as durable observations (`AiTaskObservation`). The task transitions to `verifying` and sets `continuationReady: true`.
    - **Continuation Turn:** The runtime claims the next turn lease and prompts the model with full observation history. The model can propose a follow-up plan (continuing the loop), ask for operator clarification (`awaiting_input`), or conclude the task with an explicit typed completion outcome (`AiTaskCompletionOutcome` with kind `verified`, `unverified`, `blocked`, `cancelled`, or `expired`).
 3. **Turn Leasing:** Turn leases serialize execution workers and protect multi-turn loops from concurrent execution races across distributed workers.
 
@@ -133,20 +133,21 @@ Repeated identical tool/target/result observations increment the durable no-prog
 Each VPS AI policy defines an `executionMode: "manual" | "yolo"` (default `"manual"`):
 
 1. **Manual Approval Mode (`executionMode: "manual"`, default):**
-   - Every proposed mutation plan across all turns requires explicit human review and approval via `POST /api/vps/:vpsId/ai/tasks/:taskId/approve` using the exact plan version and SHA-256 payload digest (`planDigest`).
-   - Preview validation, capability gates, and one-time server-side plan consumption remain enforced on every turn. Even when a task executes a sequence of plans across turns, each individual plan must be confirmed by the operator before dispatch.
+   - Every proposed tool action across all turns — including read tools (`container_inspect`, `container_logs`, `file_read`, `service_status`), host telemetry (`host_metrics`), Docker inventory (`docker_inventory`), as well as mutating plans — requires explicit human review and approval via `POST /api/vps/:vpsId/ai/tasks/:taskId/approve` using the exact plan version and SHA-256 payload digest (`planDigest`).
+   - Preview validation, capability gates, and one-time server-side plan consumption remain enforced on every turn. Even when a task executes a sequence of inspection and mutation plans across turns, each individual plan must be confirmed by the operator before dispatch. Approving a read plan executes the inspection inline and records durable observations, respecting explicit provider egress controls (`sendLogsToProvider` and `sendFilesToProvider`).
 2. **Full YOLO Root Mode (`executionMode: "yolo"`):**
    - **Autonomous Plan Approval:** Newly proposed plans are automatically approved per turn using the authenticated initiating dashboard session without an interactive review pause; keeping a browser tab open is not required.
    - **Full Host Root Operations:** Enabling YOLO mode grants full host root execution within the chosen VPS. The effective policy automatically expands file scopes to root (`fileReadScopes: ["/"]`, `fileWriteScopes: ["/"]`), escalates shell execution to root (`execMode: "privileged"`), and enables all action categories.
    - **Explicit Root Consent Requirement:** Switching a policy to YOLO mode over `PATCH /api/vps/:vpsId/ai/policy` strictly requires explicit operator acknowledgment of the root risk (`acknowledgeYolo: true`). The server persists `yoloAcknowledgedAt` and `yoloAcknowledgedBy` (requesting admin session). Unacknowledged requests fail with `400 Bad Request`.
    - **In-Chat Warning:** A prominent warning banner is displayed in the assistant chat whenever YOLO mode is active on a host. Disabling YOLO immediately restores manual approval for subsequent plans; it does not undo commands already dispatched.
 
-### Strictly Independent Provider Egress
+### Provider Egress and Credential Redaction
 
-Provider egress controls (`sendLogsToProvider` and `sendFilesToProvider`) are **strictly decoupled** from `executionMode` and `execMode`:
-- Entering YOLO root mode does **NOT** enable sending container/host logs or file contents to the external LLM provider.
-- Egress remains strictly opt-in per VPS. Tool metadata, command exit codes, and truncated previews are sent to the provider, but raw log streams and full file contents are omitted or redacted unless explicitly enabled by the operator.
-
+Provider egress controls (`sendLogsToProvider` and `sendFilesToProvider`) govern outbound file contents and container/host logs:
+- In **manual mode**, egress remains strictly opt-in per VPS based on explicit operator grants.
+- In **YOLO root mode**, effective policy enables file and log egress when AI is enabled on the VPS, allowing the model to autonomously inspect and troubleshoot host problems without manual per-read approvals.
+- **Credential Checking and Redaction:** In all modes, including YOLO, outbound content is checked and stripped of credentials, secrets, tokens, and private keys via centralized redaction before transmission to the provider.
+- When AI is disabled on the host, egress permissions are never elevated.
 ### Legacy `autoApprove` Normalization
 
 Legacy policies previously containing `autoApprove: true` are NOT grandfathered into YOLO root mode:

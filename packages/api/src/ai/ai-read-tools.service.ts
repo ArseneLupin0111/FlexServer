@@ -22,7 +22,7 @@ import {
 } from "../docker/docker-logs.service.js";
 import { AiPolicyService, AiPolicyError } from "./ai-policy.service.js";
 import { AiAgentService } from "./ai-agent.service.js";
-import { redactString, redactValue } from "../common/redaction.js";
+import { ChunkRedactor, redactString, redactValue } from "../common/redaction.js";
 import { AiAssistantError } from "./ai-failures.js";
 import type { AiExecutionReceipt, AiPolicy, AiTask } from "./ai.models.js";
 import type { ProviderTool } from "./ai-provider.js";
@@ -209,7 +209,7 @@ function isWithinScope(target: string, scope: string): boolean {
  * Synthetic Express Response stream adapter to consume DockerLogsService SSE events
  * in-memory with strict bounds and zero socket leaks.
  */
-class SyntheticLogsResponse extends EventEmitter {
+export class SyntheticLogsResponse extends EventEmitter {
   writableEnded = false;
   destroyed = false;
   statusCode = 200;
@@ -219,6 +219,7 @@ class SyntheticLogsResponse extends EventEmitter {
   closeReason?: string;
   closeStatus?: string;
   private lineBuffer = "";
+  private readonly redactor = new ChunkRedactor();
 
   writeHead(status: number, headers?: Record<string, unknown>): this {
     this.statusCode = status;
@@ -227,7 +228,9 @@ class SyntheticLogsResponse extends EventEmitter {
   }
 
   flushHeaders(): void {}
-  flush(): void {}
+  flush(): void {
+    this.flushRedactor();
+  }
 
   write(chunk: unknown): boolean {
     if (this.destroyed || this.writableEnded) return false;
@@ -244,6 +247,7 @@ class SyntheticLogsResponse extends EventEmitter {
 
   end(chunk?: unknown): this {
     if (chunk) this.write(chunk);
+    this.flushRedactor();
     this.writableEnded = true;
     this.destroyed = true;
     this.emit("finish");
@@ -252,10 +256,24 @@ class SyntheticLogsResponse extends EventEmitter {
   }
 
   destroy(): this {
+    this.flushRedactor();
     this.destroyed = true;
     this.writableEnded = true;
     this.emit("close");
     return this;
+  }
+
+  flushRedactor(): void {
+    const flushed = this.redactor.flush();
+    if (flushed) {
+      const parts = flushed.split("\n");
+      const len = flushed.endsWith("\n") ? parts.length - 1 : parts.length;
+      for (let i = 0; i < len; i++) {
+        if (parts[i]!.length > 0) {
+          this.lines.push(parts[i]!);
+        }
+      }
+    }
   }
 
   private parseBuffer(): void {
@@ -284,7 +302,15 @@ class SyntheticLogsResponse extends EventEmitter {
         if (Array.isArray(parsed.lines)) {
           for (const l of parsed.lines) {
             if (typeof l === "string") {
-              this.lines.push(redactString(l));
+              const formatted = l.endsWith("\n") ? l : `${l}\n`;
+              const processed = this.redactor.process(formatted);
+              if (processed) {
+                const parts = processed.split("\n");
+                const len = processed.endsWith("\n") ? parts.length - 1 : parts.length;
+                for (let i = 0; i < len; i++) {
+                  this.lines.push(parts[i]!);
+                }
+              }
             }
           }
         }
@@ -293,6 +319,7 @@ class SyntheticLogsResponse extends EventEmitter {
       }
     } else if (eventName === "closed" && dataStr) {
       this.closed = true;
+      this.flushRedactor();
       try {
         const parsed = JSON.parse(dataStr);
         this.closeStatus = parsed.status;
@@ -598,7 +625,7 @@ export class AiReadToolsService {
 
     const cappedLines = synthetic.lines.slice(-targetLines);
     let totalBytes = 0;
-    const boundedLines: string[] = [];
+    const rawBounded: string[] = [];
     let truncated = false;
 
     // Enforce 64 KiB tool envelope limit
@@ -610,8 +637,12 @@ export class AiReadToolsService {
         break;
       }
       totalBytes += byteLen;
-      boundedLines.unshift(line);
+      rawBounded.unshift(line);
     }
+
+    const boundedLines = rawBounded.length > 0
+      ? redactString(rawBounded.join("\n")).split("\n")
+      : [];
 
     const payload = {
       containerKey: target.containerKey,

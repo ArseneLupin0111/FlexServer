@@ -19,7 +19,7 @@ import {
   type ProviderToolCall,
   type UsageInfo,
 } from "./ai-provider.js";
-import { redactString } from "../common/redaction.js";
+import { redactString, redactValue } from "../common/redaction.js";
 
 /** Codex OAuth transport (docs/ai-chatgpt-oauth-provider-plan.md slice 3).
  * ChatGPT subscription dispatch goes through the same guarded request funnel
@@ -49,22 +49,32 @@ export type CodexResponsesBody = {
  * with blank-line separators); everything else maps in order to input items.
  * Throws ProviderProtocolError on invalid output caps or a tool result without
  * the call id the Responses format requires. */
+function sanitizeToolArgs(raw: string): string {
+  if (!raw) return raw ?? "";
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return JSON.stringify(redactValue(parsed));
+  } catch {
+    return redactString(raw);
+  }
+}
 export function toCodexResponsesBody(model: string, messages: readonly ProviderMessage[], tools: readonly ProviderTool[], options?: { maxOutputTokens?: number }): CodexResponsesBody {
   const maxOutputTokens = normalizedMaxOutputTokens(options);
-  const instructions = messages.filter(message => message.role === "system").map(message => message.content).join("\n\n");
+  const instructions = messages.filter(message => message.role === "system").map(message => typeof message.content === "string" ? redactString(message.content) : "").join("\n\n");
   const input: unknown[] = [];
   for (const message of messages) {
     if (message.role === "system") continue;
-    if (message.role === "user") { input.push({ type: "message", role: "user", content: [{ type: "input_text", text: message.content }] }); continue; }
+    if (message.role === "user") { input.push({ type: "message", role: "user", content: [{ type: "input_text", text: typeof message.content === "string" ? redactString(message.content) : "" }] }); continue; }
     if (message.role === "assistant") {
       const calls = message.toolCalls ?? [];
-      if (!calls.length) { input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: message.content }] }); continue; }
-      if (message.content) input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: message.content }] });
-      for (const call of calls) input.push({ type: "function_call", call_id: call.id, name: call.function.name, arguments: call.function.arguments });
+      const safeContent = typeof message.content === "string" ? redactString(message.content) : "";
+      if (!calls.length) { input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: safeContent }] }); continue; }
+      if (safeContent) input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: safeContent }] });
+      for (const call of calls) input.push({ type: "function_call", call_id: call.id, name: call.function.name, arguments: sanitizeToolArgs(call.function.arguments) });
       continue;
     }
     if (!message.toolCallId) throw new ProviderProtocolError();
-    input.push({ type: "function_call_output", call_id: message.toolCallId, output: message.content });
+    input.push({ type: "function_call_output", call_id: message.toolCallId, output: typeof message.content === "string" ? redactString(message.content) : "" });
   }
   return {
     model,

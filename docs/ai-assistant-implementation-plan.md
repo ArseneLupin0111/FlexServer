@@ -18,7 +18,7 @@ Mã nguồn hệ thống Flexserver AI Assistant đã được thiết lập đ�
 | **Persistence Seam & Types** | `packages/api/src/persistence/repositories/ai.persistence.ts` | Implemented | Giao diện trừu tượng `AiRepository`, kiểu `StoredTask`, `StoredAiState` và hàm bao bọc `withAiAdminLock`. |
 | **Database Migrations** | `packages/api/db/migrations/030_ai_assistant.sql`, `031_ai_state_journal.sql` | Implemented / Verified | Đầy đủ schema DDL theo §8.1 cho PostgreSQL (conversations, tasks, steps, commands, approvals, receipts, provider settings); tích hợp đầy đủ và tự động qua `loadMigrations`/`selectMigrations`/`runMigrations`, startup service Compose `migrate`, kiểm tra `/api/health`, và wiring vào `createRepositories`/`AppDependencies`. |
 | **NestJS Wiring & Controllers** | `packages/api/src/app.module.ts`, `packages/api/src/ai/ai.controller.ts`, `ai-agent.controller.ts` | Implemented / Một phần đã kiểm chứng | Module wiring, dependency injection, token `AI_REPOSITORY`, bảo vệ bằng `DashboardSessionService`/`OriginGuard`, routes `/api/ai/*`, `/api/vps/:id/ai/*`, `/api/agent/ai/*`. The earlier HTTP approval checks covered admission/origin/VPS isolation, plan preview, approval replay, deny/cancel/invalidate; real-provider calls were intentionally absent. Authorized disposable-host proof is recorded below. |
-| **Orchestrator & Bridge Proposals** | `packages/api/src/ai/ai-task.service.ts`, `ai-agent.service.ts`, `ai-docker-bridge.service.ts`, `ai-policy.service.ts`, `ai-host-plan.service.ts` | Implemented / Đã kiểm chứng một phần | Read/bridge policy, digest-bound approval, independent egress, and target-drift refusal are covered by local/database suites; the authorized disposable-host proof below additionally covers manual and YOLO host execution. Real-provider behavior remains unverified. |
+| **Orchestrator & Bridge Proposals** | `packages/api/src/ai/ai-task.service.ts`, `ai-agent.service.ts`, `ai-docker-bridge.service.ts`, `ai-policy.service.ts`, `ai-host-plan.service.ts` | Implemented / Đã kiểm chứng một phần | Read/bridge policy, digest-bound approval, authorized YOLO egress with redaction, manual explicit egress grants, and target-drift refusal are covered by local/database suites; the authorized disposable-host proof below additionally covers manual and YOLO host execution. Real-provider behavior remains unverified. |
 | **SSE Streaming Publisher** | `packages/api/src/ai/ai.controller.ts` | Implemented / Một phần đã kiểm chứng | Snapshot kèm revision, chunk và gap đã được quan sát qua HTTP approval smoke (stream session-bound, sai VPS trả 404). Raw content chỉ tồn tại trong RAM/ephemeral stream; disk chỉ giữ metadata và digest. |
 | **Agent Go Worker & Transport** | `packages/agent/internal/ai/worker.go`, `client.go`, `types.go`, `receipts.go` | Implemented / Đã kiểm chứng một phần | Worker polling, dispatch, heartbeat, and durable receipts are exercised by the authorized disposable-host smoke; manual restart/recovery preserved plan and receipts without replay, and YOLO execution recorded actual-host UID 0 markers. A real-provider workflow remains unverified. |
 | **Agent Confinement (Helper & Executor)** | `packages/agent/cmd/ai-host-helper/`, `packages/agent/cmd/ai-executor/`, `packages/agent/internal/ai/executor_linux.go` | Implemented / Một phần đã kiểm chứng | Focused Go/HostWire suites and helper safety checks cover protected paths, CAS, drift rejection, and fail-closed behavior. The disposable-host proof verifies the authorized root execution path; confined cgroup-v2 success and production multi-node rollout remain separate gates. |
@@ -79,7 +79,7 @@ Trợ lý vận hành theo yêu cầu: hiểu tiếng Việt → thu thập bằ
 | --- | --- | --- |
 | Q1 | Công cụ chuyên dụng và shell/file nâng cao đều trong phạm vi | Giai đoạn P1–P4 |
 | Q2 | Chỉ theo yêu cầu trực tiếp; không tự trị nền/cron/alert | Orchestrator, admission |
-| Q3 | Read tools được cấp phép tự động; mutation và shell tổng quát phải duyệt | Policy, approval |
+| Q3 | Trong manual mode, mọi tool (read và mutation) đều phải duyệt; trong YOLO mode, read tools tự động và mutation auto-approve | Policy, approval |
 | Q4 | Một VPS mỗi tác vụ, không tự đổi mục tiêu | Task binding |
 | Q5 | LLM bên ngoài theo opt-in hoặc endpoint riêng | Provider, data policy |
 | Q6 | Chỉ quản trị viên hiện tại, chưa xây nhiều vai trò | Auth reuse |
@@ -88,7 +88,7 @@ Trợ lý vận hành theo yêu cầu: hiểu tiếng Việt → thu thập bằ
 | Q9 | Linux; systemd tools chỉ khi có capability phù hợp | Capability/preflight |
 | Q10 | Duyệt nhóm thao tác cố định, đổi payload phải duyệt lại | Canonical plan |
 | Q11 | Cấp quyền đọc/ghi đường dẫn riêng, diff/CAS/backup | File broker |
-| Q12 | Quyền đọc khác quyền gửi log/file tới LLM | Data egress policy |
+| Q12 | Quyền đọc hoặc duyệt read plan không tự động cho phép gửi log/file tới LLM; egress hoàn toàn độc lập | Data egress policy |
 | Q13 | Không hỗ trợ thao tác đặc biệt nguy hiểm | Tool catalog, OS restrictions |
 | Q14 | Đóng tab không hủy nhóm đã duyệt; chờ duyệt có hạn | Durable tasks |
 | Q15 | Crash/mất mạng phải đối soát, không tự replay mutation | Receipts, reconciliation |
@@ -300,7 +300,7 @@ Backup/restore chỉ cho file và service profile cụ thể; restore cần curr
 
 | State | Ý nghĩa | Cho phép bước mới? |
 | --- | --- | --- |
-| `planning` | Đang đọc/đề xuất | Chỉ read tools được policy cho phép |
+| `planning` | Đang phân tích/đề xuất | Manual: tạo plan chờ duyệt; YOLO: read tools chạy tự động |
 | `awaiting_input` | Target/yêu cầu cần làm rõ | Không cho tới khi có input hợp lệ |
 | `awaiting_approval` | Plan immutable chờ duyệt | Không mutation |
 | `executing` | Chạy nhóm đã duyệt | Chỉ step kế tiếp đúng plan và policy hiện tại |

@@ -3,7 +3,7 @@ import { BlockList, isIP } from "node:net";
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { z } from "zod";
-import { redactString } from "../common/redaction.js";
+import { redactString, redactValue } from "../common/redaction.js";
 export type ProviderConfig = { endpoint: string; model: string; apiKey: string; allowPrivateEndpoint?: boolean };
 export type ProviderToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
 export type ProviderMessage = { role: "system" | "user" | "assistant" | "tool"; content: string; toolCalls?: ProviderToolCall[]; toolCallId?: string; name?: string };
@@ -35,9 +35,39 @@ function normalizedMaxOutputTokens(options?: ProviderRequestOptions): number {
   if (!Number.isInteger(requested) || requested < 1 || requested > PROVIDER_MAX_OUTPUT_TOKENS) throw new ProviderProtocolError();
   return requested;
 }
+function sanitizeToolArgs(raw: string): string {
+  if (!raw) return raw ?? "";
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return JSON.stringify(redactValue(parsed));
+  } catch {
+    return redactString(raw);
+  }
+}
 /** Exact request serializer shared by the network path and preflight measurement. Never includes credentials. */
 export function serializeProviderRequestBody(model: string, messages: readonly ProviderMessage[], tools: readonly ProviderTool[], options?: ProviderRequestOptions): string {
-  return JSON.stringify({model,stream:false,messages:messages.map(m=>({role:m.role,content:m.content,...(m.toolCalls ? {tool_calls:m.toolCalls}:{}),...(m.toolCallId ? {tool_call_id:m.toolCallId}:{}),...(m.name ? {name:m.name}:{})})),...(tools.length ? {tools}:{}),max_tokens:normalizedMaxOutputTokens(options)});
+  return JSON.stringify({
+    model,
+    stream: false,
+    messages: messages.map(m => ({
+      role: m.role,
+      content: typeof m.content === "string" ? redactString(m.content) : (m.content ?? ""),
+      ...(m.toolCalls ? {
+        tool_calls: m.toolCalls.map(c => ({
+          id: c.id,
+          type: c.type,
+          function: {
+            name: c.function.name,
+            arguments: sanitizeToolArgs(c.function.arguments),
+          },
+        })),
+      } : {}),
+      ...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
+      ...(m.name ? { name: m.name } : {}),
+    })),
+    ...(tools.length ? { tools } : {}),
+    max_tokens: normalizedMaxOutputTokens(options),
+  });
 }
 /** Conservative token estimate. Never exact by design: CJK/fullwidth code points count as at least one
  * token each (a 3-byte UTF-8 CJK char is undercounted by the naive bytes/4 rule); when extended-Latin

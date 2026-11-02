@@ -203,7 +203,7 @@ export function AssistantChat({
         aria-label="Assistant messages"
         aria-live="polite"
         onScroll={handleLogScroll}
-        className="min-h-0 flex-1 space-y-6 overflow-y-auto overscroll-contain px-1 py-5 sm:space-y-3 sm:px-4 [scrollbar-width:thin]"
+        className="min-h-0 flex-1 space-y-6 overflow-y-auto overscroll-contain px-2 py-6 sm:px-6 lg:px-8 [scrollbar-width:thin]"
       >
         {messages.length === 0 && !isAwaitingInput ? (
           <div className="flex h-full min-h-[14rem] flex-col items-center justify-center p-6 text-center">
@@ -213,10 +213,6 @@ export function AssistantChat({
             <p className="mt-3 text-sm font-semibold text-text">
               How can the Assistant help?
             </p>
-            <p className="mt-1 max-w-md text-xs leading-relaxed text-dim">
-              Ask about metrics or inventory. Changes follow host policy controls; shell
-              and file access stay off unless explicitly enabled.
-            </p>
             <div className="mt-4 flex max-w-lg flex-wrap items-center justify-center gap-2">
               {SUGGESTIONS.map((suggestion) => (
                 <button
@@ -224,7 +220,7 @@ export function AssistantChat({
                   type="button"
                   disabled={!(aiEnabled && providerReady) || busy}
                   onClick={() => setInputText(suggestion)}
-                  className="rounded-full border border-line bg-raised/50 px-3.5 py-2 text-xs text-dim transition-colors hover:border-signal/50 hover:text-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal disabled:opacity-50"
+                  className="rounded border border-line px-3.5 py-2.5 text-sm text-dim transition-colors hover:border-signal/50 hover:text-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-signal disabled:opacity-50"
                 >
                   {suggestion}
                 </button>
@@ -275,15 +271,10 @@ export function AssistantChat({
                   <Bot className="h-4 w-4 text-signal" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="mb-1 flex items-baseline gap-2 text-[11px] text-dim">
-                    <span className="font-semibold uppercase tracking-[0.06em]">
+                  <div className="mb-1 flex items-baseline gap-2 text-xs text-dim">
+                    <span className="font-medium" title={msg.model ? `${msg.providerId ? (providerNameById.get(msg.providerId) ?? msg.providerId) : "provider"} · ${msg.model}` : undefined}>
                       {ROLE_LABELS[msg.role]}
                     </span>
-                    {msg.model ? (
-                      <span className="truncate font-mono text-[10px]">
-                        {msg.providerId ? (providerNameById.get(msg.providerId) ?? msg.providerId) : "provider"} · {msg.model}
-                      </span>
-                    ) : null}
                     <time className="tnum" dateTime={msg.createdAt}>
                       {new Date(msg.createdAt).toLocaleTimeString()}
                     </time>
@@ -308,15 +299,13 @@ export function AssistantChat({
               <Bot className="h-4 w-4 text-signal" />
             </div>
             <div className="min-w-0 flex-1">
-              <div className="mb-1 flex items-baseline gap-2 text-[11px] text-dim">
-                <span className="font-semibold uppercase tracking-[0.06em]">Assistant</span>
-              </div>
+              <div className="mb-1 text-xs font-medium text-dim">Assistant</div>
               <p className="flex items-center gap-2 text-xs text-dim">
                 <LoaderCircle
                   className="h-3.5 w-3.5 animate-spin text-signal"
                   aria-hidden="true"
                 />
-                Assistant is working — execution details appear in the task inspector.
+                Working…
               </p>
             </div>
           </div>
@@ -399,22 +388,10 @@ export function AssistantChat({
         </div>
       ) : null}
 
-      {/* Policy safeguards */}
-      {!aiEnabled ? (
-        <div className="shrink-0 border-t border-line bg-raised/30 p-3 text-xs text-dim">
-          AI Assistant is explicitly disabled by policy on this VPS. Enable it in
-          Settings to submit instructions.
-        </div>
-      ) : !providerReady ? (
-        <div className="shrink-0 border-t border-line bg-raised/30 p-3 text-xs text-dim">
-          Connect a provider (endpoint, model, and API key) in Settings to enable
-          the Assistant.
-        </div>
-      ) : null}
 
       {/* Composer: never clipped; only the log above scrolls */}
-      <div className="shrink-0 px-1 pb-1 pt-3 sm:border-t sm:border-line sm:bg-panel sm:px-4 sm:pb-4">
-        <div className="mx-auto w-full max-w-3xl rounded-2xl bg-raised/50 px-3 pb-2 pt-2.5 sm:border sm:border-line">
+      <div className="shrink-0 px-2 pb-3 pt-3 sm:px-6 sm:pb-5 lg:px-8">
+        <div className="mx-auto w-full max-w-3xl rounded border border-line bg-raised/50 px-3 pb-2 pt-3 focus-within:border-signal/60">
           <textarea
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
@@ -435,16 +412,8 @@ export function AssistantChat({
             className="w-full resize-none rounded-lg bg-transparent px-1 text-sm leading-relaxed text-text placeholder:text-dim focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0 disabled:opacity-50 [scrollbar-width:thin]"
           />
 
-          <div className="flex items-center justify-end gap-2 pt-1.5 sm:justify-between">
+          <div className="flex items-center justify-between gap-2 pt-1.5">
             <span className="flex min-w-0 items-center gap-2">
-              <span
-                className="tnum hidden text-[10px] text-dim sm:inline"
-                aria-hidden="true"
-              >
-                {inputText.length > 0
-                  ? `${inputText.length.toLocaleString()}/32,768`
-                  : "Shift+Enter for newline"}
-              </span>
               {enabledProviders.length > 0 && onSelectModel ? (
                 <select
                   value={selectionValue}
@@ -453,7 +422,7 @@ export function AssistantChat({
                   // disabled attribute rejects null.
                   disabled={Boolean(sending || busy || isTaskRunning)}
                   aria-label="Model"
-                  className="max-w-[11rem] truncate rounded-lg border border-line bg-ink px-2 py-1 font-mono text-[11px] text-text focus:outline-none disabled:opacity-50"
+                  className="min-h-11 max-w-[min(16rem,60vw)] truncate rounded border border-line bg-ink px-2 py-1 text-xs text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-signal disabled:opacity-50 sm:min-h-9"
                 >
                   {selectionValue === "" ? <option value="">Default model</option> : null}
                   {enabledProviders.map((profile) => (
@@ -479,7 +448,7 @@ export function AssistantChat({
                 !(aiEnabled && providerReady)
               }
               aria-label="Send message"
-              className="flex h-8 w-8 items-center justify-center rounded-full bg-signal text-ink transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal focus-visible:ring-offset-2 focus-visible:ring-offset-panel disabled:opacity-40"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded bg-signal text-ink transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal focus-visible:ring-offset-2 focus-visible:ring-offset-panel disabled:opacity-40"
             >
               {sending ? (
                 <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />

@@ -160,7 +160,9 @@ export function redactValue(value: unknown): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([key, entry]) => [
       key,
-      isSecretKey(key) ? REDACTED : redactValue(entry),
+      key === "hasApiKey" && typeof entry === "boolean"
+        ? entry
+        : isSecretKey(key) ? REDACTED : redactValue(entry),
     ]),
   );
 }

@@ -19,6 +19,8 @@ Passwords are accepted only in provision-key request bodies. They are never stor
 
 Private keys remain under `private/keys/`. Public/private key material is not displayed by the dashboard and is not returned by API responses.
 
+Public provider responses expose only the boolean `hasApiKey` credential-presence flag. Response redaction preserves this boolean for readiness checks; credential values, including non-boolean values under `hasApiKey`, remain redacted.
+
 ## HTTP Safety
 
 The backend disables `x-powered-by`, adds request IDs, applies Helmet security headers with a restrictive Content Security Policy (`default-src 'self'`, `frame-ancestors 'none'`, with explicit Google Fonts allowances), rate-limits mutations, normalizes errors, and redacts secret-looking metadata before audit persistence.

@@ -58,7 +58,7 @@ export function DashboardShell({
   const isVpsList = pathname === "/vps";
   const isVpsNew = pathname === "/vps/new";
   const isWorkspace = pathname.startsWith("/vps/") && !isVpsNew;
-
+  const isAssistant = isWorkspace && /\/assistant(?:\/|$)/.test(pathname);
   const currentCrumb = isVpsList
     ? "Servers"
     : isVpsNew
@@ -137,7 +137,8 @@ export function DashboardShell({
 
       <div
         className={cn(
-          "w-full px-4 pb-12 sm:px-6",
+          "w-full px-4 sm:px-6",
+          isAssistant ? "pb-4" : "pb-12",
           isWorkspace ? "pt-5" : "pt-6",
         )}
       >

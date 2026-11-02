@@ -154,15 +154,10 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
 
   // Dialogs
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
-  // Conversation history: persistent column left of the chat on wide
-  // screens; on narrow screens it becomes a slide-over drawer (OpenAI-style
-  // mobile chat), so the chat itself keeps the full viewport height.
-  const [historyOpen, setHistoryOpen] = useState(
-    () =>
-      typeof window !== "undefined" &&
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(min-width: 80rem)").matches,
-  );
+  // Conversation history stays collapsed at every width. The header toggle
+  // opens the column on wide screens and the drawer on narrow ones, so the
+  // chat keeps the full width and viewport height until it is asked for.
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [taskDetailsOpen, setTaskDetailsOpen] = useState(false);
 
   // Loading & Error
@@ -897,9 +892,12 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     });
   }
 
+  // Approvals and failures open the inspector on their own; the history
+  // surface yields to it so the two side panels never squeeze the chat.
   useEffect(() => {
     if (activeTask && ["awaiting_approval", "uncertain", "failed", "cancel_requested"].includes(activeTask.state)) {
       setTaskDetailsOpen(true);
+      setHistoryOpen(false);
     }
   }, [activeTask?.id, activeTask?.state]);
   const activeConversation = useMemo(
@@ -1035,9 +1033,11 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   useEffect(() => {
     const el = panelRef.current;
     if (!el) return;
+    // The shell reserves this much bottom padding on the assistant route, so
+    // the panel ends exactly at the document edge instead of inside it.
     const BOTTOM_GAP = 16;
-    // Wide screens keep a generous floor; narrow (app-like chat) screens fit
-    // the viewport exactly with only a small degenerate-height floor.
+    // Wide screens keep a generous floor; narrow (app-like chat) screens only
+    // need a degenerate-height floor so the composer never collapses.
     const MIN_HEIGHT = isWide ? 32 * 16 : 18 * 16;
     const update = () => {
       const docTop = el.getBoundingClientRect().top + window.scrollY;
@@ -1058,15 +1058,12 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   }, [loading, isWide]);
 
   // Below xl the chat and the task inspector stack naturally instead of
-  // being forced into one viewport height. Crossing the breakpoint also
-  // resets the history surface to its per-mode default (column vs drawer).
+  // being forced into one viewport height. History is manual at every
+  // width, so crossing the breakpoint never opens it.
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
     const query = window.matchMedia("(min-width: 80rem)");
-    const apply = () => {
-      setIsWide(query.matches);
-      setHistoryOpen(query.matches);
-    };
+    const apply = () => setIsWide(query.matches);
     apply();
     query.addEventListener("change", apply);
     return () => query.removeEventListener("change", apply);
@@ -1074,9 +1071,9 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
 
   if (loading) {
     return (
-      <div className="flex h-96 flex-col items-center justify-center space-y-3 p-8 text-center text-xs text-dim">
-        <LoaderCircle className="h-8 w-8 animate-spin text-signal" />
-        <div>Connecting to AI Assistant subsystem...</div>
+      <div className="flex h-96 flex-col items-center justify-center gap-3 p-8 text-center text-xs text-dim">
+        <LoaderCircle className="h-7 w-7 animate-spin text-signal motion-reduce:animate-none" />
+        <div>Loading assistant…</div>
       </div>
     );
   }
@@ -1089,19 +1086,20 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
           ? { height: `${panelHeight}px` }
           : undefined
       }
-      className="flex min-h-[32rem] min-w-0 flex-col gap-3"
+      className="flex min-h-[18rem] sm:min-h-[32rem] min-w-0 flex-col gap-3"
     >
       {/* Global Header */}
-       <AssistantHeader
-         vps={vps}
-         providerSettings={providerSettings}
-        selectedModel={effectiveSelection?.model}
-        providerReady={providerReady}
-         policy={policy}
-         capability={capability}
-         activeTask={activeTask}
+      <AssistantHeader
+        vps={vps}
+        capability={capability}
         onOpenSettings={() => setSettingsModalOpen(true)}
-        onOpenHistory={() => setHistoryOpen((open) => !open)}
+        onOpenHistory={() => {
+          setHistoryOpen((open) => {
+            const next = !open;
+            if (next) setTaskDetailsOpen(false);
+            return next;
+          });
+        }}
         historyOpen={historyOpen}
         onRefresh={() => {
           setRefreshing(true);
@@ -1133,9 +1131,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         <div className="flex flex-wrap items-center justify-between gap-3 border border-warn/40 bg-warn/10 px-4 py-2.5 text-xs text-warn">
           <div className="flex items-center gap-2">
             <Cable className="h-4 w-4 shrink-0" />
-            <span>
-              No provider is configured. Connect a provider in Settings to enable the Assistant on this host.
-            </span>
+            <span>No provider is configured. Connect a provider in Settings.</span>
           </div>
           <Button
             type="button"
@@ -1152,9 +1148,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
         <div className="flex flex-wrap items-center justify-between gap-3 border border-info/40 bg-info/10 px-4 py-2.5 text-xs text-info">
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4 shrink-0" />
-            <span>
-              Provider is ready. Enabling activates the assistant where all tool actions require individual plan approval in manual mode; shell execution and file egress stay off until explicitly approved in Settings.
-            </span>
+            <span>Provider ready. Enable Assistant to begin (plan approval required).</span>
           </div>
           <Button
             type="button"
@@ -1188,7 +1182,21 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
               </span>
             ) : null}
           </div>
-          <Button type="button" variant="ghost" size="sm" aria-expanded={taskDetailsOpen} aria-controls="assistant-task-details" onClick={() => setTaskDetailsOpen((open) => !open)} className="text-xs">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-expanded={taskDetailsOpen}
+            aria-controls="assistant-task-details"
+            onClick={() => {
+              setTaskDetailsOpen((open) => {
+                const next = !open;
+                if (next) setHistoryOpen(false);
+                return next;
+              });
+            }}
+            className="text-xs"
+          >
             <Terminal className="mr-1.5 h-3.5 w-3.5" />{taskDetailsOpen ? "Hide task details" : "Task details"}
           </Button>
         </div>
@@ -1245,23 +1253,21 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
             {policy?.executionMode === "yolo" ? (
               <div
                 data-testid="yolo-status-banner"
-                className="flex shrink-0 items-start gap-2 border border-crit/40 bg-crit/10 px-3 py-2 text-xs text-crit"
+                className="flex shrink-0 items-center gap-2 border border-crit/40 bg-crit/10 px-3 py-1.5 text-xs text-crit"
               >
-                <Zap className="h-4 w-4 shrink-0 mt-0.5 text-crit" aria-hidden="true" />
+                <Zap className="h-4 w-4 shrink-0 text-crit" aria-hidden="true" />
                 <span>
-                  <strong className="font-semibold">Full YOLO mode active (Root Execution):</strong>{" "}
-                  All proposed actions and plans (reads, inspections, and mutations) auto-execute autonomously as root directly on the host, regardless of sandbox settings. Provider file and log egress are active with credential checking and redaction.
+                  <strong className="font-semibold">Full YOLO mode active:</strong> Root auto-execution on host; files and logs redacted.
                 </span>
               </div>
             ) : policy?.execMode === "privileged" ? (
               <div
                 data-testid="privileged-exec-banner"
-                className="flex shrink-0 items-start gap-2 border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn"
+                className="flex shrink-0 items-center gap-2 border border-warn/40 bg-warn/10 px-3 py-1.5 text-xs text-warn"
               >
-                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-warn" aria-hidden="true" />
+                <AlertTriangle className="h-4 w-4 shrink-0 text-warn" aria-hidden="true" />
                 <span>
-                  Privileged execution is on for this host: AI shell commands
-                  run as root on the host, outside the sandbox. Every command still requires manual approval.
+                  <strong className="font-semibold">Privileged root execution:</strong> Host shell commands run as root with manual approval.
                 </span>
               </div>
             ) : null}

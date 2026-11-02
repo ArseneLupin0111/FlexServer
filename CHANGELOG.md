@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased - Provider credential readiness response
+
+- Preserve boolean `hasApiKey` readiness flags in AI API responses instead of replacing them with `[REDACTED]`, which incorrectly disabled configured API-key providers. Actual credential values and non-boolean values under that field remain redacted.
+
+## Unreleased - Assistant conversation workspace
+
+- Give the Assistant conversation the available workspace width, keep history closed until requested, and avoid opening history alongside task details.
+- Simplify repeated status text and the header while retaining model selection, execution warnings, approvals, and task controls. Fit the conversation composer within desktop and mobile viewports.
+
 ## Unreleased — CI dashboard test prerequisite
 
 - Make `npm test` build dashboard assets before Vitest so CI, release workflows, and local clean checkouts can exercise static dashboard routes without tracked `public/` build output.

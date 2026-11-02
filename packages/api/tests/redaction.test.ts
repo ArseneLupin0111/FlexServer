@@ -189,6 +189,21 @@ describe("redaction consumer behavior regressions", () => {
   });
 
   describe("redactValue and isSecretKey", () => {
+    it("preserves boolean provider credential readiness without exposing credential values", () => {
+      const payload = { providers: [
+        { hasApiKey: true, apiKey: "provider-credential", encryptedApiKey: "encrypted-material" },
+        { hasApiKey: false },
+        { hasApiKey: "not-a-boolean-secret" },
+      ] };
+      const expected = { providers: [
+        { hasApiKey: true, apiKey: REDACTED, encryptedApiKey: REDACTED },
+        { hasApiKey: false },
+        { hasApiKey: REDACTED },
+      ] };
+      expect(redactValue(payload)).toEqual(expected);
+      expect(JSON.parse(redactString(JSON.stringify(payload)))).toEqual(expected);
+    });
+
     it("redacts prefixed sensitive keys without matching ordinary token counts", () => {
       const input = {
         dbPassword: "secret-password",

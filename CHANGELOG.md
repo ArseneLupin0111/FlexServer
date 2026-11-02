@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — CI dashboard test prerequisite
+
+- Make `npm test` build dashboard assets before Vitest so CI, release workflows, and local clean checkouts can exercise static dashboard routes without tracked `public/` build output.
+
 
 ## Unreleased — AI Assistant multi-provider and OAuth readiness gating
 

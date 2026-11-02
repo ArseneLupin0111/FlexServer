@@ -20,7 +20,7 @@ Unless cancelled, the job uploads `playwright-report/` and `test-results/` as `e
 
 In addition to unconditional Chromium E2E, every pull request runs change detection and the matching checks below:
 
-1. When Node paths change: `npm ci`, `npm test`, `npm run typecheck`, and the `--help` script smoke tests. `npm run build` runs only as a fallback when no Docker target builds; each Docker target compiles its own workspace.
+1. When Node paths change: `npm ci`, `npm test`, `npm run typecheck`, and the `--help` script smoke tests. `npm test` builds the dashboard first, generating ignored `public/` assets required by the API route tests on clean checkouts. `npm run build:api` runs as a fallback when no Docker target builds; each Docker target compiles its own workspace.
 2. When installer paths change: `bash scripts/tests/test-installer-docker-access.sh`.
 3. When agent paths change: Go agent tested with the race detector plus `go vet`; the API image compiles agent binaries plus the AI runtime bundle, whose embedded identities are checked directly against package version and commit SHA without another standalone build in the image job. The deployed image is scoped to the agent+AI bundle: updater-era artifacts in a rebuilt image fail the image checks.
 4. When API/web paths change (or a workflow-dispatch force input selects them): Docker build checks for the affected runtime targets (`api-runtime`, `web-runtime`) with OCI labels.

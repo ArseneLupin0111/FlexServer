@@ -14,7 +14,7 @@
     "build:web": "npm run build -w @vps-manager/web",
     "build:api": "npm run build -w @vps-manager/api",
     "start": "node dist/server.js",
-    "test": "vitest run",
+    "test": "npm run build:web && vitest run",
     "test:e2e": "npm run build && playwright test",
     "test:e2e:headed": "npm run test:e2e -- --headed",
     "check:docs": "node scripts/docs/check-links.mjs",

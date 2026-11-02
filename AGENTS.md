@@ -7,6 +7,45 @@ FlexServer (`vps-manager-nodejs`) is a self-hosted VPS monitoring and management
 - This file applies repository-wide. If a subdirectory contains an `AGENTS.md`, follow the nearest applicable file for that scope; explicit user instructions take precedence over repository instructions.
 - Use npm and `package-lock.json`. The npm workspaces are `packages/api` and `packages/web`; `packages/agent` is a separate Go module.
 
+## Agent workflow
+
+Follow this sequence for implementation requests. For questions or investigation-only requests, stop after answering with evidence; implementation gates do not apply.
+
+### 1. Route skills and scope the request
+
+- Read the applicable skill instructions before using them. Use `ponytail` throughout implementation: the smallest complete change, including affected callers, contracts, tests, and documentation.
+- Select skills by the request, rather than loading every skill:
+
+  | Trigger | Skill | Required outcome |
+  | --- | --- | --- |
+  | Codebase structure or impact analysis | `graphify` | Identify the relevant flow and affected boundaries; use a `scout` agent for unfamiliar code. |
+  | Bug, crash, incorrect behavior, or performance problem | `diagnosing-bugs` | Establish a reproducible signal, find the cause, and confirm the original scenario after the fix. |
+  | Test-first feature or fix | `tdd` | Agree on public test seams with the user before writing tests; implement one failing-test-to-passing-test slice at a time. |
+  | Module responsibilities or interface design | `codebase-design` | Define the contract and affected consumers before implementation. |
+  | UI design or changes | `impeccable` | Follow the existing design system and verify the actual browser surface. |
+  | Animation or motion | `motion` | Implement and verify the requested interaction. |
+  | Agent instructions or skills | `writing-for-agents` | Keep instructions actionable, scoped, and free of duplicated rules. |
+
+- If a named skill or tool is unavailable, report that limitation and follow the documented outcome with available tools; do not claim the skill ran. Use one applicable UI skill rather than stacking equivalent UI skills.
+- Before editing, state the intended behavior, affected scope, acceptance criteria, and verification environment. Keep this brief for small changes. Ask for a decision before consequential alternatives involving contracts, architecture, compatibility, or data; otherwise proceed using repository conventions.
+
+### 2. Implement and verify in the right environment
+
+- Before running checks, establish the execution OS, required toolchain/services, and whether the changed path depends on Linux. Reuse that environment assessment until requirements change.
+- Use WSL2 or another Linux environment for Linux-dependent tests and runtime checks. Prefer a checkout in the WSL Linux filesystem and install dependencies there; keep Windows and Linux `node_modules`, binaries, and build artifacts separate.
+- Windows may run platform-independent checks supported by the project. Linux cross-compilation proves compilation only, not Linux runtime behavior. Use a dedicated Linux VM or test host for systemd, host privileges, or installer behavior that WSL/container execution does not represent; host administration still requires approval under Safety and approvals.
+- If the required environment is unavailable, finish reachable checks and report the exact unverified behavior and missing prerequisite. Do not weaken assertions or add Windows-specific product workarounds merely to make Linux checks pass on Windows.
+- `tdd` governs test design and the test-first loop; existing suites and smoke checks do not require a separate testing skill. Use the commands in Build and verification, selecting checks for the affected behavior rather than running every suite indiscriminately.
+- For significant behavior changes, exercise the changed path in addition to automated checks: real browser interaction for UI, a running API/CLI scenario for backend/tools, and Linux execution for Linux-specific behavior. Prefer isolated demo/test resources, never production data.
+- Classify failures as product defects, missing environment prerequisites, or wrong-platform execution before choosing a fix. Report the command, environment, observed result, and verification limits; build success or mocked tests alone are not runtime proof.
+
+### 3. Review and complete
+
+- After implementation and initial verification, use `ponytail-review` for non-trivial code changes. Review correctness, security/data safety, affected callers, risky behavior coverage, and unnecessary code. The implementation owner fixes blocking findings and reruns affected checks before completion.
+- Use `code-review` instead when the request is a branch/PR review against a specified baseline, with separate standards and specification checks. Do not duplicate both review workflows by default. Documentation-only or trivial edits need the relevant document/static checks, not a full code review.
+- Complete only when acceptance criteria and affected consumers are accounted for, blocking findings are resolved, and relevant documentation is updated. Remove temporary verification scaffolding.
+- In the handoff, report changed behavior, checks actually exercised with their environments, and any unverified behavior or risk. Distinguish environment-blocked verification from successful verification; never describe a blocked change as fully verified.
+
 ## Setup and development
 
 Run the commands below from the repository root. Use Node.js 22 and npm; Go 1.21+ is required for agent changes (CI uses Go 1.23.x). Container deployments require Docker Compose v2; installer tools require Python 3.

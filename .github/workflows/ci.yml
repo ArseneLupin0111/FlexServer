@@ -221,11 +221,10 @@ jobs:
         if: needs.changes.outputs.full == 'true' || needs.changes.outputs.node == 'true'
         run: npm run typecheck
 
-      - name: Build Node app
-        # Fallback compile check when no Docker target builds; scheduled
-        # API/Web image builds compile their respective workspaces.
+      - name: Build Node API
+        # The dashboard was built before tests; Docker API builds compile the API.
         if: needs.changes.outputs.node == 'true' && needs.changes.outputs.api != 'true' && needs.changes.outputs.web != 'true'
-        run: npm run build
+        run: npm run build:api
 
       - name: Smoke test scripts (--help exits 0, no env required)
         if: needs.changes.outputs.full == 'true' || needs.changes.outputs.node == 'true'

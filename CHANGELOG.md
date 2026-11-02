@@ -1,5 +1,10 @@
 # Changelog
 
+
+## Unreleased — AI Assistant multi-provider and OAuth readiness gating
+
+- Fix Assistant disabled state when configured with ChatGPT OAuth or usable non-default profiles: readiness gating in `AssistantPanel` resolves multi-provider profiles (`isProfileUsable`), checking for connected OAuth tokens or valid API keys across default and active selections instead of requiring legacy single-provider `hasApiKey === true`.
+- Header and banner alignment: `AssistantHeader` and warning banners display the active configured model and provider status without misrepresenting OAuth authentication as a missing API key.
 ## Unreleased — AI Agent execution loop, multi-plan continuation, and YOLO execution mode
 
 - Introduce `executionVersion: 2` multi-turn agent execution loop: tasks maintain durable loop continuation across sequential turns, supporting multi-plan iterative investigation, mutation, and verification instead of bounding tasks to a single mutation proposal.

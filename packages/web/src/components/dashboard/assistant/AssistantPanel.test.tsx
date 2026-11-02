@@ -1389,8 +1389,7 @@ describe("AssistantPanel multi-provider model selection", () => {
     });
   });
 
-  it("omits the provider binding from the send when the selection is stale and no default exists", async () => {
-    const request = "Rotate the tls certificates";
+  it("blocks sends when all profiles are disabled despite legacy API-key settings", async () => {
     mockAssistantLoaded({ tasks: [], conversationDetail: null });
     vi.mocked(listAiProviders).mockResolvedValue(
       makeProvidersResponse([offline], {
@@ -1398,24 +1397,13 @@ describe("AssistantPanel multi-provider model selection", () => {
         model: "off-1",
       }),
     );
-    mockSend(request);
 
     renderPanel();
     await screen.findByText(/how can the assistant help\?/i);
 
-    fireEvent.change(screen.getByPlaceholderText(/ask the assistant/i), {
-      target: { value: request },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /send/i }));
-
-    await waitFor(() => {
-      expect(createVpsAiTask).toHaveBeenCalledTimes(1);
-    });
-    expect(createVpsAiTask).toHaveBeenCalledWith("vps-1", {
-      request,
-      idempotencyKey: expect.any(String),
-      conversationId: undefined,
-    });
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /send/i })).toBeDisabled();
+    expect(createVpsAiTask).not.toHaveBeenCalled();
   });
 });
 
@@ -1604,6 +1592,147 @@ describe("AssistantPanel YOLO mode and Resume", () => {
     await waitFor(() => {
       expect(resumeVpsAiTask).toHaveBeenCalledWith("vps-1", "task-resumable");
     });
+  });
+});
+
+describe("AssistantPanel multi-provider readiness gating regression", () => {
+  const oauthProfile = makeProfile({
+    id: "prov-oauth",
+    name: "ChatGPT OAuth",
+    endpoint: "https://chatgpt.com/backend-api/codex/responses",
+    models: ["gpt-5-codex"],
+    defaultModel: "gpt-5-codex",
+    hasApiKey: false,
+    authKind: "chatgpt_oauth",
+    tokenState: "connected",
+    isDefault: true,
+    enabled: true,
+  });
+
+  const legacyOauthSettings: AiProviderSettings = {
+    endpoint: "https://chatgpt.com/backend-api/codex/responses",
+    model: "gpt-5-codex",
+    hasApiKey: false,
+    allowPrivateEndpoint: false,
+    revision: 1,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  it("enables the assistant and chat composer when a connected ChatGPT OAuth provider is configured and legacy hasApiKey is false", async () => {
+    vi.mocked(getAiSettings).mockResolvedValue(legacyOauthSettings);
+    vi.mocked(listAiProviders).mockResolvedValue(
+      makeProvidersResponse([oauthProfile]),
+    );
+    vi.mocked(getVpsAiPolicy).mockResolvedValue(enabledPolicy);
+    vi.mocked(getVpsAiCapability).mockRejectedValue(new Error("capability unavailable"));
+    vi.mocked(listVpsAiTasks).mockResolvedValue([]);
+    vi.mocked(listVpsAiConversations).mockResolvedValue([]);
+    vi.mocked(createVpsAiTask).mockResolvedValue(makeTask());
+
+    renderPanel();
+
+    // The blocking warning banner must NOT be displayed
+    await waitFor(() => {
+      expect(screen.queryByText(/No provider is configured/i)).toBeNull();
+    });
+
+    // The composer textarea must be enabled with standard placeholder
+    const textarea = screen.getByRole("textbox", { name: "Message" });
+    expect(textarea).not.toBeDisabled();
+
+    // Header must show the model and not "Provider not configured"
+    expect(screen.queryByText("Provider not configured")).toBeNull();
+
+    fireEvent.change(textarea, { target: { value: "Run diagnostic" } });
+    const sendButton = screen.getByRole("button", { name: "Send message" });
+    expect(sendButton).not.toBeDisabled();
+    fireEvent.click(sendButton);
+
+    await waitFor(() => {
+      expect(createVpsAiTask).toHaveBeenCalledWith("vps-1", {
+        request: "Run diagnostic",
+        idempotencyKey: expect.any(String),
+        conversationId: undefined,
+        providerId: "prov-oauth",
+        model: "gpt-5-codex",
+      });
+    });
+  });
+
+  it("blocks the assistant when the only provider has relogin_required", async () => {
+    const reloginProfile = {
+      ...oauthProfile,
+      tokenState: "relogin_required" as const,
+    };
+    vi.mocked(getAiSettings).mockResolvedValue(legacyOauthSettings);
+    vi.mocked(listAiProviders).mockResolvedValue(
+      makeProvidersResponse([reloginProfile]),
+    );
+    vi.mocked(getVpsAiPolicy).mockResolvedValue(enabledPolicy);
+    vi.mocked(getVpsAiCapability).mockRejectedValue(new Error("capability unavailable"));
+    vi.mocked(listVpsAiTasks).mockResolvedValue([]);
+    vi.mocked(listVpsAiConversations).mockResolvedValue([]);
+
+    renderPanel();
+
+    // Must show blocking warning banner
+    expect(
+      await screen.findByText(/No provider is configured/i),
+    ).toBeInTheDocument();
+
+    // Textarea must be disabled
+    const textarea = screen.getByRole("textbox", { name: "Message" });
+    expect(textarea).toBeDisabled();
+    expect(textarea).toHaveAttribute(
+      "placeholder",
+      "Connect a provider in Settings to enable the Assistant.",
+    );
+  });
+
+  it("enables the assistant using a usable non-default provider when default provider is disabled", async () => {
+    const disabledDefault = makeProfile({
+      id: "prov-def",
+      name: "Disabled Default",
+      models: ["def-1"],
+      defaultModel: "def-1",
+      isDefault: true,
+      enabled: false,
+    });
+    const usableNonDefault = makeProfile({
+      id: "prov-custom",
+      name: "Custom Active",
+      models: ["custom-1"],
+      defaultModel: "custom-1",
+      isDefault: false,
+      enabled: true,
+      hasApiKey: true,
+    });
+
+    vi.mocked(getAiSettings).mockResolvedValue({
+      ...savedSettings,
+      model: "def-1",
+      hasApiKey: false,
+    });
+    vi.mocked(listAiProviders).mockResolvedValue(
+      makeProvidersResponse([disabledDefault, usableNonDefault], {
+        providerId: "prov-custom",
+        model: "custom-1",
+      }),
+    );
+    vi.mocked(getVpsAiPolicy).mockResolvedValue(enabledPolicy);
+    vi.mocked(getVpsAiCapability).mockRejectedValue(new Error("capability unavailable"));
+    vi.mocked(listVpsAiTasks).mockResolvedValue([]);
+    vi.mocked(listVpsAiConversations).mockResolvedValue([]);
+
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.queryByText(/No provider is configured/i)).toBeNull();
+    });
+
+    const textarea = screen.getByRole("textbox", { name: "Message" });
+    expect(textarea).not.toBeDisabled();
+    expect(screen.queryByText("Provider not configured")).toBeNull();
   });
 });
 

@@ -246,6 +246,22 @@ export type AiProviderProfile = {
   updatedAt: string;
 };
 
+/**
+ * Readiness of one provider profile: enabled, with valid endpoint, at least one
+ * model, and valid credentials (connected token for OAuth, or hasApiKey for API key).
+ */
+export function isProfileUsable(
+  profile: AiProviderProfile | undefined | null,
+): profile is AiProviderProfile {
+  if (!profile || !profile.enabled || !profile.endpoint || profile.models.length === 0) {
+    return false;
+  }
+  if (profile.authKind === "chatgpt_oauth") {
+    return profile.tokenState === "connected";
+  }
+  return profile.hasApiKey === true;
+}
+
 export type ProviderProfileWrite = {
   name: string;
   /** Omitted for chatgpt_oauth profiles: the server fills the fixed Codex

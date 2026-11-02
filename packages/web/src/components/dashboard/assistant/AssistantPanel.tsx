@@ -23,15 +23,16 @@ import {
   deleteVpsAiConversation,
   denyVpsAiTask,
   exchangeAiProviderOauth,
-  fetchAiProviderModels,
-  getAiSettings,
-  getVpsAiCapability,
-  getVpsAiConversation,
-  getVpsAiPolicy,
-  getVpsAiTask,
-  listAiProviders,
-  listVpsAiConversations,
-  listVpsAiTasks,
+   fetchAiProviderModels,
+   getAiSettings,
+   getVpsAiCapability,
+   getVpsAiConversation,
+   getVpsAiPolicy,
+   getVpsAiTask,
+  isProfileUsable,
+   listAiProviders,
+   listVpsAiConversations,
+   listVpsAiTasks,
   patchVpsAiPolicy,
   reconcileVpsAiTask,
   resumeVpsAiTask,
@@ -67,17 +68,17 @@ export type AssistantPanelProps = {
 // null so the send omits providerId/model and the server applies its own
 // tier order (last selection, then the default profile), failing closed when
 // nothing resolves.
-function resolveUsableSelection(
-  selection: AiProviderSelection | null | undefined,
-  providerList: AiProviderProfile[],
-): AiProviderSelection | null {
-  if (!selection) return null;
-  const profile = providerList.find((p) => p.id === selection.providerId);
-  if (!profile || !profile.enabled || !profile.models.includes(selection.model)) {
-    return null;
-  }
-  return { providerId: profile.id, model: selection.model };
-}
+ function resolveUsableSelection(
+   selection: AiProviderSelection | null | undefined,
+   providerList: AiProviderProfile[],
+ ): AiProviderSelection | null {
+   if (!selection) return null;
+   const profile = providerList.find((p) => p.id === selection.providerId);
+  if (!profile || !isProfileUsable(profile) || !profile.models.includes(selection.model)) {
+     return null;
+   }
+   return { providerId: profile.id, model: selection.model };
+ }
 
 function conversationSelection(
   conversation: AiConversation | null | undefined,
@@ -93,19 +94,20 @@ function conversationSelection(
   );
 }
 
-function defaultProfileSelection(
-  providerList: AiProviderProfile[],
-): AiProviderSelection | null {
-  const fallback = providerList.find(
-    (p) => p.isDefault && p.enabled && p.models.length > 0,
-  );
-  if (!fallback) return null;
-  const model =
-    fallback.defaultModel && fallback.models.includes(fallback.defaultModel)
-      ? fallback.defaultModel
-      : fallback.models[0];
-  return { providerId: fallback.id, model };
-}
+ function defaultProfileSelection(
+   providerList: AiProviderProfile[],
+ ): AiProviderSelection | null {
+  const fallback =
+    providerList.find((p) => p.isDefault && isProfileUsable(p)) ??
+    providerList.find(isProfileUsable);
+   if (!fallback) return null;
+   const model =
+     fallback.defaultModel && fallback.models.includes(fallback.defaultModel)
+       ? fallback.defaultModel
+       : fallback.models[0];
+  if (!model) return null;
+   return { providerId: fallback.id, model };
+ }
 
 export function AssistantPanel({ vps }: AssistantPanelProps) {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -424,17 +426,19 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       const idempotencyKey = crypto.randomUUID();
       // Q16 tier 1: bind the picked provider/model only when it still
       // resolves against an enabled profile; a stale pick is omitted so the
-      // server applies its fallback order and fails closed if unusable.
-      const sendSelection = resolveUsableSelection(modelSelection, providers);
-      const body: CreateAiTaskRequest = {
-        request: requestText,
-        idempotencyKey,
-        conversationId: activeConversationId || undefined,
-      };
-      if (sendSelection) {
-        body.providerId = sendSelection.providerId;
-        body.model = sendSelection.model;
-      }
+       // server applies its fallback order and fails closed if unusable.
+      const sendSelection =
+        resolveUsableSelection(modelSelection, providers) ??
+        defaultProfileSelection(providers);
+       const body: CreateAiTaskRequest = {
+         request: requestText,
+         idempotencyKey,
+         conversationId: activeConversationId || undefined,
+       };
+       if (sendSelection) {
+         body.providerId = sendSelection.providerId;
+         body.model = sendSelection.model;
+       }
       const newTask = await createVpsAiTask(vps.id, body);
 
       // Reconcile the optimistic turn with server truth: adopt the task's
@@ -898,20 +902,30 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       setTaskDetailsOpen(true);
     }
   }, [activeTask?.id, activeTask?.state]);
-
-  const providerReady = Boolean(
-    providerSettings &&
-      providerSettings.endpoint.trim().length > 0 &&
-      providerSettings.model.trim().length > 0 &&
-      providerSettings.hasApiKey === true,
-  );
-  const aiEnabled = policy?.aiEnabled === true;
-  const readEnabled = policy?.readEnabled === true;
-
   const activeConversation = useMemo(
     () => conversations.find((c) => c.id === activeConversationId) ?? null,
     [conversations, activeConversationId],
   );
+
+  const effectiveSelection = useMemo(
+    () =>
+      resolveUsableSelection(modelSelection, providers) ??
+      conversationSelection(activeConversation, providers) ??
+      resolveUsableSelection(lastSelection, providers) ??
+      defaultProfileSelection(providers),
+    [modelSelection, activeConversation, lastSelection, providers],
+  );
+
+  const providerReady = Boolean(
+    effectiveSelection != null ||
+      providers.some(isProfileUsable) ||
+      (providers.length === 0 && providerSettings &&
+        providerSettings.endpoint.trim().length > 0 &&
+        providerSettings.model.trim().length > 0 &&
+        providerSettings.hasApiKey === true),
+  );
+  const aiEnabled = policy?.aiEnabled === true;
+  const readEnabled = policy?.readEnabled === true;
 
   // Mirror of the server's fail-closed rule (Q10/Q16): a conversation pinned
   // to a provider that no longer resolves (disabled, deleted, or model
@@ -920,14 +934,16 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
     const providerId = activeConversation?.selectedProviderId;
     const model = activeConversation?.selectedModel;
     if (!providerId || !model) return null;
-    const pinned = providers.find((p) => p.id === providerId);
-    if (!pinned || !pinned.enabled) {
-      return "The provider this conversation was using is disabled or removed. Pick another model before sending.";
+     const pinned = providers.find((p) => p.id === providerId);
+     if (!pinned || !pinned.enabled) {
+       return "The provider this conversation was using is disabled or removed. Pick another model before sending.";
+     }
+    if (pinned.authKind === "chatgpt_oauth" && pinned.tokenState === "relogin_required") {
+      return "The OAuth session for this provider has expired. Log in again in Settings before sending.";
     }
-    if (!pinned.models.includes(model)) {
-      return "The model this conversation was using is no longer available. Pick another model before sending.";
-    }
-    return null;
+     if (!pinned.models.includes(model)) {
+       return "The model this conversation was using is no longer available. Pick another model before sending.";
+     }
   }, [activeConversation, providers]);
 
   // A different conversation may carry a different pin; the dismissal is
@@ -1076,12 +1092,14 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
       className="flex min-h-[32rem] min-w-0 flex-col gap-3"
     >
       {/* Global Header */}
-      <AssistantHeader
-        vps={vps}
-        providerSettings={providerSettings}
-        policy={policy}
-        capability={capability}
-        activeTask={activeTask}
+       <AssistantHeader
+         vps={vps}
+         providerSettings={providerSettings}
+        selectedModel={effectiveSelection?.model}
+        providerReady={providerReady}
+         policy={policy}
+         capability={capability}
+         activeTask={activeTask}
         onOpenSettings={() => setSettingsModalOpen(true)}
         onOpenHistory={() => setHistoryOpen((open) => !open)}
         historyOpen={historyOpen}
@@ -1116,8 +1134,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
           <div className="flex items-center gap-2">
             <Cable className="h-4 w-4 shrink-0" />
             <span>
-              No provider is configured (endpoint, model, and API key). Connect a provider to
-              enable the Assistant on this host.
+              No provider is configured. Connect a provider in Settings to enable the Assistant on this host.
             </span>
           </div>
           <Button

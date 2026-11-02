@@ -8,6 +8,8 @@ import { vpsDisplayName } from "../../../lib/dashboard-formatters";
 export type AssistantHeaderProps = {
   vps: VpsRecord;
   providerSettings: AiProviderSettings | null;
+  selectedModel?: string | null;
+  providerReady?: boolean;
   policy: AiPolicy | null;
   capability: AiCapability | null;
   activeTask: AiTask | null;
@@ -22,6 +24,8 @@ export type AssistantHeaderProps = {
 export function AssistantHeader({
   vps,
   providerSettings,
+  selectedModel,
+  providerReady,
   capability,
   onOpenSettings,
   onOpenHistory,
@@ -31,8 +35,8 @@ export function AssistantHeader({
   onNewConversation,
 }: AssistantHeaderProps) {
   const supported = capability?.supported === true;
-  const hasProvider = Boolean(providerSettings?.endpoint && providerSettings?.model);
-
+  const displayModel = selectedModel || providerSettings?.model || null;
+  const isConfigured = providerReady !== undefined ? providerReady : Boolean(providerSettings?.endpoint && providerSettings?.model);
   return (
     <header className="flex min-w-0 flex-wrap items-center justify-between gap-4 py-1">
       <div className="min-w-0 space-y-2">
@@ -41,10 +45,10 @@ export function AssistantHeader({
           <span>Assistant <span className="font-normal text-dim">for {vpsDisplayName(vps)}</span></span>
         </h2>
         <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-dim">
-          {hasProvider && providerSettings ? (
-            <span className="inline-flex min-w-0 items-center gap-1.5" title={providerSettings.model}>
+          {isConfigured && displayModel ? (
+            <span className="inline-flex min-w-0 items-center gap-1.5" title={displayModel}>
               <Layers className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              <span className="break-all">{providerSettings.model}</span>
+              <span className="break-all">{displayModel}</span>
             </span>
           ) : <span className="text-warn">Provider not configured</span>}
           {capability ? (

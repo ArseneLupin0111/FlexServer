@@ -478,7 +478,7 @@ export function AssistantChat({
                 isTaskRunning ||
                 !(aiEnabled && providerReady)
               }
-              aria-label="Send"
+              aria-label="Send message"
               className="flex h-8 w-8 items-center justify-center rounded-full bg-signal text-ink transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal focus-visible:ring-offset-2 focus-visible:ring-offset-panel disabled:opacity-40"
             >
               {sending ? (

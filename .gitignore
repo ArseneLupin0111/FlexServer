@@ -17,3 +17,8 @@ prompt-images/
 .impeccable/review/
 /playwright-report/
 /test-results/
+
+# Generated frontend build and local tooling checkouts
+/public/
+/graphify-out/
+/hermes-agent/

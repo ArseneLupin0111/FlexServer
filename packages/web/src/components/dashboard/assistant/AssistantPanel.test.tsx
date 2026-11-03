@@ -1524,7 +1524,7 @@ describe("AssistantPanel selection-pin warning", () => {
 });
 
 describe("AssistantPanel YOLO mode and Resume", () => {
-  it("renders YOLO status banner when policy executionMode is yolo", async () => {
+  it("shows autonomous execution status for YOLO policy", async () => {
     mockAssistantLoaded({
       tasks: [],
       conversationDetail: {
@@ -1540,10 +1540,28 @@ describe("AssistantPanel YOLO mode and Resume", () => {
     renderPanel();
     await screen.findByText("Please prune unused docker images");
 
-    expect(screen.getByTestId("yolo-status-banner")).toBeInTheDocument();
-    expect(screen.getByTestId("yolo-status-banner")).toHaveTextContent(
-      /Full YOLO mode active/i,
-    );
+    expect(screen.getByRole("status", { name: /root auto-execution/i })).toBeInTheDocument();
+  });
+
+  it("preserves privileged execution banner when execMode is privileged and executionMode is manual", async () => {
+    mockAssistantLoaded({
+      tasks: [],
+      conversationDetail: {
+        conversation: makeConversation(),
+        messages: [makeMessage()],
+      },
+      policy: {
+        ...enabledPolicy,
+        execMode: "privileged",
+        executionMode: "manual",
+      },
+    });
+
+    renderPanel();
+    await screen.findByText("Please prune unused docker images");
+
+    expect(screen.getByTestId("privileged-exec-banner")).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: /root auto-execution/i })).toBeNull();
   });
 
   it("calls resumeVpsAiTask when resume button is clicked on a paused task", async () => {

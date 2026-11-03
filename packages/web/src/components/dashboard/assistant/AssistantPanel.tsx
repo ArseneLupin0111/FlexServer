@@ -9,7 +9,6 @@ import {
   RefreshCw,
   ShieldCheck,
   Terminal,
-  Zap,
 } from "lucide-react";
 import type { VpsRecord } from "../../../lib/api";
 import {
@@ -1249,18 +1248,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
 
         <div className={`grid min-h-0 min-w-0 flex-1 gap-3 ${taskDetailsOpen && activeTask ? "grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,24rem)]" : "grid-cols-1"}`}>
           <div className={`flex min-h-0 min-w-0 flex-col ${taskDetailsOpen && activeTask ? "h-[32rem] xl:h-full" : "h-full"}`}>
-            {/* YOLO execution always runs as root regardless of stored execMode. */}
-            {policy?.executionMode === "yolo" ? (
-              <div
-                data-testid="yolo-status-banner"
-                className="flex shrink-0 items-center gap-2 border border-crit/40 bg-crit/10 px-3 py-1.5 text-xs text-crit"
-              >
-                <Zap className="h-4 w-4 shrink-0 text-crit" aria-hidden="true" />
-                <span>
-                  <strong className="font-semibold">Full YOLO mode active:</strong> Root auto-execution on host; files and logs redacted.
-                </span>
-              </div>
-            ) : policy?.execMode === "privileged" ? (
+            {policy?.execMode === "privileged" && policy?.executionMode !== "yolo" ? (
               <div
                 data-testid="privileged-exec-banner"
                 className="flex shrink-0 items-center gap-2 border border-warn/40 bg-warn/10 px-3 py-1.5 text-xs text-warn"
@@ -1305,6 +1293,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
               providers={providers}
               modelSelection={modelSelection}
               onSelectModel={handleSelectModel}
+              executionMode={policy?.executionMode}
             />
             </div>
           </div>

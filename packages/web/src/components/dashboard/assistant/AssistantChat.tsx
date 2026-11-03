@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowRight,
   Bot,
+  Check,
   ChevronDown,
   CornerDownLeft,
   HelpCircle,
@@ -12,6 +13,7 @@ import {
 import { Button } from "../../ui/button";
 import type {
   AiConversationMessage,
+  AiExecutionMode,
   AiProviderProfile,
   AiProviderSelection,
   AiTask,
@@ -32,6 +34,8 @@ export type AssistantChatProps = {
   providers?: AiProviderProfile[];
   modelSelection?: AiProviderSelection | null;
   onSelectModel?: (selection: AiProviderSelection) => void;
+  /** Policy execution mode: manual requires operator approval; yolo auto-approves. */
+  executionMode?: AiExecutionMode;
 };
 
 function prefersReducedMotion(): boolean {
@@ -99,6 +103,7 @@ export function AssistantChat({
   providers = [],
   modelSelection,
   onSelectModel,
+  executionMode,
 }: AssistantChatProps) {
   const [inputText, setInputText] = useState("");
   const [clarificationText, setClarificationText] = useState("");
@@ -413,7 +418,7 @@ export function AssistantChat({
           />
 
           <div className="flex items-center justify-between gap-2 pt-1.5">
-            <span className="flex min-w-0 items-center gap-2">
+            <span className="flex min-w-0 flex-wrap items-center gap-2">
               {enabledProviders.length > 0 && onSelectModel ? (
                 <select
                   value={selectionValue}
@@ -435,6 +440,18 @@ export function AssistantChat({
                     </optgroup>
                   ))}
                 </select>
+              ) : null}
+              {executionMode === "yolo" ? (
+                <span
+                  data-testid="yolo-composer-indicator"
+                  role="status"
+                  aria-label="Full YOLO mode active: Root auto-execution on host; files and logs redacted."
+                  title="Full YOLO mode active: Root auto-execution on host; files and logs redacted."
+                  className="inline-flex items-center gap-1 rounded border border-warn/40 bg-warn/10 px-2 py-0.5 text-xs font-medium text-warn select-none"
+                >
+                  <Check className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  <span>YOLO mode</span>
+                </span>
               ) : null}
             </span>
             <button

@@ -33,6 +33,8 @@ Before changing UI, read [DESIGN.md](../../DESIGN.md) and [MASTER.md](../../MAST
 - Reuse semantic colors from `src/index.css` and `tailwind.config.js`; keep palette primitives and semantic aliases consistent.
 - Preserve flat, square panels, hairline borders, and the restrained lime accent. Use Instrument Sans for interface text and Geist Mono/tabular numerals for telemetry.
 - Use installed Radix primitives and existing components for keyboard interaction, focus, and accessible controls.
+- Prefer the least visible text that still makes each action and state clear. Use concise labels and familiar icons; remove repeated status text and explanations that clutter the interface.
+- Move supplementary detail into accessible tooltips when needed, available on keyboard focus as well as hover. Keep essential instructions, errors, and safety-critical consequences visible; give icon-only controls accessible names.
 - The installed animation package is `motion`; use `motion/react` and respect reduced-motion preferences.
 
 ## Verification

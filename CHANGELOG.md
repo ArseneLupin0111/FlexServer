@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased - Compact YOLO mode composer indicator
+
+- Replace prominent full-width YOLO root execution banner in `AssistantPanel` with a compact, noninteractive check icon + "YOLO mode" status indicator in the `AssistantChat` composer footer alongside model selection.
+- Preserve root and auto-execution disclosures in tooltip title and accessibility labels (`role="status"`, `aria-label`) without changing execution behavior, privileged shell warnings, or Settings security controls.
+
 ## Unreleased - Provider credential readiness response
 
 - Preserve boolean `hasApiKey` readiness flags in AI API responses instead of replacing them with `[REDACTED]`, which incorrectly disabled configured API-key providers. Actual credential values and non-boolean values under that field remain redacted.

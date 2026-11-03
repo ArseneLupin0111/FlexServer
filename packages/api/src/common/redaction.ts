@@ -233,11 +233,60 @@ export function safeErrorMessage(error: unknown, maxLen = 1024): string {
  * partially emitted. Oversized lines are discarded with REDACTED, and PEM blocks
  * are masked until their closing footer.
  */
+const STREAM_TRIGGERS: readonly string[] = [
+  "-----",
+  "://",
+  "?",
+  "&",
+  '"',
+  "'",
+  ":",
+  "=",
+  "sk-",
+  "vma_",
+  "ssh-",
+  "ecdsa-",
+  "bearer",
+  "password",
+  "passwd",
+  "pwd",
+  "secret",
+  "apikey",
+  "api_key",
+  "api-key",
+  "token",
+  "auth",
+  "cookie",
+  "session",
+  "private",
+];
+
 export class ChunkRedactor {
   private buffer = "";
   private inPemBlock = false;
   private lineDiscard = false;
   private readonly maxLineLength = 8192;
+
+  private extractSafeProsePrefix(): string {
+    // Only flush across completed sentence/clause boundaries (e.g. ". ", "! ", "? ", "; ")
+    // where the candidate contains NO assignment operator, trigger root, or PEM prefix.
+    const sentenceBoundary = this.buffer.search(/[.!?。！？;]\s+/);
+    if (sentenceBoundary !== -1) {
+      const afterPunct = this.buffer.slice(sentenceBoundary).match(/[.!?。！？;]\s+/);
+      if (afterPunct && afterPunct.index !== undefined) {
+        const splitPoint = sentenceBoundary + afterPunct[0].length;
+        const candidateSentence = this.buffer.slice(0, splitPoint);
+        const normalized = stripAnsi(candidateSentence);
+        // If an incomplete ANSI sequence remains (e.g. split \x1b[ across chunks), hold back
+        if (normalized.includes("\x1b")) return "";
+        if (!/[:=]|--|key|secret|token|password|passwd|pwd|credential|passphrase|auth|bearer|private|cookie|session|sk-|vma_|ssh-|ecdsa-|BEGIN/i.test(normalized)) {
+          this.buffer = this.buffer.slice(splitPoint);
+          return redactString(normalized);
+        }
+      }
+    }
+    return "";
+  }
 
   process(chunk: string): string {
     this.buffer += chunk;
@@ -280,6 +329,11 @@ export class ChunkRedactor {
       this.lineDiscard = true;
       this.buffer = "";
       output += `${REDACTED}\n`;
+    } else if (!this.inPemBlock && !this.lineDiscard && this.buffer.length > 0) {
+      const safePrefix = this.extractSafeProsePrefix();
+      if (safePrefix) {
+        output += safePrefix;
+      }
     }
 
     return output;
@@ -295,6 +349,7 @@ export class ChunkRedactor {
       output = `${REDACTED}\n`;
     } else if (this.buffer.length > 0) {
       const line = stripAnsi(this.buffer);
+      this.buffer = "";
       output = redactString(line);
     }
     return output;

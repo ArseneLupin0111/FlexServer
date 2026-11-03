@@ -663,6 +663,69 @@ describe("POST /api/agent/commands/result", () => {
       result: { ok: false, message: "uncertain_outcome" },
     });
   });
+  it("records target_busy failed receipt and updates operation to failed", async () => {
+    const cmd = await claimFirst();
+    const busyPayload = receipt(cmd.commandId, {
+      status: "failed",
+      executed: false,
+      exitCode: undefined,
+      errorCode: "target_busy",
+    });
+
+    const res = await report(busyPayload).expect(200);
+    expect(res.body).toEqual({
+      data: {
+        ok: true,
+        commandId: cmd.commandId,
+        agentInstanceId: "inst_a",
+      },
+    });
+
+    const stored = await mgmtRepo.get(cmd.commandId);
+    expect(stored).toMatchObject({
+      status: "failed",
+      result: { ok: false, message: "target_busy" },
+    });
+    expect(stored?.result?.exitCode).toBeUndefined();
+    expect(stored?.status).not.toBe("uncertain");
+    expect(stored?.status).not.toBe("succeeded");
+
+    // Queue no longer offers it
+    const again = await claim({ agentInstanceId: "inst_a" }).expect(200);
+    expect(again.body).toEqual({ data: { command: null } });
+  });
+
+  it("accepts late target_busy receipt after lease expiration and records failure", async () => {
+    const op = await queue();
+    const past = new Date(Date.now() - 180_000).toISOString();
+    await mgmtRepo.claim(op.id, "inst_a", past);
+    const claimedOp = await mgmtRepo.get(op.id);
+    expect(claimedOp?.leaseExpiresAt).toBeDefined();
+    expect(Date.parse(claimedOp!.leaseExpiresAt!)).toBeLessThan(Date.now());
+
+    const busyPayload = receipt(op.id, {
+      status: "failed",
+      executed: false,
+      exitCode: undefined,
+      errorCode: "target_busy",
+    });
+    const res = await report(busyPayload).expect(200);
+    expect(res.body).toEqual({
+      data: {
+        ok: true,
+        commandId: op.id,
+        agentInstanceId: "inst_a",
+      },
+    });
+
+    const stored = await mgmtRepo.get(op.id);
+    expect(stored).toMatchObject({
+      status: "failed",
+      result: { ok: false, message: "target_busy" },
+    });
+    expect(stored?.result?.exitCode).toBeUndefined();
+    expect(stored?.leaseExpiresAt).toBeUndefined();
+  });
 
   it("rejects invalid result bodies with 400", async () => {
     const cmd = await claimFirst();

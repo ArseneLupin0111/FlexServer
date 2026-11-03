@@ -235,6 +235,7 @@ describe("AI uncertain task admission and mutation fence regressions", () => {
       }),
     ).rejects.toMatchObject({
       code: "uncertain_outcome",
+      message: expect.stringMatching(/reconciliation required/i),
     });
 
     // 3. Approval remains strictly unconsumed: plan is still pending, task is still awaiting_approval

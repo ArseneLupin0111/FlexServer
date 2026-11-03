@@ -68,6 +68,7 @@ export type DockerManagementResultInput = z.infer<
 /** Error codes the agent may attach to failed/uncertain receipts. */
 export const AGENT_COMMAND_ERROR_CODES = [
   "container_not_found",
+  "target_busy",
   "action_failed",
   "deadline_exceeded",
   "target_mismatch",
@@ -77,7 +78,6 @@ export const AGENT_COMMAND_ERROR_CODES = [
   "timeout",
   "uncertain_outcome",
 ] as const;
-
 /** POST /api/agent/commands/claim request body. */
 export const agentCommandClaimRequestSchema = z
   .object({

@@ -50,9 +50,9 @@ export function useAiTaskStream({
 }: UseAiTaskStreamOptions) {
   const [streamState, setStreamState] = useState<AiStreamState>("idle");
   const [outputChunks, setOutputChunks] = useState<AiOutputChunk[]>([]);
+  const [streamingText, setStreamingText] = useState<string | null>(null);
   const [hasGap, setHasGap] = useState(false);
   const [isTruncated, setIsTruncated] = useState(false);
-
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
   const activeRef = useRef<{ vpsId: string; taskId: string | null }>({
@@ -116,12 +116,12 @@ export function useAiTaskStream({
   }, []);
 
   const clearOutput = useCallback(() => {
-    totalCharsRef.current = 0;
     setOutputChunks([]);
+    setStreamingText(null);
     setHasGap(false);
     setIsTruncated(false);
+    totalCharsRef.current = 0;
   }, []);
-
   const connect = useCallback(() => {
     if (!taskId || !vpsId || !enabled) {
       setStreamState("idle");
@@ -224,6 +224,31 @@ export function useAiTaskStream({
       }
     };
 
+    const handleMessageDelta = (event: MessageEvent) => {
+      if (!isActive()) return;
+      try {
+        const data = JSON.parse(event.data) as {
+          taskId?: string;
+          delta?: string;
+          text?: string;
+          reset?: boolean;
+        };
+        if (typeof data.text === "string") {
+          setStreamingText(data.text);
+          return;
+        }
+        if (data.reset) {
+          setStreamingText("");
+          return;
+        }
+        if (typeof data.delta === "string" && data.delta) {
+          setStreamingText((prev) => (prev ?? "") + data.delta);
+        }
+      } catch {
+        // Malformed frame ignored
+      }
+    };
+
     const handleOutputChunk = (event: MessageEvent) => {
       if (!isActive()) return;
       try {
@@ -286,6 +311,7 @@ export function useAiTaskStream({
     source.addEventListener("ai.task.updated", handleSnapshot);
     source.addEventListener("ai.step.updated", handleStepUpdate);
     source.addEventListener("ai.approval.required", handleApprovalRequired);
+    source.addEventListener("ai.message.delta", handleMessageDelta);
     source.addEventListener("ai.output.chunk", handleOutputChunk);
     source.addEventListener("ai.output.gap", handleOutputGap);
     source.addEventListener("ai.usage.updated", handleUsageUpdated);
@@ -335,6 +361,7 @@ export function useAiTaskStream({
   return {
     streamState,
     outputChunks,
+    streamingText,
     hasGap,
     isTruncated,
     clearOutput,

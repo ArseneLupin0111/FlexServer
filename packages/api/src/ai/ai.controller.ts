@@ -107,9 +107,30 @@ export class AiPolicyController {
     let closed = false;
     let revision = -1;
     let outputCursor = 0;
-    const stop = () => { closed = true; res.end(); };
-    res.on("close", () => { closed = true; });
+    let unsubscribeResponse = () => {};
+    const stop = () => {
+      closed = true;
+      unsubscribeResponse();
+      res.end();
+    };
+    res.on("close", () => {
+      closed = true;
+      unsubscribeResponse();
+    });
     const deadline = Date.now() + 180000;
+    const initialState = this.tasks.getResponseState(taskId);
+    const initialText = initialState?.text ?? "";
+    res.write(`event: ai.message.delta\ndata: ${JSON.stringify({ taskId, delta: initialText, text: initialText })}\n\n`);
+    unsubscribeResponse = this.tasks.subscribeResponse(taskId, (deltaEvent) => {
+      if (closed) return;
+      try {
+        if (!res.write(`event: ai.message.delta\ndata: ${JSON.stringify(deltaEvent)}\n\n`)) {
+          closed = true;
+        }
+      } catch {
+        closed = true;
+      }
+    });
     while (!closed && Date.now() < deadline) {
       try {
         if (!req.dashboardSessionId || !await this.sessions.authenticateById(req.dashboardSessionId)) break;
@@ -132,6 +153,7 @@ export class AiPolicyController {
         }
         if (!output.hasMore && ["succeeded", "failed", "cancelled", "expired"].includes(task.state)) {
           res.write("event: ai.stream.closed\ndata: {}\n\n");
+          this.tasks.clearResponseState(taskId);
           break;
         }
       } catch { break; }
@@ -139,6 +161,7 @@ export class AiPolicyController {
       setTimeout(resolve, 500);
       await promise;
     }
+    unsubscribeResponse();
     stop();
   }
 }

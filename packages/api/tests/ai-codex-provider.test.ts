@@ -351,3 +351,121 @@ describe("Codex outbound credential sanitization", () => {
     expect(sent?.body).toContain("/var/log/app.log status=healthy");
   });
 });
+
+describe("Codex streaming SSE responses", () => {
+  async function streamingCodexBackend(chunks: (string | Buffer)[]): Promise<{ config: CodexProviderConfig; requests: () => CapturedRequest[] }> {
+    const requests: CapturedRequest[] = [];
+    const server = createServer((request, response) => {
+      const bodyChunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => bodyChunks.push(chunk));
+      request.on("end", () => {
+        requests.push({ path: request.url, headers: request.headers, body: Buffer.concat(bodyChunks).toString("utf8") });
+        response.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+        });
+        for (const chunk of chunks) {
+          response.write(chunk);
+        }
+        response.end();
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing listener");
+    return {
+      config: {
+        apiBaseUrl: `http://127.0.0.1:${address.port}`,
+        cliVersion: "0.42.0",
+        model: "gpt-5-codex",
+        accessToken: "synthetic-codex-token",
+        allowPrivateEndpoint: true,
+      },
+      requests: () => requests,
+    };
+  }
+
+  it("streams incremental output_text deltas to onDelta and validates final completed response", async () => {
+    const sseLines = [
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hello "}\n\n',
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"from Codex!"}\n\n',
+      'event: response.done\ndata: {"type":"response.done","response":{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello from Codex!"}]}],"usage":{"input_tokens":8,"output_tokens":4,"total_tokens":12}}}\n\n',
+    ];
+    const deltas: string[] = [];
+    const { config, requests } = await streamingCodexBackend(sseLines);
+    const result = await generateCodexRequest(
+      config,
+      [{ role: "user", content: "hello" }],
+      [],
+      undefined,
+      { onDelta: (d) => deltas.push(d) },
+    );
+    expect(deltas.join("")).toBe("Hello from Codex!");
+    expect(result.message.content).toBe("Hello from Codex!");
+    expect(result.usage.inputTokens).toBe(8);
+    expect(result.usage.outputTokens).toBe(4);
+    const [sent] = requests();
+    expect(sent?.body).toContain('"stream":true');
+  });
+
+  it("does not emit reasoning deltas or tool arguments to onDelta", async () => {
+    const sseLines = [
+      `event: response.reasoning.delta\ndata: ${JSON.stringify({ type: "response.reasoning.delta", delta: "Internal thinking..." })}\n\n`,
+      `event: response.function_call_arguments.delta\ndata: ${JSON.stringify({ type: "response.function_call_arguments.delta", delta: '{"path":"/"}' })}\n\n`,
+      `event: response.done\ndata: ${JSON.stringify({ type: "response.done", response: { status: "completed", output: [{ type: "function_call", call_id: "call_99", name: "list_disks", arguments: '{"path":"/"}' }], usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } } })}\n\n`,
+    ];
+    const deltas: string[] = [];
+    const { config } = await streamingCodexBackend(sseLines);
+    const result = await generateCodexRequest(
+      config,
+      [{ role: "user", content: "disks" }],
+      [diskTool],
+      undefined,
+      { onDelta: (d) => deltas.push(d) },
+    );
+    expect(deltas).toEqual([]);
+    expect(result.message.toolCalls).toHaveLength(1);
+    expect(result.message.toolCalls![0]!.id).toBe("call_99");
+    expect(result.message.toolCalls![0]!.function.name).toBe("list_disks");
+  });
+
+  it("handles TCP split packets in Codex SSE stream", async () => {
+    const part1 = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta",';
+    const part2 = '"delta":"Split packet text"}\n\n';
+    const done = 'event: response.done\ndata: {"response":{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Split packet text"}]}]}}\n\n';
+
+    const deltas: string[] = [];
+    const { config } = await streamingCodexBackend([part1, part2, done]);
+    const result = await generateCodexRequest(
+      config,
+      [{ role: "user", content: "split" }],
+      [],
+      undefined,
+      { onDelta: (d) => deltas.push(d) },
+    );
+    expect(deltas.join("")).toBe("Split packet text");
+    expect(result.message.content).toBe("Split packet text");
+  });
+
+  it("throws ProviderProtocolError if Codex stream encounters response.failed event", async () => {
+    const sseLines = [
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Partial before failure"}\n\n',
+      'event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"internal_error"}}}\n\n',
+    ];
+    const { config } = await streamingCodexBackend(sseLines);
+    await expect(
+      generateCodexRequest(config, [{ role: "user", content: "fail" }], [], undefined, { onDelta: () => {} }),
+    ).rejects.toBeInstanceOf(ProviderProtocolError);
+  });
+
+  it("throws ProviderProtocolError if Codex stream terminates without completed or incomplete terminal status", async () => {
+    const sseLines = [
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Partial without terminal"}\n\n',
+    ];
+    const { config } = await streamingCodexBackend(sseLines);
+    await expect(
+      generateCodexRequest(config, [{ role: "user", content: "incomplete" }], [], undefined, { onDelta: () => {} }),
+    ).rejects.toBeInstanceOf(ProviderProtocolError);
+  });
+});

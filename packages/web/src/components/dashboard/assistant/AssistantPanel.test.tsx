@@ -56,6 +56,7 @@ import {
 
 const streamHarness = vi.hoisted(() => ({
   latestOptions: null as null | { onSnapshot?: (task: AiTask) => void },
+  streamingText: null as string | null,
 }));
 
 vi.mock("../../../lib/ai-stream", () => ({
@@ -64,6 +65,7 @@ vi.mock("../../../lib/ai-stream", () => ({
     return {
       streamState: "idle" as const,
       outputChunks: [] as never[],
+      streamingText: streamHarness.streamingText,
       hasGap: false,
       isTruncated: false,
       clearOutput: () => undefined,
@@ -264,6 +266,7 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   streamHarness.latestOptions = null;
+  streamHarness.streamingText = null;
 });
 
 describe("AssistantPanel provider check", () => {
@@ -489,6 +492,37 @@ describe("AssistantPanel final result in chat", () => {
     });
 
     expect(within(getChatLog()).getByText(summary)).toBeInTheDocument();
+  });
+
+  it("renders live incremental streaming response text before completion", async () => {
+    streamHarness.streamingText = "Inspecting system metrics and top memory consumers...";
+    mockAssistantLoaded({
+      tasks: [makeTask({ state: "executing", summary: undefined })],
+      conversationDetail: {
+        conversation: makeConversation(),
+        messages: [makeMessage({ id: "m-1", role: "user" })],
+      },
+    });
+
+    renderPanel();
+    await screen.findByText("Please prune unused docker images");
+    expect(within(getChatLog()).getByText("Inspecting system metrics and top memory consumers...")).toBeInTheDocument();
+  });
+
+  it("retains partial streamed text when task fails", async () => {
+    streamHarness.streamingText = "Starting health check before unexpected termination...";
+    mockAssistantLoaded({
+      tasks: [makeTask({ state: "failed", summary: undefined })],
+      conversationDetail: {
+        conversation: makeConversation(),
+        messages: [makeMessage({ id: "m-1", role: "user" })],
+      },
+    });
+
+    renderPanel();
+    await screen.findByText("Please prune unused docker images");
+    expect(within(getChatLog()).getByText("Starting health check before unexpected termination...")).toBeInTheDocument();
+    expect(within(getChatLog()).getByText("(interrupted)")).toBeInTheDocument();
   });
 
   it("falls back to the selected task request summary when the conversation has no user turn for it", async () => {

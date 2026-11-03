@@ -51,6 +51,10 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
   let activeInstanceId: string | null = "agent-inst-1";
   let idempotencyCounter = 0;
   let sessionValid = true;
+  const mockDockerBridge = {
+    propose: vi.fn(),
+    execute: vi.fn(),
+  };
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "ai-auto-approve-tests-"));
@@ -76,6 +80,8 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
     activeInstanceId = "agent-inst-1";
     service = makeService();
     idempotencyCounter = 0;
+    mockDockerBridge.propose.mockReset();
+    mockDockerBridge.execute.mockReset();
   });
 
   afterEach(async () => {
@@ -107,7 +113,7 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
       sessions,
       {} as unknown as DockerMonitoringService,
       new AiHostPlanService(aiRepo, config),
-      {} as unknown as AiDockerBridgeService,
+      mockDockerBridge as unknown as AiDockerBridgeService,
       monitoring,
       {} as unknown as AiReadToolsService,
       vpsRepo,
@@ -198,6 +204,64 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
       await pollDelay(10);
     }
   }
+  async function proposeDockerPlan(containerKey = "freshrss"): Promise<AiTask> {
+    idempotencyCounter += 1;
+    mockDockerBridge.propose.mockResolvedValueOnce({
+      step: {
+        stepId: "step-docker-1",
+        tool: "docker_action",
+        version: 1,
+        args: { action: "restart", target: { containerKey } },
+        resourceKeys: [`docker:container:${containerKey}`],
+        inputDigests: {},
+        description: `Restart ${containerKey}`,
+        timeoutSeconds: 30,
+      },
+      preconditions: [],
+    });
+    vi.spyOn(AiProvider.prototype, "generate").mockResolvedValueOnce({
+      message: {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "call-docker-1",
+            type: "function",
+            function: {
+              name: "docker_action",
+              arguments: JSON.stringify({ action: "restart", target: { containerKey } }),
+            },
+          },
+        ],
+      },
+      usage: { inputTokens: 10, outputTokens: 5, estimated: true },
+    });
+    const created = await service.create(request, vpsId, {
+      request: `Restart ${containerKey}`,
+      idempotencyKey: `autoapprove-docker-${idempotencyCounter}`,
+    });
+    const currentPol = await aiRepo.getAiPolicy(vpsId);
+    const deadline = Date.now() + 4000;
+    for (;;) {
+      const task = await aiRepo.getTask(vpsId, created.id);
+      if (task) {
+        const isAuto = currentPol?.executionMode === "yolo";
+        if (!isAuto && (task.state === "awaiting_approval" || TERMINAL[task.state])) {
+          return task;
+        }
+        if (isAuto) {
+          if (task.state === "failed" || task.state === "uncertain" || task.state === "succeeded" || task.state === "cancelled") {
+            return task;
+          }
+          if (task.state === "executing") {
+            return task;
+          }
+        }
+      }
+      if (Date.now() > deadline) throw new Error(`AI task never settled (last: ${task?.state ?? "none"})`);
+      await pollDelay(10);
+    }
+  }
 
 
   describe("Auto-approval execution and safety gates", () => {
@@ -281,7 +345,53 @@ describe("AI per-VPS autoApprove (YOLO policy)", () => {
       // Autoapproval is rejected truthfully by uncertain CAS fence
       expect(task.state).toBe("failed");
       expect(task.error?.code).toBe("uncertain_outcome");
+      expect(task.error?.message).toMatch(/reconciliation required/i);
+      expect(task.completion?.kind).toBe("blocked");
+      expect(task.completion?.reasonCode).toBe("uncertain_outcome");
+      expect(task.completion?.message).toMatch(/reconciliation required/i);
+      expect(task.plan?.status).toBe("pending");
 
+      const prior = await aiRepo.getTask(vpsId, "uncertain-prior-task");
+      expect(prior?.state).toBe("uncertain");
+
+      const outbox = await aiRepo.claimCommands("agent-inst-1", vpsId, 10);
+      expect(outbox).toHaveLength(0);
+    });
+
+    it("safety fence: seeded uncertain receipt blocks docker-action autoapproval with reconciliation reason and prevents mutation", async () => {
+      await seedPolicy({ executionMode: "yolo", dockerActionsEnabled: true });
+      await seedCapability();
+
+      // Seed an unresolved uncertain receipt on this VPS
+      await aiRepo.recordReceipts([
+        {
+          commandId: "cmd-prior-uncertain",
+          taskId: "task-prior-uncertain",
+          stepId: "step-1",
+          vpsId,
+          agentInstanceId: "agent-inst-1",
+          planVersion: 1,
+          planDigest: "a".repeat(64),
+          payloadDigest: "b".repeat(64),
+          status: "uncertain",
+          errorCode: "uncertain_outcome",
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+
+      const task = await proposeDockerPlan("freshrss");
+      expect(task.state).toBe("failed");
+      expect(task.error?.code).toBe("uncertain_outcome");
+      expect(task.error?.message).toMatch(/reconciliation required/i);
+      expect(task.completion?.kind).toBe("blocked");
+      expect(task.completion?.reasonCode).toBe("uncertain_outcome");
+      expect(task.completion?.message).toMatch(/reconciliation required/i);
+      expect(task.plan?.status).toBe("pending");
+
+      // Verify no bridge execution was dispatched
+      expect(mockDockerBridge.execute).not.toHaveBeenCalled();
+
+      // Verify no outbox commands
       const outbox = await aiRepo.claimCommands("agent-inst-1", vpsId, 10);
       expect(outbox).toHaveLength(0);
     });

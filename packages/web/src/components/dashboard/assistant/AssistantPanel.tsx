@@ -169,6 +169,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
   const {
     streamState,
     outputChunks,
+    streamingText,
     hasGap,
     isTruncated,
     clearOutput,
@@ -1283,6 +1284,7 @@ export function AssistantPanel({ vps }: AssistantPanelProps) {
             <AssistantChat
               messages={chatMessages}
               activeTask={activeTask}
+              streamingText={streamingText}
               onSendMessage={handleSendMessage}
               onSubmitClarification={handleSubmitClarification}
               onSelectBusyTask={handleSelectTask}

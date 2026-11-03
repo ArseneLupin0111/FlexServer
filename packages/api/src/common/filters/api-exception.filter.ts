@@ -26,7 +26,7 @@ import {
 } from "../errors.js";
 import { safeErrorMessage } from "../redaction.js";
 import { FilesError } from "../../files/files-error.js";
-import { AiAssistantError, AiTaskNotFoundError } from "../../ai/ai-failures.js";
+import { AiAssistantError, AiTaskNotFoundError, UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE } from "../../ai/ai-failures.js";
 import { AiPolicyError } from "../../ai/ai-policy.service.js";
 import { AiPersistenceConflictError } from "../../persistence/repositories/ai.persistence.js";
 import { ProviderProtocolError, ProviderTransportError, ProviderKeyRequiredError } from "../../ai/ai-provider.js";
@@ -47,10 +47,18 @@ export class ApiExceptionFilter implements ExceptionFilter {
     const requestId = request.requestId;
 
     if (error instanceof AiAssistantError || error instanceof AiPolicyError) {
-      return response.status(error.status).json(errorBody(error.code, requestId, { code: error.code }));
+      const message =
+        error.code === "uncertain_outcome"
+          ? UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE
+          : error.code;
+      return response.status(error.status).json(errorBody(message, requestId, { code: error.code }));
     }
     if (error instanceof AiPersistenceConflictError) {
-      return response.status(409).json(errorBody("AI state conflict", requestId, { code: error.code }));
+      const message =
+        error.code === "uncertain_outcome"
+          ? UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE
+          : "AI state conflict";
+      return response.status(409).json(errorBody(message, requestId, { code: error.code }));
     }
     if (error instanceof AiTaskNotFoundError) {
       return response.status(404).json(errorBody("AI task not found", requestId));

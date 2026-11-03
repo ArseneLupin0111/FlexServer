@@ -7,6 +7,7 @@ import {
   PROVIDER_MAX_OUTPUT_TOKENS,
   PROVIDER_MAX_TOOLS,
   providerJsonExchange,
+  providerSseExchange,
   ProviderKeyRequiredError,
   ProviderProtocolError,
   ProviderResponseTruncatedError,
@@ -19,7 +20,7 @@ import {
   type ProviderToolCall,
   type UsageInfo,
 } from "./ai-provider.js";
-import { redactString, redactValue } from "../common/redaction.js";
+import { ChunkRedactor, redactString, redactValue } from "../common/redaction.js";
 
 /** Codex OAuth transport (docs/ai-chatgpt-oauth-provider-plan.md slice 3).
  * ChatGPT subscription dispatch goes through the same guarded request funnel
@@ -58,7 +59,7 @@ function sanitizeToolArgs(raw: string): string {
     return redactString(raw);
   }
 }
-export function toCodexResponsesBody(model: string, messages: readonly ProviderMessage[], tools: readonly ProviderTool[], options?: { maxOutputTokens?: number }): CodexResponsesBody {
+export function toCodexResponsesBody(model: string, messages: readonly ProviderMessage[], tools: readonly ProviderTool[], options?: { maxOutputTokens?: number; onDelta?: (delta: string) => void }): CodexResponsesBody {
   const maxOutputTokens = normalizedMaxOutputTokens(options);
   const instructions = messages.filter(message => message.role === "system").map(message => typeof message.content === "string" ? redactString(message.content) : "").join("\n\n");
   const input: unknown[] = [];
@@ -83,7 +84,7 @@ export function toCodexResponsesBody(model: string, messages: readonly ProviderM
     ...(tools.length ? { tools: tools.map(tool => ({ type: "function", name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters, strict: false })), tool_choice: "auto" } : {}),
     parallel_tool_calls: false,
     store: false,
-    stream: false,
+    stream: Boolean(options?.onDelta),
     max_output_tokens: maxOutputTokens,
   };
 }
@@ -164,7 +165,7 @@ export type CodexProviderConfig = {
  * caps, deadline and failure mapping, sends the Codex client headers
  * (originator/version/session_id/OpenAI-Beta) beside the bearer token, and
  * translates via the pure functions above. */
-export async function generateCodexRequest(config: CodexProviderConfig, messages: readonly ProviderMessage[], tools: readonly ProviderTool[], signal?: AbortSignal, options?: { maxOutputTokens?: number }): Promise<ProviderResult> {
+export async function generateCodexRequest(config: CodexProviderConfig, messages: readonly ProviderMessage[], tools: readonly ProviderTool[], signal?: AbortSignal, options?: { maxOutputTokens?: number; onDelta?: (delta: string) => void }): Promise<ProviderResult> {
   if (!config.accessToken) throw new ProviderKeyRequiredError();
   if (tools.length > PROVIDER_MAX_TOOLS || messages.length > PROVIDER_MAX_MESSAGES || !config.model || config.model.length > 256) throw new ProviderProtocolError();
   normalizedMaxOutputTokens(options);
@@ -175,17 +176,88 @@ export async function generateCodexRequest(config: CodexProviderConfig, messages
     const target = await resolveProviderTarget(providerConfig, combined, "/backend-api/codex/responses");
     const body = JSON.stringify(toCodexResponsesBody(config.model, messages, tools, options));
     if (Buffer.byteLength(body) > PROVIDER_MAX_BODY_BYTES) throw new ProviderProtocolError();
-    const raw = await providerJsonExchange(target, providerConfig, combined, body, {
+    const extraHeaders = {
       originator: "codex_cli_rs",
       version: config.cliVersion,
       session_id: randomUUID(),
       "OpenAI-Beta": "responses=experimental",
+    };
+
+    if (!options?.onDelta) {
+      const raw = await providerJsonExchange(target, providerConfig, combined, body, extraHeaders);
+      let decoded: unknown;
+      try { decoded = JSON.parse(raw); } catch { throw new ProviderProtocolError(); }
+      return fromCodexResponsesResult(decoded, { tools, requestBody: body });
+    }
+
+    const redactor = new ChunkRedactor();
+    let accumulatedText = "";
+    let finalCodexPayload: unknown = null;
+
+    const exchangeResult = await providerSseExchange(target, providerConfig, combined, body, extraHeaders, ({ event, data }) => {
+      const trimmed = data.trim();
+      if (!trimmed || trimmed === "[DONE]") return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        throw new ProviderProtocolError();
+      }
+      const parsedRecord = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+      if (!parsedRecord || parsedRecord.error) throw new ProviderProtocolError();
+      if (parsedRecord.type === "response.failed" || parsedRecord.type === "error") throw new ProviderProtocolError();
+      if (parsedRecord.status === "failed") throw new ProviderProtocolError();
+      if (parsedRecord.response && typeof parsedRecord.response === "object") {
+        const resp = parsedRecord.response as Record<string, unknown>;
+        if (resp.status === "failed" || resp.error) throw new ProviderProtocolError();
+      }
+      if (parsedRecord.status === "completed" || parsedRecord.status === "incomplete") {
+        finalCodexPayload = parsedRecord;
+      } else if (parsedRecord.response && typeof parsedRecord.response === "object") {
+        const resp = parsedRecord.response as Record<string, unknown>;
+        if (resp.status === "completed" || resp.status === "incomplete") {
+          finalCodexPayload = resp;
+        }
+      }
+
+      const isTextDeltaEvent =
+        event === "response.output_text.delta" ||
+        event === "response.text.delta" ||
+        parsedRecord.type === "response.output_text.delta" ||
+        parsedRecord.type === "response.text.delta";
+      const deltaText = isTextDeltaEvent
+        ? (typeof parsedRecord.delta === "string" ? parsedRecord.delta : typeof parsedRecord.text === "string" ? parsedRecord.text : "")
+        : "";
+      if (deltaText) {
+        accumulatedText += deltaText;
+        const safe = redactor.process(deltaText);
+        if (safe) options.onDelta!(safe);
+      }
     });
-    let decoded: unknown;
-    try { decoded = JSON.parse(raw); } catch { throw new ProviderProtocolError(); }
-    return fromCodexResponsesResult(decoded, { tools, requestBody: body });
+
+    if (exchangeResult.rawJsonFallback) {
+      let decoded: unknown;
+      try { decoded = JSON.parse(exchangeResult.rawJsonFallback); } catch { throw new ProviderProtocolError(); }
+      const res = fromCodexResponsesResult(decoded, { tools, requestBody: body });
+      if (options.onDelta && res.message.content) options.onDelta(res.message.content);
+      return res;
+    }
+
+    const flushed = redactor.flush();
+    if (flushed) options.onDelta(flushed);
+
+    if (!finalCodexPayload) {
+      throw new ProviderProtocolError();
+    }
+    return fromCodexResponsesResult(finalCodexPayload, { tools, requestBody: body });
   } catch (error) {
-    if (error instanceof ProviderProtocolError || error instanceof ProviderTransportError) throw error;
+    if (
+      error instanceof ProviderProtocolError ||
+      error instanceof ProviderTransportError ||
+      error instanceof ProviderResponseTruncatedError
+    ) {
+      throw error;
+    }
     throw new ProviderTransportError();
   }
 }

@@ -10,6 +10,8 @@ import type { AppConfig } from "../src/config/app-config.js";
 import { createKeyService } from "../src/ssh/keyService.js";
 import { createJsonAuditRepository } from "../src/persistence/repositories/audit.repository.js";
 import { createVpsStore } from "../src/persistence/store/vpsStore.js";
+import { AiAssistantError, UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE } from "../src/ai/ai-failures.js";
+import { AiPersistenceConflictError } from "../src/persistence/repositories/ai.persistence.js";
 
 const demoConfig: AppConfig = {
   mode: "demo",
@@ -202,5 +204,31 @@ describe("exception filter — HttpException payload messages", () => {
     const { status, body } = runFilter(new HttpException("Plain string", 418));
     expect(status).toBe(418);
     expect(body).toEqual({ error: { message: "Plain string" } });
+  });
+
+  it("maps AiAssistantError uncertain_outcome to explicit reconciliation message", () => {
+    const { status, body } = runFilter(
+      new AiAssistantError("uncertain_outcome", UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE),
+    );
+    expect(status).toBe(409);
+    expect(body).toEqual({
+      error: {
+        code: "uncertain_outcome",
+        message: UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE,
+      },
+    });
+  });
+
+  it("maps AiPersistenceConflictError uncertain_outcome to explicit reconciliation message", () => {
+    const { status, body } = runFilter(
+      new AiPersistenceConflictError("uncertain_outcome", "receipt uncertain"),
+    );
+    expect(status).toBe(409);
+    expect(body).toEqual({
+      error: {
+        code: "uncertain_outcome",
+        message: UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE,
+      },
+    });
   });
 });

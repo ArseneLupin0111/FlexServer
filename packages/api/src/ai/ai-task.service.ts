@@ -7,7 +7,7 @@ import { AiPersistenceConflictError } from "../persistence/repositories/ai.persi
 import type { AppConfig } from "../config/app-config.js";
 import { MetricService } from "../metrics/metric.service.js";
 import { AiPolicyService, AiPolicyError } from "./ai-policy.service.js";
-import { AiAssistantError, isAiErrorCode } from "./ai-failures.js";
+import { AiAssistantError, isAiErrorCode, UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE } from "./ai-failures.js";
 import { createAiTaskSchema, taskInputSchema, approvePlanSchema } from "./ai.schemas.js";
 import { decryptAiSecret, loadAiKeyring, AiCryptoUnavailableError } from "./ai-crypto.js";
 import { redactString, redactValue } from "../common/redaction.js";
@@ -48,6 +48,14 @@ const tools: ProviderTool[] = [
   ...readTools,
 ];
 const terminal = new Set(["succeeded", "failed", "cancelled", "expired"]);
+function failureErrorMessage(code: string, cancelled: boolean): string {
+  if (cancelled) return "Task cancelled";
+  if (code === "uncertain_outcome") return UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE;
+  if (code === "budget_exhausted") return "Conversation context or task token budget could not fit safely";
+  if (code === "provider_response_truncated") return "Provider response was truncated; no incomplete summary was saved";
+  if (code === "provider_context_overflow") return "Provider context overflow remained after one compact retry";
+  return "AI task could not complete";
+}
 /** Read-only Docker metadata tools. Their bounded output is never shell/exec evidence; docker_action/logs stay restricted. */
 const dockerMetadataTool: Record<string, true> = { docker_inventory: true, docker_inspect: true, container_inspect: true };
 const isShellOrExecTool = (name: string): boolean =>
@@ -292,6 +300,78 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
   private readonly ownerInstanceId = `api-${process.pid}-${randomUUID()}`;
   private continuationSweepInFlight: Promise<void> | null = null;
   private continuationTimer: NodeJS.Timeout | null = null;
+  private readonly responseStates = new Map<string, { text: string; updatedAt: number }>();
+  private readonly responseListeners = new Map<string, Set<(event: { taskId: string; delta: string; text: string; reset?: boolean }) => void>>();
+
+  subscribeResponse(taskId: string, listener: (event: { taskId: string; delta: string; text: string; reset?: boolean }) => void): () => void {
+    let set = this.responseListeners.get(taskId);
+    if (!set) {
+      set = new Set();
+      this.responseListeners.set(taskId, set);
+    }
+    set.add(listener);
+    return () => {
+      set?.delete(listener);
+      if (set && set.size === 0) {
+        this.responseListeners.delete(taskId);
+      }
+    };
+  }
+
+  getResponseState(taskId: string): { text: string; updatedAt: number } | null {
+    return this.responseStates.get(taskId) ?? null;
+  }
+
+  resetResponseState(taskId: string): void {
+    const existing = this.responseStates.get(taskId);
+    if (existing) {
+      existing.text = "";
+      existing.updatedAt = Date.now();
+    }
+    const listeners = this.responseListeners.get(taskId);
+    if (listeners) {
+      const payload = { taskId, delta: "", text: "", reset: true };
+      for (const fn of listeners) {
+        try { fn(payload); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  appendResponseDelta(taskId: string, delta: string): void {
+    if (!delta) return;
+    let state = this.responseStates.get(taskId);
+    if (!state) {
+      if (this.responseStates.size >= 64) {
+        let oldestKey: string | null = null;
+        let oldestTime = Infinity;
+        for (const [k, v] of this.responseStates.entries()) {
+          if (v.updatedAt < oldestTime) {
+            oldestTime = v.updatedAt;
+            oldestKey = k;
+          }
+        }
+        if (oldestKey) this.responseStates.delete(oldestKey);
+      }
+      state = { text: "", updatedAt: Date.now() };
+      this.responseStates.set(taskId, state);
+    }
+    if (state.text.length < 262144) {
+      state.text += delta;
+      state.updatedAt = Date.now();
+      const listeners = this.responseListeners.get(taskId);
+      if (listeners) {
+        const payload = { taskId, delta, text: state.text, reset: false };
+        for (const fn of listeners) {
+          try { fn(payload); } catch { /* ignore */ }
+        }
+      }
+    }
+  }
+
+  clearResponseState(taskId: string): void {
+    this.responseStates.delete(taskId);
+    this.responseListeners.delete(taskId);
+  }
   private contextLimitsFor(model: string) {
     return {
       window: this.config.ai.contextWindowTokensByModel?.[model] ?? this.config.ai.contextWindowTokens ?? 128000,
@@ -355,7 +435,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
   /** Settings shape carried through prepareContext/dispatch. For
    * chatgpt_oauth profiles `apiKey` holds the ACCESS token and `endpoint`
    * the Codex API base (docs/ai-chatgpt-oauth-provider-plan.md slice 4). */
-  private dispatchGenerate(settings: { endpoint: string; model: string; apiKey: string; allowPrivateEndpoint?: boolean; authKind?: string; cliVersion?: string }, messages: readonly ProviderMessage[], dispatchTools: readonly ProviderTool[], signal: AbortSignal, options?: { maxOutputTokens?: number }) {
+  private dispatchGenerate(settings: { endpoint: string; model: string; apiKey: string; allowPrivateEndpoint?: boolean; authKind?: string; cliVersion?: string }, messages: readonly ProviderMessage[], dispatchTools: readonly ProviderTool[], signal: AbortSignal, options?: { maxOutputTokens?: number; onDelta?: (delta: string) => void }) {
     if (settings.authKind === "chatgpt_oauth") {
       return generateCodexRequest({ apiBaseUrl: settings.endpoint, cliVersion: settings.cliVersion ?? this.config.ai.codexOauth.cliVersion, model: settings.model, accessToken: settings.apiKey, allowPrivateEndpoint: settings.allowPrivateEndpoint }, messages, dispatchTools, signal, options);
     }
@@ -1021,8 +1101,10 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
         );
 
         let result;
+        this.resetResponseState(claimedTask.id);
+        const onDeltaLegacy = (delta: string) => this.appendResponseDelta(claimedTask.id, delta);
         try {
-          result = await this.dispatchGenerate(settings, activeMessages, tools, signal);
+          result = await this.dispatchGenerate(settings, activeMessages, tools, signal, { onDelta: onDeltaLegacy });
         } catch (error) {
           if (!(error instanceof ProviderContextOverflowError)) throw error;
           try {
@@ -1059,7 +1141,8 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
             signal,
             [...restrictedSources],
           );
-          result = await this.dispatchGenerate(settings, retryMessages, tools, signal);
+          this.resetResponseState(claimedTask.id);
+          result = await this.dispatchGenerate(settings, retryMessages, tools, signal, { onDelta: onDeltaLegacy });
         }
         if (!result.message.toolCalls?.length) {
           if (!result.message.content.trim()) throw new AiAssistantError("provider_unavailable");
@@ -1134,6 +1217,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
           });
           return;
         }
+        this.resetResponseState(claimedTask.id);
 
         const call = result.message.toolCalls[0]!;
         if (call.function.name === "request_clarification") {
@@ -1474,18 +1558,21 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
         }
         return;
       } catch (err) {
-        if (err instanceof AiPersistenceConflictError && err.code === "uncertain_outcome") {
+        const isUncertainOutcome =
+          (err instanceof AiPersistenceConflictError || err instanceof AiAssistantError) &&
+          err.code === "uncertain_outcome";
+        if (isUncertainOutcome) {
           const current = await this.repository.getTask(vpsId, taskId);
           if (current && current.state === "awaiting_approval") {
             await this.repository.updateTask({
               id: taskId,
               expectedRevision: current.revision,
               state: "failed",
-              error: { code: "uncertain_outcome", message: "AI task could not complete" },
+              error: { code: "uncertain_outcome", message: UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE },
               completion: {
                 kind: "blocked",
                 reasonCode: "uncertain_outcome",
-                message: "AI task could not complete",
+                message: UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE,
                 completedAt: new Date().toISOString(),
               },
             }).catch(() => {});
@@ -1497,16 +1584,17 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
         if (!current || terminal.has(current.state) || current.state === "uncertain") return;
         const cancelled = controller.signal.aborted;
         const code = cancelled ? "cancelled" : snapshotFailureCode(err);
+        const message = failureErrorMessage(code, cancelled);
         if (current.state === "awaiting_approval") {
           await this.repository.updateTask({
             id: taskId,
             expectedRevision: current.revision,
             state: cancelled ? "cancelled" : "failed",
-            error: { code, message: "AI task could not complete" },
+            error: { code, message },
             completion: {
               kind: cancelled ? "cancelled" : "blocked",
               reasonCode: code,
-              message: "AI task could not complete",
+              message,
               completedAt: new Date().toISOString(),
             },
           }).catch(() => {});
@@ -1519,11 +1607,11 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
           expectedLeaseToken: leaseToken,
           ownerInstanceId,
           state: cancelled ? "cancelled" : "failed",
-          error: { code, message: "AI task could not complete" },
+          error: { code, message },
           completion: {
             kind: cancelled ? "cancelled" : "blocked",
             reasonCode: code,
-            message: "AI task could not complete",
+            message,
             completedAt: new Date().toISOString(),
           },
           releaseTurnLease: true,
@@ -1556,9 +1644,11 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
         const preflight = this.measureDispatch(settings, prepared.messages, tools);
         if (task.usage.inputTokens + task.usage.outputTokens + preflight.estimatedPromptTokens + PROVIDER_MAX_OUTPUT_TOKENS > this.config.ai.maxCumulativeTaskTokens) throw new AiAssistantError("budget_exhausted");
         let result;
+        this.resetResponseState(task.id);
+        const onDeltaLoop = (delta: string) => this.appendResponseDelta(task.id, delta);
         try {
           await this.revalidateContextDispatch(task, { providerRevision, policyRevision, sessionId }, signal, [...restrictedSources]);
-          result = await this.dispatchGenerate({ ...settings }, prepared.messages, tools, signal);
+          result = await this.dispatchGenerate({ ...settings }, prepared.messages, tools, signal, { onDelta: onDeltaLoop });
         } catch (error) {
           if (!(error instanceof ProviderContextOverflowError)) throw error;
           try {
@@ -1571,7 +1661,8 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
           const retrySize = this.measureDispatch(settings, prepared.messages, tools);
           if (task.usage.inputTokens + task.usage.outputTokens + retrySize.estimatedPromptTokens + PROVIDER_MAX_OUTPUT_TOKENS > this.config.ai.maxCumulativeTaskTokens) throw new AiAssistantError("budget_exhausted");
           await this.revalidateContextDispatch(task, { providerRevision, policyRevision, sessionId }, signal, [...restrictedSources]);
-          result = await this.dispatchGenerate({ ...settings }, prepared.messages, tools, signal);
+          this.resetResponseState(task.id);
+          result = await this.dispatchGenerate({ ...settings }, prepared.messages, tools, signal, { onDelta: onDeltaLoop });
         }
         const current = await this.repository.getTask(task.vpsId, task.id);
         if (!current || terminal.has(current.state)) return;
@@ -1585,6 +1676,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
           await this.repository.updateTask({ id: task.id, expectedRevision: task.revision, state: "succeeded", summary: sanitizedContent });
           return;
         }
+        this.resetResponseState(task.id);
         for (const call of result.message.toolCalls) {
           signal.throwIfAborted();
           await this.policy.revalidateForDispatch(task.vpsId, { providerRevision, policyRevision, providerId: task.providerId });
@@ -1785,7 +1877,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
         state: cancelled ? "cancelled" : "failed",
         error: {
           code,
-          message: cancelled ? "Task cancelled" : code === "budget_exhausted" ? "Conversation context or task token budget could not fit safely" : code === "provider_response_truncated" ? "Provider response was truncated; no incomplete summary was saved" : code === "provider_context_overflow" ? "Provider context overflow remained after one compact retry" : "AI task could not complete",
+          message: failureErrorMessage(code, cancelled),
         },
       });
     }
@@ -1901,7 +1993,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
         await this.repository.approve({ taskId, ...input.data, approvedSessionId: request.dashboardSessionId! });
       } catch (err) {
         if (err instanceof AiPersistenceConflictError && err.code === "uncertain_outcome") {
-          throw new AiAssistantError("uncertain_outcome", err.message);
+          throw new AiAssistantError("uncertain_outcome", UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE);
         }
         throw err;
       }
@@ -2089,7 +2181,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
         approvedPlan = await this.repository.approve({ taskId, ...input.data, approvedSessionId: request.dashboardSessionId! });
       } catch (err) {
         if (err instanceof AiPersistenceConflictError && err.code === "uncertain_outcome") {
-          throw new AiAssistantError("uncertain_outcome", err.message);
+          throw new AiAssistantError("uncertain_outcome", UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE);
         }
         if (err instanceof AiPersistenceConflictError && err.code === "approval_conflict") {
           throw new AiAssistantError("stale_plan", err.message);
@@ -2250,7 +2342,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
         await this.repository.approve({ taskId, ...input.data, approvedSessionId: request.dashboardSessionId! });
       } catch (err) {
         if (err instanceof AiPersistenceConflictError && err.code === "uncertain_outcome") {
-          throw new AiAssistantError("uncertain_outcome", err.message);
+          throw new AiAssistantError("uncertain_outcome", UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE);
         }
         throw err;
       }

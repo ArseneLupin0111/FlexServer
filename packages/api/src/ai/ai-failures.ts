@@ -62,6 +62,9 @@ const AI_HTTP_STATUS: Record<AiErrorCode, number> = {
   file_changed: 409,
   profile_changed: 409,
 };
+export const UNRESOLVED_UNCERTAIN_RECONCILE_MESSAGE =
+  "Cannot approve mutations while an unresolved uncertain execution exists on this VPS; reconciliation required";
+
 
 export function aiHttpStatusFor(code: AiErrorCode): number {
   return AI_HTTP_STATUS[code];

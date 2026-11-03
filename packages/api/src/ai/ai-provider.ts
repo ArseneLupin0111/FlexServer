@@ -2,8 +2,9 @@ import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest, type IncomingMessage } from "node:http";
+import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
-import { redactString, redactValue } from "../common/redaction.js";
+import { ChunkRedactor, redactString, redactValue } from "../common/redaction.js";
 export type ProviderConfig = { endpoint: string; model: string; apiKey: string; allowPrivateEndpoint?: boolean };
 export type ProviderToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
 export type ProviderMessage = { role: "system" | "user" | "assistant" | "tool"; content: string; toolCalls?: ProviderToolCall[]; toolCallId?: string; name?: string };
@@ -27,7 +28,7 @@ export const PROVIDER_MAX_BODY_BYTES = 1024 * 1024;
 export const PROVIDER_MAX_OUTPUT_TOKENS = 2048;
 /** Bounded output for no-tools compaction/summary requests. */
 export const PROVIDER_SUMMARY_MAX_OUTPUT_TOKENS = 1024;
-export type ProviderRequestOptions = { maxOutputTokens?: number };
+export type ProviderRequestOptions = { maxOutputTokens?: number; onDelta?: (delta: string) => void };
 export type ProviderRequestMeasure = { bodyBytes: number; messageCount: number; toolCount: number; maxOutputTokens: number; estimatedPromptTokens: number };
 
 function normalizedMaxOutputTokens(options?: ProviderRequestOptions): number {
@@ -46,9 +47,11 @@ function sanitizeToolArgs(raw: string): string {
 }
 /** Exact request serializer shared by the network path and preflight measurement. Never includes credentials. */
 export function serializeProviderRequestBody(model: string, messages: readonly ProviderMessage[], tools: readonly ProviderTool[], options?: ProviderRequestOptions): string {
+  const stream = Boolean(options?.onDelta);
   return JSON.stringify({
     model,
-    stream: false,
+    stream,
+    ...(stream ? { stream_options: { include_usage: true } } : {}),
     messages: messages.map(m => ({
       role: m.role,
       content: typeof m.content === "string" ? redactString(m.content) : (m.content ?? ""),
@@ -192,29 +195,330 @@ export function providerJsonExchange(target: ProviderTarget, config: ProviderCon
   });
 }
 
+export type SseEvent = { event?: string; data: string };
+
+export function providerSseExchange(
+  target: ProviderTarget,
+  config: ProviderConfig,
+  combined: AbortSignal,
+  body: string,
+  extraHeaders?: Record<string, string>,
+  onEvent?: (event: SseEvent) => void,
+): Promise<{ rawJsonFallback?: string }> {
+  return new Promise<{ rawJsonFallback?: string }>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error, result?: { rawJsonFallback?: string }) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(result ?? {});
+    };
+
+    const request = (target.url.protocol === "https:" ? httpsRequest : httpRequest)(
+      target.url,
+      {
+        method: "POST",
+        agent: false,
+        signal: combined,
+        lookup: (_host, options, callback) => {
+          const familyFiltered = options.family === 4 || options.family === 6 ? target.addresses.filter(a => a.family === options.family) : [];
+          const pinned = familyFiltered.length ? familyFiltered : target.addresses;
+          if (options.all) callback(null, pinned.map(a => ({ address: a.address, family: a.family })));
+          else { const first = pinned[0]!; callback(null, first.address, first.family); }
+        },
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+          Accept: "text/event-stream, application/json",
+          ...extraHeaders,
+        },
+      },
+      response => {
+        if (response.statusCode !== 200) {
+          rejectClassifiedStatus(response, reject);
+          return;
+        }
+        const contentType = (response.headers["content-type"] ?? "").toLowerCase();
+        if (!contentType.includes("text/event-stream") && !contentType.includes("application/json")) {
+          response.destroy();
+          finish(new ProviderTransportError());
+          return;
+        }
+
+        const isJson = contentType.includes("application/json") && !contentType.includes("text/event-stream");
+        const decoder = new StringDecoder("utf8");
+        let lineBuffer = "";
+        let currentEvent: string | undefined;
+        let currentData: string[] = [];
+        let bytes = 0;
+        const jsonChunks: Buffer[] = [];
+
+        const dispatchCurrentEvent = () => {
+          if (currentData.length > 0) {
+            const dataStr = currentData.join("\n");
+            try {
+              onEvent?.({ event: currentEvent, data: dataStr });
+            } catch (err) {
+              finish(err instanceof Error ? err : new ProviderProtocolError());
+              response.destroy();
+              return;
+            }
+          }
+          currentEvent = undefined;
+          currentData = [];
+        };
+
+        const processLine = (line: string) => {
+          const trimmedLine = line.endsWith("\r") ? line.slice(0, -1) : line;
+          if (trimmedLine === "") {
+            dispatchCurrentEvent();
+            return;
+          }
+          if (trimmedLine.startsWith(":")) {
+            return;
+          }
+          if (trimmedLine.startsWith("event:")) {
+            currentEvent = trimmedLine.slice(6).trimStart();
+            return;
+          }
+          if (trimmedLine.startsWith("data:")) {
+            currentData.push(trimmedLine.slice(5).trimStart());
+            return;
+          }
+        };
+
+        response.on("data", (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes > PROVIDER_MAX_BODY_BYTES) {
+            finish(new ProviderProtocolError());
+            response.destroy();
+            return;
+          }
+
+          if (isJson) {
+            jsonChunks.push(chunk);
+            return;
+          }
+
+          lineBuffer += decoder.write(chunk);
+          let newlineIdx: number;
+          while ((newlineIdx = lineBuffer.indexOf("\n")) !== -1) {
+            const line = lineBuffer.slice(0, newlineIdx);
+            lineBuffer = lineBuffer.slice(newlineIdx + 1);
+            processLine(line);
+          }
+        });
+
+        response.on("end", () => {
+          if (isJson) {
+            finish(undefined, { rawJsonFallback: Buffer.concat(jsonChunks).toString("utf8") });
+            return;
+          }
+          lineBuffer += decoder.end();
+          if (lineBuffer.length > 0) {
+            processLine(lineBuffer);
+          }
+          dispatchCurrentEvent();
+          finish();
+        });
+
+        response.on("error", () => finish(new ProviderTransportError()));
+        response.on("aborted", () => finish(new ProviderTransportError()));
+      },
+    );
+
+    request.on("error", () => finish(new ProviderTransportError()));
+    request.end(body);
+  });
+}
+
+function parseChatCompletionsJson(raw: string, body: string, tools: readonly ProviderTool[], onDelta?: (delta: string) => void): ProviderResult {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(raw);
+  } catch {
+    throw new ProviderProtocolError();
+  }
+  const parsed = responseSchema.safeParse(decoded);
+  if (!parsed.success) throw new ProviderProtocolError();
+  const choice = parsed.data.choices[0]!;
+  const message = choice.message;
+  if (choice.finish_reason === "length") throw new ProviderResponseTruncatedError();
+  if ((choice.finish_reason === "tool_calls") !== Boolean(message.tool_calls?.length)) throw new ProviderProtocolError();
+  const names = new Set(tools.map(t => t.function.name));
+  const ids = new Set<string>();
+  for (const call of message.tool_calls ?? []) {
+    if (!names.has(call.function.name) || ids.has(call.id)) throw new ProviderProtocolError();
+    ids.add(call.id);
+    try {
+      const args: unknown = JSON.parse(call.function.arguments);
+      if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error();
+    } catch {
+      throw new ProviderProtocolError();
+    }
+  }
+  const usage = parsed.data.usage;
+  const assistant: ProviderMessage = {
+    role: "assistant",
+    content: redactString(message.content ?? ""),
+    ...(message.tool_calls ? { toolCalls: message.tool_calls } : {}),
+  };
+  if (onDelta && assistant.content) {
+    onDelta(assistant.content);
+  }
+  const output = JSON.stringify(assistant);
+  return {
+    message: assistant,
+    usage: usage
+      ? { inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens, estimated: false }
+      : { inputTokens: estimateTokens(body), outputTokens: estimateTokens(output), estimated: true },
+  };
+}
+
 export async function generateProviderRequest(config: ProviderConfig, messages: readonly ProviderMessage[], tools: readonly ProviderTool[], signal?: AbortSignal, options?: ProviderRequestOptions): Promise<ProviderResult> {
   if (!config.apiKey) throw new ProviderKeyRequiredError();
   if (tools.length > PROVIDER_MAX_TOOLS || messages.length > PROVIDER_MAX_MESSAGES || !config.model || config.model.length > 256) throw new ProviderProtocolError();
   normalizedMaxOutputTokens(options);
   const deadline = AbortSignal.timeout(60000);
-  const combined = signal ? AbortSignal.any([signal,deadline]) : deadline;
+  const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
   try {
     const target = await resolveProviderTarget(config, combined, "/v1/chat/completions");
     const body = serializeProviderRequestBody(config.model, messages, tools, options);
     if (Buffer.byteLength(body) > PROVIDER_MAX_BODY_BYTES) throw new ProviderProtocolError();
-    const raw = await providerJsonExchange(target, config, combined, body);
-    let decoded: unknown; try { decoded=JSON.parse(raw); } catch { throw new ProviderProtocolError(); }
-    const parsed=responseSchema.safeParse(decoded); if(!parsed.success) throw new ProviderProtocolError();
-    const choice=parsed.data.choices[0]!; const message=choice.message;
-    if (choice.finish_reason === "length") throw new ProviderResponseTruncatedError();
-    if ((choice.finish_reason === "tool_calls") !== Boolean(message.tool_calls?.length)) throw new ProviderProtocolError();
-    const names=new Set(tools.map(t=>t.function.name)); const ids=new Set<string>();
-    for(const call of message.tool_calls ?? []) { if(!names.has(call.function.name)||ids.has(call.id)) throw new ProviderProtocolError(); ids.add(call.id); try { const args:unknown=JSON.parse(call.function.arguments); if(!args||typeof args!=="object"||Array.isArray(args)) throw new Error(); } catch { throw new ProviderProtocolError(); } }
-    const usage=parsed.data.usage;
-    const assistant = {role:"assistant" as const,content:redactString(message.content ?? ""),...(message.tool_calls ? {toolCalls:message.tool_calls}:{})};
+
+    if (!options?.onDelta) {
+      const raw = await providerJsonExchange(target, config, combined, body);
+      return parseChatCompletionsJson(raw, body, tools);
+    }
+
+    const redactor = new ChunkRedactor();
+    let accumulatedContent = "";
+    const accumulatedToolCalls: ProviderToolCall[] = [];
+    let finishReason: string | null = null;
+    let usageInfo: UsageInfo | null = null;
+    let sawValidData = false;
+
+    const exchangeResult = await providerSseExchange(target, config, combined, body, undefined, ({ data }) => {
+      const trimmed = data.trim();
+      if (!trimmed) return;
+      if (trimmed === "[DONE]") return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        throw new ProviderProtocolError();
+      }
+      sawValidData = true;
+      const parsedObj = parsed as {
+        error?: unknown;
+        choices?: Array<{
+          finish_reason?: string | null;
+          delta?: {
+            content?: string | null;
+            tool_calls?: Array<{
+              index?: number;
+              id?: string;
+              type?: "function";
+              function?: { name?: string; arguments?: string };
+            }>;
+          };
+        }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number };
+      };
+      if (parsedObj.error) throw new ProviderProtocolError();
+      if (parsedObj.usage) {
+        const pt = parsedObj.usage.prompt_tokens;
+        const ct = parsedObj.usage.completion_tokens;
+        if (typeof pt === "number" && typeof ct === "number") {
+          if (pt < 0 || ct < 0 || !Number.isSafeInteger(pt) || !Number.isSafeInteger(ct)) {
+            throw new ProviderProtocolError();
+          }
+          usageInfo = {
+            inputTokens: pt,
+            outputTokens: ct,
+            estimated: false,
+          };
+        }
+      }
+      const choices = parsedObj.choices;
+      if (!Array.isArray(choices) || !choices.length) return;
+      const choice = choices[0]!;
+      if (choice.finish_reason) finishReason = choice.finish_reason;
+      const delta = choice.delta;
+      if (!delta) return;
+
+      if (typeof delta.content === "string" && delta.content) {
+        accumulatedContent += delta.content;
+        const safeDelta = redactor.process(delta.content);
+        if (safeDelta) options.onDelta!(safeDelta);
+      }
+
+      if (Array.isArray(delta.tool_calls)) {
+        for (const tc of delta.tool_calls) {
+          const idx = tc.index ?? 0;
+          if (!accumulatedToolCalls[idx]) {
+            accumulatedToolCalls[idx] = {
+              id: "",
+              type: "function",
+              function: { name: "", arguments: "" },
+            };
+          }
+          if (tc.id) accumulatedToolCalls[idx]!.id = tc.id;
+          if (tc.function?.name) accumulatedToolCalls[idx]!.function.name += tc.function.name;
+          if (tc.function?.arguments) accumulatedToolCalls[idx]!.function.arguments += tc.function.arguments;
+        }
+      }
+    });
+
+    if (exchangeResult.rawJsonFallback) {
+      return parseChatCompletionsJson(exchangeResult.rawJsonFallback, body, tools, options.onDelta);
+    }
+
+    const flushed = redactor.flush();
+    if (flushed) options.onDelta(flushed);
+
+    if (!sawValidData) throw new ProviderProtocolError();
+    if (finishReason === "length") throw new ProviderResponseTruncatedError();
+    if (finishReason !== "stop" && finishReason !== "tool_calls") throw new ProviderProtocolError();
+    if (finishReason === "tool_calls" && !accumulatedToolCalls.length) throw new ProviderProtocolError();
+    if (finishReason === "stop" && accumulatedToolCalls.length) throw new ProviderProtocolError();
+
+    const names = new Set(tools.map(t => t.function.name));
+    const ids = new Set<string>();
+    for (const call of accumulatedToolCalls) {
+      if (!names.has(call.function.name) || ids.has(call.id)) throw new ProviderProtocolError();
+      ids.add(call.id);
+      try {
+        const args: unknown = JSON.parse(call.function.arguments);
+        if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error();
+      } catch {
+        throw new ProviderProtocolError();
+      }
+    }
+
+    const assistant: ProviderMessage = {
+      role: "assistant",
+      content: redactString(accumulatedContent),
+      ...(accumulatedToolCalls.length ? { toolCalls: accumulatedToolCalls } : {}),
+    };
     const output = JSON.stringify(assistant);
-    return {message:assistant,usage:usage?{inputTokens:usage.prompt_tokens,outputTokens:usage.completion_tokens,estimated:false}:{inputTokens:estimateTokens(body),outputTokens:estimateTokens(output),estimated:true}};
-  } catch(error) { if(error instanceof ProviderProtocolError || error instanceof ProviderTransportError) throw error; throw new ProviderTransportError(); }
+    const usage = usageInfo ?? {
+      inputTokens: estimateTokens(body),
+      outputTokens: estimateTokens(output),
+      estimated: true,
+    };
+    return { message: assistant, usage };
+  } catch (error) {
+    if (
+      error instanceof ProviderProtocolError ||
+      error instanceof ProviderTransportError ||
+      error instanceof ProviderResponseTruncatedError
+    ) {
+      throw error;
+    }
+    throw new ProviderTransportError();
+  }
 }
 
 const modelsResponseSchema = z.object({ data: z.array(z.object({ id: z.string().min(1).max(256) }).passthrough()) }).passthrough();

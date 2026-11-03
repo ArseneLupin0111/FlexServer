@@ -23,6 +23,7 @@ import { AssistantMarkdown } from "./AssistantMarkdown";
 export type AssistantChatProps = {
   messages: AiConversationMessage[];
   activeTask: AiTask | null;
+  streamingText?: string | null;
   onSendMessage: (text: string) => Promise<void>;
   onSubmitClarification: (text: string) => Promise<void>;
   onSelectBusyTask?: (taskId: string) => void;
@@ -93,6 +94,7 @@ function EvidenceDisclosure({
 export function AssistantChat({
   messages,
   activeTask,
+  streamingText,
   onSendMessage,
   onSubmitClarification,
   onSelectBusyTask,
@@ -133,7 +135,7 @@ export function AssistantChat({
       top: el.scrollHeight,
       behavior: prefersReducedMotion() ? "auto" : "smooth",
     });
-  }, [messages.length, activeTask?.state, isAwaitingInput, clarificationPrompt]);
+  }, [messages.length, activeTask?.state, isAwaitingInput, clarificationPrompt, streamingText]);
 
   function handleLogScroll() {
     const el = logRef.current;
@@ -305,13 +307,43 @@ export function AssistantChat({
             </div>
             <div className="min-w-0 flex-1">
               <div className="mb-1 text-xs font-medium text-dim">Assistant</div>
-              <p className="flex items-center gap-2 text-xs text-dim">
-                <LoaderCircle
-                  className="h-3.5 w-3.5 animate-spin text-signal"
-                  aria-hidden="true"
-                />
-                Working…
-              </p>
+              {streamingText ? (
+                <div>
+                  <AssistantMarkdown content={streamingText} />
+                  <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-signal align-middle animate-pulse" aria-hidden="true" />
+                </div>
+              ) : (
+                <p className="flex items-center gap-2 text-xs text-dim">
+                  <LoaderCircle
+                    className="h-3.5 w-3.5 animate-spin text-signal"
+                    aria-hidden="true"
+                  />
+                  Working…
+                </p>
+              )}
+            </div>
+          </div>
+        ) : null}
+
+        {/* Retain partial response on failure or cancellation only if no final answer/summary is represented */}
+        {!isTaskRunning &&
+        streamingText &&
+        !activeTask?.summary &&
+        !(messages.length > 0 && messages[messages.length - 1]?.role === "assistant") &&
+        (activeTask?.state === "failed" || activeTask?.state === "cancelled") ? (
+          <div className="mx-auto flex w-full min-w-0 max-w-3xl gap-3 opacity-80">
+            <div
+              className="mt-4 hidden h-7 w-7 shrink-0 items-center justify-center rounded-[10px] border border-line bg-raised sm:flex"
+              aria-hidden="true"
+            >
+              <Bot className="h-4 w-4 text-dim" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="mb-1 flex items-baseline gap-2 text-xs text-dim">
+                <span className="font-medium">Assistant</span>
+                <span className="text-warn text-[11px]">(interrupted)</span>
+              </div>
+              <AssistantMarkdown content={streamingText} />
             </div>
           </div>
         ) : null}

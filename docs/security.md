@@ -336,7 +336,7 @@ When executing commands on host systems, uncertainty cannot be resolved by blind
 - **Uncertainty triggers:** If an execution turn lease expires without a receipt, a receipt is marked `"uncertain"`, or execution was cancelled after starting on the host, the task transitions to `state: "uncertain"` with error code `uncertain_outcome`.
 - **Continuation halted:** The execution loop immediately halts all further execution.
 - **No blind retries:** The runtime strictly refuses to retry or re-dispatch an uncertain mutation step. Re-running a command that partially completed or succeeded without acknowledging receipt could result in corrupted data, broken configurations, or duplicate destructive side effects.
-- **Mutation fence:** Outbox mutation fences block any further plan approval or dispatch on that VPS while an unresolved uncertain task exists. Manual inspection or receipt reconciliation is required.
+- **Mutation fence:** Outbox mutation fences block any further plan approval or dispatch on that VPS while an unresolved uncertain task or receipt exists. Auto-approval and manual approval fail closed with an explicit reconciliation required message (`uncertain_outcome`). Manual inspection or receipt reconciliation is required.
 
 ### Resume Security Constraints (`POST /api/vps/:vpsId/ai/tasks/:taskId/resume`)
 

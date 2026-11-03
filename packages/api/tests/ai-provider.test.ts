@@ -426,3 +426,138 @@ describe("AI provider outbound credential sanitization", () => {
     expect(capturedBody).toContain("/var/log/auth.log failed login for root");
   });
 });
+
+describe("AI provider streaming and SSE parsing", () => {
+  async function streamingProvider(chunks: (string | Buffer)[], headers?: Record<string, string>, status = 200): Promise<ProviderConfig> {
+    const server = createServer((request, response) => {
+      request.resume();
+      response.writeHead(status, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        ...headers,
+      });
+      for (const chunk of chunks) {
+        response.write(chunk);
+      }
+      response.end();
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing listener");
+    return {
+      endpoint: `http://127.0.0.1:${address.port}`,
+      apiKey: "synthetic-test-key",
+      model: "synthetic",
+      allowPrivateEndpoint: true,
+    };
+  }
+
+  it("delivers incremental prose deltas and validates final message with usage", async () => {
+    const sseLines = [
+      'data: {"choices":[{"delta":{"role":"assistant"},"index":0}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"Hello "},"index":0}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"world!"},"index":0}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const deltas: string[] = [];
+    const config = await streamingProvider(sseLines);
+    const result = await new AiProvider().generate(
+      config,
+      [{ role: "user", content: "hi" }],
+      [],
+      undefined,
+      { onDelta: (d) => deltas.push(d) },
+    );
+    expect(deltas.join("")).toBe("Hello world!");
+    expect(result.message.content).toBe("Hello world!");
+    expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 5, estimated: false });
+  });
+
+  it("handles TCP split packets across lines and multibyte UTF-8 characters", async () => {
+    const json1 = 'data: {"choices":[{"delta":{"content":"Rocket: ';
+    const json2 = '🚀 and text\\n"},"index":0}]}\n\n';
+    const buf1 = Buffer.from(json1, "utf8");
+    const fullBuf2 = Buffer.from(json2, "utf8");
+    const partA = fullBuf2.subarray(0, 2);
+    const partB = fullBuf2.subarray(2);
+
+    const ssePackets = [
+      buf1,
+      partA,
+      partB,
+      Buffer.from('data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}]}\n\ndata: [DONE]\n\n', "utf8"),
+    ];
+
+    const deltas: string[] = [];
+    const config = await streamingProvider(ssePackets);
+    const result = await new AiProvider().generate(
+      config,
+      [{ role: "user", content: "rocket" }],
+      [],
+      undefined,
+      { onDelta: (d) => deltas.push(d) },
+    );
+    expect(deltas.join("")).toBe("Rocket: 🚀 and text\n");
+    expect(result.message.content).toBe("Rocket: 🚀 and text\n");
+  });
+
+  it("accumulates tool call deltas without leaking tool arguments to onDelta", async () => {
+    const sseLines = [
+      'data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_123","type":"function","function":{"name":"flexserver_check","arguments":""}}]},"index":0}]}\n\n',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"ok\\""}}]},"index":0}]}\n\n',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":true}"}}]},"index":0}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}]}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const deltas: string[] = [];
+    const config = await streamingProvider(sseLines);
+    const result = await new AiProvider().generate(
+      config,
+      [{ role: "user", content: "check" }],
+      [{ type: "function", function: { name: "flexserver_check", description: "Synthetic", parameters: { type: "object" } } }],
+      undefined,
+      { onDelta: (d) => deltas.push(d) },
+    );
+    expect(deltas).toEqual([]);
+    expect(result.message.toolCalls).toHaveLength(1);
+    expect(result.message.toolCalls![0]!.id).toBe("call_123");
+    expect(result.message.toolCalls![0]!.function.name).toBe("flexserver_check");
+    expect(result.message.toolCalls![0]!.function.arguments).toBe('{"ok":true}');
+  });
+
+  it("throws ProviderResponseTruncatedError on finish_reason length", async () => {
+    const sseLines = [
+      'data: {"choices":[{"delta":{"content":"Incomplete..." },"finish_reason":"length","index":0}]}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const config = await streamingProvider(sseLines);
+    await expect(
+      new AiProvider().generate(config, [{ role: "user", content: "hi" }], [], undefined, { onDelta: () => {} }),
+    ).rejects.toBeInstanceOf(ProviderResponseTruncatedError);
+  });
+
+  it("throws ProviderProtocolError if stream terminates without valid finish_reason", async () => {
+    const sseLines = [
+      'data: {"choices":[{"delta":{"content":"Halfway without finish reason"},"index":0}]}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const config = await streamingProvider(sseLines);
+    await expect(
+      new AiProvider().generate(config, [{ role: "user", content: "hi" }], [], undefined, { onDelta: () => {} }),
+    ).rejects.toBeInstanceOf(ProviderProtocolError);
+  });
+
+  it("throws ProviderProtocolError if streaming usage contains negative values", async () => {
+    const sseLines = [
+      'data: {"choices":[{"delta":{"content":"Hi"},"index":0}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":-10,"completion_tokens":5}}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const config = await streamingProvider(sseLines);
+    await expect(
+      new AiProvider().generate(config, [{ role: "user", content: "hi" }], [], undefined, { onDelta: () => {} }),
+    ).rejects.toBeInstanceOf(ProviderProtocolError);
+  });
+});

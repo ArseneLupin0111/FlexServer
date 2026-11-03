@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — Agent command receipt contract for target_busy
+
+- Add `target_busy` to API `AGENT_COMMAND_ERROR_CODES` enum (`docker-management.schemas.ts`), matching the Go agent command error allowlist. Prevents HTTP 400 schema validation errors on truthfully reported lock conflicts (`executed: false`, `errorCode: "target_busy"`).
+- Ingest late command reports idempotently after lease expiration: record terminal failure (`failed`, `target_busy`) in database persistence without arbitrary error codes, blind retries, or automatic AI task uncertainty clearing. Unreconciled AI tasks safely require operator reconciliation.
+
+## Unreleased — Clear uncertain admission rejection and reconciliation message
+
+- Preserve and surface the true cause when plan approval is rejected by the uncertain outcome fence: when an unresolved uncertain task or receipt exists on the VPS, both manual approval and autonomous YOLO auto-approval now fail closed with an explicit error message ("Cannot approve mutations while an unresolved uncertain execution exists on this VPS; reconciliation required") and blocked completion ("uncertain_outcome") instead of masking the rejection behind a generic "AI task could not complete".
+- In `runLoopTurn`, handle wrapped `AiAssistantError` with code `uncertain_outcome` alongside `AiPersistenceConflictError`, preventing the catch handler from bypassing admission fence handling.
+- Preserve pending plan status, host command fences, and prior unresolved uncertain state without dispatching commands or pretending mutations executed.
+
+## Unreleased — Real incremental assistant response streaming (API -> Web)
+
+- Real-time incremental streaming for both API-key Chat Completions and ChatGPT Codex OAuth transports via delta callback provider contract (`stream: true`).
+- Wire SSE stream events: added task-scoped ephemeral response state (`ai.message.delta`) to SSE publisher (`GET /api/ai/tasks/:taskId/events`), handling late joiners, reconnects, turn resets, and terminal state cleanup.
+- Resilient SSE parsing: robust UTF-8 StringDecoder decoding, multiline buffering, tool-call delta accumulation without emitting raw tool arguments or reasoning tokens as prose, handling finish reason `length` as `ProviderResponseTruncatedError`, and enforcing body byte caps.
+- Safe chunk redactor: emits prose tokens incrementally without newline delays while holding back split secret triggers, tokens, and assignments across chunk boundaries to prevent secret leakage.
+- Web chat integration: updated `useAiTaskStream`, `AssistantPanel`, and `AssistantChat` to render live streaming markdown before task completion with an active pulsing indicator, transition seamlessly to persisted final summary without duplicate messages, reset state across conversation/task/host changes, and retain partial streamed text with `(interrupted)` badge on failure or cancellation.
+
 ## Unreleased - Compact YOLO mode composer indicator
 
 - Replace prominent full-width YOLO root execution banner in `AssistantPanel` with a compact, noninteractive check icon + "YOLO mode" status indicator in the `AssistantChat` composer footer alongside model selection.

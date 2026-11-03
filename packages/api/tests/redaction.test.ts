@@ -186,6 +186,44 @@ describe("redaction consumer behavior regressions", () => {
       expect(flushed).not.toContain("MIIEowIBAAKCAQEA0Y1v");
       expect(flushed).toContain(REDACTED);
     });
+
+    it("emits normal prose incrementally before end without waiting for newlines", () => {
+      const redactor = new ChunkRedactor();
+      const p1 = redactor.process("Hello world! ");
+      expect(p1).toBe("Hello world! ");
+      const p2 = redactor.process("The server is running smoothly. ");
+      expect(p2).toBe("The server is running smoothly. ");
+      const p3 = redactor.process("All containers are healthy.");
+      expect(p3).toBe("");
+      const flushed = redactor.flush();
+      expect(flushed).toBe("All containers are healthy.");
+    });
+
+    it("holds back split tokens and masks secrets cut across chunk boundaries", () => {
+      const redactor = new ChunkRedactor();
+      // "sk-" cut across chunks: "sk-" then rest of token
+      const p1 = redactor.process("System inspected. Key is sk-");
+      // "System inspected. " was a safe clause, but "Key is sk-" has a trigger and no newline so held back
+      expect(p1).toBe("System inspected. ");
+      const p2 = redactor.process("1234567890abcdef1234567890 in text.\n");
+      expect(p2).not.toContain("1234567890abcdef1234567890");
+      const flushed = redactor.flush();
+      const total = p1 + p2 + flushed;
+      expect(total).not.toContain("1234567890abcdef1234567890");
+      expect(total).toContain(REDACTED);
+    });
+
+    it("holds back split assignment keys and values across chunk boundaries", () => {
+      const redactor = new ChunkRedactor();
+      const p1 = redactor.process("Setup complete; pass");
+      expect(p1).toBe("Setup complete; ");
+      const p2 = redactor.process("word = supersecret123\n");
+      expect(p2).not.toContain("supersecret123");
+      const flushed = redactor.flush();
+      const total = p1 + p2 + flushed;
+      expect(total).not.toContain("supersecret123");
+      expect(total).toContain(REDACTED);
+    });
   });
 
   describe("redactValue and isSecretKey", () => {
@@ -273,6 +311,54 @@ describe("redaction consumer behavior regressions", () => {
       expect(redactString("curl -H 'Accept: application/json' https://api.example.com")).toBe(
         "curl -H 'Accept: application/json' https://api.example.com",
       );
+    });
+  });
+
+  describe("ChunkRedactor sentence-safe split chunk redaction", () => {
+    it("does not leak YAML keys or values when split around whitespace before colon", () => {
+      const redactor = new ChunkRedactor();
+      const p1 = redactor.process("db_passphrase ");
+      const p2 = redactor.process(": swordfish\n");
+      const full = p1 + p2 + redactor.flush();
+      expect(full).not.toContain("swordfish");
+      expect(full).toContain(REDACTED);
+    });
+
+    it("does not leak env assignment when split around whitespace before equals", () => {
+      const redactor = new ChunkRedactor();
+      const p1 = redactor.process("AWS_ACCESS_KEY_ID ");
+      const p2 = redactor.process("= AKIAIOSFODNN7EXAMPLE\n");
+      const full = p1 + p2 + redactor.flush();
+      expect(full).not.toContain("AKIAIOSFODNN7EXAMPLE");
+      expect(full).toContain(REDACTED);
+    });
+
+    it("emits safe prose across sentence boundaries before line end", () => {
+      const redactor = new ChunkRedactor();
+      const p1 = redactor.process("The memory inspection completed successfully. ");
+      const p2 = redactor.process("Next step underway.");
+      expect(p1).toBe("The memory inspection completed successfully. ");
+      const flushed = redactor.flush();
+      expect(flushed).toBe("Next step underway.");
+    });
+
+    it("does not leak env key ending in dot when assignment operator is in subsequent chunk", () => {
+      const redactor = new ChunkRedactor();
+      const p1 = redactor.process("MY_KEY. ");
+      const p2 = redactor.process("= swordfish\n");
+      const full = p1 + p2 + redactor.flush();
+      expect(full).not.toContain("swordfish");
+      expect(full).toContain(REDACTED);
+    });
+
+    it("does not leak secrets when ANSI escape codes bisect trigger roots across chunks", () => {
+      const redactor = new ChunkRedactor();
+      const p1 = redactor.process("MY_KE\u001b[31mY. ");
+      expect(p1).toBe(""); // Held back because normalized candidate contains "KEY"
+      const p2 = redactor.process("= swordfish\n");
+      const full = p1 + p2 + redactor.flush();
+      expect(full).not.toContain("swordfish");
+      expect(full).toContain(REDACTED);
     });
   });
 });

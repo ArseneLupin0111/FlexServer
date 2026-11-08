@@ -144,7 +144,7 @@ const publicTask = (task: AiTask): AiTask => {
     executionMode: task.executionMode ?? task.loop?.mode,
     providerId: task.providerId,
     model: task.model,
-    requestSummary: redactString(task.requestSummary),
+    requestSummary: redactString(task.requestSummary ?? ""),
     summary: task.summary ? redactString(task.summary) : undefined,
     clarificationPrompt: task.clarificationPrompt ? redactString(task.clarificationPrompt) : undefined,
     plan: task.plan,
@@ -300,8 +300,43 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
   private readonly ownerInstanceId = `api-${process.pid}-${randomUUID()}`;
   private continuationSweepInFlight: Promise<void> | null = null;
   private continuationTimer: NodeJS.Timeout | null = null;
+  private readonly fencedTasks = new Set<string>();
+
+  fenceTask(taskId: string): void {
+    this.fencedTasks.add(taskId);
+  }
+
+  isTaskFenced(taskId: string): boolean {
+    return this.fencedTasks.has(taskId);
+  }
+
+  unfenceTask(taskId: string): void {
+    this.fencedTasks.delete(taskId);
+  }
+
+  private readonly taskLocks = new Map<string, Promise<void>>();
+
+  async withTaskLock<T>(taskId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.taskLocks.get(taskId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chained = prev.then(() => current, () => current);
+    this.taskLocks.set(taskId, chained);
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.taskLocks.get(taskId) === chained) {
+        this.taskLocks.delete(taskId);
+      }
+    }
+  }
   private readonly responseStates = new Map<string, { text: string; updatedAt: number }>();
   private readonly responseListeners = new Map<string, Set<(event: { taskId: string; delta: string; text: string; reset?: boolean }) => void>>();
+  private dockerResultUnsub?: () => void;
 
   subscribeResponse(taskId: string, listener: (event: { taskId: string; delta: string; text: string; reset?: boolean }) => void): () => void {
     let set = this.responseListeners.get(taskId);
@@ -610,7 +645,22 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
      * Optional so apiKey-only test harnesses keep constructing this service
      * positionally; chatgpt_oauth dispatch fails closed without it. */
     @Optional() @Inject(AiCodexOauthService) private readonly codexOauth?: AiCodexOauthService,
-  ) {}
+  ) {
+    this.dockerResultUnsub = this.dockerBridge?.onDockerOperationResult?.(async (vpsId, op) => {
+      if (!op.idempotencyKey?.startsWith("ai-step-")) return;
+      const stepId = op.idempotencyKey.replace(/^ai-step-/, "");
+      try {
+        const uncertainTasks = await this.repository.listUncertainTasks(vpsId);
+        for (const task of uncertainTasks) {
+          if (task.plan?.steps.some((s) => s.stepId === stepId)) {
+            await this.reconcileTaskOutcome(task).catch(() => undefined);
+          }
+        }
+      } catch {
+        // Safe dispatch
+      }
+    });
+  }
   async onModuleInit(): Promise<void> {
     await this.runContinuationSweep();
     this.continuationTimer = setInterval(() => { void this.runContinuationSweep().catch((err: unknown) => console.error("AI continuation sweep failed", { error: err instanceof Error ? err.message : String(err) })); }, 5000);
@@ -639,6 +689,10 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
     if (this.continuationTimer) clearInterval(this.continuationTimer);
     this.continuationTimer = null;
     for (const controller of this.running.values()) controller.abort();
+    if (this.dockerResultUnsub) {
+      this.dockerResultUnsub();
+      this.dockerResultUnsub = undefined;
+    }
   }
   private authorize(request: Request) { this.policy.requireAdminSession(request); if (!this.policy.isGlobalEnabled()) throw new AiAssistantError("ai_disabled"); }
   async list(request: Request, vpsId: string, conversationId?: string) {
@@ -2017,19 +2071,40 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
             expectedRevision: currentTask.revision,
             ownerLease: { ownerInstanceId: this.ownerInstanceId, leaseSeconds: stepLeaseSec },
           });
-          const onBeforeMutate = async () => {
-            try {
-              await this.policy.revalidateForDispatch(vpsId, approvedPlan);
-            } catch {
-              throw new AiAssistantError("uncertain_outcome", "Policy changed during bridge dispatch");
-            }
-            if (options?.autoApprove) {
-              const pol = await this.policy.getPolicy(vpsId);
-              const isYolo = pol?.executionMode === "yolo";
-              if (!isYolo || !await this.sessions.authenticateById(request.dashboardSessionId!)) {
-                throw new AiAssistantError("uncertain_outcome", "AutoApprove disabled or session revoked during bridge dispatch");
+          const onBeforeMutate = async <T = unknown>(mutateFn?: () => Promise<T>): Promise<T | void> => {
+            return await this.withTaskLock(taskId, async () => {
+              if (this.isTaskFenced(taskId)) {
+                throw new AiAssistantError("stale_plan", "Task dispatch fenced by retention");
               }
-            }
+              const check = await this.repository.getTask(vpsId, taskId);
+              if (!check || check.state !== "executing" || check.revision !== currentTask.revision) {
+                throw new AiAssistantError("stale_plan", "Task state changed before bridge dispatch");
+              }
+              try {
+                await this.policy.revalidateForDispatch(vpsId, approvedPlan);
+              } catch {
+                throw new AiAssistantError("uncertain_outcome", "Policy changed during bridge dispatch");
+              }
+              if (options?.autoApprove) {
+                const pol = await this.policy.getPolicy(vpsId);
+                const isYolo = pol?.executionMode === "yolo";
+                if (!isYolo || !await this.sessions.authenticateById(request.dashboardSessionId!)) {
+                  throw new AiAssistantError("uncertain_outcome", "AutoApprove disabled or session revoked during bridge dispatch");
+                }
+              }
+              if (this.isTaskFenced(taskId)) {
+                throw new AiAssistantError("stale_plan", "Task dispatch fenced by retention");
+              }
+              if (mutateFn) {
+                bridgeDispatchStarted = true;
+                const res = await mutateFn();
+                const post = await this.repository.getTask(vpsId, taskId);
+                if (!post || post.state !== "executing" || post.revision !== currentTask.revision) {
+                  throw new AiAssistantError("uncertain_outcome", "Task state changed during bridge dispatch");
+                }
+                return res;
+              }
+            });
           };
           bridgeDispatchStarted = true;
           const outcome = await this.dockerBridge.execute(vpsId, step, approvedPlan, request, onBeforeMutate);
@@ -2132,7 +2207,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
         try {
           const current = await this.repository.getTask(vpsId, taskId);
           if (!current || terminal.has(current.state)) return publicTask(current ?? task);
-          const knownPreDispatchFailure = err instanceof AiAssistantError && ["policy_denied", "stale_plan", "target_changed", "ambiguous_target", "protected_target", "task_busy", "approval_expired"].includes(err.code);
+          const knownPreDispatchFailure = err instanceof AiAssistantError && ["policy_denied", "stale_plan", "target_changed", "ambiguous_target", "protected_target", "task_busy", "approval_expired", "deadline_exceeded"].includes(err.code);
           if ((bridgeDispatchStarted && !knownPreDispatchFailure) || (err instanceof AiAssistantError && err.code === "uncertain_outcome")) {
             const uncertain = await this.repository.updateTask({
               id: taskId,
@@ -2385,28 +2460,209 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
   async reconcile(request: Request, vpsId: string, taskId: string) {
     const task = await this.get(request, vpsId, taskId);
     if (task.state !== "uncertain") return task;
-    if (
-      (task.error?.details && typeof task.error.details === "object" && (task.error.details as { conflict?: string }).conflict === "receipt_conflict") ||
-      task.error?.message?.includes("Conflicting execution receipt")
-    ) {
-      throw new AiAssistantError("uncertain_outcome", "Conflicting receipt exists; reconcile rejected without authoritative evidence");
-    }
-    const receipts = await this.repository.listReceiptsByTask(taskId);
-    const plan = task.plan;
-    if (!plan || !plan.steps.every(step => receipts.some(receipt => receipt.stepId === step.stepId && receipt.planDigest === plan.planDigest && receipt.status !== "uncertain"))) return task;
-    const stepReceipts = new Map<string, typeof receipts>();
-    for (const r of receipts) {
-      const list = stepReceipts.get(r.stepId) ?? [];
-      list.push(r);
-      stepReceipts.set(r.stepId, list);
-    }
-    for (const [stepId, list] of stepReceipts.entries()) {
-      if (list.length > 1) {
-        throw new AiAssistantError("uncertain_outcome", `Conflicting multiple receipts for step ${stepId}`);
+    const reconciled = await this.reconcileTaskOutcome(task);
+    return publicTask(reconciled);
+  }
+
+  async failQueuedOperationsForTask(vpsId: string, task: AiTask): Promise<{ failedCount: number; claimedCount: number }> {
+    if (!task.plan?.steps) return { failedCount: 0, claimedCount: 0 };
+    let failedCount = 0;
+    let claimedCount = 0;
+    for (const step of task.plan.steps) {
+      if (step.tool === "docker_action") {
+        const idempotencyKey = `ai-step-${step.stepId}`;
+        const op = await this.dockerBridge?.tombstoneDockerOperation?.(vpsId, idempotencyKey, "deadline_exceeded");
+        if (op) {
+          if (
+            op.status === "claimed" ||
+            (op.status === "failed" && (op.result?.message === "uncertain_outcome" || op.result?.message === "timeout"))
+          ) {
+            claimedCount++;
+          } else if (op.status === "failed" || op.status === "cancelled") {
+            failedCount++;
+          }
+        }
+      } else if (step.tool === "compose_action" || step.tool === "compose_deploy") {
+        const idempotencyKey = `ai-step-${step.stepId}`;
+        const op = await this.dockerBridge?.findComposeOperation?.(vpsId, idempotencyKey);
+        if (op) {
+          if (op.status === "prepared") {
+            const ok = await this.dockerBridge.failQueuedComposeOperation(vpsId, idempotencyKey);
+            if (ok) failedCount++;
+            else claimedCount++;
+          } else if (
+            op.status === "claimed" ||
+            op.status === "applying" ||
+            op.status === "uncertain" ||
+            (op.status === "failed" && (
+              (op.result as Record<string, unknown> | undefined)?.message === "uncertain_outcome" ||
+              (op.result as Record<string, unknown> | undefined)?.message === "timeout"
+            ))
+          ) {
+            claimedCount++;
+          }
+        } else {
+          await this.dockerBridge?.failQueuedComposeOperation?.(vpsId, idempotencyKey);
+          failedCount++;
+        }
       }
     }
-    const state = receipts.every(receipt => receipt.status === "succeeded") ? "succeeded" : "failed";
-    return publicTask(await this.repository.updateTask({ id: taskId, expectedRevision: task.revision, state }));
+    return { failedCount, claimedCount };
+  }
+
+  async reconcileTaskOutcome(task: AiTask): Promise<AiTask> {
+    const current = await this.repository.getTask(task.vpsId, task.id);
+    if (!current) return task;
+    if (current.state !== "uncertain") return current;
+    if (!current.plan || !current.plan.steps || current.plan.steps.length === 0) {
+      return current;
+    }
+
+    const errorDetails = current.error?.details;
+    const hasReceiptConflict =
+      (errorDetails && typeof errorDetails === "object" && "conflict" in errorDetails && errorDetails.conflict === "receipt_conflict") ||
+      Boolean(current.error?.message?.includes("Conflicting execution receipt"));
+    if (hasReceiptConflict) {
+      throw new AiAssistantError("uncertain_outcome", "Conflicting receipt exists; reconcile rejected without authoritative evidence");
+    }
+
+    const receipts = await this.repository.listReceiptsByTask(current.id);
+    let allSucceeded = true;
+    let anyFailed = false;
+    let anyUncertain = false;
+    let failureCode: string | undefined;
+    let failureMessage: string | undefined;
+
+    for (const step of current.plan.steps) {
+      if (step.tool === "docker_action") {
+        const idempotencyKey = `ai-step-${step.stepId}`;
+        const op = await this.dockerBridge?.findDockerOperation?.(current.vpsId, idempotencyKey);
+        if (!op) {
+          anyUncertain = true;
+          allSucceeded = false;
+          break;
+        }
+        if (op.status === "succeeded") {
+          continue;
+        } else if (op.status === "failed") {
+          if (op.result?.message === "uncertain_outcome" || op.result?.message === "timeout") {
+            anyUncertain = true;
+            allSucceeded = false;
+            break;
+          }
+          anyFailed = true;
+          allSucceeded = false;
+          failureCode = op.result?.message === "target_busy" ? "task_busy" : (op.result?.message ?? "action_failed");
+          failureMessage = op.result?.message ?? "Docker operation failed";
+        } else {
+          anyUncertain = true;
+          allSucceeded = false;
+          break;
+        }
+      } else if (step.tool === "compose_action" || step.tool === "compose_deploy") {
+        const idempotencyKey = `ai-step-${step.stepId}`;
+        const op = await this.dockerBridge?.findComposeOperation?.(current.vpsId, idempotencyKey);
+        if (!op) {
+          anyUncertain = true;
+          allSucceeded = false;
+          break;
+        }
+        if (op.status === "succeeded") {
+          continue;
+        } else if (op.status === "failed") {
+          anyFailed = true;
+          allSucceeded = false;
+          failureCode = "action_failed";
+          failureMessage = "Compose operation failed";
+        } else {
+          anyUncertain = true;
+          allSucceeded = false;
+          break;
+        }
+      } else {
+        const stepReceipts = receipts.filter((r) => r.stepId === step.stepId && r.planDigest === current.plan?.planDigest);
+        if (stepReceipts.length === 0) {
+          anyUncertain = true;
+          allSucceeded = false;
+          break;
+        }
+        if (stepReceipts.length > 1) {
+          throw new AiAssistantError("uncertain_outcome", `Conflicting multiple receipts for step ${step.stepId}`);
+        }
+        const r = stepReceipts[0];
+        if (r.status === "uncertain") {
+          anyUncertain = true;
+          allSucceeded = false;
+          break;
+        } else if (r.status === "failed") {
+          anyFailed = true;
+          allSucceeded = false;
+          failureCode = (r.result && typeof r.result === "object" && "message" in r.result && typeof r.result.message === "string") ? r.result.message : "action_failed";
+          failureMessage = failureCode;
+        } else if (r.status === "cancelled") {
+          const executed = Boolean(r.result && typeof r.result === "object" && "executed" in r.result && (r.result as { executed?: boolean }).executed === true);
+          if (executed) {
+            anyUncertain = true;
+            allSucceeded = false;
+            break;
+          } else {
+            anyFailed = true;
+            allSucceeded = false;
+            failureCode = "cancelled";
+            failureMessage = "Step cancelled";
+          }
+        } else if (r.status === "succeeded") {
+          continue;
+        } else {
+          anyUncertain = true;
+          allSucceeded = false;
+          break;
+        }
+      }
+    }
+
+    if (anyUncertain) {
+      return current;
+    }
+
+    const nextState: AiTaskState = allSucceeded ? "succeeded" : "failed";
+    const isLoop = current.executionVersion === 2 || Boolean(current.loop);
+    const completion = isLoop ? {
+      kind: nextState === "succeeded" ? "verified" as const : "unverified" as const,
+      reasonCode: nextState === "succeeded" ? "reconciled_succeeded" : "reconciled_from_evidence",
+      message: nextState === "succeeded"
+        ? "Task reconciled successfully from definitive evidence"
+        : `Task reconciled to failure from definitive evidence: ${failureMessage ?? "operation failed"}`,
+      completedAt: new Date().toISOString(),
+    } : undefined;
+
+    try {
+      const updated = await this.repository.updateTask({
+        id: current.id,
+        expectedRevision: current.revision,
+        state: nextState,
+        completion,
+        error: nextState === "failed" ? { code: failureCode ?? "action_failed", message: failureMessage ?? "Task execution failed" } : undefined,
+      });
+
+      await this.repository.appendAuditEvent({
+        id: randomUUID(),
+        actorSessionId: "system",
+        vpsId: current.vpsId,
+        taskId: current.id,
+        operationId: "task_reconcile",
+        resultCode: nextState,
+        createdAt: new Date().toISOString(),
+      });
+
+      return updated;
+    } catch (err) {
+      if (err instanceof AiPersistenceConflictError) {
+        const refreshed = await this.repository.getTask(current.vpsId, current.id);
+        if (refreshed) return refreshed;
+      }
+      throw err;
+    }
   }
   async wakeContinuation(vpsId: string, taskId: string): Promise<void> {
     const rawTask = await this.repository.getTask(vpsId, taskId);

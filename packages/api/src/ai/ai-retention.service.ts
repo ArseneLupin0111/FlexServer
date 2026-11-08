@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional, type OnApplicationBootstrap, type OnApplicationShutdown } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config/app-config.js";
 import { AI_REPOSITORY, APP_CONFIG, VPS_REPOSITORY } from "../tokens.js";
@@ -7,6 +7,7 @@ import { AI_ACTIVE_TASK_STATES } from "../persistence/repositories/ai.persistenc
 import type { AiTaskState } from "./ai.models.js";
 import type { VpsRepository } from "../persistence/repositories/vps.repository.js";
 import { DashboardSessionService } from "../auth/dashboard-session.service.js";
+import { AiTaskService } from "./ai-task.service.js";
 
 export type AiRetentionHealth = {
   status: "healthy" | "degraded" | "unknown";
@@ -42,6 +43,8 @@ export class AiRetentionService implements OnApplicationBootstrap, OnApplication
     @Inject(VPS_REPOSITORY) private readonly vpsRepository: VpsRepository,
     @Inject(DashboardSessionService)
     private readonly dashboardSessions: DashboardSessionService,
+    @Optional() @Inject(AiTaskService)
+    private readonly taskService?: AiTaskService,
   ) {}
   getHealth(): AiRetentionHealth {
     return { ...this.healthState };
@@ -135,6 +138,7 @@ export class AiRetentionService implements OnApplicationBootstrap, OnApplication
         initiatingSessionId?: string;
         ownerLeaseExpiresAt?: string;
       };
+
 
       // Check session revocation: initiating session or plan approved session
       let sessionRevoked = false;
@@ -248,80 +252,252 @@ export class AiRetentionService implements OnApplicationBootstrap, OnApplication
         activeTask.loop?.counters.deadlineAt &&
         new Date(activeTask.loop.counters.deadlineAt).getTime() <= now;
 
+      const planExpired = Boolean(
+        activeTask.state === "awaiting_approval" &&
+        activeTask.plan?.expiresAt &&
+        new Date(activeTask.plan.expiresAt).getTime() <= now
+      );
       const isExpiredAwaiting =
-        Boolean(isLoopDeadlineExpired) || (
-        !isLoopContinuationActive &&
-        (activeTask.state === "awaiting_approval" ||
-          activeTask.state === "awaiting_input" ||
-          activeTask.state === "planning") &&
-        activeTask.expiresAt &&
-        new Date(activeTask.expiresAt).getTime() <= now);
+        Boolean(isLoopDeadlineExpired) ||
+        planExpired ||
+        (
+          !isLoopContinuationActive &&
+          (activeTask.state === "awaiting_approval" ||
+            activeTask.state === "awaiting_input" ||
+            activeTask.state === "planning") &&
+          activeTask.expiresAt &&
+          new Date(activeTask.expiresAt).getTime() <= now
+        );
       if (isStalePlanning || isExpiredAwaiting) {
         try {
-          await this.repository.updateTask({
-            id: activeTask.id,
-            expectedRevision: activeTask.revision,
-            state: "expired",
-            plan: activeTask.plan ? { ...activeTask.plan, status: "expired" } : undefined,
-            completion: isLoop ? {
-              kind: "expired",
-              reasonCode: isLoopDeadlineExpired ? "deadline_exceeded" : "approval_expired",
-              message: isLoopDeadlineExpired ? "Loop task deadline exceeded" : "Task awaiting input or approval expired",
-              completedAt: new Date().toISOString(),
-            } : undefined,
-            error: {
-              code: isLoopDeadlineExpired ? "deadline_exceeded" : "approval_expired",
-              message: isLoopDeadlineExpired
-                ? "Loop task deadline exceeded"
-                : isStalePlanning
-                ? "Planning lease expired following crash or disconnect"
-                : "Task awaiting input or approval expired",
-            },
-          });
-          await this.repository.appendAuditEvent({
-            id: randomUUID(),
-            actorSessionId: "system",
-            vpsId: vps.id,
-            taskId: activeTask.id,
-            operationId: "task_expired_reconcile",
-            resultCode: "approval_expired",
-            createdAt: new Date().toISOString(),
-          });
-          recoveredCount++;
+          const runCleanup = async () => {
+            this.taskService?.fenceTask(activeTask.id);
+            const { remainingDispatchedCount } = await this.repository.expirePendingCommandsForTask(activeTask.id);
+            const dockerStatus = await this.taskService?.failQueuedOperationsForTask(vps.id, activeTask);
+            const dockerClaimedCount = dockerStatus?.claimedCount ?? 0;
+
+            if (remainingDispatchedCount > 0 || dockerClaimedCount > 0) {
+              await this.repository.updateTask({
+                id: activeTask.id,
+                expectedRevision: activeTask.revision,
+                state: "uncertain",
+                plan: activeTask.plan ? { ...activeTask.plan, status: "expired" } : undefined,
+                error: {
+                  code: "uncertain_outcome",
+                  message: "Dispatched mutation commands remained pending at timeout expiry",
+                },
+              });
+              await this.repository.appendAuditEvent({
+                id: randomUUID(),
+                actorSessionId: "system",
+                vpsId: vps.id,
+                taskId: activeTask.id,
+                operationId: "timeout_uncertain_reconcile",
+                resultCode: "uncertain_outcome",
+                createdAt: new Date().toISOString(),
+              });
+              recoveredCount++;
+              return;
+            }
+
+            await this.repository.updateTask({
+              id: activeTask.id,
+              expectedRevision: activeTask.revision,
+              state: "expired",
+              plan: activeTask.plan ? { ...activeTask.plan, status: "expired" } : undefined,
+              completion: isLoop ? {
+                kind: "expired",
+                reasonCode: isLoopDeadlineExpired ? "deadline_exceeded" : "approval_expired",
+                message: isLoopDeadlineExpired ? "Loop task deadline exceeded" : "Task awaiting input or approval expired",
+                completedAt: new Date().toISOString(),
+              } : undefined,
+              error: {
+                code: isLoopDeadlineExpired ? "deadline_exceeded" : "approval_expired",
+                message: isLoopDeadlineExpired
+                  ? "Loop task deadline exceeded"
+                  : isStalePlanning
+                  ? "Planning lease expired following crash or disconnect"
+                  : "Task awaiting input or approval expired",
+              },
+            });
+            await this.repository.appendAuditEvent({
+              id: randomUUID(),
+              actorSessionId: "system",
+              vpsId: vps.id,
+              taskId: activeTask.id,
+              operationId: "task_expired_reconcile",
+              resultCode: "approval_expired",
+              createdAt: new Date().toISOString(),
+            });
+            recoveredCount++;
+          };
+          if (this.taskService?.withTaskLock) {
+            await this.taskService.withTaskLock(activeTask.id, runCleanup);
+          } else {
+            await runCleanup();
+          }
         } catch {
           // Task revision changed concurrently
         }
         continue;
       }
-      // Check owner lease expiration for executing/verifying tasks
+      // Check cancel_requested stalled task bounds
+      if (activeTask.state === "cancel_requested") {
+        const isCancelTimeout =
+          (stored.ownerLeaseExpiresAt && new Date(stored.ownerLeaseExpiresAt).getTime() <= now) ||
+          (activeTask.expiresAt && new Date(activeTask.expiresAt).getTime() <= now) ||
+          (isLoop && activeTask.loop?.counters.deadlineAt && new Date(activeTask.loop.counters.deadlineAt).getTime() <= now) ||
+          (activeTask.plan?.expiresAt && new Date(activeTask.plan.expiresAt).getTime() <= now);
+
+        if (isCancelTimeout) {
+          try {
+            const runCancelCleanup = async () => {
+              this.taskService?.fenceTask(activeTask.id);
+              const { remainingDispatchedCount } = await this.repository.expirePendingCommandsForTask(activeTask.id);
+              const dockerStatus = await this.taskService?.failQueuedOperationsForTask(vps.id, activeTask);
+              const dockerClaimedCount = dockerStatus?.claimedCount ?? 0;
+
+              if (remainingDispatchedCount > 0 || dockerClaimedCount > 0) {
+                await this.repository.updateTask({
+                  id: activeTask.id,
+                  expectedRevision: activeTask.revision,
+                  state: "uncertain",
+                  error: {
+                    code: "uncertain_outcome",
+                    message: "Execution outcome could not be confirmed during cancellation",
+                  },
+                });
+                await this.repository.appendAuditEvent({
+                  id: randomUUID(),
+                  actorSessionId: "system",
+                  vpsId: vps.id,
+                  taskId: activeTask.id,
+                  operationId: "cancel_timeout_reconcile",
+                  resultCode: "uncertain_outcome",
+                  createdAt: new Date().toISOString(),
+                });
+              } else {
+                await this.repository.updateTask({
+                  id: activeTask.id,
+                  expectedRevision: activeTask.revision,
+                  state: "cancelled",
+                  plan: activeTask.plan ? { ...activeTask.plan, status: "denied" } : undefined,
+                  error: {
+                    code: "cancelled",
+                    message: "Task cancelled",
+                  },
+                });
+                await this.repository.appendAuditEvent({
+                  id: randomUUID(),
+                  actorSessionId: "system",
+                  vpsId: vps.id,
+                  taskId: activeTask.id,
+                  operationId: "cancel_timeout_reconcile",
+                  resultCode: "cancelled",
+                  createdAt: new Date().toISOString(),
+                });
+              }
+              recoveredCount++;
+            };
+            if (this.taskService?.withTaskLock) {
+              await this.taskService.withTaskLock(activeTask.id, runCancelCleanup);
+            } else {
+              await runCancelCleanup();
+            }
+          } catch {
+            // Task revision changed concurrently
+          }
+          continue;
+        }
+      }
+
+      // Check owner lease and deadline expiration for executing/verifying tasks
       if (
         (activeTask.state === "executing" || (!isLoop && activeTask.state === "verifying")) &&
-        stored.ownerLeaseExpiresAt &&
-        new Date(stored.ownerLeaseExpiresAt).getTime() <= now
+        ((stored.ownerLeaseExpiresAt && new Date(stored.ownerLeaseExpiresAt).getTime() <= now) ||
+         (activeTask.expiresAt && new Date(activeTask.expiresAt).getTime() <= now) ||
+         (isLoop && activeTask.loop?.counters.deadlineAt && new Date(activeTask.loop.counters.deadlineAt).getTime() <= now))
       ) {
         try {
-          await this.repository.updateTask({
-            id: activeTask.id,
-            expectedRevision: activeTask.revision,
-            state: "uncertain",
-            error: {
-              code: "uncertain_outcome",
-              message: "Execution lease expired without receipt",
-            },
-          });
-          await this.repository.appendAuditEvent({
-            id: randomUUID(),
-            actorSessionId: "system",
-            vpsId: vps.id,
-            taskId: activeTask.id,
-            operationId: "lease_expired_reconcile",
-            resultCode: "uncertain_outcome",
-            createdAt: new Date().toISOString(),
-          });
-          recoveredCount++;
+          const runExecutingCleanup = async () => {
+            this.taskService?.fenceTask(activeTask.id);
+            const { remainingDispatchedCount } = await this.repository.expirePendingCommandsForTask(activeTask.id);
+            const dockerStatus = await this.taskService?.failQueuedOperationsForTask(vps.id, activeTask);
+            const dockerClaimedCount = dockerStatus?.claimedCount ?? 0;
+
+            if (remainingDispatchedCount > 0 || dockerClaimedCount > 0) {
+              await this.repository.updateTask({
+                id: activeTask.id,
+                expectedRevision: activeTask.revision,
+                state: "uncertain",
+                error: {
+                  code: "uncertain_outcome",
+                  message: "Execution lease expired without receipt",
+                },
+              });
+              await this.repository.appendAuditEvent({
+                id: randomUUID(),
+                actorSessionId: "system",
+                vpsId: vps.id,
+                taskId: activeTask.id,
+                operationId: "lease_expired_reconcile",
+                resultCode: "uncertain_outcome",
+                createdAt: new Date().toISOString(),
+              });
+            } else {
+              // No command was ever dispatched/claimed; fail cleanly without fencing
+              await this.repository.updateTask({
+                id: activeTask.id,
+                expectedRevision: activeTask.revision,
+                state: "failed",
+                plan: activeTask.plan ? { ...activeTask.plan, status: "expired" } : undefined,
+                completion: isLoop ? {
+                  kind: "expired",
+                  reasonCode: "deadline_exceeded",
+                  message: "Execution deadline exceeded before commands were claimed",
+                  completedAt: new Date().toISOString(),
+                } : undefined,
+                error: {
+                  code: "deadline_exceeded",
+                  message: "Execution deadline exceeded before commands were claimed",
+                },
+              });
+              await this.repository.appendAuditEvent({
+                id: randomUUID(),
+                actorSessionId: "system",
+                vpsId: vps.id,
+                taskId: activeTask.id,
+                operationId: "lease_expired_reconcile",
+                resultCode: "deadline_exceeded",
+                createdAt: new Date().toISOString(),
+              });
+            }
+            recoveredCount++;
+          };
+          if (this.taskService?.withTaskLock) {
+            await this.taskService.withTaskLock(activeTask.id, runExecutingCleanup);
+          } else {
+            await runExecutingCleanup();
+          }
         } catch {
           // Task revision changed concurrently
         }
+        continue;
+      }
+    }
+
+    // Reconcile uncertain tasks across VPSs with definitive terminal evidence
+    for (const vps of vpsList) {
+      try {
+        const uncertainTasks = await this.repository.listUncertainTasks(vps.id);
+        for (const uncertainTask of uncertainTasks) {
+          const reconciled = await this.taskService?.reconcileTaskOutcome(uncertainTask);
+          if (reconciled && reconciled.state !== "uncertain") {
+            recoveredCount++;
+          }
+        }
+      } catch {
+        // Safe reconciliation scan
       }
     }
 

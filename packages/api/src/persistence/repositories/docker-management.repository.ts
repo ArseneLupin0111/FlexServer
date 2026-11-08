@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { nanoid } from "nanoid";
 import type { DatabasePool } from "../../db/pool.js";
 import { withTransaction } from "../../db/pool.js";
@@ -42,6 +43,8 @@ export type DockerManagementRepository = {
   setResult(id: string, status: Extract<DockerManagementStatus, "succeeded" | "failed">, result: DockerManagementResult, now?: string): Promise<DockerManagementOperation | undefined>;
   status(id: string): Promise<DockerManagementOperation | undefined>;
   cancelByVps(vpsId: string, reason: DockerManagementCancelReason, now?: string): Promise<number>;
+  failQueued(id: string, message: string, now?: string): Promise<boolean>;
+  tombstone(vpsId: string, idempotencyKey: string, reason?: string, now?: string): Promise<DockerManagementOperation>;
 };
 
 type Store = { operations: DockerManagementOperation[] };
@@ -77,7 +80,32 @@ export function createJsonDockerManagementRepository(filePath = "data/docker-man
   const listUnresolved = async (vpsId: string) => (await getAll()).filter(o => o.vpsId === vpsId && (o.status === "queued" || o.status === "claimed")).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
   const setResult = (id: string, status: "succeeded" | "failed", result: DockerManagementResult, now = new Date().toISOString()) => modify(s => { const o = s.operations.find(x => x.id === id); if (!o) return [s, undefined]; Object.assign(o, { status, result, leaseExpiresAt: undefined, updatedAt: now }); return [s, clone(o)]; });
   const cancelByVps = (vpsId: string, reason: DockerManagementCancelReason, now = new Date().toISOString()) => modify(s => { let n = 0; for (const o of s.operations) if (o.vpsId === vpsId && (o.status === "queued" || o.status === "claimed")) { Object.assign(o, { status: "cancelled", cancelReason: reason, leaseExpiresAt: undefined, updatedAt: now }); n++; } return [s, n]; });
-  return { deleteByVps, create, get, listByVps: async (v, l) => (await getAll()).filter(o => o.vpsId === v).sort(order).slice(0, cap(l)), claim, claimNextQueued, findByIdempotencyKey, peekNextClaimable, listUnresolved, setResult, status: get, cancelByVps };
+  const failQueued = (id: string, message: string, now = new Date().toISOString()) => modify(s => { const o = s.operations.find(x => x.id === id && x.status === "queued"); if (!o) return [s, false]; Object.assign(o, { status: "failed", result: { ok: false, message }, leaseExpiresAt: undefined, updatedAt: now }); return [s, true]; });
+  const tombstone = (vpsId: string, idempotencyKey: string, reason = "deadline_exceeded", now = new Date().toISOString()) => modify(s => {
+    const old = s.operations.find(o => o.vpsId === vpsId && o.idempotencyKey === idempotencyKey);
+    if (old) {
+      if (old.status === "queued") {
+        Object.assign(old, { status: "failed", result: { ok: false, message: reason }, cancelReason: reason, leaseExpiresAt: undefined, updatedAt: now });
+      }
+      return [s, clone(old)];
+    }
+    const id = createHash("sha256").update(JSON.stringify([vpsId, idempotencyKey])).digest("base64url").slice(0, 21);
+    const op: DockerManagementOperation = {
+      id,
+      vpsId,
+      idempotencyKey,
+      requestDigest: "tombstone",
+      action: "stop",
+      target: { containerKey: "" },
+      status: "failed",
+      cancelReason: reason,
+      result: { ok: false, message: reason },
+      createdAt: now,
+      updatedAt: now,
+    };
+    return [{ operations: [...s.operations, op] }, clone(op)];
+  });
+  return { deleteByVps, create, get, listByVps: async (v, l) => (await getAll()).filter(o => o.vpsId === v).sort(order).slice(0, cap(l)), claim, claimNextQueued, findByIdempotencyKey, peekNextClaimable, listUnresolved, setResult, status: get, cancelByVps, failQueued, tombstone };
   async function getAll() { return normalize(await readJsonFile(filePath, empty())).operations; }
 }
 
@@ -103,6 +131,25 @@ export function createPostgresDockerManagementRepository(pool: DatabasePool): Do
        RETURNING *`,
       [vpsId,agentInstanceId,new Date(Date.parse(now)+DOCKER_MANAGEMENT_CAPS.claimLeaseSeconds*1000).toISOString(),now]);return r.rows[0]&&rowToOperation(r.rows[0]);},
     async setResult(id,status,result,now=new Date().toISOString()){const r=await pool.query<Row>("UPDATE docker_management_operations SET status=$2,result=$3,lease_expires_at=NULL,updated_at=$4::timestamptz WHERE id=$1 RETURNING *",[id,status,result,now]);return r.rows[0]&&rowToOperation(r.rows[0]);},
-    async cancelByVps(v,reason,now=new Date().toISOString()){const r=await pool.query("UPDATE docker_management_operations SET status='cancelled',cancel_reason=$2,lease_expires_at=NULL,updated_at=$3::timestamptz WHERE vps_id=$1 AND status IN ('queued','claimed')",[v,reason,now]);return r.rowCount ?? 0;}
+    async cancelByVps(v,reason,now=new Date().toISOString()){const r=await pool.query("UPDATE docker_management_operations SET status='cancelled',cancel_reason=$2,lease_expires_at=NULL,updated_at=$3::timestamptz WHERE vps_id=$1 AND status IN ('queued','claimed')",[v,reason,now]);return r.rowCount ?? 0;},
+    async failQueued(id, message, now = new Date().toISOString()) { const r = await pool.query<Row>("UPDATE docker_management_operations SET status='failed',result=$2,lease_expires_at=NULL,updated_at=$3::timestamptz WHERE id=$1 AND status='queued' RETURNING *", [id, { ok: false, message }, now]); return Boolean(r.rows[0]); },
+    async tombstone(vpsId, idempotencyKey, reason = "deadline_exceeded", now = new Date().toISOString()) {
+      return withTransaction(pool, async (c) => {
+        const id = createHash("sha256").update(JSON.stringify([vpsId, idempotencyKey])).digest("base64url").slice(0, 21);
+        const r = await c.query<Row>(
+          `INSERT INTO docker_management_operations (id, vps_id, idempotency_key, request_digest, action, target, status, cancel_reason, result, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, 'stop', '{}'::jsonb, 'failed', $5, $6, $7::timestamptz, $7::timestamptz)
+           ON CONFLICT (idempotency_key) DO UPDATE
+             SET status = CASE WHEN docker_management_operations.status = 'queued' THEN 'failed' ELSE docker_management_operations.status END,
+                 cancel_reason = CASE WHEN docker_management_operations.status = 'queued' THEN EXCLUDED.cancel_reason ELSE docker_management_operations.cancel_reason END,
+                 result = CASE WHEN docker_management_operations.status = 'queued' THEN EXCLUDED.result ELSE docker_management_operations.result END,
+                 lease_expires_at = CASE WHEN docker_management_operations.status = 'queued' THEN NULL ELSE docker_management_operations.lease_expires_at END,
+                 updated_at = $7::timestamptz
+           RETURNING *`,
+          [id, vpsId, idempotencyKey, "tombstone", reason, { ok: false, message: reason }, now],
+        );
+        return rowToOperation(r.rows[0]);
+      });
+    },
   };
 }

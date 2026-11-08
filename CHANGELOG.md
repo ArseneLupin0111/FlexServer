@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — Safe AI task timeouts and auto clear resolved fences
+
+- **Bounded stalled AI states**: Bounded all pre-dispatch and waiting AI states (`planning`, `awaiting_approval`, `awaiting_input`, and `cancel_requested`) using existing configured deadlines (`loop.counters.deadlineAt`, `expiresAt`, `plan.expiresAt`, and turn lease timeouts) without arbitrary new knobs.
+  - `planning`: expired tasks transition to `expired` (`approval_expired`) after atomically failing pending outbox commands.
+  - `awaiting_approval`: expired plans transition to `expired` (`approval_expired`) with pending outbox commands atomically marked failed.
+  - `awaiting_input`: explicit waiting policy honors the overall loop/task deadline (`expiresAt`), failing cleanly if abandoned.
+  - `cancel_requested`: if execution lease expires prior to dispatch, task transitions cleanly to `cancelled` with outbox commands failed; if steps were dispatched, transitions to `uncertain` to preserve safety fences.
+- **Atomic outbox command dispatch invalidation**: Prior to releasing the active conversation slot on task timeout or pre-dispatch cancellation, all undispatched (`pending`) commands are atomically transitioned to `failed` (`expirePendingCommandsForTask`), permanently removing dispatch eligibility and ensuring stale agent workers cannot later claim expired commands.
+- **Unified reconciliation for host and Docker bridge mutations**: Unified manual (`POST /api/vps/:vpsId/ai/tasks/:taskId/reconcile`) and automated background retention (`AiRetentionService.reconcileActiveTasks()`) to inspect both host receipts (`ai_receipts`) and Docker/Compose bridge operations (`docker_management_operations`, `applications`) correlated by exact step ID and idempotency keys (`ai-step-${stepId}`).
+- **Definitive outcome fence clearance**: Uncertain tasks with definitive receipts (such as late `target_busy`, `deadline_exceeded`, or operation failure/success) are automatically transitioned to `failed` or `succeeded`, clearing the VPS mutation fence and permitting subsequent plan approvals. Indeterminate or missing receipts strictly maintain the uncertainty fence; uncertain tasks are never cleared by elapsed time alone.
+
 ## Unreleased — Agent command receipt contract for target_busy
 
 - Add `target_busy` to API `AGENT_COMMAND_ERROR_CODES` enum (`docker-management.schemas.ts`), matching the Go agent command error allowlist. Prevents HTTP 400 schema validation errors on truthfully reported lock conflicts (`executed: false`, `errorCode: "target_busy"`).

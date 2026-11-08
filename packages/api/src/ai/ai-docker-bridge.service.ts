@@ -188,6 +188,29 @@ export class AiDockerBridgeService {
     @Inject(DockerMonitoringService) private readonly dockerMonitoring: DockerMonitoringService,
     @Inject(DOCKER_MONITORING_REPOSITORY) private readonly monitoringRepo: DockerMonitoringRepository,
   ) {}
+  async findDockerOperation(vpsId: string, idempotencyKey: string): Promise<DockerManagementOperation | undefined> {
+    return this.dockerManagement?.findByIdempotencyKey(vpsId, idempotencyKey);
+  }
+
+  async failQueuedOperation(vpsId: string, id: string, message: string): Promise<boolean> {
+    return this.dockerManagement?.failQueued(vpsId, id, message) ?? false;
+  }
+  async tombstoneDockerOperation(vpsId: string, idempotencyKey: string, reason = "deadline_exceeded"): Promise<DockerManagementOperation | undefined> {
+    return this.dockerManagement?.tombstone(vpsId, idempotencyKey, reason);
+  }
+
+
+  async findComposeOperation(vpsId: string, idempotencyKey: string) {
+    return this.applications?.findByIdempotencyKey(vpsId, idempotencyKey);
+  }
+
+  async failQueuedComposeOperation(vpsId: string, idempotencyKey: string): Promise<boolean> {
+    return this.applications?.failQueued(vpsId, idempotencyKey) ?? false;
+  }
+
+  onDockerOperationResult(listener: (vpsId: string, op: DockerManagementOperation) => void | Promise<void>): (() => void) | undefined {
+    return this.dockerManagement?.onResult?.(listener);
+  }
 
   async propose(
     vpsIdOrTask: string | AiTask,
@@ -564,7 +587,7 @@ export class AiDockerBridgeService {
     step: AiPlanStep,
     plan: AiPlan,
     request?: Request,
-    onBeforeMutate?: () => Promise<void>,
+    onBeforeMutate?: <T = unknown>(mutateFn?: () => Promise<T>) => Promise<T | void>,
   ): Promise<{ ok: boolean; result: unknown }> {
     if (plan.expiresAt && Date.parse(plan.expiresAt) <= Date.now()) {
       throw new AiAssistantError("approval_expired", "Plan approval has expired");
@@ -630,7 +653,6 @@ export class AiDockerBridgeService {
         throw new AiAssistantError("protected_target", "Target container is protected");
       }
 
-      await onBeforeMutate?.();
       const idempotencyKey = `ai-step-${step.stepId}`;
       let operation: DockerManagementOperation;
       try {
@@ -639,6 +661,7 @@ export class AiDockerBridgeService {
           target,
           idempotencyKey,
           confirmedAt: new Date().toISOString(),
+          onBeforeCreate: onBeforeMutate as ((insertFn: () => Promise<DockerManagementOperation>) => Promise<DockerManagementOperation>) | undefined,
         });
       } catch (err) {
         if (err instanceof ConflictException) {
@@ -655,6 +678,10 @@ export class AiDockerBridgeService {
         }
         throw err;
       }
+      if (operation.status === "failed") {
+        throw new AiAssistantError("stale_plan", operation.result?.message || "Operation expired before execution");
+      }
+
 
       const timeoutMs = (step.timeoutSeconds ? Math.min(step.timeoutSeconds, 120) : 120) * 1000;
       const deadline = Date.now() + timeoutMs;
@@ -674,6 +701,10 @@ export class AiDockerBridgeService {
         }
         await sleep(500);
       }
+      const failedQueued = await this.dockerManagement?.failQueued(vpsId, operation.id, "deadline_exceeded").catch(() => false);
+      if (failedQueued) {
+        throw new AiAssistantError("approval_expired", "Docker operation timed out before being claimed by agent");
+      }
 
       throw new AiAssistantError("uncertain_outcome", "Timed out observing Docker operation completion");
     }
@@ -690,16 +721,18 @@ export class AiDockerBridgeService {
       const kind = `lifecycle_${action}`;
       const idempotencyKey = `ai-step-${step.stepId}`;
       let workOp: { id: string };
-      await onBeforeMutate?.();
       try {
-        workOp = await this.applications.work(vpsId, appId, kind, {
-          confirmation: { confirmed: true },
-          idempotencyKey,
-          actor: {
-            kind: "ai",
-            id: request?.dashboardSessionId ?? plan.approvedSessionId ?? "ai_assistant",
-          },
-        });
+        const doWork = async () => {
+          return await this.applications.work(vpsId, appId, kind, {
+            confirmation: { confirmed: true },
+            idempotencyKey,
+            actor: {
+              kind: "ai",
+              id: request?.dashboardSessionId ?? plan.approvedSessionId ?? "ai_assistant",
+            },
+          });
+        };
+        workOp = onBeforeMutate ? ((await onBeforeMutate(doWork)) as { id: string }) : await doWork();
       } catch (err) {
         if (err instanceof ConflictException) {
           if (err.message === "application_busy" || err.message === "container_operation_busy") {
@@ -715,6 +748,7 @@ export class AiDockerBridgeService {
         }
         throw err;
       }
+
       // Polling deadline matches apps.work lifecycle operation deadline: readiness + 60s stop grace (max 3660s)
       const timeoutMs = (step.timeoutSeconds ? Math.min(step.timeoutSeconds, 3660) : 360) * 1000;
       const deadline = Date.now() + timeoutMs;
@@ -776,19 +810,21 @@ export class AiDockerBridgeService {
       const previewDigest = previewRaw && typeof previewRaw === "object" && "digest" in previewRaw && typeof previewRaw.digest === "string" ? previewRaw.digest : "";
       const idempotencyKey = `ai-step-${step.stepId}`;
 
-      await onBeforeMutate?.();
       let deployOp: { id: string };
       try {
-        deployOp = await this.applications.confirmPreview(vpsId, appId, previewId, {
-          confirmation: { confirmed: true },
-          idempotencyKey,
-          approvedDigest: previewDigest,
-          removedServiceIds,
-          actor: {
-            kind: "ai",
-            id: request?.dashboardSessionId ?? plan.approvedSessionId ?? "ai_assistant",
-          },
-        });
+        const doDeploy = async () => {
+          return await this.applications.confirmPreview(vpsId, appId, previewId, {
+            confirmation: { confirmed: true },
+            idempotencyKey,
+            approvedDigest: previewDigest,
+            removedServiceIds,
+            actor: {
+              kind: "ai",
+              id: request?.dashboardSessionId ?? plan.approvedSessionId ?? "ai_assistant",
+            },
+          });
+        };
+        deployOp = onBeforeMutate ? ((await onBeforeMutate(doDeploy)) as { id: string }) : await doDeploy();
       } catch (err) {
         if (err instanceof ConflictException) {
           if (err.message === "application_busy") throw new AiAssistantError("task_busy", err.message);
@@ -800,6 +836,7 @@ export class AiDockerBridgeService {
         if (err instanceof ForbiddenException) throw new AiAssistantError("policy_denied", err.message);
         throw err;
       }
+
       // Polling deadline matches apps.work deploy deadline: 600s pull + 60s stop grace + readiness (max 4260s)
       const timeoutMs = (step.timeoutSeconds ? Math.min(step.timeoutSeconds, 4260) : 960) * 1000;
       const deadline = Date.now() + timeoutMs;

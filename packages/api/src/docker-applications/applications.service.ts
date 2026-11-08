@@ -373,6 +373,10 @@ export class ApplicationsService {
     return this.repo.transaction(state => {
       const app = this.app(state, vpsId, appId);
       const requestDigest = digest(input);
+      const tombstoned = state.operations.find(op => op.vpsId === vpsId && op.idempotencyKey === input.idempotencyKey && (op.requestDigest === "tombstone" || op.status === "cancelled"));
+      if (tombstoned) {
+        throw new ConflictException("operation_expired");
+      }
       const previous = state.operations.find(op => op.appId === appId && op.kind === kind && op.idempotencyKey === input.idempotencyKey);
       if (previous) {
         if (previous.requestDigest !== requestDigest) throw new ConflictException("idempotency_conflict");
@@ -1072,6 +1076,41 @@ export class ApplicationsService {
       return this.publicOperation(op);
     });
   }
+  async findByIdempotencyKey(vpsId: string, idempotencyKey: string) {
+    return this.repo.transaction(state => {
+      const op = state.operations.find(o => o.vpsId === vpsId && o.idempotencyKey === idempotencyKey);
+      return op ? this.publicOperation(op) : undefined;
+    });
+  }
+  async failQueued(vpsId: string, idempotencyKey: string): Promise<boolean> {
+    return this.repo.transaction(state => {
+      const op = state.operations.find(o => o.vpsId === vpsId && o.idempotencyKey === idempotencyKey);
+      if (!op) {
+        const id = createHash("sha256").update(JSON.stringify([vpsId, "tombstone", idempotencyKey])).digest("hex").slice(0, 21);
+        state.operations.push({
+          id,
+          vpsId,
+          appId: "",
+          kind: "lifecycle_action",
+          status: "cancelled",
+          request: {},
+          generation: 0,
+          idempotencyKey,
+          requestDigest: "tombstone",
+          createdAt: now(),
+          updatedAt: now(),
+          actor: { kind: "system" },
+        });
+        return true;
+      }
+      if (op.status === "prepared") {
+        op.status = "cancelled";
+        op.updatedAt = now();
+        return true;
+      }
+      return false;
+    });
+  }
 
   /** Byzantine-safe durable manifest for exact owned-container removal. */
   /** Rebuilds the approved preview binding from the stored encrypted resolution. */
@@ -1261,6 +1300,10 @@ export class ApplicationsService {
     await this.gate(vpsId, true);
     return this.repo.transaction(state => {
       const app = this.app(state, vpsId, appId);
+      const tombstoned = state.operations.find(op => op.vpsId === vpsId && op.idempotencyKey === input.idempotencyKey && (op.requestDigest === "tombstone" || op.status === "cancelled"));
+      if (tombstoned) {
+        throw new ConflictException("operation_expired");
+      }
       const existing = state.operations.find(op => op.appId === appId && op.kind === "deploy" && op.idempotencyKey === input.idempotencyKey);
       if (existing) {
         if (existing.requestDigest !== digest(input)) throw new ConflictException("idempotency_conflict");

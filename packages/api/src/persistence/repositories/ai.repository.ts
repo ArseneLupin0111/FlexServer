@@ -534,11 +534,22 @@ const planChanged = (
 ): boolean => {
   if (input.plan === undefined || input.plan === task.plan) return false;
   const previous = task.plan;
-  if (previous && previous.status !== "consumed" && previous.status !== "expired") {
+  if (!previous) return false;
+  if (
+    input.plan &&
+    input.plan.planId === previous.planId &&
+    input.plan.planVersion === previous.planVersion
+  ) {
+    return false;
+  }
+  if (previous.status !== "consumed" && previous.status !== "expired") {
     // Replacing a live plan requires the previous one never to have been
     // dispatched; once dispatched it must run to a receipt first.
     const dispatched = state.outbox.some(
-      (entry) => entry.taskId === task.id && entry.command.planVersion === previous.planVersion,
+      (entry) =>
+        entry.taskId === task.id &&
+        entry.command.planVersion === previous.planVersion &&
+        entry.status !== "failed",
     );
     if (dispatched) return true;
   }
@@ -847,10 +858,12 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
     async createTask(input) {
       const createdAt = isoNow(input.createdAt);
       return exec((state) => {
-        const replay = state.tasks.find(
-          (t) =>
-            t.vpsId === input.vpsId && t.idempotencyKey === input.idempotencyKey,
-        );
+        const replay = input.idempotencyKey
+          ? state.tasks.find(
+              (t) =>
+                t.vpsId === input.vpsId && t.idempotencyKey === input.idempotencyKey,
+            )
+          : undefined;
         if (replay) return { task: snapshotTask(replay), replay: true };
         assertNoActiveTask(state, input.vpsId);
         assertConversation(state, input.vpsId, input.conversationId);
@@ -889,7 +902,7 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
             }
           : undefined;
         const task: StoredTask = {
-          id: input.id,
+          id: input.id ?? randomUUID(),
           conversationId: input.conversationId,
           vpsId: input.vpsId,
           state: input.state,
@@ -1718,6 +1731,12 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
         })
         .map(snapshotTask);
     },
+    async listUncertainTasks(vpsId?: string) {
+      const state = await exec((s) => s);
+      return state.tasks
+        .filter((task) => task.state === "uncertain" && (!vpsId || task.vpsId === vpsId))
+        .map(snapshotTask);
+    },
 
     async enqueueCommands(entries) {
       await exec((state) => {
@@ -1841,6 +1860,59 @@ export function createAiRepositoryCore(exec: AiStateExecutor): AiRepository {
         .filter((entry) => entry.vpsId === vpsId && entry.status === "pending")
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
         .slice(0, Math.max(limit, 0));
+    },
+    async expirePendingCommandsForTask(taskId, now) {
+      const at = isoNow(now);
+      return exec((state) => {
+        let expiredCount = 0;
+        let remainingDispatchedCount = 0;
+        for (const entry of state.outbox) {
+          if (entry.taskId === taskId) {
+            if (entry.status === "pending") {
+              entry.status = "failed";
+              expiredCount++;
+            } else if (entry.status === "dispatched" || entry.status === "acknowledged") {
+              const hasDefinitiveReceipt = state.receipts.some(
+                (r) => r.taskId === taskId && r.commandId === entry.commandId && (
+                  r.status === "succeeded" ||
+                  r.status === "failed" ||
+                  (r.status === "cancelled" && !(r.result && typeof r.result === "object" && "executed" in r.result && (r.result as { executed?: boolean }).executed))
+                )
+              );
+              if (!hasDefinitiveReceipt) {
+                remainingDispatchedCount++;
+              }
+            }
+          }
+        }
+        const hasUncertainReceipts = state.receipts.some(
+          (r) => r.taskId === taskId && (
+            r.status === "uncertain" ||
+            (r.status === "cancelled" && Boolean(r.result && typeof r.result === "object" && "executed" in r.result && (r.result as { executed?: boolean }).executed))
+          )
+        );
+        return { expiredCount, remainingDispatchedCount: remainingDispatchedCount + (hasUncertainReceipts ? 1 : 0) };
+      });
+    },
+
+    async expirePendingCommands(now) {
+      const at = isoNow(now);
+      const atDate = new Date(at).getTime();
+      return exec((state) => {
+        let expiredCount = 0;
+        for (const entry of state.outbox) {
+          if (entry.status === "pending") {
+            const task = findTask(state, entry.taskId);
+            const isTerminal = task && isTerminalState(task.state);
+            const isDeadlinePassed = entry.command.deadlineAt && new Date(entry.command.deadlineAt).getTime() <= atDate;
+            if (isTerminal || isDeadlinePassed) {
+              entry.status = "failed";
+              expiredCount++;
+            }
+          }
+        }
+        return expiredCount;
+      });
     },
 
     async recordReceipts(receipts) {

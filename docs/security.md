@@ -277,7 +277,7 @@ AI agent result, live output, heartbeat, and cancel-status reports are accepted 
    - Tasks in `executing` or `verifying` are transitioned to `cancel_requested` with code `session_revoked`, instructing the agent to terminate execution on its next heartbeat rather than running detached.
    - Tasks in `planning`, `awaiting_approval`, or `awaiting_input` are expired immediately with code `session_revoked`.
 2. **Owner lease expiration:** Tasks in `executing` or `verifying` whose runtime owner lease expires without fresh heartbeat/receipt are transitioned to `uncertain` with wire code `uncertain_outcome`, preserving the active-slot fence without duplicate execution. Stale `planning` leases expire to unblock VPS crashes.
-3. **Awaiting task expiration:** Tasks remaining in `awaiting_approval`, `awaiting_input`, or `planning` past their `expiresAt` deadline are transitioned to `expired` with wire code `approval_expired`. A loop's absolute deadline is authoritative and is not reset by resume or restart.
+3. **Awaiting task expiration:** Tasks remaining in `awaiting_approval`, `awaiting_input`, or `planning` past their configured `expiresAt` deadline, as well as `cancel_requested` tasks whose owner lease has expired without dispatch, are transitioned to `expired` with wire code `approval_expired` or `cancelled`. Before releasing the conversation slot, all undispatched outbox commands are atomically marked `failed` (`expirePendingCommandsForTask`), permanently removing their eligibility so stale workers cannot later claim them. If commands were already dispatched, the task transitions to `uncertain` to preserve the mutation fence. User clarification input waiting policy explicitly waits up to the overarching task/loop deadline.
 
 ### Secret redaction and streaming boundaries
 
@@ -337,6 +337,7 @@ When executing commands on host systems, uncertainty cannot be resolved by blind
 - **Continuation halted:** The execution loop immediately halts all further execution.
 - **No blind retries:** The runtime strictly refuses to retry or re-dispatch an uncertain mutation step. Re-running a command that partially completed or succeeded without acknowledging receipt could result in corrupted data, broken configurations, or duplicate destructive side effects.
 - **Mutation fence:** Outbox mutation fences block any further plan approval or dispatch on that VPS while an unresolved uncertain task or receipt exists. Auto-approval and manual approval fail closed with an explicit reconciliation required message (`uncertain_outcome`). Manual inspection or receipt reconciliation is required.
+- **Definitive auto-reconciliation:** Background retention (`AiRetentionService`) and manual reconciliation (`POST /api/vps/:vpsId/ai/tasks/:taskId/reconcile`) evaluate terminal evidence across host command receipts and Docker/Compose bridge operations. Only definitive outcomes (`succeeded` or `failed`, including `target_busy` and `deadline_exceeded`) clear an uncertain task and release the fence; indeterminate or missing receipts maintain the fence. Uncertain tasks are never cleared by age/TTL alone.
 
 ### Resume Security Constraints (`POST /api/vps/:vpsId/ai/tasks/:taskId/resume`)
 

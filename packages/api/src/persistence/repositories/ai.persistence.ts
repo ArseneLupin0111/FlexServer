@@ -431,6 +431,7 @@ export interface AiRepository {
   appendJournal(input: AiAppendJournalInput): Promise<{ task: AiTask; appendedCount: number }>;
   claimPendingContinuation(input: AiClaimContinuationInput): Promise<AiTask | undefined>;
   listActiveLoopTasks(options?: { vpsId?: string; expiredTurnOnly?: boolean; continuationReadyOnly?: boolean; now?: string }): Promise<AiTask[]>;
+  listUncertainTasks(vpsId?: string): Promise<AiTask[]>;
 
   // ─── approval (CAS) ─────────────────────────────────────────────
   approve(taskReplayPlan: AiPlanApprovalInput): Promise<AiPlan>;
@@ -442,6 +443,8 @@ export interface AiRepository {
   markCommandDispatched(commandId: string, now?: string): Promise<boolean>;
   markCommandAcknowledged(commandId: string, agentInstanceId: string, now?: string): Promise<boolean>;
   replayPendingCommands(vpsId: string, limit?: number): Promise<AiOutboxEntry[]>;
+  expirePendingCommandsForTask(taskId: string, now?: string): Promise<{ expiredCount: number; remainingDispatchedCount: number }>;
+  expirePendingCommands(now?: string): Promise<number>;
 
   // ─── receipts (idempotent execution records) ─────────────────────
   recordReceipts(receipts: AiExecutionReceipt[]): Promise<{ created: number }>;

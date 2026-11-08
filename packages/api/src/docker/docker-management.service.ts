@@ -36,6 +36,36 @@ export class DockerManagementService {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Optional() @Inject(ApplicationsService) private readonly applications?: ApplicationsService,
   ) {}
+  private readonly resultListeners: ((vpsId: string, op: DockerManagementOperation) => void | Promise<void>)[] = [];
+
+  onResult(listener: (vpsId: string, op: DockerManagementOperation) => void | Promise<void>): () => void {
+    this.resultListeners.push(listener);
+    return () => {
+      const idx = this.resultListeners.indexOf(listener);
+      if (idx >= 0) this.resultListeners.splice(idx, 1);
+    };
+  }
+
+  async findByIdempotencyKey(vpsId: string, idempotencyKey: string): Promise<DockerManagementOperation | undefined> {
+    return this.repository.findByIdempotencyKey(vpsId, idempotencyKey);
+  }
+
+  async failQueued(vpsId: string, id: string, message: string): Promise<boolean> {
+    const op = await this.get(vpsId, id);
+    if (!op || op.status !== "queued") return false;
+    const ok = await this.repository.failQueued(id, message);
+    if (ok) {
+      await this.applications?.releaseContainer(vpsId, id);
+    }
+    return ok;
+  }
+  async tombstone(vpsId: string, idempotencyKey: string, reason?: string): Promise<DockerManagementOperation> {
+    const res = await this.repository.tombstone(vpsId, idempotencyKey, reason);
+    if (res.status === "failed") {
+      await this.applications?.releaseContainer(vpsId, res.id);
+    }
+    return res;
+  }
 
   private isManagementHostAllowed(record: { managedBy?: string; kind?: string }): boolean {
     return record.managedBy !== "system" || record.kind === "local";
@@ -94,7 +124,7 @@ export class DockerManagementService {
     return targets;
   }
 
-  async create(vpsId: string, input: { action: DockerManagementAction; target: DockerManagementTarget; idempotencyKey: string; confirmedAt?: string }) {
+  async create(vpsId: string, input: { action: DockerManagementAction; target: DockerManagementTarget; idempotencyKey: string; confirmedAt?: string; onBeforeCreate?: (insertFn: () => Promise<DockerManagementOperation>) => Promise<DockerManagementOperation> | Promise<void> | void }) {
     const record = await this.vps.get(vpsId);
     if (!record) throw new NotFoundException("VPS not found");
     if (!this.isManagementHostAllowed(record)) throw new ForbiddenException("Docker management is unavailable");
@@ -113,7 +143,21 @@ export class DockerManagementService {
     if (identity && previous?.status !== "succeeded" && previous?.status !== "failed" && previous?.status !== "cancelled") {
       await this.applications?.reserveContainer(vpsId, { containerKey: input.target.containerKey, agentInstanceId: identity }, operationId);
     }
-    return (await this.repository.create({ id: operationId, vpsId, idempotencyKey: input.idempotencyKey, requestDigest, action: input.action, target: input.target })).operation;
+    const insertOp = async () => {
+      return (await this.repository.create({ id: operationId, vpsId, idempotencyKey: input.idempotencyKey, requestDigest, action: input.action, target: input.target })).operation;
+    };
+    if (input.onBeforeCreate) {
+      try {
+        const customCreated = await input.onBeforeCreate(insertOp);
+        if (customCreated) return customCreated;
+      } catch (err) {
+        if (identity && previous?.status !== "succeeded" && previous?.status !== "failed" && previous?.status !== "cancelled") {
+          await this.applications?.releaseContainer(vpsId, operationId);
+        }
+        throw err;
+      }
+    }
+    return await insertOp();
   }
 
   async get(vpsId: string, id: string) {
@@ -147,12 +191,26 @@ export class DockerManagementService {
         throw new DockerManagementConflict("not_claimable", id);
       }
       await this.applications?.releaseContainer(vpsId, id);
+      for (const listener of this.resultListeners) {
+        try {
+          await listener(vpsId, op);
+        } catch {
+          // Listeners do not fail result recording
+        }
+      }
       return op;
     }
     if (op.status !== "claimed") throw new DockerManagementConflict("not_claimable", id);
     const updated = await this.repository.setResult(id, result.ok ? "succeeded" : "failed", result);
     if (!updated) throw new NotFoundException("Operation not found");
     await this.applications?.releaseContainer(vpsId, id);
+    for (const listener of this.resultListeners) {
+      try {
+        await listener(vpsId, updated);
+      } catch {
+        // Listeners do not fail result recording
+      }
+    }
     return updated;
   }
 
@@ -228,6 +286,13 @@ export class DockerManagementService {
         stored.message === result.message;
       if (identical) {
         await this.applications?.releaseContainer(vpsId, op.id);
+        for (const listener of this.resultListeners) {
+          try {
+            await listener(vpsId, op);
+          } catch {
+            // Listeners do not fail result recording
+          }
+        }
         return echo;
       }
       throw new DockerManagementConflict("not_claimable", op.id);
@@ -236,7 +301,13 @@ export class DockerManagementService {
     const updated = await this.repository.setResult(op.id, result.ok ? "succeeded" : "failed", result);
     if (!updated) throw new NotFoundException("Operation not found");
     await this.applications?.releaseContainer(vpsId, op.id);
+    for (const listener of this.resultListeners) {
+      try {
+        await listener(vpsId, updated);
+      } catch {
+        // Listeners do not fail result recording
+      }
+    }
     return echo;
   }
-
 }

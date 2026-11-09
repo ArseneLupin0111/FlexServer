@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ConflictException } from "@nestjs/common";
 import { AgentLifecycleCoordinator } from "../src/agents/agent-lifecycle-coordinator.js";
 import { TerminalSessionRegistry } from "../src/terminal/terminal-registry.js";
 import {
@@ -77,6 +78,74 @@ function createInMemoryJobRepo(initialJobs: CommandJob[] = []): JobRepository {
   } as unknown as JobRepository;
 }
 
+
+describe("AgentLifecycleCoordinator activity admission and fencing", () => {
+  it("tracks concurrent job and terminal activities, mutually excludes update, and releases idempotently", async () => {
+    const coordinator = new AgentLifecycleCoordinator();
+    const vpsId = "vps-test-1";
+
+    // Initially, update lifecycle can be acquired
+    const releaseInit = await coordinator.tryAcquire(vpsId, "update");
+    releaseInit();
+
+    const releaseJob1 = coordinator.tryAcquireActivity(vpsId, "job");
+    const releaseJob2 = coordinator.tryAcquireActivity(vpsId, "job");
+    const releaseTerm1 = coordinator.tryAcquireActivity(vpsId, "terminal");
+
+    // With active activities, tryAcquire("update") must reject with ConflictException
+    await expect(coordinator.tryAcquire(vpsId, "update")).rejects.toThrow(ConflictException);
+
+    // Idempotent release: calling multiple times should only decrement once
+    releaseJob1();
+    releaseJob1();
+    // Still active activities remaining -> update must still reject
+    await expect(coordinator.tryAcquire(vpsId, "update")).rejects.toThrow(ConflictException);
+
+    releaseJob2();
+    // Still active activity remaining -> update must still reject
+    await expect(coordinator.tryAcquire(vpsId, "update")).rejects.toThrow(ConflictException);
+
+    // Release terminal activity idempotently
+    releaseTerm1();
+    releaseTerm1();
+
+    // Now all activities released -> update acquisition must succeed
+    const releaseUpdate = await coordinator.tryAcquire(vpsId, "update");
+    expect(coordinator.isLifecycleActive(vpsId)).toBe(true);
+
+    // While update is active, new activities must reject with ConflictException
+    expect(() => coordinator.tryAcquireActivity(vpsId, "job")).toThrow(ConflictException);
+    expect(() => coordinator.tryAcquireActivity(vpsId, "terminal")).toThrow(ConflictException);
+
+    releaseUpdate();
+    expect(coordinator.isLifecycleActive(vpsId)).toBe(false);
+
+    // After update release, activities can be acquired again
+    const releaseNewJob = coordinator.tryAcquireActivity(vpsId, "job");
+    releaseNewJob();
+  });
+
+  it("permits activity during non-update lifecycle operations such as install and reconcile", async () => {
+    const coordinator = new AgentLifecycleCoordinator();
+    const vpsId = "vps-test-2";
+
+    const releaseInstall = await coordinator.tryAcquire(vpsId, "install");
+    expect(coordinator.isLifecycleActive(vpsId)).toBe(true);
+
+    // Activities are permitted during install
+    const releaseJob = coordinator.tryAcquireActivity(vpsId, "job");
+    releaseJob();
+    releaseInstall();
+
+    // Activities are permitted during reconcile
+    const releaseReconcile = await coordinator.tryAcquire(vpsId, "reconcile");
+    expect(coordinator.isLifecycleActive(vpsId)).toBe(true);
+    const releaseTerm = coordinator.tryAcquireActivity(vpsId, "terminal");
+    releaseTerm();
+    releaseReconcile();
+  });
+
+});
 
 describe("TerminalSessionRegistry.hasActive", () => {
   it("reports active session presence and clears on release or bulk close", async () => {
@@ -200,8 +269,43 @@ describe("TerminalSessionService activity admission and leak prevention", () => 
     ).rejects.toMatchObject({ code: "SSH_FAILURE" });
 
     expect(service.registry.hasActive("vps-1")).toBe(false);
+    const releaseUpdate = await coordinator.tryAcquire("vps-1", "update");
+    releaseUpdate();
   });
 
+  it("rejects terminal open when agent update fence is active", async () => {
+    const coordinator = new AgentLifecycleCoordinator();
+    const releaseUpdate = await coordinator.tryAcquire("vps-updating", "update");
+
+    const sessions = {
+      authenticateById: vi.fn(async () => ({
+        id: "dash-1",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      })),
+    } as unknown as DashboardSessionService;
+    const service = new TerminalSessionService(
+      config,
+      {} as unknown as VpsRepository,
+      {} as unknown as KeyService,
+      {} as unknown as SshService,
+      sessions,
+      coordinator,
+    );
+
+    const socket = new MockSocket();
+    await expect(
+      service.open(socket, "dash-1", {
+        type: "open",
+        version: 1,
+        vpsId: "vps-updating",
+        cols: 80,
+        rows: 24,
+      }),
+    ).rejects.toThrow(ConflictException);
+
+    expect(service.registry.hasActive("vps-updating")).toBe(false);
+    releaseUpdate();
+  });
 });
 
 describe("JobRunnerService activity admission and conflict safety", () => {

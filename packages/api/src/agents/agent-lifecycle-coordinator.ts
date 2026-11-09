@@ -1,5 +1,5 @@
 import { ConflictException, Injectable } from "@nestjs/common";
-type ActivityKind = "job" | "terminal";
+export type ActivityKind = "job" | "terminal" | "ai" | "docker" | "compose" | "files" | "sftp";
 export type LifecycleOperation =
   | "install"
   | "uninstall"
@@ -14,10 +14,7 @@ type Slot = {
   lifecycle?: LifecycleOperation;
   ingests: number;
   waiters: Array<() => void>;
-  activities: {
-    job: number;
-    terminal: number;
-  };
+  activities: Record<string, number>;
 };
 
 @Injectable()
@@ -29,7 +26,7 @@ export class AgentLifecycleCoordinator {
       s = {
         ingests: 0,
         waiters: [],
-        activities: { job: 0, terminal: 0 },
+        activities: { job: 0, terminal: 0, ai: 0, docker: 0, compose: 0, files: 0, sftp: 0 },
       };
       this.slots.set(id, s);
     }
@@ -45,6 +42,15 @@ export class AgentLifecycleCoordinator {
       throw new ConflictException(
         "An agent lifecycle operation is already in progress for this VPS",
       );
+    const hasActivities = Object.values(s.activities).some((c) => (c ?? 0) > 0);
+    if (
+      operation === "update" &&
+      hasActivities
+    ) {
+      throw new ConflictException(
+        "Cannot perform agent update while activity is in progress for this VPS",
+      );
+    }
     s.lifecycle = operation;
     if ((operation === "uninstall" || operation === "reconcile") && s.ingests) {
       const { promise, resolve } = Promise.withResolvers<void>();
@@ -61,15 +67,21 @@ export class AgentLifecycleCoordinator {
   }
   tryAcquireActivity(vpsId: string, kind: ActivityKind): () => void {
     const s = this.slot(vpsId);
-    s.activities[kind]++;
+    if (s.lifecycle === "update") {
+      throw new ConflictException(
+        "Agent update is in progress for this VPS",
+      );
+    }
+    s.activities[kind] = (s.activities[kind] ?? 0) + 1;
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      s.activities[kind]--;
+      s.activities[kind] = Math.max(0, (s.activities[kind] ?? 0) - 1);
       this.drain(vpsId, s);
     };
   }
+
   async beginIngest(vpsId: string): Promise<() => void> {
     const s = this.slot(vpsId);
     if (s.lifecycle === "uninstall" || s.lifecycle === "reconcile")
@@ -91,8 +103,7 @@ export class AgentLifecycleCoordinator {
       !s.lifecycle &&
       s.ingests === 0 &&
       s.waiters.length === 0 &&
-      s.activities.job === 0 &&
-      s.activities.terminal === 0
+      !Object.values(s.activities).some((c) => (c ?? 0) > 0)
     )
       this.slots.delete(id);
   }

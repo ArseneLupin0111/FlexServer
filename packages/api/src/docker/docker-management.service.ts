@@ -10,6 +10,7 @@ import { DockerManagementConflict } from "./docker-management.models.js";
 import { agentCommandSchema, dockerManagementTargetSchema, type AgentCommand, type AgentCommandReport } from "./docker-management.schemas.js";
 import type { DockerCurrentContainer } from "./docker-monitoring.models.js";
 import { ApplicationsService } from "../docker-applications/applications.service.js";
+import { AgentLifecycleCoordinator } from "../agents/agent-lifecycle-coordinator.js";
 
 type AllowedDockerManagementAction = Extract<DockerManagementAction, "start" | "stop" | "restart">;
 const ACTIONS: Record<AllowedDockerManagementAction, true> = { start: true, stop: true, restart: true };
@@ -35,6 +36,7 @@ export class DockerManagementService {
     @Inject(DOCKER_MONITORING_REPOSITORY) private readonly monitoring: DockerMonitoringRepository,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Optional() @Inject(ApplicationsService) private readonly applications?: ApplicationsService,
+    @Optional() @Inject(AgentLifecycleCoordinator) private readonly coordinator?: AgentLifecycleCoordinator,
   ) {}
   private readonly resultListeners: ((vpsId: string, op: DockerManagementOperation) => void | Promise<void>)[] = [];
 
@@ -134,32 +136,39 @@ export class DockerManagementService {
     const requestDigest = createHash("sha256").update(JSON.stringify({ action: input.action, target: input.target })).digest("hex");
     const previous = await this.repository.findByIdempotencyKey(vpsId, input.idempotencyKey);
     if (previous && previous.requestDigest !== requestDigest) throw new DockerManagementConflict("request_digest_mismatch", previous.id);
-    // Stable reservation identity closes concurrent idempotent-create races.
-    // Reserve before the legacy write: a crash may leave a blocking reservation,
-    // never an executable operation that escaped Compose exclusion.
-    const operationId = previous?.id ?? createHash("sha256").update(JSON.stringify([vpsId, input.idempotencyKey])).digest("base64url").slice(0, 21);
-    const identity = input.target.agentInstanceId ?? (await this.listTargets(vpsId)).find((target) => target.containerKey === input.target.containerKey)?.agentInstanceId;
-    if (this.applications && !identity) throw new ForbiddenException("Container identity is unavailable");
-    if (identity && previous?.status !== "succeeded" && previous?.status !== "failed" && previous?.status !== "cancelled") {
-      await this.applications?.reserveContainer(vpsId, { containerKey: input.target.containerKey, agentInstanceId: identity }, operationId);
+    let releaseActivity: (() => void) | undefined;
+    if (!previous && this.coordinator) {
+      releaseActivity = this.coordinator.tryAcquireActivity(vpsId, "docker");
     }
-    const insertOp = async () => {
-      return (await this.repository.create({ id: operationId, vpsId, idempotencyKey: input.idempotencyKey, requestDigest, action: input.action, target: input.target })).operation;
-    };
-    if (input.onBeforeCreate) {
-      try {
-        const customCreated = await input.onBeforeCreate(insertOp);
-        if (customCreated) return customCreated;
-      } catch (err) {
-        if (identity && previous?.status !== "succeeded" && previous?.status !== "failed" && previous?.status !== "cancelled") {
-          await this.applications?.releaseContainer(vpsId, operationId);
-        }
-        throw err;
+    try {
+      // Stable reservation identity closes concurrent idempotent-create races.
+      // Reserve before the legacy write: a crash may leave a blocking reservation,
+      // never an executable operation that escaped Compose exclusion.
+      const operationId = previous?.id ?? createHash("sha256").update(JSON.stringify([vpsId, input.idempotencyKey])).digest("base64url").slice(0, 21);
+      const identity = input.target.agentInstanceId ?? (await this.listTargets(vpsId)).find((target) => target.containerKey === input.target.containerKey)?.agentInstanceId;
+      if (this.applications && !identity) throw new ForbiddenException("Container identity is unavailable");
+      if (identity && previous?.status !== "succeeded" && previous?.status !== "failed" && previous?.status !== "cancelled") {
+        await this.applications?.reserveContainer(vpsId, { containerKey: input.target.containerKey, agentInstanceId: identity }, operationId);
       }
+      const insertOp = async () => {
+        return (await this.repository.create({ id: operationId, vpsId, idempotencyKey: input.idempotencyKey, requestDigest, action: input.action, target: input.target })).operation;
+      };
+      if (input.onBeforeCreate) {
+        try {
+          const customCreated = await input.onBeforeCreate(insertOp);
+          if (customCreated) return customCreated;
+        } catch (err) {
+          if (identity && previous?.status !== "succeeded" && previous?.status !== "failed" && previous?.status !== "cancelled") {
+            await this.applications?.releaseContainer(vpsId, operationId);
+          }
+          throw err;
+        }
+      }
+      return await insertOp();
+    } finally {
+      releaseActivity?.();
     }
-    return await insertOp();
   }
-
   async get(vpsId: string, id: string) {
     const op = await this.repository.status(id);
     if (!op || op.vpsId !== vpsId) throw new NotFoundException("Operation not found");
@@ -176,12 +185,19 @@ export class DockerManagementService {
       throw new DockerManagementConflict("not_claimable", id);
     }
     if (pending.target.agentInstanceId && pending.target.agentInstanceId !== claimedBy) throw new UnauthorizedException();
-    await this.applications?.reserveContainer(vpsId, { containerKey: pending.target.containerKey, agentInstanceId: pending.target.agentInstanceId ?? claimedBy }, id);
-    const op = await this.repository.claim(id, claimedBy);
-    if (!op) throw new NotFoundException("Operation not found");
-    return op;
+    let releaseActivity: (() => void) | undefined;
+    if (this.coordinator) {
+      releaseActivity = this.coordinator.tryAcquireActivity(vpsId, "docker");
+    }
+    try {
+      await this.applications?.reserveContainer(vpsId, { containerKey: pending.target.containerKey, agentInstanceId: pending.target.agentInstanceId ?? claimedBy }, id);
+      const op = await this.repository.claim(id, claimedBy);
+      if (!op) throw new NotFoundException("Operation not found");
+      return op;
+    } finally {
+      releaseActivity?.();
+    }
   }
-
   async result(vpsId: string, id: string, claimedBy: string, result: DockerManagementResult) {
     const op = await this.get(vpsId, id);
     if (op.claimedBy !== claimedBy) throw new DockerManagementConflict("not_claimable", id);
@@ -227,32 +243,41 @@ export class DockerManagementService {
     const candidate = await this.repository.peekNextClaimable(vpsId, agentInstanceId);
     // Claim only after the shared authority fences the exact target.
     if (!candidate) return null;
-    try {
-      await this.applications?.reserveContainer(vpsId, { containerKey: candidate.target.containerKey, agentInstanceId }, candidate.id);
-    } catch (error) {
-      if (error instanceof ConflictException && ["operation_target_conflict", "container_busy"].includes(error.message)) return null;
-      throw error;
+    let releaseActivity: (() => void) | undefined;
+    if (this.coordinator) {
+      releaseActivity = this.coordinator.tryAcquireActivity(vpsId, "docker");
     }
-    const op = await this.repository.claim(candidate.id, agentInstanceId);
-    if (!op) return null;
-    if (!op.leaseExpiresAt) throw new InternalServerErrorException("Claimed operation is missing its lease");
-    const deadlineMs = Date.parse(op.leaseExpiresAt);
-    const nowMs = Date.now();
-    // deadlineNano is the lease deadline in epoch nanoseconds — beyond Number
-    // precision, so scale the millisecond epoch through BigInt. The timeout is
-    // the remaining lease clamped to the agent's 1..120s execution bound.
-    const parsed = agentCommandSchema.safeParse({
-      commandId: op.id,
-      agentInstanceId,
-      vpsId,
-      action: op.action,
-      containerKey: op.target.containerKey,
-      deadlineNano: (BigInt(deadlineMs) * 1_000_000n).toString(),
-      timeoutSeconds: Math.max(1, Math.min(120, Math.ceil((deadlineMs - nowMs) / 1000))),
-    });
-    if (!parsed.success) throw new InternalServerErrorException("Queued operation is not executable by the agent");
-    return parsed.data;
+    try {
+      try {
+        await this.applications?.reserveContainer(vpsId, { containerKey: candidate.target.containerKey, agentInstanceId }, candidate.id);
+      } catch (error) {
+        if (error instanceof ConflictException && ["operation_target_conflict", "container_busy"].includes(error.message)) return null;
+        throw error;
+      }
+      const op = await this.repository.claim(candidate.id, agentInstanceId);
+      if (!op) return null;
+      if (!op.leaseExpiresAt) throw new InternalServerErrorException("Claimed operation is missing its lease");
+      const deadlineMs = Date.parse(op.leaseExpiresAt);
+      const nowMs = Date.now();
+      // deadlineNano is the lease deadline in epoch nanoseconds — beyond Number
+      // precision, so scale the millisecond epoch through BigInt. The timeout is
+      // the remaining lease clamped to the agent's 1..120s execution bound.
+      const parsed = agentCommandSchema.safeParse({
+        commandId: op.id,
+        agentInstanceId,
+        vpsId,
+        action: op.action,
+        containerKey: op.target.containerKey,
+        deadlineNano: (BigInt(deadlineMs) * 1_000_000n).toString(),
+        timeoutSeconds: Math.max(1, Math.min(120, Math.ceil((deadlineMs - nowMs) / 1000))),
+      });
+      if (!parsed.success) throw new InternalServerErrorException("Queued operation is not executable by the agent");
+      return parsed.data;
+    } finally {
+      releaseActivity?.();
+    }
   }
+
 
   /**
    * Terminal result receipt from the claiming agent. Binds on the

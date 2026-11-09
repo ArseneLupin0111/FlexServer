@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit, Optional } from "@nestjs/common";
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit, Optional } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type { Request } from "express";
 import { AI_REPOSITORY, APP_CONFIG, DOCKER_MONITORING_REPOSITORY, VPS_REPOSITORY } from "../tokens.js";
@@ -26,6 +26,7 @@ import { AiReadToolsService, isReadTool, readTools } from "./ai-read-tools.servi
 import { boundedEvidence, historicalMessage, COMPACT_SUMMARY_MAX_BYTES, CONTEXT_MESSAGE_LIMIT, CONTEXT_REQUEST_BYTES } from "./ai-context.js";
 import type { AiConversationMessage, AiConversationMessageEvidence } from "./ai.models.js";
 import type { DockerMonitoringRepository } from "../persistence/repositories/docker-monitoring.repository.js";
+import { AgentLifecycleCoordinator } from "../agents/agent-lifecycle-coordinator.js";
 
 const NO_PROGRESS_THRESHOLD = 3;
 
@@ -645,6 +646,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
      * Optional so apiKey-only test harnesses keep constructing this service
      * positionally; chatgpt_oauth dispatch fails closed without it. */
     @Optional() @Inject(AiCodexOauthService) private readonly codexOauth?: AiCodexOauthService,
+    @Optional() @Inject(AgentLifecycleCoordinator) private readonly coordinator?: AgentLifecycleCoordinator,
   ) {
     this.dockerResultUnsub = this.dockerBridge?.onDockerOperationResult?.(async (vpsId, op) => {
       if (!op.idempotencyKey?.startsWith("ai-step-")) return;
@@ -837,7 +839,18 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
   ): Promise<{ status: "succeeded" | "failed"; toolContent: string }> {
     let toolContent = "";
     let status: "succeeded" | "failed" = "succeeded";
+    let releaseActivity: (() => void) | undefined;
     try {
+      if (this.coordinator) {
+        try {
+          releaseActivity = this.coordinator.tryAcquireActivity(claimedTask.vpsId, "ai");
+        } catch (err) {
+          if (err instanceof ConflictException) {
+            throw new AiAssistantError("task_busy", err.message);
+          }
+          throw err;
+        }
+      }
       if (signal?.aborted) throw signal.reason ?? new AiAssistantError("cancelled");
       const isRead = isReadTool(call.name) || (typeof this.readToolsService?.isReadTool === "function" && this.readToolsService.isReadTool(call.name));
       if (isRead) {
@@ -868,6 +881,8 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
       if (signal?.aborted) throw readErr;
       status = "failed";
       toolContent = readErr instanceof Error ? readErr.message : "Read tool execution failed";
+    } finally {
+      releaseActivity?.();
     }
     return { status, toolContent };
   }
@@ -2268,9 +2283,20 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
       const executingTask = await this.repository.getTask(vpsId, taskId);
       if (!executingTask || terminal.has(executingTask.state)) return publicTask(executingTask ?? task);
 
+      let releaseActivity: (() => void) | undefined;
       const controller = new AbortController();
       this.running.set(taskId, controller);
       try {
+        if (this.coordinator) {
+          try {
+            releaseActivity = this.coordinator.tryAcquireActivity(vpsId, "ai");
+          } catch (err) {
+            if (err instanceof ConflictException) {
+              throw new AiAssistantError("task_busy", err.message);
+            }
+            throw err;
+          }
+        }
         const { status, toolContent } = await this.executeReadCall(
           executingTask,
           activePolicy,
@@ -2392,6 +2418,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
         return publicTask(failed);
       } finally {
         this.running.delete(taskId);
+        releaseActivity?.();
       }
     } else {
       const capability = await this.policy.getCapability(vpsId);
@@ -2425,6 +2452,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
       if (!consumed) throw new AiAssistantError("stale_plan");
       const executing = await this.repository.updateTask({ id: taskId, expectedRevision: consumed.revision, state: "executing", ownerLease: { ownerInstanceId: `api-${process.pid}`, leaseSeconds: 180 } });
       let hostDispatchStarted = false;
+      let releaseActivity: (() => void) | undefined;
       try {
         try {
           await this.policy.revalidateForDispatch(vpsId, plan);
@@ -2438,6 +2466,16 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
             throw new AiAssistantError("stale_plan", "AutoApprove disabled or session revoked before host enqueue");
           }
         }
+        if (this.coordinator) {
+          try {
+            releaseActivity = this.coordinator.tryAcquireActivity(vpsId, "ai");
+          } catch (err) {
+            if (err instanceof ConflictException) {
+              throw new AiAssistantError("task_busy", err.message);
+            }
+            throw err;
+          }
+        }
         hostDispatchStarted = true;
         await this.repository.enqueueCommands(plan.steps.map(step => {
           const commandId = randomUUID();
@@ -2448,6 +2486,8 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
         if (!current || terminal.has(current.state)) return publicTask(current ?? executing);
         const updated = await this.repository.updateTask({ id: taskId, expectedRevision: current.revision, state: hostDispatchStarted ? "uncertain" : "failed", error: { code: hostDispatchStarted ? "uncertain_outcome" : snapshotFailureCode(err), message: "AI task could not complete" } });
         return publicTask(updated);
+      } finally {
+        releaseActivity?.();
       }
       return publicTask(executing);
     }

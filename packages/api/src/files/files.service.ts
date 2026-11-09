@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   Inject,
   Injectable,
   OnApplicationBootstrap,
@@ -27,6 +28,7 @@ import {
   type FilesTransport,
 } from "./files.models.js";
 import { LocalFilesTransport } from "./local-files.transport.js";
+import { AgentLifecycleCoordinator } from "../agents/agent-lifecycle-coordinator.js";
 import { RemoteFilesTransport } from "./remote-files.transport.js";
 
 export type SessionContext = {
@@ -40,6 +42,7 @@ type ActiveOperation = {
   abortController: AbortController;
   initialHost?: string;
   initialPort?: number;
+  releaseActivity?: () => void;
   initialUsername?: string;
 };
 
@@ -66,6 +69,7 @@ export class FilesService implements OnApplicationBootstrap, OnApplicationShutdo
     @Inject(SshService) private readonly sshService: SshService,
     @Optional() @Inject(LOCAL_FILES_TRANSPORT) private readonly customLocalTransport?: FilesTransport,
     @Optional() @Inject(REMOTE_FILES_TRANSPORT) private readonly customRemoteTransport?: FilesTransport,
+    @Optional() @Inject(AgentLifecycleCoordinator) private readonly coordinator?: AgentLifecycleCoordinator,
   ) {
     this.defaultLocalTransport = new LocalFilesTransport(this.config.localFilesSocketPath);
     this.defaultRemoteTransport = new RemoteFilesTransport(this.sshService, this.keyService);
@@ -82,8 +86,10 @@ export class FilesService implements OnApplicationBootstrap, OnApplicationShutdo
     }
     for (const op of this.activeOperations.values()) {
       op.abortController.abort(new FilesError("FILES_BUSY", "Server shutting down"));
+      try {
+        op.releaseActivity?.();
+      } catch {}
     }
-    this.activeOperations.clear();
   }
 
   private isLocal(vps: VpsRecord): boolean {
@@ -143,35 +149,52 @@ export class FilesService implements OnApplicationBootstrap, OnApplicationShutdo
   }
 
   private acquireSlot(vps: VpsRecord, dashboardSessionId?: string): ActiveOperation {
-    if (this.activeOperations.size >= MAX_CONCURRENT_GLOBAL) {
-      throw new FilesError("FILES_BUSY", "Global files transfer capacity reached. Try again later.");
-    }
-    let perVpsCount = 0;
-    for (const op of this.activeOperations.values()) {
-      if (op.vpsId === vps.id) perVpsCount++;
-    }
-    if (perVpsCount >= MAX_CONCURRENT_PER_VPS) {
-      throw new FilesError("FILES_BUSY", "Maximum concurrent file operations reached for this host.");
-    }
+    const releaseActivity = this.coordinator?.tryAcquireActivity(
+      vps.id,
+      this.isLocal(vps) ? "files" : "sftp",
+    );
+    try {
+      if (this.activeOperations.size >= MAX_CONCURRENT_GLOBAL) {
+        throw new FilesError("FILES_BUSY", "Global files transfer capacity reached. Try again later.");
+      }
+      let perVpsCount = 0;
+      for (const op of this.activeOperations.values()) {
+        if (op.vpsId === vps.id) perVpsCount++;
+      }
+      if (perVpsCount >= MAX_CONCURRENT_PER_VPS) {
+        throw new FilesError("FILES_BUSY", "Maximum concurrent file operations reached for this host.");
+      }
 
-    const id = `${vps.id}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const op: ActiveOperation = {
-      id,
-      vpsId: vps.id,
-      dashboardSessionId,
-      abortController: new AbortController(),
-      initialHost: vps.host,
-      initialPort: vps.port,
-      initialUsername: vps.username,
-    };
-    this.activeOperations.set(id, op);
-    return op;
+      const id = `${vps.id}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const op: ActiveOperation = {
+        id,
+        vpsId: vps.id,
+        dashboardSessionId,
+        abortController: new AbortController(),
+        initialHost: vps.host,
+        initialPort: vps.port,
+        initialUsername: vps.username,
+        releaseActivity,
+      };
+      this.activeOperations.set(id, op);
+      return op;
+    } catch (err) {
+      try {
+        releaseActivity?.();
+      } catch {}
+      throw err;
+    }
   }
 
   private releaseSlot(opId: string): void {
-    this.activeOperations.delete(opId);
+    const op = this.activeOperations.get(opId);
+    if (op) {
+      this.activeOperations.delete(opId);
+      try {
+        op.releaseActivity?.();
+      } catch {}
+    }
   }
-
   private async preflight(
     vpsId: string,
     ctx: SessionContext,
@@ -228,12 +251,12 @@ export class FilesService implements OnApplicationBootstrap, OnApplicationShutdo
     let slot: ActiveOperation | null = null;
     try {
       slot = this.acquireSlot(vps);
-    } catch {
+    } catch (err: unknown) {
       return {
         enabled: true,
         available: false,
         transport: transportKind,
-        reason: "Files transport is busy",
+        reason: err instanceof ConflictException ? err.message : "Files transport is busy",
       };
     }
 

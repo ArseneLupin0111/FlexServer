@@ -1,4 +1,4 @@
-import { Injectable, Inject, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
+import { Injectable, Inject, Optional, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import { createHash, randomBytes } from "node:crypto";
 import { AGENT_REPOSITORY, APP_CONFIG, VPS_REPOSITORY } from "../tokens.js";
 import type { AgentRepository } from "../persistence/repositories/agent.repository.js";
@@ -14,6 +14,7 @@ import type { Keyring } from "../ssh/key-encryption.js";
 import { encryptComposeField, decryptComposeField, loadComposeKeyring } from "../crypto/secret-envelope.js";
 import { validateComposeYaml } from "./config-policy.js";
 import { z } from "zod";
+import { AgentLifecycleCoordinator } from "../agents/agent-lifecycle-coordinator.js";
 
 export const APPLICATIONS_REPOSITORY = Symbol("APPLICATIONS_REPOSITORY");
 const registryCredentialIdentity = (name: string): { host: string; username: string } => {
@@ -120,6 +121,7 @@ export class ApplicationsService {
     @Inject(AGENT_REPOSITORY) private readonly agents: AgentRepository,
     @Inject(APPLICATIONS_REPOSITORY) private readonly repo: ApplicationsRepository,
     @Inject(APPLICATIONS_INVENTORY_REPOSITORY) private readonly inventories: ApplicationsInventoryRepository,
+    @Optional() @Inject(AgentLifecycleCoordinator) private readonly coordinator?: AgentLifecycleCoordinator,
   ) {}
 
   async onApplicationShutdown() { await this.repo.close(); }
@@ -348,21 +350,29 @@ export class ApplicationsService {
     if (Buffer.byteLength(JSON.stringify(input.variables ?? {})) > 262_144) throw new BadRequestException("variables_too_large");
     const keys = await loadComposeKeyring(this.config.composeCrypto.keyringFile);
     const liveInventory = await this.inventories.current(vpsId);
-    return this.repo.transaction(state => {
-      const app = this.app(state, vpsId, appId);
-      this.idle(state, appId);
-      this.assertProjectFree(state, app);
-      if (app.mode !== "managed") throw new ConflictException("managed_configuration_required");
-      const seq = Math.max(0, ...state.revisions.filter(r => r.appId === appId).map(r => r.seq)) + 1;
-      state.revisions.push({ id: createHash("sha256").update(JSON.stringify([appId, seq, Date.now()])).digest("hex").slice(0, 16), appId, vpsId, seq, envelope: encryptComposeField(JSON.stringify({ composeYaml: input.composeYaml, variables: input.variables }), { vpsId, appId, field: "composeYaml", version: seq }, keys), variables: {}, profiles: input.profiles, oneShotServices: input.oneShotServices, createdAt: now() });
-      const previewId = createHash("sha256").update(JSON.stringify([appId, seq, "preview", Date.now()])).digest("hex").slice(0, 16);
-      const operation: WorkRow = { id: createHash("sha256").update(JSON.stringify([appId, "preview_prepare", previewId])).digest("hex").slice(0, 21), vpsId, appId, kind: "preview_prepare", status: "prepared", request: { previewId, revisionSeq: seq, registryCredentialIds: input.registryCredentialIds }, generation: app.generation, idempotencyKey: input.idempotencyKey, requestDigest: digest(input), createdAt: now(), updatedAt: now(), actor: this.actorOf((input as { actor?: { kind: string; id?: string } }).actor) };
-      const preview: PreviewRow = { id: previewId, appId, vpsId, revisionSeq: seq, status: "pending", generation: app.generation, request: { registryCredentialIds: input.registryCredentialIds }, createdAt: now(), expiresAt: new Date(Date.now() + (this.config.compose?.previewTtlSeconds ?? 300) * 1000).toISOString(), updatedAt: now() };
-      state.operations.push(operation);
-      state.previews.push(preview);
-      for (const prior of state.previews) if (prior.appId === appId && prior.id !== preview.id && prior.status === "pending") prior.status = "stale";
-      return { previewId: preview.id, status: preview.status, operationId: operation.id };
-    });
+    let releaseActivity: (() => void) | undefined;
+    try {
+      return await this.repo.transaction(state => {
+        const app = this.app(state, vpsId, appId);
+        if (this.coordinator) {
+          releaseActivity = this.coordinator.tryAcquireActivity(vpsId, "compose");
+        }
+        this.idle(state, appId);
+        this.assertProjectFree(state, app);
+        if (app.mode !== "managed") throw new ConflictException("managed_configuration_required");
+        const seq = Math.max(0, ...state.revisions.filter(r => r.appId === appId).map(r => r.seq)) + 1;
+        state.revisions.push({ id: createHash("sha256").update(JSON.stringify([appId, seq, Date.now()])).digest("hex").slice(0, 16), appId, vpsId, seq, envelope: encryptComposeField(JSON.stringify({ composeYaml: input.composeYaml, variables: input.variables }), { vpsId, appId, field: "composeYaml", version: seq }, keys), variables: {}, profiles: input.profiles, oneShotServices: input.oneShotServices, createdAt: now() });
+        const previewId = createHash("sha256").update(JSON.stringify([appId, seq, "preview", Date.now()])).digest("hex").slice(0, 16);
+        const operation: WorkRow = { id: createHash("sha256").update(JSON.stringify([appId, "preview_prepare", previewId])).digest("hex").slice(0, 21), vpsId, appId, kind: "preview_prepare", status: "prepared", request: { previewId, revisionSeq: seq, registryCredentialIds: input.registryCredentialIds }, generation: app.generation, idempotencyKey: input.idempotencyKey, requestDigest: digest(input), createdAt: now(), updatedAt: now(), actor: this.actorOf((input as { actor?: { kind: string; id?: string } }).actor) };
+        const preview: PreviewRow = { id: previewId, appId, vpsId, revisionSeq: seq, status: "pending", generation: app.generation, request: { registryCredentialIds: input.registryCredentialIds }, createdAt: now(), expiresAt: new Date(Date.now() + (this.config.compose?.previewTtlSeconds ?? 300) * 1000).toISOString(), updatedAt: now() };
+        state.operations.push(operation);
+        state.previews.push(preview);
+        for (const prior of state.previews) if (prior.appId === appId && prior.id !== preview.id && prior.status === "pending") prior.status = "stale";
+        return { previewId: preview.id, status: preview.status, operationId: operation.id };
+      });
+    } finally {
+      releaseActivity?.();
+    }
   }
 
   async work(vpsId: string, appId: string, kind: string, body: unknown) {
@@ -370,19 +380,24 @@ export class ApplicationsService {
     // Ownership is resolved before any gate/inventory work so a cross-VPS app id is reported as not found.
     await this.repo.transaction(state => this.app(state, vpsId, appId));
     const inv = await this.gate(vpsId, true);
-    return this.repo.transaction(state => {
-      const app = this.app(state, vpsId, appId);
-      const requestDigest = digest(input);
-      const tombstoned = state.operations.find(op => op.vpsId === vpsId && op.idempotencyKey === input.idempotencyKey && (op.requestDigest === "tombstone" || op.status === "cancelled"));
-      if (tombstoned) {
-        throw new ConflictException("operation_expired");
-      }
-      const previous = state.operations.find(op => op.appId === appId && op.kind === kind && op.idempotencyKey === input.idempotencyKey);
-      if (previous) {
-        if (previous.requestDigest !== requestDigest) throw new ConflictException("idempotency_conflict");
-        return previous;
-      }
-      this.idle(state, appId);
+    let releaseActivity: (() => void) | undefined;
+    try {
+      return await this.repo.transaction(state => {
+        const app = this.app(state, vpsId, appId);
+        const requestDigest = digest(input);
+        const tombstoned = state.operations.find(op => op.vpsId === vpsId && op.idempotencyKey === input.idempotencyKey && (op.requestDigest === "tombstone" || op.status === "cancelled"));
+        if (tombstoned) {
+          throw new ConflictException("operation_expired");
+        }
+        const previous = state.operations.find(op => op.appId === appId && op.kind === kind && op.idempotencyKey === input.idempotencyKey);
+        if (previous) {
+          if (previous.requestDigest !== requestDigest) throw new ConflictException("idempotency_conflict");
+          return previous;
+        }
+        if (this.coordinator) {
+          releaseActivity = this.coordinator.tryAcquireActivity(vpsId, "compose");
+        }
+        this.idle(state, appId);
       this.assertProjectFree(state, app);
       this.assertContainerFree(state, vpsId, app, inv);
       if (app.agentInstanceId !== inv!.agentInstanceId || app.daemonEpoch !== String(inv!.daemonEpoch)) throw new ConflictException("identity_changed");
@@ -457,7 +472,10 @@ export class ApplicationsService {
       op.lifecyclePlan = { action, sourcePath: String(op.request.sourcePath), sourceDigest: String(op.request.sourceDigest), services: planServices, order, observedFingerprint: computeProjectRuntimeFingerprint(inv, app.projectName) };
       state.operations.push(op);
       return op;
-    });
+      });
+    } finally {
+      releaseActivity?.();
+    }
   }
 
   async unmanage(vpsId: string, appId: string, body: unknown) {
@@ -506,22 +524,32 @@ export class ApplicationsService {
   async source(vpsId: string, appId: string, body: unknown) {
     const input = confirmation.extend({ sourcePath: z.string().startsWith("/").max(4096), oneShotServices: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/)).max(64).default([]), actor }).strict().parse(body);
     const inv = await this.gate(vpsId, true);
-    return this.repo.transaction(state => {
-      const app = this.app(state, vpsId, appId);
-      const prior = state.operations.find(o => o.vpsId === vpsId && o.kind === "verify_source" && o.idempotencyKey === input.idempotencyKey);
-      if (prior) { if (prior.requestDigest !== digest(input)) throw new ConflictException("idempotency_conflict"); return { operationId: prior.id, status: prior.status }; }
-      this.idle(state, appId);
-      const operationId = createHash("sha256").update(JSON.stringify([vpsId, appId, "verify_source", input.idempotencyKey])).digest("hex").slice(0, 21);
-      const op: WorkRow = { id: operationId, vpsId, appId, kind: "verify_source", status: "prepared", request: { sourcePath: input.sourcePath, oneShotServices: input.oneShotServices, daemonEpoch: inv!.daemonEpoch, agentInstanceId: inv!.agentInstanceId }, generation: app.generation, idempotencyKey: input.idempotencyKey, requestDigest: digest(input), createdAt: now(), updatedAt: now(), actor: this.actorOf(input.actor) };
-      state.operations.push(op);
-      return { operationId: op.id, status: op.status };
-    });
+    let releaseActivity: (() => void) | undefined;
+    try {
+      return await this.repo.transaction(state => {
+        const app = this.app(state, vpsId, appId);
+        const prior = state.operations.find(o => o.vpsId === vpsId && o.kind === "verify_source" && o.idempotencyKey === input.idempotencyKey);
+        if (prior) { if (prior.requestDigest !== digest(input)) throw new ConflictException("idempotency_conflict"); return { operationId: prior.id, status: prior.status }; }
+        if (this.coordinator) {
+          releaseActivity = this.coordinator.tryAcquireActivity(vpsId, "compose");
+        }
+        this.idle(state, appId);
+        const operationId = createHash("sha256").update(JSON.stringify([vpsId, appId, "verify_source", input.idempotencyKey])).digest("hex").slice(0, 21);
+        const op: WorkRow = { id: operationId, vpsId, appId, kind: "verify_source", status: "prepared", request: { sourcePath: input.sourcePath, oneShotServices: input.oneShotServices, daemonEpoch: inv!.daemonEpoch, agentInstanceId: inv!.agentInstanceId }, generation: app.generation, idempotencyKey: input.idempotencyKey, requestDigest: digest(input), createdAt: now(), updatedAt: now(), actor: this.actorOf(input.actor) };
+        state.operations.push(op);
+        return { operationId: op.id, status: op.status };
+      });
+    } finally {
+      releaseActivity?.();
+    }
   }
 
   async claim(vpsId: string, instance: string): Promise<ClaimWork | null> {
     const liveInventory = await this.gate(vpsId, true);
     const keys = await loadComposeKeyring(this.config.composeCrypto.keyringFile);
-    return this.repo.transaction<ClaimWork | null>(async state => {
+    let releaseActivity: (() => void) | undefined;
+    try {
+      return await this.repo.transaction<ClaimWork | null>(async state => {
       const take = (op: WorkRow) => {
         const claimToken = randomBytes(32).toString("hex");
         op.status = "claimed";
@@ -539,7 +567,10 @@ export class ApplicationsService {
       const previewOps = state.previews.filter(p => p.vpsId === vpsId && p.status === "pending").map(stalePreviewOp).filter((op): op is WorkRow => op !== undefined && leaseEligible(op) && revisionPresent(op) && ownsInstance(op));
       const candidates = state.operations.filter(o => o.vpsId === vpsId && leaseEligible(o) && revisionPresent(o) && ownsInstance(o) && (o.kind !== "preview_prepare" || !previewOps.includes(o)));
       const op = [...candidates, ...previewOps][0];
-      if (!op) return null;
+        if (!op) return null;
+        if (this.coordinator) {
+          releaseActivity = this.coordinator.tryAcquireActivity(vpsId, "compose");
+        }
       if (op.kind === "runtime_prep") {
         const claimToken = take(op);
         return { operationId: op.id, kind: op.kind, vpsId, app: { id: "", project: "", daemonEpoch: String(op.request.daemonEpoch), generation: op.generation, mode: "unmanaged" }, runtimePrep: { pluginRequired: true }, stages: ["preflight"], readinessSeconds: 0, pullTimeoutSeconds: 0, stopGraceSeconds: 0, claimToken };
@@ -558,7 +589,10 @@ export class ApplicationsService {
         return { operationId: op.id, kind: op.kind, vpsId, app: appPayload, revision: rendered ? { seq: revision!.seq, composeYaml: rendered.composeYaml, variables: rendered.variables, profiles: revision!.profiles, oneShotServices: revision!.oneShotServices } : undefined, adoptionOwnership: app.ownerManifest?.containers ? { agentInstanceId: app.ownerManifest.agentInstanceId, daemonEpoch: app.ownerManifest.daemonEpoch, projectName: app.ownerManifest.projectName, containers: app.ownerManifest.containers } : undefined, secrets: state.secrets.filter(s => s.appId === app.id).map(s => ({ name: s.name, version: s.version, value: decryptComposeField(s.envelope, { vpsId, appId: app.id, field: "secret", version: `${s.name}:${s.version}` }, keys) })), registryCredentials, approvedDigest: (op.request.approvedDigest as string | undefined), approvedPreview, stages: op.kind === "deploy" ? deployStages : ["preflight"], readinessSeconds: op.kind === "deploy" ? (app.readinessSeconds ?? 300) : 0, pullTimeoutSeconds: op.kind === "deploy" ? 600 : 0, stopGraceSeconds: op.kind === "deploy" ? 60 : 0, claimToken };
       }
       return { operationId: op.id, kind: op.kind, vpsId, app: appPayload, lifecyclePlan: op.lifecyclePlan, stages: lifecycleStages, readinessSeconds: (app.readinessSeconds ?? 300), pullTimeoutSeconds: 0, stopGraceSeconds: 60, claimToken };
-    });
+      });
+    } finally {
+      releaseActivity?.();
+    }
   }
 
   async progress(vpsId: string, instance: string, opId: string, body: unknown) {
@@ -582,12 +616,17 @@ export class ApplicationsService {
     const input = z.object({ claimToken: z.string().length(64), payloadDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(body);
     const liveInventory = await this.gate(vpsId, true);
     const keys = await loadComposeKeyring(this.config.composeCrypto.keyringFile);
-    return this.repo.transaction(state => {
+    let releaseActivity: (() => void) | undefined;
+    try {
+      return await this.repo.transaction(state => {
       const op = state.operations.find(o => o.id === opId && o.vpsId === vpsId);
       if (!op || op.claimToken !== input.claimToken || op.claimedBy !== instance) throw new ForbiddenException("invalid_claim");
       if (op.authorization) {
         if (op.authorization.payloadDigest !== input.payloadDigest) throw new ConflictException("authorization_digest_conflict");
         return { revisionAuthorizationId: op.authorization.revisionAuthorizationId, nonce: op.authorization.nonce, grantedAt: op.authorization.grantedAt };
+      }
+      if (this.coordinator) {
+        releaseActivity = this.coordinator.tryAcquireActivity(vpsId, "compose");
       }
       if (op.status !== "claimed") throw new ConflictException("invalid_operation_state");
       if (op.appId === "" && op.kind !== "runtime_prep") throw new ConflictException("vps_scoped_operation");
@@ -621,7 +660,10 @@ export class ApplicationsService {
       op.authorization = authorization;
       op.updatedAt = now();
       return { revisionAuthorizationId: authorization.revisionAuthorizationId, nonce: authorization.nonce, grantedAt: authorization.grantedAt };
-    });
+      });
+    } finally {
+      releaseActivity?.();
+    }
   }
 
   async report(vpsId: string, instance: string, opId: string, body: unknown) {
@@ -1050,14 +1092,22 @@ export class ApplicationsService {
   async runtimePreparation(vpsId: string, body: unknown) {
     const input = confirmation.extend({ pluginRequired: z.literal(true), actor }).strict().parse(body);
     const inv = await this.gate(vpsId, true);
-    return this.repo.transaction(state => {
-      const prior = state.operations.find(o => o.vpsId === vpsId && o.kind === "runtime_prep" && o.idempotencyKey === input.idempotencyKey);
-      if (prior) { if (prior.requestDigest !== digest(input)) throw new ConflictException("idempotency_conflict"); return prior; }
-      if (state.operations.some(o => o.vpsId === vpsId && !terminalOp(o))) throw new ConflictException("vps_operation_busy");
-      const op: WorkRow = { id: createHash("sha256").update(JSON.stringify([vpsId, "runtime_prep", input.idempotencyKey])).digest("hex").slice(0, 21), vpsId, appId: "", kind: "runtime_prep", status: "prepared", request: { pluginRequired: true, daemonEpoch: String(inv!.daemonEpoch), agentInstanceId: inv!.agentInstanceId }, generation: 0, idempotencyKey: input.idempotencyKey, requestDigest: digest(input), createdAt: now(), updatedAt: now(), actor: this.actorOf(input.actor) };
-      state.operations.push(op);
-      return op;
-    });
+    let releaseActivity: (() => void) | undefined;
+    try {
+      return await this.repo.transaction(state => {
+        const prior = state.operations.find(o => o.vpsId === vpsId && o.kind === "runtime_prep" && o.idempotencyKey === input.idempotencyKey);
+        if (prior) { if (prior.requestDigest !== digest(input)) throw new ConflictException("idempotency_conflict"); return prior; }
+        if (this.coordinator) {
+          releaseActivity = this.coordinator.tryAcquireActivity(vpsId, "compose");
+        }
+        if (state.operations.some(o => o.vpsId === vpsId && !terminalOp(o))) throw new ConflictException("vps_operation_busy");
+        const op: WorkRow = { id: createHash("sha256").update(JSON.stringify([vpsId, "runtime_prep", input.idempotencyKey])).digest("hex").slice(0, 21), vpsId, appId: "", kind: "runtime_prep", status: "prepared", request: { pluginRequired: true, daemonEpoch: String(inv!.daemonEpoch), agentInstanceId: inv!.agentInstanceId }, generation: 0, idempotencyKey: input.idempotencyKey, requestDigest: digest(input), createdAt: now(), updatedAt: now(), actor: this.actorOf(input.actor) };
+        state.operations.push(op);
+        return op;
+      });
+    } finally {
+      releaseActivity?.();
+    }
   }
 
   async vpsOperation(vpsId: string, opId: string) {
@@ -1298,28 +1348,36 @@ export class ApplicationsService {
   async confirmPreview(vpsId: string, appId: string, previewId: string, body: unknown) {
     const input = confirmation.extend({ approvedDigest: z.string().regex(/^[a-f0-9]{64}$/), removedServiceIds: z.array(z.string().max(128)).max(64), actor }).strict().parse(body);
     await this.gate(vpsId, true);
-    return this.repo.transaction(state => {
-      const app = this.app(state, vpsId, appId);
-      const tombstoned = state.operations.find(op => op.vpsId === vpsId && op.idempotencyKey === input.idempotencyKey && (op.requestDigest === "tombstone" || op.status === "cancelled"));
-      if (tombstoned) {
-        throw new ConflictException("operation_expired");
-      }
-      const existing = state.operations.find(op => op.appId === appId && op.kind === "deploy" && op.idempotencyKey === input.idempotencyKey);
-      if (existing) {
-        if (existing.requestDigest !== digest(input)) throw new ConflictException("idempotency_conflict");
-        return existing;
-      }
-      const p = state.previews.find(x => x.id === previewId && x.appId === appId);
-      if (!p || (p.status as string) !== "ready" || Date.parse(p.expiresAt) <= Date.now() || p.digest !== input.approvedDigest || p.generation !== app.generation) throw new ConflictException("stale_preview");
-      if (digest((p.removedServices as string[] | undefined) ?? []) !== digest(input.removedServiceIds)) throw new ConflictException("removed_services_confirmation_mismatch");
-      // Input fencing: only bounded durable values are persisted in the
-      // manifest and preview-to-deploy binding; nothing in-flight is trusted.
-      this.idle(state, appId);
-      const operation: WorkRow = { id: createHash("sha256").update(JSON.stringify([vpsId, appId, previewId, input.idempotencyKey])).digest("hex").slice(0, 21), vpsId, appId, kind: "deploy", status: "prepared", request: { previewId, approvedDigest: input.approvedDigest, removedServiceIds: input.removedServiceIds, revisionSeq: p.revisionSeq }, generation: app.generation, idempotencyKey: input.idempotencyKey, requestDigest: digest(input), createdAt: now(), updatedAt: now(), actor: this.actorOf(input.actor) };
-      state.operations.push(operation);
-      p.status = "confirmed";
-      return operation;
-    });
+    let releaseActivity: (() => void) | undefined;
+    try {
+      return await this.repo.transaction(state => {
+        const app = this.app(state, vpsId, appId);
+        const tombstoned = state.operations.find(op => op.vpsId === vpsId && op.idempotencyKey === input.idempotencyKey && (op.requestDigest === "tombstone" || op.status === "cancelled"));
+        if (tombstoned) {
+          throw new ConflictException("operation_expired");
+        }
+        const existing = state.operations.find(op => op.appId === appId && op.kind === "deploy" && op.idempotencyKey === input.idempotencyKey);
+        if (existing) {
+          if (existing.requestDigest !== digest(input)) throw new ConflictException("idempotency_conflict");
+          return existing;
+        }
+        if (this.coordinator) {
+          releaseActivity = this.coordinator.tryAcquireActivity(vpsId, "compose");
+        }
+        const p = state.previews.find(x => x.id === previewId && x.appId === appId);
+        if (!p || (p.status as string) !== "ready" || Date.parse(p.expiresAt) <= Date.now() || p.digest !== input.approvedDigest || p.generation !== app.generation) throw new ConflictException("stale_preview");
+        if (digest((p.removedServices as string[] | undefined) ?? []) !== digest(input.removedServiceIds)) throw new ConflictException("removed_services_confirmation_mismatch");
+        // Input fencing: only bounded durable values are persisted in the
+        // manifest and preview-to-deploy binding; nothing in-flight is trusted.
+        this.idle(state, appId);
+        const operation: WorkRow = { id: createHash("sha256").update(JSON.stringify([vpsId, appId, previewId, input.idempotencyKey])).digest("hex").slice(0, 21), vpsId, appId, kind: "deploy", status: "prepared", request: { previewId, approvedDigest: input.approvedDigest, removedServiceIds: input.removedServiceIds, revisionSeq: p.revisionSeq }, generation: app.generation, idempotencyKey: input.idempotencyKey, requestDigest: digest(input), createdAt: now(), updatedAt: now(), actor: this.actorOf(input.actor) };
+        state.operations.push(operation);
+        p.status = "confirmed";
+        return operation;
+      });
+    } finally {
+      releaseActivity?.();
+    }
   }
 
   async secretMetadata(vpsId: string, appId: string, name: string) {

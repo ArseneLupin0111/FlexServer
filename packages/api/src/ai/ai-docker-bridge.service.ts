@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Request } from "express";
@@ -18,6 +18,7 @@ import { AiAssistantError } from "./ai-failures.js";
 import { encryptAiSecret, loadAiKeyring } from "./ai-crypto.js";
 import { sha256 } from "./ai-host-plan.service.js";
 import { getEffectiveAiPolicy } from "./ai-policy.service.js";
+import { AgentLifecycleCoordinator } from "../agents/agent-lifecycle-coordinator.js";
 import type { ProviderTool } from "./ai-provider.js";
 function sleep(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -187,6 +188,7 @@ export class AiDockerBridgeService {
     @Inject(ApplicationsService) private readonly applications: ApplicationsService,
     @Inject(DockerMonitoringService) private readonly dockerMonitoring: DockerMonitoringService,
     @Inject(DOCKER_MONITORING_REPOSITORY) private readonly monitoringRepo: DockerMonitoringRepository,
+    @Optional() @Inject(AgentLifecycleCoordinator) private readonly coordinator?: AgentLifecycleCoordinator,
   ) {}
   async findDockerOperation(vpsId: string, idempotencyKey: string): Promise<DockerManagementOperation | undefined> {
     return this.dockerManagement?.findByIdempotencyKey(vpsId, idempotencyKey);
@@ -645,7 +647,20 @@ export class AiDockerBridgeService {
       }
     }
 
-    if (step.tool === "docker_action") {
+    let releaseActivity: (() => void) | undefined;
+    if (this.coordinator) {
+      try {
+        releaseActivity = this.coordinator.tryAcquireActivity(vpsId, "ai");
+      } catch (err) {
+        if (err instanceof ConflictException) {
+          throw new AiAssistantError("task_busy", err.message);
+        }
+        throw err;
+      }
+    }
+
+    try {
+      if (step.tool === "docker_action") {
       const action = step.args.action as DockerManagementAction;
       const target = step.args.target as DockerManagementTarget;
 
@@ -860,6 +875,9 @@ export class AiDockerBridgeService {
       throw new AiAssistantError("uncertain_outcome", "Timed out observing Compose deployment completion");
     }
 
-    throw new AiAssistantError("policy_denied", `Unsupported bridge execution tool: ${step.tool}`);
+      throw new AiAssistantError("policy_denied", `Unsupported bridge execution tool: ${step.tool}`);
+    } finally {
+      releaseActivity?.();
+    }
   }
 }

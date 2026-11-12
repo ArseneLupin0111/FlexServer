@@ -513,9 +513,11 @@ describe("AI Agent Multi-Turn Execution Loop (ai-agent-loop)", () => {
         task.id,
       );
 
-      // Mutation succeeded but lacks postcheck verification -> unverified
+      // Execution succeeded; the persisted completion must not repeat the stale dispatched state.
       expect(settled.completion?.kind).toBe("unverified");
       expect(settled.completion?.reasonCode).toBe("unverified_completion");
+      expect(settled.completion?.message).toContain("Execution completed");
+      expect(settled.completion?.message).not.toContain("dispatched");
     });
 
     it("postcheck reporting unhealthy or unrelated read must not be marked verified", async () => {

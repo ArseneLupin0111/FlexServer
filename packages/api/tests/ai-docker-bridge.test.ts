@@ -375,9 +375,8 @@ const createdPre = undefined
       policy(vpsId),
     );
 
-    // No agents exist here: completion is decoupled. A settle loop drains the
-    // queued operation the way the agent claim path does (claim then terminal
-    // result), while execute observes completion instead of assuming it.
+    // This integration seam crosses the file-locking repository; a real short
+    // wait is required for the async queue writer to release its lock.
     const task = bridge.execute(
       vpsId,
       proposal.step,
@@ -388,12 +387,12 @@ const createdPre = undefined
       for (let i = 0; i < 20; i++) {
         const pending = await mgmtRepo.peekNextClaimable(vpsId, "agent-inst-1");
         if (!pending) {
-          await new Promise((r) => setTimeout(r, 50));
+          await new Promise((resolve) => setTimeout(resolve, 50));
           continue;
         }
         const claimed = await mgmtRepo.claimNextQueued(vpsId, "agent-inst-1");
         if (claimed) {
-          await mgmtRepo.setResult(claimed.id, "succeeded", { ok: true });
+          await mgmtRepo.setResult(claimed.id, "succeeded", { ok: true, outputPreview: "container restarted" });
           return;
         }
       }
@@ -401,7 +400,7 @@ const createdPre = undefined
 
     const result = await task;
     await settle;
-    expect(result.ok).toBe(true);
+    expect(result).toEqual({ ok: true, result: { ok: true, outputPreview: "container restarted" } });
 
     const ops = await mgmtRepo.listByVps(vpsId);
     expect(ops).toHaveLength(1);

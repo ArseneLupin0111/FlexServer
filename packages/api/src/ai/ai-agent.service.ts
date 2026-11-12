@@ -881,9 +881,9 @@ export class AiAgentService {
     const durableReceipt: AiExecutionReceipt = {
       ...inMemoryReceipt,
       result: durableResult,
-      outputPreview: undefined,
-      errorMessage: undefined,
-      error: input.errorCode ? { code: input.errorCode, message: "" } : undefined,
+      outputPreview,
+      errorMessage,
+      error: input.errorCode ? { code: input.errorCode, message: errorMessage ?? "" } : undefined,
     };
 
 

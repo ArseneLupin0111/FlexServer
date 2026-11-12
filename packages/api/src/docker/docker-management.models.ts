@@ -27,6 +27,7 @@ export type DockerManagementResult = {
   ok: boolean;
   exitCode?: number;
   message?: string;
+  outputPreview?: string;
 };
 
 export type DockerManagementOperation = {

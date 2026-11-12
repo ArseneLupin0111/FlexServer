@@ -568,7 +568,7 @@ describe("POST /api/agent/commands/claim", () => {
 describe("POST /api/agent/commands/result", () => {
   it("echoes the receipt, stores the outcome, and drops it from the queue", async () => {
     const cmd = await claimFirst();
-    const res = await report(receipt(cmd.commandId)).expect(200);
+    const res = await report(receipt(cmd.commandId, { outputPreview: "container started" })).expect(200);
     expect(res.body).toEqual({
       data: {
         ok: true,
@@ -578,7 +578,7 @@ describe("POST /api/agent/commands/result", () => {
     });
     expect(await mgmtRepo.get(cmd.commandId)).toMatchObject({
       status: "succeeded",
-      result: { ok: true, exitCode: 0 },
+      result: { ok: true, exitCode: 0, outputPreview: "container started" },
     });
     // Terminal: the queue no longer offers it.
     const again = await claim({ agentInstanceId: "inst_a" }).expect(200);

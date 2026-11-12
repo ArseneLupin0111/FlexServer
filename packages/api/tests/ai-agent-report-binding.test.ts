@@ -168,6 +168,7 @@ describe("AI agent result/output command binding", () => {
       status: "succeeded",
       executed: true,
       exitCode: 0,
+      outputPreview: "service docker is active",
       payload: { service: "docker", status: "active" },
     };
     const output: AiHostOutputRequest = {
@@ -222,6 +223,42 @@ describe("AI agent result/output command binding", () => {
       }),
     ).rejects.toThrow();
     expect(await repo.listReceiptsByTask(TASK_ID)).toHaveLength(0);
+  });
+
+  it("accepts a legitimate dispatched report and retains terminal output", async () => {
+    const { service, repo, result } = await fixture(true);
+    await expect(service.result(VPS_ID, result)).resolves.toMatchObject({
+      ok: true,
+      commandId: COMMAND_ID,
+      agentInstanceId: INSTANCE_ID,
+    });
+    const receipts = await repo.listReceiptsByTask(TASK_ID);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({
+      status: "succeeded",
+      outputPreview: "service docker is active",
+      result: { executed: true, exitCode: 0 },
+    });
+  });
+  it("retains terminal output for a failed agent task", async () => {
+    const { service, repo, result } = await fixture(true);
+    await expect(service.result(VPS_ID, {
+      ...result,
+      status: "failed",
+      executed: true,
+      exitCode: 1,
+      outputPreview: "service docker failed to start",
+      errorCode: "execution_failed",
+      errorMessage: "service docker failed to start",
+    })).resolves.toMatchObject({ ok: true });
+    await expect(repo.listReceiptsByTask(TASK_ID)).resolves.toEqual([
+      expect.objectContaining({
+        status: "failed",
+        outputPreview: "service docker failed to start",
+        errorMessage: "service docker failed to start",
+        result: { executed: true, exitCode: 1 },
+      }),
+    ]);
   });
 
   it("accepts a legitimate dispatched report and its identical retry", async () => {

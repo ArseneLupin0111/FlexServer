@@ -203,7 +203,7 @@ export class DockerManagementService {
     if (op.claimedBy !== claimedBy) throw new DockerManagementConflict("not_claimable", id);
     if (op.status === "succeeded" || op.status === "failed") {
       const stored = op.result;
-      if (!stored || stored.ok !== result.ok || stored.exitCode !== result.exitCode || stored.message !== result.message) {
+      if (!stored || stored.ok !== result.ok || stored.exitCode !== result.exitCode || stored.message !== result.message || stored.outputPreview !== result.outputPreview) {
         throw new DockerManagementConflict("not_claimable", id);
       }
       await this.applications?.releaseContainer(vpsId, id);
@@ -300,6 +300,7 @@ export class DockerManagementService {
       ok: report.status === "succeeded",
       ...(report.exitCode !== undefined ? { exitCode: report.exitCode } : {}),
       ...(report.errorCode !== undefined ? { message: report.errorCode } : {}),
+      ...(report.outputPreview !== undefined ? { outputPreview: report.outputPreview } : {}),
     };
     const echo = { ok: true as const, commandId: op.id, agentInstanceId: report.agentInstanceId };
     if (op.status === "succeeded" || op.status === "failed") {
@@ -308,7 +309,8 @@ export class DockerManagementService {
         stored !== undefined &&
         stored.ok === result.ok &&
         stored.exitCode === result.exitCode &&
-        stored.message === result.message;
+        stored.message === result.message &&
+        stored.outputPreview === result.outputPreview;
       if (identical) {
         await this.applications?.releaseContainer(vpsId, op.id);
         for (const listener of this.resultListeners) {

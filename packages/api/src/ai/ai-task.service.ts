@@ -1245,10 +1245,13 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
               reasonCode = "execution_failed";
             }
           }
+          const completionMessage = completionKind === "unverified"
+            ? "Execution completed, but the result was not independently verified."
+            : sanitizedContent;
           const completionOutcome: AiTaskCompletionOutcome = {
             kind: completionKind,
             reasonCode,
-            message: sanitizedContent,
+            message: completionMessage,
             evidenceReferences: evidence.slice(0, 5).map(e => `${e.type}:${e.title}`),
             completedAt: new Date().toISOString(),
           };
@@ -1259,7 +1262,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
             conversationId: claimedTask.conversationId,
             taskId,
             role: "assistant",
-            content: sanitizedContent,
+            content: completionMessage,
             providerId: claimedTask.providerId,
             model: claimedTask.model,
             ...(evidence.length ? { evidence: evidence.slice(0, 12) } : {}),
@@ -1273,7 +1276,7 @@ export class AiTaskService implements OnModuleDestroy, OnModuleInit {
             expectedLeaseToken: leaseToken,
             ownerInstanceId,
             state: completionKind === "blocked" ? "failed" : "succeeded",
-            summary: sanitizedContent,
+            summary: completionMessage,
             usageDelta: { ...result.usage, rounds: 1 },
             loopPatch: {
               phase: "completed",

@@ -99,9 +99,10 @@ export type AiBundleView = {
   available: boolean;
   /** Present only when available=false. */
   reason?: string;
+  /** Current deployment's AI bundle identity, when available. */
   bundleId: string | null;
-  /** True when the host ever reported an AI capability claim or a successful
-   * bundle install was recorded (AI worker exists = bundle installed). */
+  /** True only when the current bundle was durably installed successfully;
+   * an old capability report alone cannot prove the deployed artifact. */
   installed: boolean;
   lastInstalledBundleId: string | null;
   lastJob: {
@@ -187,12 +188,14 @@ export class AiBundleOrchestrationService {
     capability: Awaited<ReturnType<AiRepository["getAiCapability"]>>,
     job: AiBundleJobRecord | undefined,
   ): AiBundleView {
+    const bundleId = bundle.available ? bundle.bundleId : null;
+    const lastInstalledBundleId = job?.lastInstalledBundleId ?? null;
     return {
       available: bundle.available,
       ...(bundle.available ? {} : { reason: bundle.reason }),
-      bundleId: bundle.available ? bundle.bundleId : null,
-      installed: Boolean(capability) || Boolean(job?.lastInstalledBundleId),
-      lastInstalledBundleId: job?.lastInstalledBundleId ?? null,
+      bundleId,
+      installed: bundleId !== null && lastInstalledBundleId === bundleId,
+      lastInstalledBundleId,
       lastJob: job
         ? {
             state: job.state,
@@ -269,7 +272,6 @@ export class AiBundleOrchestrationService {
     if (capability || job?.lastInstalledBundleId) return;
     await this.scheduleInstall(vpsId, "deliberate");
   }
-
 
   // ─── job execution ──────────────────────────────────────────────────
 

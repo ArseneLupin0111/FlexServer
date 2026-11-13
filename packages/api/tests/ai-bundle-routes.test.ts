@@ -195,7 +195,7 @@ describe("GET /api/vps/:id/ai/bundle", () => {
     await aiRepo.finishAiBundleJob({ vpsId, jobId: started.job.jobId, outcome: "failed", error: "installer boom token=abc123" });
 
     const view = (await routes.bundle(request, vpsId)) as AiBundleView;
-    expect(view.installed).toBe(true);
+    expect(view.installed).toBe(false);
     expect(view.lastInstalledBundleId).toBeNull();
     expect(view.lastJob).toEqual({
       state: "failed",

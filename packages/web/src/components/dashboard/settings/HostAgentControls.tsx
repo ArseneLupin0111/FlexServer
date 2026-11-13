@@ -23,11 +23,17 @@ export function HostAgentControls({ vpsId }: { vpsId: string }) {
   const job = agentJobFor(vps, dashboard.jobs);
   const lifecycleActive = agentStatus === "installing" || Boolean(job && (job.status === "queued" || job.status === "running"));
   const disabled = dashboard.busy || dashboard.mode === "demo" || lifecycleActive;
-  const canInstall = keyReady && !isLocalHost && (agentStatus === "not_installed" || agentStatus === "failed");
-  const canUninstall = keyReady && !isLocalHost && (agentStatus === "online" || agentStatus === "offline" || agentStatus === "failed");
+  const isInstalled = agentStatus === "online" || agentStatus === "offline";
+  const canInstall = keyReady && !isLocalHost;
+  const canUninstall = keyReady && !isLocalHost && (isInstalled || agentStatus === "failed");
   const canRestart = keyReady && !isLocalHost && (agentStatus === "offline" || agentStatus === "failed");
-  const password = dashboard.provisionPasswords?.[vps.id] ?? "";
   const displayName = vpsDisplayName(vps);
+  const installLabel = agentStatus === "failed" ? "Retry install" : isInstalled ? "Update agent" : "Install agent";
+  const installTitle = agentStatus === "failed" ? "Retry agent install?" : isInstalled ? "Update agent?" : "Install agent?";
+  const installDescription = isInstalled
+    ? `This will update the monitoring agent on ${displayName}.`
+    : `This will install the monitoring agent on ${displayName}.`;
+  const password = dashboard.provisionPasswords?.[vps.id] ?? "";
   const actionDisabled = disabled || !password.trim();
 
   const runConfirmed = () => {
@@ -81,7 +87,7 @@ export function HostAgentControls({ vpsId }: { vpsId: string }) {
         {canInstall ? (
           <Button type="button" data-testid="install-agent" disabled={disabled} onClick={() => setConfirm("install")}>
             <DownloadCloud size={16} aria-hidden="true" />
-            {agentStatus === "failed" ? "Retry install" : "Install agent"}
+            {installLabel}
           </Button>
         ) : null}
         {canRestart ? (
@@ -106,13 +112,13 @@ export function HostAgentControls({ vpsId }: { vpsId: string }) {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {confirm === "key" ? "Install SSH key?" : confirm === "install" ? (agentStatus === "failed" ? "Retry agent install?" : "Install agent?") : confirm === "restart" ? `Restart agent on ${displayName}?` : `Uninstall agent from ${displayName}?`}
+              {confirm === "key" ? "Install SSH key?" : confirm === "install" ? installTitle : confirm === "restart" ? `Restart agent on ${displayName}?` : `Uninstall agent from ${displayName}?`}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {confirm === "key"
                 ? `This will connect to ${displayName} with the one-time password and install SSH access. The password will not be stored.`
                 : confirm === "install"
-                  ? `This will install the monitoring agent on ${displayName}.`
+                  ? installDescription
                   : confirm === "restart"
                     ? "This restarts the monitoring agent only. It does not reboot the VPS."
                     : "Monitoring from this agent will stop. The server record and SSH access stay in place."}
@@ -121,7 +127,7 @@ export function HostAgentControls({ vpsId }: { vpsId: string }) {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction disabled={disabled} onClick={runConfirmed}>
-              {confirm === "key" ? "Install key" : confirm === "install" ? (agentStatus === "failed" ? "Retry install" : "Install agent") : confirm === "restart" ? "Restart agent" : "Uninstall agent"}
+              {confirm === "key" ? "Install key" : confirm === "install" ? installLabel : confirm === "restart" ? "Restart agent" : "Uninstall agent"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

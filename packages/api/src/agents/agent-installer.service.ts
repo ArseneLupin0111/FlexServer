@@ -31,7 +31,9 @@ function normalizeArchitecture(raw: string): Architecture | null {
   if (/x86_64|amd64/i.test(raw)) return "amd64";
   return null;
 }
-import { BundledAgentService } from "../local-upgrade/bundled-agent.service.js";
+import { BundledAgentService, extractAgentBinaryMetadata } from "../local-upgrade/bundled-agent.service.js";
+import { createAgentPackageManifest, type AgentPackageManifest } from "./agent-package.models.js";
+import { AiBundleService } from "../ai/ai-bundle.service.js";
 import {
   AGENT_LIFECYCLE_LOCK,
   buildDockerStateProvisionCommand,
@@ -110,8 +112,6 @@ function resolveSshAuth(
 }
 
 // ── Service ──────────────────────────────────────────────────────────────
-
-@Injectable()
 export class AgentInstallerService {
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -127,7 +127,27 @@ export class AgentInstallerService {
     @Inject(AgentLifecycleCoordinator)
     private readonly lifecycle: AgentLifecycleCoordinator,
     @Optional() private readonly polling?: Partial<Polling>,
+    @Optional() private readonly aiBundle?: AiBundleService,
   ) {}
+
+  /** Returns the exact architecture-specific package identity used by installs. */
+  packageManifest(arch: Architecture): AgentPackageManifest | null {
+    const binaryPath = this.bundledAgent.resolveBinaryPath(arch);
+    if (!binaryPath) return null;
+    let agent;
+    try {
+      agent = this.bundledAgent.getMetadata(arch) ?? extractAgentBinaryMetadata(binaryPath);
+    } catch {
+      return null;
+    }
+    const bundle = this.aiBundle?.getBundle();
+    const ai = bundle?.available ? bundle : null;
+    try {
+      return createAgentPackageManifest(agent, ai);
+    } catch {
+      return null;
+    }
+  }
 
   /**
    * Start the one-click agent installation for a VPS.
@@ -281,11 +301,13 @@ export class AgentInstallerService {
           // (Linux returns ETXTBSY/text-file-busy on open-for-write of a
           // running image). Staged path is removed on every failure path.
           await ctx.update("uploading-binary", 30);
+          const packageManifest = this.packageManifest(targetArch);
           const binaryPath = this.resolveBinaryPath(targetArch);
           const binaryContent = readFileSync(binaryPath);
-          const checksum = createHash("sha256")
-            .update(binaryContent)
-            .digest("hex");
+          const checksum = createHash("sha256").update(binaryContent).digest("hex");
+          if (packageManifest && (checksum !== packageManifest.agent.sha256 || binaryContent.length !== packageManifest.agent.size)) {
+            throw new Error(`Agent package identity mismatch for ${targetArch}`);
+          }
           await this.ssh.uploadFile(
             vps,
             stagedBinary,

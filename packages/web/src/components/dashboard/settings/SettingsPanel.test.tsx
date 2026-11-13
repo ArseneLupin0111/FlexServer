@@ -278,7 +278,10 @@ describe("SettingsPanel host agent controls", () => {
   });
 
   it.each([
-    ["not_installed", "Install agent"], ["failed", "Retry install"],
+    ["not_installed", "Install agent"],
+    ["failed", "Retry install"],
+    ["online", "Update agent"],
+    ["offline", "Update agent"],
   ] as const)("offers %s agent installation", (agentStatus, label) => {
     const host = remoteHost({ keyProvisionedAt: "2026-10-25T00:00:00.000Z", agentStatus });
     const onInstallAgent = vi.fn();

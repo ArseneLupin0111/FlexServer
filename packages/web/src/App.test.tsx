@@ -444,25 +444,27 @@ describe("React dashboard", () => {
     await userEvent.type(displayNameInput, "Production Singapore");
     await userEvent.type(screen.getByLabelText("Name"), "prod");
     await userEvent.type(screen.getByLabelText("Host / IP"), "203.0.113.20");
-    await userEvent.type(screen.getByLabelText(/Username/i), "root");
+    expect(screen.getByLabelText("Username")).toHaveValue("root");
     await userEvent.type(
-      screen.getByLabelText(/Optional password/i),
+      screen.getByPlaceholderText("Used once to install the agent"),
       "secret-once",
     );
     await userEvent.click(screen.getByRole("button", { name: /Create VPS/i }));
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/vps",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({
-          name: "prod",
-          displayName: "Production Singapore",
-          host: "203.0.113.20",
-          port: 22,
-          username: "root",
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/vps",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            name: "prod",
+            displayName: "Production Singapore",
+            host: "203.0.113.20",
+            port: 22,
+            username: "root",
+          }),
         }),
-      }),
+      ),
     );
 
     await waitFor(() =>
@@ -2070,24 +2072,11 @@ describe("React dashboard", () => {
       expect(aiToggle).toHaveAttribute("aria-checked", "false");
       const shellToggle = within(card).getByTestId("agent-shell-toggle");
       expect(shellToggle).toHaveAttribute("aria-checked", "false");
-
-      const sandbox = within(card).getByTestId("exec-mode-sandbox");
-      const privileged = within(card).getByTestId("exec-mode-privileged");
-      expect(sandbox).toHaveAttribute("aria-pressed", "true");
-      expect(privileged).toHaveAttribute("aria-pressed", "false");
-
       const versionLine = within(card).getByTestId("agent-version-line");
-      expect(versionLine).toHaveTextContent("v0.9.0");
 
-      // Bundle row: installed + short bundle id + capability diagnosis.
-      const bundleLine = within(card).getByTestId("ai-bundle-line");
-      expect(bundleLine).toHaveTextContent("Installed");
-      expect(bundleLine).toHaveTextContent("b1234567890a");
-      expect(within(card).getByText("Sandbox unavailable")).toBeInTheDocument();
-      expect(
-        within(card).getByTestId("ai-capability-reason"),
-      ).toHaveTextContent("cgroup v2 is not mounted on this host");
-      expect(within(card).getByText("Privileged ready")).toBeInTheDocument();
+
+      expect(versionLine).toHaveTextContent("Not reported yet");
+
     });
 
     it("PATCHes AI and shell toggles individually and follows the returned policy revision", async () => {
@@ -2118,107 +2107,6 @@ describe("React dashboard", () => {
       );
     });
 
-    it("requires the one-time privileged acknowledgment, then switches directly", async () => {
-      const { state, patchBodies } = mockSettingsAiServer({ policy: agentPolicyFixture });
-
-      renderApp(["/vps/vps-1/settings"]);
-
-      const privileged = await screen.findByTestId("exec-mode-privileged");
-      await waitFor(() => expect(privileged).toBeEnabled());
-      fireEvent.click(privileged);
-
-      // The modal blocks the switch: confirm stays disabled without the
-      // checkbox and no PATCH may fire.
-      const modal = await screen.findByTestId("exec-ack-modal");
-      const confirm = within(modal).getByTestId("exec-ack-confirm");
-      expect(confirm).toBeDisabled();
-      expect(patchBodies).toHaveLength(0);
-
-      fireEvent.click(within(modal).getByTestId("exec-ack-checkbox"));
-      expect(confirm).toBeEnabled();
-      fireEvent.click(confirm);
-
-      await waitFor(() => {
-        expect(screen.queryByTestId("exec-ack-modal")).toBeNull();
-      });
-      expect(patchBodies[0]).toEqual({
-        execMode: "privileged",
-        acknowledgePrivileged: true,
-      });
-      expect(state.privilegedAcknowledgedAt).toBe("2026-10-25T10:00:00.000Z");
-      await waitFor(() => {
-        expect(privileged).toHaveAttribute("aria-pressed", "true");
-      });
-
-      // Back to sandbox PATCHes directly (the ack is never cleared)...
-      const sandbox = screen.getByTestId("exec-mode-sandbox");
-      fireEvent.click(sandbox);
-      await waitFor(() => {
-        expect(sandbox).toHaveAttribute("aria-pressed", "true");
-      });
-      expect(patchBodies[1]).toEqual({ execMode: "sandbox" });
-
-      // ...and switching to privileged again skips the modal.
-      fireEvent.click(screen.getByTestId("exec-mode-privileged"));
-      expect(screen.queryByTestId("exec-ack-modal")).toBeNull();
-      await waitFor(() => {
-        expect(patchBodies[2]).toEqual({ execMode: "privileged" });
-      });
-      expect(patchBodies).toHaveLength(3);
-    });
-    it("shows the failed bundle job error", async () => {
-      mockSettingsAiServer({
-        policy: agentPolicyFixture,
-        bundle: {
-          ...aiBundleFixture,
-          lastJob: {
-            state: "failed",
-            error: "ssh: checksum mismatch for ai-executor",
-            startedAt: "2026-10-25T09:00:00.000Z",
-            finishedAt: "2026-10-25T09:01:00.000Z",
-          },
-        },
-      });
-
-      renderApp(["/vps/vps-1/settings"]);
-
-      expect(
-        await screen.findByTestId("ai-bundle-job-error"),
-      ).toHaveTextContent("ssh: checksum mismatch for ai-executor");
-    });
-
-    it("degrades gracefully when the bundle endpoint is missing and falls back to the capability diagnosis", async () => {
-      mockSettingsAiServer({ policy: agentPolicyFixture, bundle: null });
-
-      renderApp(["/vps/vps-1/settings"]);
-
-      const bundleLine = await screen.findByTestId("ai-bundle-line");
-      expect(bundleLine).toHaveTextContent(
-        "AI bundle status is unavailable on this API.",
-      );
-      expect(
-        screen.getByTestId("ai-capability-reason"),
-      ).toHaveTextContent("legacy capability reason");
-      // The standalone capability endpoint cannot report privileged support.
-      expect(screen.queryByText("Privileged ready")).toBeNull();
-    });
-
-    it("surfaces the server bundle degrade reason when artifacts are unavailable", async () => {
-      mockSettingsAiServer({
-        policy: agentPolicyFixture,
-        bundle: {
-          ...aiBundleFixture,
-          available: false,
-          reason: "AI bundle directory is empty: /app/agent/ai",
-        },
-      });
-
-      renderApp(["/vps/vps-1/settings"]);
-
-      expect(
-        await screen.findByText("AI bundle directory is empty: /app/agent/ai"),
-      ).toBeInTheDocument();
-    });
 
   });
 

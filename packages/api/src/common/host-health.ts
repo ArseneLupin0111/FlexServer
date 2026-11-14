@@ -20,6 +20,6 @@ export function deriveHostStatus(
   if (storedStatus !== "healthy") return storedStatus;
   if (!lastSeenAt) return storedStatus;
   const seen = new Date(lastSeenAt).getTime();
-  if (!Number.isFinite(seen)) return storedStatus;
+  if (!Number.isFinite(seen) || seen > now) return "unknown";
   return now - seen >= HOST_FRESHNESS_THRESHOLD_MS ? "unknown" : storedStatus;
 }

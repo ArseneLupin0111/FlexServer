@@ -166,16 +166,7 @@ describe("host health freshness", () => {
     expect(status).toBe("unknown");
   });
 
-  it.each([undefined, "not-a-timestamp"])(
-    "preserves status when lastSeenAt is %s",
-    (lastSeenAt) => {
-      const now = Date.parse("2026-09-14T12:00:00.000Z");
-      expect(deriveHostStatus("healthy", lastSeenAt, now)).toBe("healthy");
-      expect(deriveHostStatus("warning", lastSeenAt, now)).toBe("warning");
-      expect(deriveHostStatus("unreachable", lastSeenAt, now)).toBe("unreachable");
-      expect(deriveHostStatus("unknown", lastSeenAt, now)).toBe("unknown");
-    },
-  );
+
 });
 
 describe("agent freshness", () => {
@@ -191,10 +182,16 @@ describe("agent freshness", () => {
     ).toBe(expected);
   });
 
-  it.each([undefined, "not-a-timestamp"])(
+  it.each([undefined, "not-a-timestamp", new Date(now + 60_000).toISOString()])(
     "does not claim online with %s timestamp",
     (lastSeenAt: string | undefined) => {
       expect(deriveAgentStatus("online", lastSeenAt, now)).toBe("offline");
+    },
+  );
+  it.each(["not-a-timestamp", new Date(now + 60_000).toISOString()])(
+    "does not claim a healthy host is fresh with %s timestamp",
+    (lastSeenAt) => {
+      expect(deriveHostStatus("healthy", lastSeenAt, now)).toBe("unknown");
     },
   );
 

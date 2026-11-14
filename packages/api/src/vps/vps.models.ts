@@ -53,7 +53,7 @@ export function deriveAgentStatus(
   if (status !== "online") return status;
   if (!lastSeenAt) return "offline";
   const seen = Date.parse(lastSeenAt);
-  if (!Number.isFinite(seen) || now - seen >= HOST_FRESHNESS_THRESHOLD_MS) {
+  if (!Number.isFinite(seen) || seen > now || now - seen >= HOST_FRESHNESS_THRESHOLD_MS) {
     return "offline";
   }
   return "online";

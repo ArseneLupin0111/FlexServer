@@ -25,7 +25,7 @@ export function CreateServerCard({
         </p>
         <CardTitle className="truncate text-text">New VPS</CardTitle>
         <CardDescription className="text-dim">
-          Password is optional and never stored.
+          Enter the root password once. It is never stored; the agent uses its SSH key afterwards.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -121,32 +121,22 @@ export function CreateServerCard({
               </Label>
               <Label>
                 Username
-                <Input
-                  required
-                  maxLength={64}
-                  placeholder="root"
-                  value={createForm.username}
-                  onChange={(event) =>
-                    onCreateFormChange({
-                      ...createForm,
-                      username: event.target.value,
-                    })
-                  }
-                />
+                <Input value="root" readOnly aria-label="Username" />
               </Label>
             </div>
           </fieldset>
           <fieldset className="grid gap-3">
             <legend className="mb-1 text-[11px] font-normal uppercase tracking-[0.14em] text-dim">
-              Key provisioning
+              Root access
             </legend>
             <Label>
-              Optional password
+              Root password
               <Input
+                required
                 type="password"
                 maxLength={4096}
                 autoComplete="new-password"
-                placeholder="One-time key install"
+                placeholder="Used once to install the agent"
                 value={createForm.password}
                 onChange={(event) =>
                   onCreateFormChange({

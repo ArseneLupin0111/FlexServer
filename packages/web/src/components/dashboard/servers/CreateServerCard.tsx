@@ -146,7 +146,7 @@ export function CreateServerCard({
                 type="password"
                 maxLength={4096}
                 autoComplete="new-password"
-                placeholder="One-time key install"
+                placeholder="Used once to install the agent"
                 value={createForm.password}
                 onChange={(event) =>
                   onCreateFormChange({

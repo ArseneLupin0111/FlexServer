@@ -13,7 +13,7 @@ const vpsFields = {
 
 export const createVpsSchema = z.object({
   ...vpsFields,
-  username: z.literal("root"),
+  username: z.string().trim().min(1).max(64),
   password: z.string().min(1).max(4096).optional(),
 }).strict();
 

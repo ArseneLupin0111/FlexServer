@@ -509,45 +509,44 @@ export function DashboardProvider({
     const created = await runAction("Creating VPS...", async () => {
       const result = await createVps(payload);
       const resultLabel = vpsDisplayName(result);
-      if (!password) {
+      if (password) {
         setStatus({
-          message: "Enter the root password to install the agent.",
-          kind: "destructive",
+          message: `Created ${resultLabel}. Installing SSH key...`,
+          kind: "default",
         });
-        return result;
-      }
-      setStatus({
-        message: `Created ${resultLabel}. Installing root SSH access...`,
-        kind: "default",
-      });
-      try {
-        await provisionKey(result.id, password);
-      } catch (error) {
-        const trust = getHostKeyTrustRequired(error);
-        if (trust) {
-          setPendingHostKeyTrust({
-            vpsId: result.id,
-            vpsName: resultLabel,
-            host: trust.host,
-            port: trust.port,
-            fingerprint: trust.fingerprint,
-            keyType: trust.keyType,
-            password,
-            afterTrustPath: `/vps/${encodeURIComponent(result.id)}`,
-          });
-          setStatus({
-            message: `Created ${resultLabel}. Trust the SSH host key to continue installation.`,
-            kind: "default",
-          });
-          return result;
+        try {
+          await provisionKey(result.id, password);
+        } catch (error) {
+          const trust = getHostKeyTrustRequired(error);
+          if (trust) {
+            setPendingHostKeyTrust({
+              vpsId: result.id,
+              vpsName: resultLabel,
+              host: trust.host,
+              port: trust.port,
+              fingerprint: trust.fingerprint,
+              keyType: trust.keyType,
+              password,
+              afterTrustPath: `/vps/${encodeURIComponent(result.id)}`,
+            });
+            setStatus({
+              message: `Created ${resultLabel}. Trust the SSH host key to continue provisioning.`,
+              kind: "default",
+            });
+            return result;
+          }
+          throw error;
         }
-        throw error;
+        setStatus({
+          message: `Created VPS and installed key for ${resultLabel}. Password was not stored.`,
+          kind: "success",
+        });
+      } else {
+        setStatus({
+          message: `Created VPS ${resultLabel}. You can install the key from the list.`,
+          kind: "success",
+        });
       }
-      await installAgent(result.id);
-      setStatus({
-        message: `Created ${resultLabel}. Agent installation started. Root password was not stored.`,
-        kind: "success",
-      });
       setCreateForm(initialCreateForm);
       return result;
     });

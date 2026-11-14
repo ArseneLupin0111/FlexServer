@@ -189,22 +189,32 @@ function CreateVpsFormInline({ ctx }: { ctx: DashboardCtx }) {
             </Label>
             <Label>
               Username
-              <Input value="root" readOnly aria-label="Username" />
+              <Input
+                required
+                maxLength={64}
+                placeholder="root"
+                value={ctx.createForm.username}
+                onChange={(e) =>
+                  ctx.onCreateFormChange({
+                    ...ctx.createForm,
+                    username: e.target.value,
+                  })
+                }
+              />
             </Label>
           </div>
         </fieldset>
         <fieldset className="grid gap-3">
           <legend className="mb-1 text-xs font-semibold uppercase tracking-[0.14em] text-dim">
-            Root access
+            Key provisioning
           </legend>
           <Label>
-            Root password
+            Optional password
             <Input
-              required
               type="password"
               maxLength={4096}
               autoComplete="new-password"
-              placeholder="Used once to install the agent"
+              placeholder="One-time key install"
               value={ctx.createForm.password}
               onChange={(e) =>
                 ctx.onCreateFormChange({
